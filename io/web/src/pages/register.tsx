@@ -1,12 +1,15 @@
+import { JWT_TOKEN_KEY } from "@/commons/constant.common";
 import AppButton from "@/components/AppButton";
+import { AppContext } from "@/components/AppContext";
 import AppInput from "@/components/AppInput";
 import Header from "@/components/Header";
 import InfoMessage from "@/components/InfoMessage";
 import { registerService } from "@/services/user.service";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const Login = () => {
+  const [token, setToken] = useState<string>("");
   const [Email, setEmail] = useState<string>("");
   const [Password, setPassword] = useState<string>("");
   const [ConfirmPassword, setConfirmPassword] = useState<string>("");
@@ -16,6 +19,10 @@ const Login = () => {
   const [ErrorMessage, setErrorMessage] = useState<string | undefined>(
     undefined
   );
+  useEffect(() => {
+    const _token: string = localStorage.getItem(JWT_TOKEN_KEY) || "";
+    setToken(_token);
+  }, []);
   async function registerHandler(e: any) {
     const { status, data } = await registerService(
       Email,
@@ -26,7 +33,7 @@ const Login = () => {
     if (status !== 200) setErrorMessage(data.message);
   }
   return (
-    <>
+    <AppContext.Provider value={{ token }}>
       <Header />
       <div className="flex flex-col justify-center items-center h-screen">
         <div className="flex flex-col space-y-4 p-2 border shadow rounded-lg w-80">
@@ -72,7 +79,7 @@ const Login = () => {
           >{`Already have an account ?`}</Link>
         </div>
       </div>
-    </>
+    </AppContext.Provider>
   );
 };
 

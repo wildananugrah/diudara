@@ -8,11 +8,6 @@ describe("template spec", () => {
     cy.get("[data-cyid='password']").click().type("p@ssw0rd");
     cy.wait(1000).get("[data-cyid='loginButton']").click();
     cy.wait(1000).get("[data-cyid='profileMe']").click();
-    cy.wait(1000).get("[data-cyid='addProductMenu']").trigger("mouseenter");
-    cy.wait(1000).get("[data-cyid='transactionMenu']").trigger("mouseenter");
-    cy.wait(1000)
-      .get("[data-cyid='downloadedProductMenu']")
-      .trigger("mouseenter");
-    cy.wait(1000).get("[data-cyid='settingMenu']").trigger("mouseenter");
+    cy.wait(500).get("[data-cyid='settingMenu']").click();
   });
 });

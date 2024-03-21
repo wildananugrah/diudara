@@ -1,5 +1,6 @@
 import { JWT_TOKEN_KEY } from "@/commons/constant.common";
 import AppButton from "@/components/AppButton";
+import { AppContext } from "@/components/AppContext";
 import AppInput from "@/components/AppInput";
 import Header from "@/components/Header";
 import InfoMessage from "@/components/InfoMessage";
@@ -7,10 +8,11 @@ import { loginService } from "@/services/user.service";
 import { ILoginResponse } from "@/types/common.type";
 import Link from "next/link";
 import { useRouter } from "next/router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const Login = () => {
   const router = useRouter();
+  const [token, setToken] = useState<string>("");
   const [Email, setEmail] = useState<string>("");
   const [Password, setPassword] = useState<string>("");
   const [SuccessMessage, setSuccessMessage] = useState<string | undefined>(
@@ -19,8 +21,13 @@ const Login = () => {
   const [ErrorMessage, setErrorMessage] = useState<string | undefined>(
     undefined
   );
+  useEffect(() => {
+    const _token: string = localStorage.getItem(JWT_TOKEN_KEY) || "";
+    setToken(_token);
+  }, []);
   function successLoginRedirectToLandingPage(data: ILoginResponse) {
     localStorage.setItem(JWT_TOKEN_KEY, data.token);
+    setSuccessMessage("");
     router.push("/");
   }
   async function loginHandler(e: any) {
@@ -33,7 +40,7 @@ const Login = () => {
     if (status !== 200) setErrorMessage(data.message);
   }
   return (
-    <>
+    <AppContext.Provider value={{ token }}>
       <Header />
       <div className="flex flex-col justify-center items-center h-screen">
         <div className="flex flex-col space-y-4 p-2 border shadow rounded-lg w-80">
@@ -70,7 +77,7 @@ const Login = () => {
           >{`Don't have an account`}</Link>
         </div>
       </div>
-    </>
+    </AppContext.Provider>
   );
 };
 
