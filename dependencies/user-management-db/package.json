@@ -1,0 +1,77 @@
+{
+  "name": "user-management-db",
+  "version": "1.0.0",
+  "description": "Typescript User Management Database",
+  "main": "dist/cjs/index.js",
+  "module": "dist/mjs/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/mjs/index.js",
+      "require": "./dist/cjs/index.js"
+    },
+    "./user": {
+      "import": "./dist/mjs/user.svc.js",
+      "require": "./dist/cjs/user.svc.js"
+    },
+    "./healthcheck": {
+      "import": "./dist/mjs/healthcheck.svc.js",
+      "require": "./dist/cjs/healthcheck.svc.js"
+    },
+    "./role": {
+      "import": "./dist/mjs/role.svc.js",
+      "require": "./dist/cjs/role.svc.js"
+    },
+    "./role-attribute": {
+      "import": "./dist/mjs/role-attribute.svc.js",
+      "require": "./dist/cjs/role-attribute.svc.js"
+    },
+    "./user-attribute": {
+      "import": "./dist/mjs/user-attribute.svc.js",
+      "require": "./dist/cjs/user-attribute.svc.js"
+    },
+    "./user-role-trx": {
+      "import": "./dist/mjs/user-role-trx.svc.js",
+      "require": "./dist/cjs/user-role-trx.svc.js"
+    }
+  },
+  "scripts": {
+    "test:ts": "jest -i src/test/*.test.ts",
+    "test:mjs": "jest -i dist/mjs/test/*.test.js",
+    "test:cjs": "jest -i dist/cjs/test/*.test.js",
+    "lint": "eslint . --fix",
+    "build": "rm -fr dist/* && tsc -p tsconfig.json && tsc -p tsconfig-cjs.json && ./afterbuild.sh"
+  },
+  "directories": {
+    "src": "src",
+    "test": "test"
+  },
+  "jest": {
+    "transform": {
+      "^.+\\.[t|j]sx?$": "babel-jest"
+    },
+    "testTimeout": 7000
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@babel/preset-env": "^7.24.0",
+    "@babel/preset-typescript": "^7.23.3",
+    "@jest/globals": "^29.7.0",
+    "@types/jest": "^29.5.12",
+    "@types/jsonwebtoken": "^9.0.6",
+    "babel-jest": "^29.7.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
+    "typescript": "^5.4.2"
+  },
+  "type": "module",
+  "dependencies": {
+    "@types/pg": "^8.11.2",
+    "dotenv": "^16.4.5",
+    "pg": "^8.11.3",
+    "pg-pool": "^3.6.1",
+    "ts-node": "^10.9.2",
+    "user-management": "../../user-management"
+  }
+}

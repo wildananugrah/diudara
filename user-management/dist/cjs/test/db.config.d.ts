@@ -1,0 +1,10 @@
+export declare const dbhost: string;
+export declare const dbDatabase: string;
+export declare const dbPort: number;
+export declare const dbUser: string;
+export declare const dbPass: string;
+export declare const dbPoolMin: number;
+export declare const dbPoolMax: number;
+export declare const dbIdleTimeout: number;
+export declare const dbConnectionTimeout: number;
+export declare const dbMaxUses: number;

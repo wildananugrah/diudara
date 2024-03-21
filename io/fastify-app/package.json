@@ -1,0 +1,40 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "test": "jest",
+    "dev": "nodemon src/server.ts"
+  },
+  "jest": {
+    "transform": {
+      "^.+\\.[t|j]sx?$": "babel-jest"
+    }
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/autoload": "^5.8.0",
+    "@fastify/cors": "^9.0.1",
+    "@types/pg-pool": "^2.0.6",
+    "axios": "^1.6.7",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.26.2",
+    "fastify-plugin": "^4.5.1",
+    "jwt-service": "file:../../dependencies/jwt-service",
+    "nodemon": "^3.1.0",
+    "pg": "^8.11.3",
+    "pg-pool": "^3.6.1",
+    "user-management": "file:../../user-management",
+    "user-management-db": "file:../../dependencies/user-management-db"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.24.0",
+    "@babel/preset-env": "^7.24.0",
+    "@types/node": "^20.11.25",
+    "babel-jest": "^29.7.0",
+    "jest": "^29.7.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.2"
+  }
+}

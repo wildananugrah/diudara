@@ -1,0 +1,43 @@
+@host=http://localhost:4000
+
+POST {{host}}/api/users/register
+Content-Type: application/json
+
+{
+    "username": "wildananugrah",
+    "password": "p@ssw0rd"
+}
+
+###
+# @name Login
+POST {{host}}/api/users/login
+Content-Type: application/json
+
+{
+    "username": "wildananugrah",
+    "password": "p@ssw0rd"
+}
+
+###
+@token={{Login.response.body.token}}
+###
+GET {{host}}/api/users/info
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+###
+# @name RefreshToken
+PUT {{host}}/api/token
+Content-Type: application/json
+
+{
+    "token": "{{token}}",
+    "expired": 7200
+}
+###
+@tokenRefreshed={{RefreshToken.response.body.token}}
+
+###
+GET {{host}}/api/users/info
+Content-Type: application/json
+Authorization: Bearer {{tokenRefreshed}}

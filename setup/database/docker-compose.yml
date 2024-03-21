@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  user-management-db:
+    image: postgres:alpine
+    container_name: user-management-db
+    ports:
+      - "5010:5432"
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_USER: pg
+      POSTGRES_PASSWORD: p0stgr3s
+    volumes:
+      - ./user-management-db:/var/lib/postgresql/data
+    networks:
+      app-net: {}
+
+networks:
+  app-net:
+    external: true
+    name: "diudara-net"

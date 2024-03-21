@@ -1,0 +1,27 @@
+@host=http://localhost:4000
+
+POST {{host}}/api/users/register
+Content-Type: application/json
+
+{
+    "email": "wildananugrah@gmail.com",
+    "password": "p@ssw0rd",
+    "confirmPassword": "p@ssw0rd"
+}
+
+###
+# @name UserLogin
+POST {{host}}/api/users/login
+Content-Type: application/json
+
+{
+    "email": "wildananugrah@gmail.com",
+    "password": "p@ssw0rd"
+}
+###
+@token={{UserLogin.response.body.token}}
+
+###
+GET {{host}}/api/users/info
+Content-Type: application/json
+Authorization: Bearer {{token}}

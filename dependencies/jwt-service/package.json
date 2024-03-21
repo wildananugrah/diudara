@@ -1,0 +1,44 @@
+{
+  "name": "jwt-service",
+  "version": "1.0.0",
+  "description": "Typescript JWT",
+  "main": "dist/cjs/index.js",
+  "module": "dist/mjs/index.js",
+  "scripts": {
+    "test:ts": "jest -i src/test/*.test.ts",
+    "test:cjs": "jest -i dist/cjs/test/*.test.js",
+    "test:mjs": "jest -i dist/mjs/test/*.test.js",
+    "lint": "eslint . --fix",
+    "build": "rm -fr dist/* && tsc -p tsconfig.json && tsc -p tsconfig-cjs.json && ./afterbuild.sh"
+  },
+  "directories": {
+    "src": "src",
+    "test": "test"
+  },
+  "jest": {
+    "transform": {
+      "^.+\\.[t|j]sx?$": "babel-jest"
+    }
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@babel/preset-env": "^7.24.0",
+    "@babel/preset-typescript": "^7.23.3",
+    "@jest/globals": "^29.7.0",
+    "@types/jest": "^29.5.12",
+    "@types/jsonwebtoken": "^9.0.6",
+    "babel-jest": "^29.7.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
+    "typescript": "^5.4.2"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "jsonwebtoken": "^9.0.2",
+    "ts-node": "^10.9.2",
+    "user-management": "file:../../user-management"
+  }
+}
