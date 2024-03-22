@@ -1,5 +1,6 @@
 import { Pool } from "pg";
 import {
+  IUser,
   IUserAttribute,
   IUserAttributeService,
   IUserService,
@@ -51,8 +52,8 @@ afterAll(async () => {
 
 describe("User Service", () => {
   let userAttributeId: string | undefined = undefined;
-  const userData = {
-    email: "wildananugrah@gmail.com",
+  const userData: IUser = {
+    identifier: "wildananugrah@gmail.com",
     password: "p@ssw0rd",
   };
   let data: IUserAttribute = {

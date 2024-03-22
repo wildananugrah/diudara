@@ -4,7 +4,7 @@ POST {{host}}/api/users/register
 Content-Type: application/json
 
 {
-    "email": "wildananugrah@gmail.com",
+    "identifier": "wildananugrah@gmail.com",
     "password": "p@ssw0rd",
     "confirmPassword": "p@ssw0rd"
 }
@@ -15,7 +15,7 @@ POST {{host}}/api/users/login
 Content-Type: application/json
 
 {
-    "email": "wildananugrah@gmail.com",
+    "identifier": "wildananugrah@gmail.com",
     "password": "p@ssw0rd"
 }
 ###

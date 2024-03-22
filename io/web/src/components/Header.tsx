@@ -58,7 +58,7 @@ const Header = () => {
   async function handleGetUserInfo(token: string) {
     const { status, data } = await getUserInfo(token);
     if (status === 200) setUserInfo(data);
-    setUsername(data.user.email.split("@")[0]);
+    setUsername(data.user.identifier.split("@")[0]);
   }
   useEffect(() => {
     if (token !== null && token !== "") handleGetUserInfo(token);

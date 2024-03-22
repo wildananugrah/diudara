@@ -128,8 +128,8 @@ describe("User Logic Layer", () => {
             console.error(error);
             expect(error).toBeInstanceOf(user_1.AppError);
             if (error instanceof user_1.AppError) {
-                expect(error.code).toBe(user_1.INVALID_EMAIL_CODE);
-                expect(error.message).toBe(user_1.INVALID_EMAIL_MESSAGE);
+                expect(error.code).toBe(user_1.INVALID_IDENTIFIER_CODE);
+                expect(error.message).toBe(user_1.INVALID_IDENTIFIER_MESSAGE);
             }
         }
     }));

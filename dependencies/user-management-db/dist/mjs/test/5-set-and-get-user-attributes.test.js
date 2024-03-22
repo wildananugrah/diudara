@@ -27,7 +27,7 @@ describe("Set and Get User Attributes", () => {
     let userId = "";
     let roleId = "";
     const userData = {
-        email: "wildananugrah@gmail.com",
+        identifier: "wildananugrah@gmail.com",
         password: "p@ssw0rd",
     };
     const roleData = {
@@ -109,7 +109,7 @@ describe("Set and Get User Attributes", () => {
         if (user === undefined)
             fail();
         expect(typeof user.id).toBe("string");
-        expect(user.email).toBe(userData.email);
+        expect(user.identifier).toBe(userData.identifier);
         expect(user.password).toBe(userData.password);
         userId = user.id;
     });

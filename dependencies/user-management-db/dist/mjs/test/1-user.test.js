@@ -28,7 +28,7 @@ afterAll(async () => {
 describe("User Service", () => {
     let todoId = "";
     const data = {
-        email: "wildananugrah@gmail.com",
+        identifier: "wildananugrah@gmail.com",
         password: "p@ssw0rd",
     };
     it("should be registered new user", async () => {
@@ -36,16 +36,16 @@ describe("User Service", () => {
         const user = await userService.register(data);
         if (user === undefined)
             fail();
-        expect(user.email).toBe(data.email);
+        expect(user.identifier).toBe(data.identifier);
         expect(user.password).toBe(data.password);
     });
     it("should be logged in a user", async () => {
         const userService = new UserService(pool);
-        const user = await userService.selectByEmail(data.email);
+        const user = await userService.selectByIdentifier(data.identifier);
         if (user === undefined)
             fail();
         expect(typeof user.id).toBe("string");
-        expect(user.email).toBe(data.email);
+        expect(user.identifier).toBe(data.identifier);
         expect(user.password).toBe(data.password);
     });
 });

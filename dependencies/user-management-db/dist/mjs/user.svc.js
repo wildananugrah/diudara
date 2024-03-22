@@ -1,21 +1,23 @@
 export class UserService {
     tblName = "tbl_mst_user";
     deleteAllRecordsQuery = `DELETE FROM ${this.tblName}`;
-    selectByEmailQuery = `SELECT * FROM ${this.tblName} WHERE email=$1`;
-    insertUser = `INSERT INTO ${this.tblName} (email, password) VALUES ($1, $2) RETURNING *`;
+    selectByIdentifierQuery = `SELECT * FROM ${this.tblName} WHERE identifier=$1`;
+    insertUser = `INSERT INTO ${this.tblName} (identifier, password) VALUES ($1, $2) RETURNING *`;
     pool;
     constructor(pool) {
         this.pool = pool;
     }
-    async selectByEmail(email) {
+    async selectByIdentifier(identifier) {
         const client = await this.pool.connect();
         try {
-            const dbResult = await client.query(this.selectByEmailQuery, [email]);
+            const dbResult = await client.query(this.selectByIdentifierQuery, [
+                identifier,
+            ]);
             if (dbResult.rows.length === 0)
                 return undefined;
             return {
                 id: dbResult.rows[0].user_id,
-                email: dbResult.rows[0].email,
+                identifier: dbResult.rows[0].identifier,
                 password: dbResult.rows[0].password,
             };
         }
@@ -45,12 +47,12 @@ export class UserService {
         const client = await this.pool.connect();
         try {
             const dbResult = await client.query(this.insertUser, [
-                user.email,
+                user.identifier,
                 user.password,
             ]);
             return {
                 id: dbResult.rows[0].user_id,
-                email: dbResult.rows[0].email,
+                identifier: dbResult.rows[0].identifier,
                 password: dbResult.rows[0].password,
             };
         }
@@ -65,14 +67,14 @@ export class UserService {
     async login(user) {
         const client = await this.pool.connect();
         try {
-            const dbResult = await client.query(this.selectByEmailQuery, [
-                user.email,
+            const dbResult = await client.query(this.selectByIdentifierQuery, [
+                user.identifier,
             ]);
             if (dbResult.rows.length === 0)
                 return undefined;
             return {
                 id: dbResult.rows[0].user_id,
-                email: dbResult.rows[0].email,
+                identifier: dbResult.rows[0].identifier,
                 password: dbResult.rows[0].password,
             };
         }

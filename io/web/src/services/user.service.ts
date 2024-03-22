@@ -15,7 +15,7 @@ export const registerService = async (
         "Content-Type": "application/json",
       },
       data: JSON.stringify({
-        email: email,
+        identifier: email,
         password: password,
         confirmPassword: confirmPassword,
       }),
@@ -53,7 +53,7 @@ export const loginService = async (
         "Content-Type": "application/json",
       },
       data: JSON.stringify({
-        email: email,
+        identifier: email,
         password: password,
       }),
     });

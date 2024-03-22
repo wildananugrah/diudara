@@ -24,10 +24,10 @@ const routes = async (app: any, options: any) => {
           app.dbPool
         );
         const user = new User(userService, userRoleTrxService, jwtService);
-        const { email, password, confirmPassword } = req.body;
+        const { identifier, password, confirmPassword } = req.body;
         return res
           .status(200)
-          .send(await user.register(email, password, confirmPassword));
+          .send(await user.register(identifier, password, confirmPassword));
       } catch (error: any) {
         if (error instanceof AppError) {
           return res
@@ -52,8 +52,8 @@ const routes = async (app: any, options: any) => {
           app.dbPool
         );
         const user = new User(userService, userRoleTrxService, jwtService);
-        const { email, password } = req.body;
-        return res.status(200).send(await user.login(email, password));
+        const { identifier, password } = req.body;
+        return res.status(200).send(await user.login(identifier, password));
       } catch (error: any) {
         if (error instanceof AppError) {
           return res

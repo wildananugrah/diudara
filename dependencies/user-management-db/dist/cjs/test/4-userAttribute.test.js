@@ -43,7 +43,7 @@ afterAll(() => __awaiter(void 0, void 0, void 0, function* () {
 describe("User Service", () => {
     let userAttributeId = undefined;
     const userData = {
-        email: "wildananugrah@gmail.com",
+        identifier: "wildananugrah@gmail.com",
         password: "p@ssw0rd",
     };
     let data = {

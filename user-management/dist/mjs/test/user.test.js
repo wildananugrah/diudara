@@ -1,5 +1,5 @@
 import { UserServiceMock } from "./mocks/UserServiceMock";
-import { AppError, INVALID_PASSWORD_CODE, INVALID_PASSWORD_MESSAGE, INVALID_EMAIL_CODE, INVALID_EMAIL_MESSAGE, REGISTER_FAILED_INVALID_PASSWORD, REGISTER_FAILED_INVALID_PASSWORD_CODE, User, } from "../user";
+import { AppError, INVALID_PASSWORD_CODE, INVALID_PASSWORD_MESSAGE, INVALID_IDENTIFIER_CODE, INVALID_IDENTIFIER_MESSAGE, REGISTER_FAILED_INVALID_PASSWORD, REGISTER_FAILED_INVALID_PASSWORD_CODE, User, } from "../user";
 import { JWTServiceMock } from "./mocks/JWTServiceMock";
 import { UserRoleTrxServiceMock } from "./mocks/UserRoleTrxServiceMock";
 beforeAll(async () => { });
@@ -117,8 +117,8 @@ describe("User Logic Layer", () => {
             console.error(error);
             expect(error).toBeInstanceOf(AppError);
             if (error instanceof AppError) {
-                expect(error.code).toBe(INVALID_EMAIL_CODE);
-                expect(error.message).toBe(INVALID_EMAIL_MESSAGE);
+                expect(error.code).toBe(INVALID_IDENTIFIER_CODE);
+                expect(error.message).toBe(INVALID_IDENTIFIER_MESSAGE);
             }
         }
     });

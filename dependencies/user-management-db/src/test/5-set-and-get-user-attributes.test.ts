@@ -3,6 +3,7 @@ import {
   IRoleAttribute,
   IRoleAttributeService,
   IRoleService,
+  IUser,
   IUserAttribute,
   IUserAttributeService,
   IUserRoleTrxService,
@@ -51,8 +52,8 @@ afterAll(async () => {
 describe("Set and Get User Attributes", () => {
   let userId: string | undefined = "";
   let roleId: string | undefined = "";
-  const userData = {
-    email: "wildananugrah@gmail.com",
+  const userData: IUser = {
+    identifier: "wildananugrah@gmail.com",
     password: "p@ssw0rd",
   };
   const roleData = {
@@ -135,7 +136,7 @@ describe("Set and Get User Attributes", () => {
     const user = await userService.login(userData);
     if (user === undefined) fail();
     expect(typeof user.id).toBe("string");
-    expect(user.email).toBe(userData.email);
+    expect(user.identifier).toBe(userData.identifier);
     expect(user.password).toBe(userData.password);
     userId = user.id;
   });

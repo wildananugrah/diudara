@@ -11,13 +11,13 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.UserServiceMock = void 0;
 class UserServiceMock {
-    selectByEmail(email) {
+    selectByIdentifier(identifier) {
         return __awaiter(this, void 0, void 0, function* () {
-            if (email === "wildan@gmail.com")
+            if (identifier === "wildan@gmail.com")
                 return undefined;
             return {
                 id: "1234567890123456",
-                email: "wildananugrah@gmail.com",
+                identifier: "wildananugrah@gmail.com",
                 password: "p@ssw0rd",
             };
         });
@@ -26,19 +26,19 @@ class UserServiceMock {
         return __awaiter(this, void 0, void 0, function* () {
             return {
                 id: "1234567890123456",
-                email: "wildananugrah@gmail.com",
+                identifier: "wildananugrah@gmail.com",
                 password: "p@ssw0rd",
             };
         });
     }
     login(user) {
         return __awaiter(this, void 0, void 0, function* () {
-            if (user.email === "wildan@mail.com")
+            if (user.identifier === "wildan@mail.com")
                 return undefined;
             console.log(user);
             return {
                 id: "1234567890123456",
-                email: "wildananugrah@gmail.com",
+                identifier: "wildananugrah@gmail.com",
                 password: "p@ssw0rd",
             };
         });

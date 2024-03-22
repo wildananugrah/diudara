@@ -9,13 +9,13 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.User = exports.AppError = exports.REGISTER_FAILED_INVALID_PASSWORD = exports.REGISTER_FAILED_INVALID_PASSWORD_CODE = exports.REGISTER_FAILED_MESSAGE = exports.REGISTER_FAILED_CODE = exports.REGISTER_FAILED_EMAIL_EXISTS = exports.REGISTER_FAILED_EMAIL_EXISTS_CODE = exports.INVALID_PASSWORD_MESSAGE = exports.INVALID_PASSWORD_CODE = exports.INVALID_EMAIL_MESSAGE = exports.INVALID_EMAIL_CODE = void 0;
-exports.INVALID_EMAIL_CODE = "UM404";
-exports.INVALID_EMAIL_MESSAGE = "email is invalid!";
+exports.User = exports.AppError = exports.REGISTER_FAILED_INVALID_PASSWORD = exports.REGISTER_FAILED_INVALID_PASSWORD_CODE = exports.REGISTER_FAILED_MESSAGE = exports.REGISTER_FAILED_CODE = exports.REGISTER_FAILED_IDENTIFIER_EXISTS = exports.REGISTER_FAILED_IDENTIFIER_EXISTS_CODE = exports.INVALID_PASSWORD_MESSAGE = exports.INVALID_PASSWORD_CODE = exports.INVALID_IDENTIFIER_MESSAGE = exports.INVALID_IDENTIFIER_CODE = void 0;
+exports.INVALID_IDENTIFIER_CODE = "UM404";
+exports.INVALID_IDENTIFIER_MESSAGE = "Identifier is invalid!";
 exports.INVALID_PASSWORD_CODE = "UM400";
 exports.INVALID_PASSWORD_MESSAGE = "Password is invalid!";
-exports.REGISTER_FAILED_EMAIL_EXISTS_CODE = "UM400";
-exports.REGISTER_FAILED_EMAIL_EXISTS = "Email has been registered!";
+exports.REGISTER_FAILED_IDENTIFIER_EXISTS_CODE = "UM400";
+exports.REGISTER_FAILED_IDENTIFIER_EXISTS = "Identifier has been registered!";
 exports.REGISTER_FAILED_CODE = "UM400";
 exports.REGISTER_FAILED_MESSAGE = "System can not register the user!";
 exports.REGISTER_FAILED_INVALID_PASSWORD_CODE = "UM400";
@@ -35,26 +35,26 @@ class User {
         this.jwtService = jwtService;
         this.userRoleTrxService = userRoleTrxService;
     }
-    login(email, password) {
+    login(identifier, password) {
         return __awaiter(this, void 0, void 0, function* () {
-            const user = yield this.userService.selectByEmail(email);
+            const user = yield this.userService.selectByIdentifier(identifier);
             if (user === undefined || user.id === undefined)
-                throw new AppError(exports.INVALID_EMAIL_CODE, exports.INVALID_EMAIL_MESSAGE);
+                throw new AppError(exports.INVALID_IDENTIFIER_CODE, exports.INVALID_IDENTIFIER_MESSAGE);
             if (user.password !== password)
                 throw new AppError(exports.INVALID_PASSWORD_CODE, exports.INVALID_PASSWORD_MESSAGE);
             const userRole = yield this.userRoleTrxService.list(user.id);
             return yield this.jwtService.create({ user, userRole }, 3600);
         });
     }
-    register(email, password, confirmPassword) {
+    register(identifier, password, confirmPassword) {
         return __awaiter(this, void 0, void 0, function* () {
             if (password !== confirmPassword)
                 throw new AppError(exports.REGISTER_FAILED_INVALID_PASSWORD_CODE, exports.REGISTER_FAILED_INVALID_PASSWORD);
-            const _user = yield this.userService.selectByEmail(email);
+            const _user = yield this.userService.selectByIdentifier(identifier);
             if (_user !== undefined)
-                throw new AppError(exports.REGISTER_FAILED_EMAIL_EXISTS_CODE, exports.REGISTER_FAILED_EMAIL_EXISTS);
+                throw new AppError(exports.REGISTER_FAILED_IDENTIFIER_EXISTS_CODE, exports.REGISTER_FAILED_IDENTIFIER_EXISTS);
             const user = yield this.userService.register({
-                email: email,
+                identifier: identifier,
                 password: password,
             });
             if (user === undefined)

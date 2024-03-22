@@ -1,6 +1,6 @@
 export interface IUser {
   id?: string;
-  email: string;
+  identifier: string;
   password: string;
   attributes?: IRoleAttribute[] | IUserAttribute[];
 }
@@ -37,7 +37,7 @@ export interface IJWTService {
 export interface IUserService {
   register(user: IUser): Promise<IUser | undefined>;
   login(user: IUser): Promise<IUser | undefined>;
-  selectByEmail(email: string): Promise<IUser | undefined>;
+  selectByIdentifier(identifier: string): Promise<IUser | undefined>;
   truncate(): Promise<void>;
 }
 export interface IRoleService {
@@ -69,11 +69,11 @@ export interface IUserAttributeService {
 }
 export interface IUserLogic {
   register(
-    email: string,
+    identifier: string,
     password: string,
     confirmPassword: string
   ): Promise<IToken | undefined>;
-  login(email: string, password: string): Promise<IToken | undefined>;
+  login(identifier: string, password: string): Promise<IToken | undefined>;
   validateToken(token: string): Promise<IUser | undefined>;
   refreshToken(token: string, expired: number): Promise<IToken | undefined>;
 }

@@ -16,7 +16,7 @@ delete from tbl_mst_user;
 -- Create tbl_mst_user table
 CREATE TABLE "tbl_mst_user" (
     user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    email VARCHAR(255) UNIQUE NOT NULL,
+    identifier VARCHAR(255) UNIQUE NOT NULL,
     password VARCHAR(255) NOT NULL,
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP
@@ -62,7 +62,7 @@ CREATE TABLE "tbl_mst_role_attribute" (
 );
 
 -- DML
--- insert into tbl_mst_user(email, password)
+-- insert into tbl_mst_user(identifier, password)
 -- values('wildananugrah', 'p@ssw0rd') returning *;
 
 -- insert into tbl_mst_role(role_name)
@@ -98,7 +98,7 @@ select
 	tmu.user_id
 from tbl_mst_user_attribute tmua
 join tbl_mst_user tmu on tmu.user_id = tmua.user_id) as a 
-where a.user_id=(select user_id from tbl_mst_user tmu where email='wildananugrah')
+where a.user_id=(select user_id from tbl_mst_user tmu where identifier='wildananugrah')
 order by a.created_at asc;
 
 select * from tbl_mst_role tmr ;

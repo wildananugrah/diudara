@@ -39,7 +39,7 @@ afterAll(() => __awaiter(void 0, void 0, void 0, function* () {
 describe("User Service", () => {
     let todoId = "";
     const data = {
-        email: "wildananugrah@gmail.com",
+        identifier: "wildananugrah@gmail.com",
         password: "p@ssw0rd",
     };
     it("should be registered new user", () => __awaiter(void 0, void 0, void 0, function* () {
@@ -47,16 +47,16 @@ describe("User Service", () => {
         const user = yield userService.register(data);
         if (user === undefined)
             fail();
-        expect(user.email).toBe(data.email);
+        expect(user.identifier).toBe(data.identifier);
         expect(user.password).toBe(data.password);
     }));
     it("should be logged in a user", () => __awaiter(void 0, void 0, void 0, function* () {
         const userService = new user_svc_1.UserService(pool);
-        const user = yield userService.selectByEmail(data.email);
+        const user = yield userService.selectByIdentifier(data.identifier);
         if (user === undefined)
             fail();
         expect(typeof user.id).toBe("string");
-        expect(user.email).toBe(data.email);
+        expect(user.identifier).toBe(data.identifier);
         expect(user.password).toBe(data.password);
     }));
 });

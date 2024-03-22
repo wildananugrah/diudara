@@ -14,20 +14,22 @@ class UserService {
     constructor(pool) {
         this.tblName = "tbl_mst_user";
         this.deleteAllRecordsQuery = `DELETE FROM ${this.tblName}`;
-        this.selectByEmailQuery = `SELECT * FROM ${this.tblName} WHERE email=$1`;
-        this.insertUser = `INSERT INTO ${this.tblName} (email, password) VALUES ($1, $2) RETURNING *`;
+        this.selectByIdentifierQuery = `SELECT * FROM ${this.tblName} WHERE identifier=$1`;
+        this.insertUser = `INSERT INTO ${this.tblName} (identifier, password) VALUES ($1, $2) RETURNING *`;
         this.pool = pool;
     }
-    selectByEmail(email) {
+    selectByIdentifier(identifier) {
         return __awaiter(this, void 0, void 0, function* () {
             const client = yield this.pool.connect();
             try {
-                const dbResult = yield client.query(this.selectByEmailQuery, [email]);
+                const dbResult = yield client.query(this.selectByIdentifierQuery, [
+                    identifier,
+                ]);
                 if (dbResult.rows.length === 0)
                     return undefined;
                 return {
                     id: dbResult.rows[0].user_id,
-                    email: dbResult.rows[0].email,
+                    identifier: dbResult.rows[0].identifier,
                     password: dbResult.rows[0].password,
                 };
             }
@@ -61,12 +63,12 @@ class UserService {
             const client = yield this.pool.connect();
             try {
                 const dbResult = yield client.query(this.insertUser, [
-                    user.email,
+                    user.identifier,
                     user.password,
                 ]);
                 return {
                     id: dbResult.rows[0].user_id,
-                    email: dbResult.rows[0].email,
+                    identifier: dbResult.rows[0].identifier,
                     password: dbResult.rows[0].password,
                 };
             }
@@ -83,14 +85,14 @@ class UserService {
         return __awaiter(this, void 0, void 0, function* () {
             const client = yield this.pool.connect();
             try {
-                const dbResult = yield client.query(this.selectByEmailQuery, [
-                    user.email,
+                const dbResult = yield client.query(this.selectByIdentifierQuery, [
+                    user.identifier,
                 ]);
                 if (dbResult.rows.length === 0)
                     return undefined;
                 return {
                     id: dbResult.rows[0].user_id,
-                    email: dbResult.rows[0].email,
+                    identifier: dbResult.rows[0].identifier,
                     password: dbResult.rows[0].password,
                 };
             }
