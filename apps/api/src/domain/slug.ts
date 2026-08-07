@@ -4,6 +4,12 @@ const FALLBACK_SLUG = "komunitas";
 export function slugify(name: string): string {
   const base = name
     .normalize("NFKD")
+    // NFKD splits an accented letter into a base letter plus a combining mark.
+    // Drop the marks here — otherwise the [^a-z0-9] pass below turns each one
+    // into a hyphen, so "Ñoño" becomes "n-on-o" instead of "nono". A diacritic
+    // at the end of a word hides this, because the trailing hyphen gets
+    // stripped; only mid-word accents expose it.
+    .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
