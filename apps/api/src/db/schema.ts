@@ -81,3 +81,37 @@ export const activityLogs = pgTable("activity_log", {
   metadata: jsonb("metadata"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const courses = pgTable("course", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  communityId: uuid("community_id").notNull().references(() => communities.id),
+  title: varchar("title", { length: 255 }).notNull(),
+  dripSchedule: jsonb("drip_schedule"),
+});
+
+export const enrollments = pgTable("enrollment", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  memberId: uuid("member_id").notNull().references(() => members.id),
+  courseId: uuid("course_id").notNull().references(() => courses.id),
+  progressPercent: integer("progress_percent").notNull().default(0),
+  certificateStatus: varchar("certificate_status", { length: 32 }),
+});
+
+export const events = pgTable("event", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  communityId: uuid("community_id").notNull().references(() => communities.id),
+  title: varchar("title", { length: 255 }).notNull(),
+  scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
+  meetingLink: varchar("meeting_link", { length: 512 }),
+  streamKey: varchar("stream_key", { length: 128 }),
+  status: varchar("status", { length: 16 }).notNull().default("scheduled"),
+  hlsPlaybackPath: varchar("hls_playback_path", { length: 512 }),
+  recordingUrl: varchar("recording_url", { length: 512 }),
+});
+
+export const eventRsvps = pgTable("event_rsvp", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  memberId: uuid("member_id").notNull().references(() => members.id),
+  eventId: uuid("event_id").notNull().references(() => events.id),
+  status: varchar("status", { length: 16 }).notNull().default("registered"),
+});

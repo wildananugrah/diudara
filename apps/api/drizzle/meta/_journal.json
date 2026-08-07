@@ -8,6 +8,13 @@
       "when": 1786090120745,
       "tag": "0000_faulty_mariko_yashida",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786090414613,
+      "tag": "0001_aspiring_cargill",
+      "breakpoints": true
     }
   ]
 }
