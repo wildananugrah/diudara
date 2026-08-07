@@ -20,22 +20,22 @@ export const updateCommunitySchema = z
     slug: slug.optional(),
     status: z.enum(["active", "paused", "archived"]).optional(),
   })
-  .refine((v) => Object.keys(v).length > 0, { message: "at least one field is required" });
+  .refine((v) => Object.values(v).some((x) => x !== undefined), { message: "at least one field is required" });
 
 export const createTierSchema = z.object({
   name: z.string().trim().min(1).max(128),
-  priceAmount: z.number().int().min(0),
+  priceAmount: z.number().int().min(0).max(2_000_000_000),
   billingCycle: z.enum(["monthly", "quarterly", "yearly"]),
 });
 
 export const updateTierSchema = z
   .object({
     name: z.string().trim().min(1).max(128).optional(),
-    priceAmount: z.number().int().min(0).optional(),
+    priceAmount: z.number().int().min(0).max(2_000_000_000).optional(),
     billingCycle: z.enum(["monthly", "quarterly", "yearly"]).optional(),
     isActive: z.boolean().optional(),
   })
-  .refine((v) => Object.keys(v).length > 0, { message: "at least one field is required" });
+  .refine((v) => Object.values(v).some((x) => x !== undefined), { message: "at least one field is required" });
 
 export const connectChannelSchema = z.object({
   platform: z.enum(["whatsapp", "telegram"]),

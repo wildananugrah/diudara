@@ -38,6 +38,16 @@ describe("signupSchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("rejects an email longer than 255 characters", () => {
+    const longEmail = "a".repeat(250) + "@example.com";
+    const result = signupSchema.safeParse({
+      name: "Budi",
+      email: longEmail,
+      password: "supersecret123",
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe("loginSchema", () => {

@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "cd apps/api && bun test",
-    "typecheck": "cd apps/api && bun run typecheck"
+    "test": "bun run --workspaces test",
+    "typecheck": "bun run --workspaces typecheck"
   }
 }
