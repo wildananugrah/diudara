@@ -10,4 +10,9 @@ describe("GET /health", () => {
     const body = await res.json();
     expect(body).toEqual({ status: "ok" });
   });
+
+  it("returns 500 when the database is unreachable", async () => {
+    const app = createApp({ ...bootstrap(), sql: (() => Promise.reject(new Error("down"))) as never });
+    expect((await app.request("/health")).status).toBe(500);
+  });
 });
