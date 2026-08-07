@@ -1,6 +1,11 @@
 import { db, sql } from "./db/client";
 import { DrizzleCreatorRepository } from "./infrastructure/repositories/drizzle-creator.repository";
+import { BunPasswordHasher } from "./infrastructure/auth/bun-password.hasher";
+import { HonoJwtTokenIssuer } from "./infrastructure/auth/hono-jwt.token-issuer";
+import { RegisterCreator } from "./application/use-cases/register-creator";
+import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
+import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 
 /** Values that may be interpolated into a `DatabasePing` tagged template. */
 type PingValue = string | number | boolean | Date | null;
@@ -29,14 +34,36 @@ export type DatabasePing = (
  */
 export interface Dependencies {
   creatorRepository: CreatorRepositoryPort;
+  tokenIssuer: TokenIssuerPort;
+  registerCreator: RegisterCreator;
+  authenticateCreator: AuthenticateCreator;
   sql: DatabasePing;
 }
 
 export function bootstrap(): Dependencies {
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret) {
+    throw new Error(
+      "JWT_SECRET is not set. Add it to apps/api/.env — see .env.example. " +
+        "Refusing to start rather than signing tokens with a default secret."
+    );
+  }
+
   const creatorRepository = new DrizzleCreatorRepository(db);
+  const passwordHasher = new BunPasswordHasher();
+  const tokenIssuer = new HonoJwtTokenIssuer(jwtSecret);
+  const registerCreator = new RegisterCreator(creatorRepository, passwordHasher, tokenIssuer);
+  const authenticateCreator = new AuthenticateCreator(
+    creatorRepository,
+    passwordHasher,
+    tokenIssuer
+  );
 
   return {
     creatorRepository,
+    tokenIssuer,
+    registerCreator,
+    authenticateCreator,
     sql,
   };
 }
