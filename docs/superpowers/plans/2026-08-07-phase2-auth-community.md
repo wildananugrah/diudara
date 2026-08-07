@@ -833,8 +833,10 @@ git commit -m "feat(auth): add password hasher and JWT token issuer ports with a
 Create `apps/api/src/application/errors.ts` first (both tests import from it):
 
 ```ts
+import type { ContentfulStatusCode } from "hono/utils/http-status";
+
 export class AppError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: ContentfulStatusCode) {
     super(message);
     this.name = new.target.name;
   }
@@ -1428,7 +1430,8 @@ import { AppError } from "../application/errors";
 
 export function errorHandler(err: Error, c: Context): Response {
   if (err instanceof AppError) {
-    return c.json({ error: err.message }, err.status as 400);
+    // No cast needed: AppError.status is typed as Hono's ContentfulStatusCode.
+    return c.json({ error: err.message }, err.status);
   }
 
   // Never surface an unexpected error's message — it may contain connection
@@ -2686,14 +2689,18 @@ git commit -m "feat(community): add authenticated community routes"
 - Create: `apps/api/src/infrastructure/repositories/drizzle-membership-tier.repository.ts`
 - Create: `apps/api/src/application/use-cases/manage-tiers.ts`
 - Create: `apps/api/src/routes/tiers.ts`
+- Modify: `apps/api/src/domain/membership-tier.ts` (add `assertValidTier`)
+- Modify: `apps/api/src/domain/membership-tier.test.ts` (add its tests)
 - Modify: `apps/api/src/bootstrap.ts`
 - Modify: `apps/api/src/app.ts`
 - Test: `apps/api/src/routes/tiers.test.ts`
 
 **Interfaces:**
-- Consumes: `CommunityRepositoryPort` (Task 8), `createMembershipTier` domain factory
-  (Phase 1, `apps/api/src/domain/membership-tier.ts`), `createTierSchema`,
-  `updateTierSchema` (Task 1), `signupAndGetToken`/`bearer` (Task 9).
+- Consumes: `CommunityRepositoryPort` (Task 8), `BillingCycle` type (Phase 1,
+  `apps/api/src/domain/membership-tier.ts`), `createTierSchema`, `updateTierSchema`
+  (Task 1), `signupAndGetToken`/`bearer` (Task 9).
+- Also produces: `assertValidTier(input)` added to
+  `apps/api/src/domain/membership-tier.ts` — see Step 3.
 - Produces:
   - `TierRecord` — `{ id, communityId, name, priceAmount, billingCycle, isActive }`
   - `MembershipTierRepositoryPort` — `create`, `listByCommunity`,
@@ -2987,10 +2994,60 @@ export class DrizzleMembershipTierRepository implements MembershipTierRepository
 }
 ```
 
-Create `apps/api/src/application/use-cases/manage-tiers.ts`:
+First, add a validate-only function to the existing
+`apps/api/src/domain/membership-tier.ts` (append below `createMembershipTier`, leaving that
+function untouched). This exists so use-cases can enforce the tier invariants without
+constructing and discarding an entity — and so the rules still apply when a non-HTTP caller
+(Phase 7's AI co-builder) bypasses the Zod layer:
 
 ```ts
-import { createMembershipTier, type BillingCycle } from "../../domain/membership-tier";
+export function assertValidTier(input: {
+  name: string;
+  priceAmount: number;
+  billingCycle: BillingCycle;
+}): void {
+  if (input.priceAmount < 0) {
+    throw new Error("priceAmount must not be negative");
+  }
+  if (!VALID_BILLING_CYCLES.includes(input.billingCycle)) {
+    throw new Error(`billingCycle must be one of ${VALID_BILLING_CYCLES.join(", ")}`);
+  }
+  if (input.name.trim().length === 0) {
+    throw new Error("name must not be empty");
+  }
+}
+```
+
+Add matching tests to `apps/api/src/domain/membership-tier.test.ts`:
+
+```ts
+import { assertValidTier } from "./membership-tier";
+
+describe("assertValidTier", () => {
+  it("accepts a valid tier", () => {
+    expect(() =>
+      assertValidTier({ name: "Basic", priceAmount: 50000, billingCycle: "monthly" })
+    ).not.toThrow();
+  });
+
+  it("rejects a negative priceAmount", () => {
+    expect(() =>
+      assertValidTier({ name: "Basic", priceAmount: -1, billingCycle: "monthly" })
+    ).toThrow("priceAmount must not be negative");
+  });
+
+  it("rejects an empty name", () => {
+    expect(() =>
+      assertValidTier({ name: "  ", priceAmount: 100, billingCycle: "monthly" })
+    ).toThrow("name must not be empty");
+  });
+});
+```
+
+Then create `apps/api/src/application/use-cases/manage-tiers.ts`:
+
+```ts
+import { assertValidTier, type BillingCycle } from "../../domain/membership-tier";
 import { NotFoundError } from "../errors";
 import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 import type {
@@ -3026,11 +3083,9 @@ export class DefineMembershipTier {
   }): Promise<TierRecord> {
     await assertOwnsCommunity(this.communities, input.communityId, input.creatorId);
 
-    // Domain factory enforces the invariants (non-negative price, known cycle,
-    // non-empty name) before anything reaches the database.
-    createMembershipTier({
-      id: "pending",
-      communityId: input.communityId,
+    // Enforces the invariants (non-negative price, known cycle, non-empty name)
+    // before anything reaches the database, independently of the Zod layer.
+    assertValidTier({
       name: input.name,
       priceAmount: input.priceAmount,
       billingCycle: input.billingCycle,
