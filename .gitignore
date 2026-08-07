@@ -1,3 +1,7 @@
 docs/server
 .worktrees
 .superpowers
+node_modules
+dist
+.env
+.DS_Store

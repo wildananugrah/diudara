@@ -1,0 +1,8 @@
+{
+  "name": "diudara",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}
