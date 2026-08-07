@@ -819,8 +819,19 @@ git commit -m "feat(auth): add password hasher and JWT token issuer ports with a
 - Consumes: `PasswordHasherPort`, `TokenIssuerPort` (Task 4), `normalizeEmail` (Task 3),
   `creators` table with `passwordHash` (Task 2).
 - Produces:
-  - `CreatorRecord` gains `passwordHash: string | null`; `create()` accepts an optional
-    `passwordHash` and `whatsappNumber` is now optional.
+  - **`CreatorRecord` must NOT gain a `passwordHash` field.** Task 2 established that the
+    repository's general-purpose methods project an explicit column list which excludes
+    `password_hash`, so the hash is never fetched — enforcing the global constraint that
+    password hashes never leave the repository layer. Widening `CreatorRecord` would undo
+    that. Instead this task adds a **dedicated** credentials lookup (below) that is the
+    only path to the hash.
+  - `CreatorCredentials` — `{ id, name, email, passwordHash }` — and
+    `findCredentialsByEmail(email): Promise<CreatorCredentials | null>` on
+    `CreatorRepositoryPort`, with its own explicit column list including `passwordHash`.
+    It returns enough to both verify the password and build the public creator in one
+    query.
+  - `create()` accepts an optional `passwordHash` and `whatsappNumber` is now optional;
+    it still returns `CreatorRecord` (no hash).
   - `apps/api/src/application/errors.ts` exporting `AppError` (with a `status` field),
     `ConflictError` (409), `UnauthorizedError` (401), `NotFoundError` (404),
     `ValidationError` (400).
@@ -877,8 +888,13 @@ import type { CreatorRecord, CreatorRepositoryPort } from "../ports/creator-repo
 import type { PasswordHasherPort } from "../ports/password-hasher.port";
 import type { TokenIssuerPort, TokenPayload } from "../ports/token-issuer.port";
 
+// Stores the hash alongside the record so the fake can serve
+// findCredentialsByEmail, while `rows` stays free of it — mirroring the real
+// repository, where only the dedicated lookup returns the hash.
 function fakeRepository(seed: CreatorRecord[] = []) {
   const rows = [...seed];
+  const hashes = new Map<string, string | null>();
+
   const repository: CreatorRepositoryPort = {
     async create(input) {
       const row: CreatorRecord = {
@@ -886,11 +902,11 @@ function fakeRepository(seed: CreatorRecord[] = []) {
         name: input.name,
         whatsappNumber: input.whatsappNumber ?? null,
         email: input.email ?? null,
-        passwordHash: input.passwordHash ?? null,
         tierPlan: "starter",
         createdAt: new Date(),
       };
       rows.push(row);
+      hashes.set(row.id, input.passwordHash ?? null);
       return row;
     },
     async findById(id) {
@@ -899,8 +915,18 @@ function fakeRepository(seed: CreatorRecord[] = []) {
     async findByEmail(email) {
       return rows.find((r) => r.email === email) ?? null;
     },
+    async findCredentialsByEmail(email) {
+      const row = rows.find((r) => r.email === email);
+      if (!row) return null;
+      return {
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        passwordHash: hashes.get(row.id) ?? null,
+      };
+    },
   };
-  return { repository, rows };
+  return { repository, rows, hashes };
 }
 
 const fakeHasher: PasswordHasherPort = {
@@ -924,7 +950,7 @@ const fakeIssuer: TokenIssuerPort = {
 
 describe("RegisterCreator", () => {
   it("creates a creator with a hashed password and returns a token", async () => {
-    const { repository, rows } = fakeRepository();
+    const { repository, rows, hashes } = fakeRepository();
     const useCase = new RegisterCreator(repository, fakeHasher, fakeIssuer);
 
     const result = await useCase.execute({
@@ -935,7 +961,8 @@ describe("RegisterCreator", () => {
 
     expect(result.creator.email).toBe("budi@example.com");
     expect(result.token).toBe("token-for-creator-1");
-    expect(rows[0].passwordHash).toBe("hashed:supersecret123");
+    // The plaintext was hashed before it reached the repository.
+    expect(hashes.get(rows[0].id)).toBe("hashed:supersecret123");
   });
 
   it("never returns the password hash to the caller", async () => {
@@ -972,7 +999,6 @@ describe("RegisterCreator", () => {
         name: "Someone",
         whatsappNumber: null,
         email: "budi@example.com",
-        passwordHash: "hashed:whatever",
         tierPlan: "starter",
         createdAt: new Date(),
       },
@@ -992,32 +1018,35 @@ Create `apps/api/src/application/use-cases/authenticate-creator.test.ts`:
 import { describe, expect, it } from "bun:test";
 import { AuthenticateCreator } from "./authenticate-creator";
 import { UnauthorizedError } from "../errors";
-import type { CreatorRecord, CreatorRepositoryPort } from "../ports/creator-repository.port";
+import type {
+  CreatorCredentials,
+  CreatorRepositoryPort,
+} from "../ports/creator-repository.port";
 import type { PasswordHasherPort } from "../ports/password-hasher.port";
 import type { TokenIssuerPort, TokenPayload } from "../ports/token-issuer.port";
 
-function creator(overrides: Partial<CreatorRecord> = {}): CreatorRecord {
+function credentials(overrides: Partial<CreatorCredentials> = {}): CreatorCredentials {
   return {
     id: "creator-1",
     name: "Budi",
-    whatsappNumber: null,
     email: "budi@example.com",
     passwordHash: "hashed:supersecret123",
-    tierPlan: "starter",
-    createdAt: new Date(),
     ...overrides,
   };
 }
 
-function fakeRepository(seed: CreatorRecord[]) {
+function fakeRepository(seed: CreatorCredentials[]) {
   const repository: CreatorRepositoryPort = {
     async create() {
       throw new Error("not used in these tests");
     },
-    async findById(id) {
-      return seed.find((r) => r.id === id) ?? null;
+    async findById() {
+      throw new Error("not used in these tests");
     },
-    async findByEmail(email) {
+    async findByEmail() {
+      throw new Error("not used in these tests");
+    },
+    async findCredentialsByEmail(email) {
       return seed.find((r) => r.email === email) ?? null;
     },
   };
@@ -1045,7 +1074,7 @@ const fakeIssuer: TokenIssuerPort = {
 
 describe("AuthenticateCreator", () => {
   it("returns a token for correct credentials", async () => {
-    const useCase = new AuthenticateCreator(fakeRepository([creator()]), fakeHasher, fakeIssuer);
+    const useCase = new AuthenticateCreator(fakeRepository([credentials()]), fakeHasher, fakeIssuer);
 
     const result = await useCase.execute({
       email: "budi@example.com",
@@ -1057,7 +1086,7 @@ describe("AuthenticateCreator", () => {
   });
 
   it("rejects a wrong password", async () => {
-    const useCase = new AuthenticateCreator(fakeRepository([creator()]), fakeHasher, fakeIssuer);
+    const useCase = new AuthenticateCreator(fakeRepository([credentials()]), fakeHasher, fakeIssuer);
 
     await expect(
       useCase.execute({ email: "budi@example.com", password: "wrong-password" })
@@ -1065,7 +1094,7 @@ describe("AuthenticateCreator", () => {
   });
 
   it("rejects an unknown email with the same error as a wrong password", async () => {
-    const useCase = new AuthenticateCreator(fakeRepository([creator()]), fakeHasher, fakeIssuer);
+    const useCase = new AuthenticateCreator(fakeRepository([credentials()]), fakeHasher, fakeIssuer);
 
     const unknown = await useCase
       .execute({ email: "nobody@example.com", password: "supersecret123" })
@@ -1082,7 +1111,7 @@ describe("AuthenticateCreator", () => {
 
   it("rejects an account that has no password set", async () => {
     const useCase = new AuthenticateCreator(
-      fakeRepository([creator({ passwordHash: null })]),
+      fakeRepository([credentials({ passwordHash: null })]),
       fakeHasher,
       fakeIssuer
     );
@@ -1093,7 +1122,7 @@ describe("AuthenticateCreator", () => {
   });
 
   it("never returns the password hash", async () => {
-    const useCase = new AuthenticateCreator(fakeRepository([creator()]), fakeHasher, fakeIssuer);
+    const useCase = new AuthenticateCreator(fakeRepository([credentials()]), fakeHasher, fakeIssuer);
 
     const result = await useCase.execute({
       email: "budi@example.com",
@@ -1124,9 +1153,22 @@ export interface CreatorRecord {
   name: string;
   whatsappNumber: string | null;
   email: string | null;
-  passwordHash: string | null;
   tierPlan: string;
   createdAt: Date;
+}
+
+/**
+ * The ONLY shape that carries the password hash. Returned exclusively by
+ * findCredentialsByEmail, which exists so the login use-case can verify a
+ * password without widening CreatorRecord — every other method projects a
+ * column list that excludes password_hash entirely.
+ * Never return this from an HTTP handler.
+ */
+export interface CreatorCredentials {
+  id: string;
+  name: string;
+  email: string | null;
+  passwordHash: string | null;
 }
 
 export interface CreatorRepositoryPort {
@@ -1138,11 +1180,13 @@ export interface CreatorRepositoryPort {
   }): Promise<CreatorRecord>;
   findById(id: string): Promise<CreatorRecord | null>;
   findByEmail(email: string): Promise<CreatorRecord | null>;
+  findCredentialsByEmail(email: string): Promise<CreatorCredentials | null>;
 }
 ```
 
 In `apps/api/src/infrastructure/repositories/drizzle-creator.repository.ts`, update the
-`create` method signature and body to carry the new fields:
+`create` method to carry the new fields — **keep the existing `creatorColumns` projection
+on `.returning()`**, which Task 2 added to stop the hash leaving this layer:
 
 ```ts
   async create(input: {
@@ -1159,10 +1203,31 @@ In `apps/api/src/infrastructure/repositories/drizzle-creator.repository.ts`, upd
         email: input.email,
         passwordHash: input.passwordHash,
       })
-      .returning();
+      .returning(creatorColumns);
     return row;
   }
 ```
+
+Then add the dedicated credentials lookup — the one method with its own column list that
+includes the hash:
+
+```ts
+  async findCredentialsByEmail(email: string): Promise<CreatorCredentials | null> {
+    const [row] = await this.db
+      .select({
+        id: creators.id,
+        name: creators.name,
+        email: creators.email,
+        passwordHash: creators.passwordHash,
+      })
+      .from(creators)
+      .where(eq(creators.email, email))
+      .limit(1);
+    return row ?? null;
+  }
+```
+
+Import `CreatorCredentials` alongside the existing type imports.
 
 Create `apps/api/src/application/use-cases/register-creator.ts`:
 
@@ -1233,7 +1298,9 @@ export class AuthenticateCreator {
     token: string;
   }> {
     const email = normalizeEmail(input.email);
-    const found = await this.creators.findByEmail(email);
+    // The dedicated credentials lookup is the only path to the hash; the
+    // general-purpose findByEmail deliberately does not return it.
+    const found = await this.creators.findCredentialsByEmail(email);
 
     if (!found || !found.passwordHash) {
       throw new UnauthorizedError(GENERIC_FAILURE);
@@ -1260,6 +1327,19 @@ bun test src/application/use-cases
 ```
 
 Expected: PASS (9 tests).
+
+- [ ] **Step 4b: Confirm the general-purpose lookups still do not expose the hash**
+
+Task 2 added a test asserting `"passwordHash" in result === false` for `create`,
+`findById`, and `findByEmail`. This task widens the repository, so re-run it and confirm it
+still passes — the new `findCredentialsByEmail` must be the *only* path to the hash:
+
+```bash
+bun test src/infrastructure/repositories/drizzle-creator.repository.test.ts
+```
+
+Expected: PASS. If it now fails, you have widened a general-purpose method instead of
+adding a dedicated one — fix that rather than relaxing the test.
 
 - [ ] **Step 5: Run the full suite and typecheck**
 
