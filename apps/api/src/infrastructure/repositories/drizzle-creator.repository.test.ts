@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach } from "bun:test";
 import { db } from "../../db/client";
+import { creators } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { DrizzleCreatorRepository } from "./drizzle-creator.repository";
 
@@ -26,5 +27,37 @@ describe("DrizzleCreatorRepository", () => {
     const repository = new DrizzleCreatorRepository(db);
     const result = await repository.findById("00000000-0000-0000-0000-000000000000");
     expect(result).toBeNull();
+  });
+
+  // Password hashes must never leave the repository layer (plan-wide constraint:
+  // no endpoint may return password_hash). TypeScript can't catch a leak here — a
+  // Drizzle row returned as-is structurally satisfies CreatorRecord even with an
+  // extra passwordHash field, since excess-property checking only applies to
+  // object literals. So this checks the actual runtime key, not just the value.
+  it("never exposes passwordHash from create, findById, or findByEmail", async () => {
+    const repository = new DrizzleCreatorRepository(db);
+
+    const [seeded] = await db
+      .insert(creators)
+      .values({
+        name: "Farah",
+        email: "farah@example.com",
+        passwordHash: "$argon2id$fake",
+      })
+      .returning();
+
+    const created = await repository.create({
+      name: "Gilang",
+      whatsappNumber: "+6281333444555",
+      email: "gilang@example.com",
+    });
+    const byId = await repository.findById(seeded.id);
+    const byEmail = await repository.findByEmail("farah@example.com");
+
+    expect("passwordHash" in created).toBe(false);
+    expect(byId).not.toBeNull();
+    expect(byEmail).not.toBeNull();
+    expect("passwordHash" in (byId as object)).toBe(false);
+    expect("passwordHash" in (byEmail as object)).toBe(false);
   });
 });
