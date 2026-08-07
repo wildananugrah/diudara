@@ -15,7 +15,12 @@ describe("core schema round-trip", () => {
 
     const [community] = await db
       .insert(communities)
-      .values({ creatorId: creator.id, name: "Kelas Bimbel Budi", niche: "bimbel" })
+      .values({
+        creatorId: creator.id,
+        name: "Kelas Bimbel Budi",
+        slug: "kelas-bimbel-budi",
+        niche: "bimbel",
+      })
       .returning();
 
     const [tier] = await db

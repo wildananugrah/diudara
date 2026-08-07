@@ -17,8 +17,9 @@ export const creators = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     name: varchar("name", { length: 255 }).notNull(),
-    whatsappNumber: varchar("whatsapp_number", { length: 32 }).notNull(),
+    whatsappNumber: varchar("whatsapp_number", { length: 32 }),
     email: varchar("email", { length: 255 }),
+    passwordHash: varchar("password_hash", { length: 255 }),
     tierPlan: varchar("tier_plan", { length: 32 }).notNull().default("starter"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -42,6 +43,7 @@ export const communities = pgTable(
       .notNull()
       .references(() => creators.id),
     name: varchar("name", { length: 255 }).notNull(),
+    slug: varchar("slug", { length: 120 }).notNull().unique(),
     niche: varchar("niche", { length: 128 }),
     status: varchar("status", { length: 32 }).notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

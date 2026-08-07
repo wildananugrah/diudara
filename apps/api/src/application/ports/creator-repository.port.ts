@@ -1,7 +1,7 @@
 export interface CreatorRecord {
   id: string;
   name: string;
-  whatsappNumber: string;
+  whatsappNumber: string | null;
   email: string | null;
   tierPlan: string;
   createdAt: Date;

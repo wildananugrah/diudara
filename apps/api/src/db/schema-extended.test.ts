@@ -13,7 +13,7 @@ describe("extended schema — event with streaming fields", () => {
       .returning();
     const [community] = await db
       .insert(communities)
-      .values({ creatorId: creator.id, name: "Kelas Sinta" })
+      .values({ creatorId: creator.id, name: "Kelas Sinta", slug: "kelas-sinta" })
       .returning();
 
     const [event] = await db
