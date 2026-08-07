@@ -21,7 +21,11 @@ Copied verbatim (or near-verbatim) from `docs/superpowers/specs/2026-08-07-diuda
 Every task's work implicitly includes these, even tasks that don't touch them directly:
 
 - Backend must follow ports-and-adapters (SOLID) layering: use-cases/application code
-  depends only on port interfaces, never on concrete SDKs directly (spec §5).
+  depends only on port interfaces, never on concrete SDKs directly (spec §5). **Standing
+  exception, ruled on 2026-08-07:** liveness/readiness health-check routes (e.g. Task 7's
+  `GET /health`) may call the raw database client directly — they are diagnostic
+  infrastructure, not application/use-case logic, and are exempt from the ports rule.
+  Do not flag this as a spec violation in review.
 - Database is PostgreSQL, accessed exclusively through Drizzle ORM (spec §3, §7).
 - No payment/card data is ever stored directly by our system — only gateway references
   (spec §10). Not exercised in this phase, binding from Phase 3 onward.

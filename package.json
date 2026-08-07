@@ -1,0 +1,12 @@
+{
+  "name": "diudara",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "cd apps/api && bun test",
+    "typecheck": "cd apps/api && bun run typecheck"
+  }
+}

@@ -1,0 +1,4 @@
+[test]
+# Loads apps/api/.env so `bun test` works from the repo root, not just apps/api.
+# See apps/api/src/test-env-preload.ts.
+preload = ["./apps/api/src/test-env-preload.ts"]
