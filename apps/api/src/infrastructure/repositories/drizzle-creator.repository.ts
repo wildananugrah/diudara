@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import type { db as DbClient } from "../../db/client";
 import { creators } from "../../db/schema";
 import type {
+  CreatorCredentials,
   CreatorRecord,
   CreatorRepositoryPort,
 } from "../../application/ports/creator-repository.port";
@@ -27,8 +28,9 @@ export class DrizzleCreatorRepository implements CreatorRepositoryPort {
 
   async create(input: {
     name: string;
-    whatsappNumber: string;
+    whatsappNumber?: string;
     email?: string;
+    passwordHash?: string;
   }): Promise<CreatorRecord> {
     const [row] = await this.db
       .insert(creators)
@@ -36,6 +38,7 @@ export class DrizzleCreatorRepository implements CreatorRepositoryPort {
         name: input.name,
         whatsappNumber: input.whatsappNumber,
         email: input.email,
+        passwordHash: input.passwordHash,
       })
       .returning(creatorColumns);
     return row;
@@ -52,6 +55,20 @@ export class DrizzleCreatorRepository implements CreatorRepositoryPort {
   async findByEmail(email: string): Promise<CreatorRecord | null> {
     const [row] = await this.db
       .select(creatorColumns)
+      .from(creators)
+      .where(eq(creators.email, email))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async findCredentialsByEmail(email: string): Promise<CreatorCredentials | null> {
+    const [row] = await this.db
+      .select({
+        id: creators.id,
+        name: creators.name,
+        email: creators.email,
+        passwordHash: creators.passwordHash,
+      })
       .from(creators)
       .where(eq(creators.email, email))
       .limit(1);

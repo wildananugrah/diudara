@@ -22,7 +22,7 @@ describe("Dependencies (composition root contract)", () => {
         const record: CreatorRecord = {
           id: `fake-${stored.length + 1}`,
           name: input.name,
-          whatsappNumber: input.whatsappNumber,
+          whatsappNumber: input.whatsappNumber ?? null,
           email: input.email ?? null,
           tierPlan: "starter",
           createdAt: new Date(0),
@@ -35,6 +35,9 @@ describe("Dependencies (composition root contract)", () => {
       },
       async findByEmail(email) {
         return stored.find((record) => record.email === email) ?? null;
+      },
+      async findCredentialsByEmail() {
+        return null;
       },
     };
 
@@ -63,6 +66,9 @@ describe("Dependencies (composition root contract)", () => {
           return null;
         },
         async findByEmail() {
+          return null;
+        },
+        async findCredentialsByEmail() {
           return null;
         },
       },
