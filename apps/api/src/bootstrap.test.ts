@@ -11,12 +11,14 @@ import {
   ListTiers,
   UpdateTier,
 } from "./application/use-cases/manage-tiers";
+import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import type {
   CreatorRecord,
   CreatorRepositoryPort,
 } from "./application/ports/creator-repository.port";
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "./application/ports/membership-tier-repository.port";
+import type { ChannelRepositoryPort } from "./application/ports/channel-repository.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 
@@ -28,8 +30,9 @@ import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
  * would hide exactly the regression this test exists to catch.
  *
  * `registerCreator`/`authenticateCreator`/`createCommunity`/`listCommunities`/
- * `updateCommunity`/`defineTier`/`listTiers`/`updateTier` are typed as the
- * concrete use-case classes (there's only one implementation of each, so no
+ * `updateCommunity`/`defineTier`/`listTiers`/`updateTier`/`connectChannel`/
+ * `listChannels` are typed as the concrete use-case classes (there's only one
+ * implementation of each, so no
  * port exists for them) — a class with private members can't be satisfied by
  * a plain object literal without a cast, so the fakes below construct real
  * instances of those classes wrapping hand-written fake ports instead.
@@ -82,6 +85,15 @@ const fakeMembershipTierRepository: MembershipTierRepositoryPort = {
   },
 };
 
+const fakeChannelRepository: ChannelRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async listByCommunity() {
+    return [];
+  },
+};
+
 describe("Dependencies (composition root contract)", () => {
   it("accepts a hand-written fake CreatorRepositoryPort with no casts", async () => {
     const stored: CreatorRecord[] = [];
@@ -129,6 +141,8 @@ describe("Dependencies (composition root contract)", () => {
       defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
       listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
       updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
+      connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
+      listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       sql: async () => [{ one: 1 }],
     };
 
@@ -177,6 +191,8 @@ describe("Dependencies (composition root contract)", () => {
       defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
       listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
       updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
+      connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
+      listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       sql: async () => [{ one: 1 }],
     };
 

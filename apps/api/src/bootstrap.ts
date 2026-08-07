@@ -14,6 +14,8 @@ import {
   ListTiers,
   UpdateTier,
 } from "./application/use-cases/manage-tiers";
+import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
+import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 
@@ -53,6 +55,8 @@ export interface Dependencies {
   defineTier: DefineMembershipTier;
   listTiers: ListTiers;
   updateTier: UpdateTier;
+  connectChannel: ConnectChannel;
+  listChannels: ListChannels;
   sql: DatabasePing;
 }
 
@@ -85,6 +89,10 @@ export function bootstrap(): Dependencies {
   const listTiers = new ListTiers(communityRepository, tierRepository);
   const updateTier = new UpdateTier(communityRepository, tierRepository);
 
+  const channelRepository = new DrizzleChannelRepository(db);
+  const connectChannel = new ConnectChannel(communityRepository, channelRepository);
+  const listChannels = new ListChannels(communityRepository, channelRepository);
+
   return {
     creatorRepository,
     tokenIssuer,
@@ -96,6 +104,8 @@ export function bootstrap(): Dependencies {
     defineTier,
     listTiers,
     updateTier,
+    connectChannel,
+    listChannels,
     sql,
   };
 }
