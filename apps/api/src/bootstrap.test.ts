@@ -6,11 +6,17 @@ import { AuthenticateCreator } from "./application/use-cases/authenticate-creato
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
+import {
+  DefineMembershipTier,
+  ListTiers,
+  UpdateTier,
+} from "./application/use-cases/manage-tiers";
 import type {
   CreatorRecord,
   CreatorRepositoryPort,
 } from "./application/ports/creator-repository.port";
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
+import type { MembershipTierRepositoryPort } from "./application/ports/membership-tier-repository.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 
@@ -22,11 +28,11 @@ import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
  * would hide exactly the regression this test exists to catch.
  *
  * `registerCreator`/`authenticateCreator`/`createCommunity`/`listCommunities`/
- * `updateCommunity` are typed as the concrete use-case classes (there's only
- * one implementation of each, so no port exists for them) — a class with
- * private members can't be satisfied by a plain object literal without a
- * cast, so the fakes below construct real instances of those classes
- * wrapping hand-written fake ports instead.
+ * `updateCommunity`/`defineTier`/`listTiers`/`updateTier` are typed as the
+ * concrete use-case classes (there's only one implementation of each, so no
+ * port exists for them) — a class with private members can't be satisfied by
+ * a plain object literal without a cast, so the fakes below construct real
+ * instances of those classes wrapping hand-written fake ports instead.
  */
 const fakeTokenIssuer: TokenIssuerPort = {
   async issue() {
@@ -60,6 +66,18 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
     return false;
   },
   async update() {
+    return null;
+  },
+};
+
+const fakeMembershipTierRepository: MembershipTierRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async listByCommunity() {
+    return [];
+  },
+  async updateForCommunity() {
     return null;
   },
 };
@@ -108,6 +126,9 @@ describe("Dependencies (composition root contract)", () => {
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),
       updateCommunity: new UpdateCommunity(fakeCommunityRepository),
+      defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
+      listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
+      updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
       sql: async () => [{ one: 1 }],
     };
 
@@ -153,6 +174,9 @@ describe("Dependencies (composition root contract)", () => {
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),
       updateCommunity: new UpdateCommunity(fakeCommunityRepository),
+      defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
+      listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
+      updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
       sql: async () => [{ one: 1 }],
     };
 
