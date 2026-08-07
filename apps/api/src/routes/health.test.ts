@@ -12,7 +12,7 @@ describe("GET /health", () => {
   });
 
   it("returns 500 when the database is unreachable", async () => {
-    const app = createApp({ ...bootstrap(), sql: (() => Promise.reject(new Error("down"))) as never });
+    const app = createApp({ ...bootstrap(), sql: () => Promise.reject(new Error("down")) });
     expect((await app.request("/health")).status).toBe(500);
   });
 });
