@@ -1,3 +1,9 @@
 import { Hono } from "hono";
+import type { Dependencies } from "../bootstrap";
 
-export const healthRoute = new Hono().get("/", (c) => c.json({ status: "ok" }));
+export function healthRoute(deps: Dependencies) {
+  return new Hono().get("/", async (c) => {
+    await deps.sql`select 1`;
+    return c.json({ status: "ok" });
+  });
+}

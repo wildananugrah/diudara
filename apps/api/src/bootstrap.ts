@@ -1,4 +1,4 @@
-import { db } from "./db/client";
+import { db, sql } from "./db/client";
 import { DrizzleCreatorRepository } from "./infrastructure/repositories/drizzle-creator.repository";
 
 export function bootstrap() {
@@ -6,6 +6,7 @@ export function bootstrap() {
 
   return {
     creatorRepository,
+    sql,
   };
 }
 
