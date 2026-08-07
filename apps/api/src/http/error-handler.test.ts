@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { errorHandler } from "./error-handler";
 import { ConflictError, NotFoundError, UnauthorizedError, ValidationError } from "../application/errors";
 
@@ -33,6 +34,20 @@ describe("errorHandler", () => {
     const res = await appThatThrows(new ConflictError("email is already registered")).request("/boom");
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "email is already registered" });
+  });
+
+  it("preserves Hono's own HTTPException status instead of collapsing it to 500", async () => {
+    const res = await appThatThrows(new HTTPException(404, { message: "route not found" })).request(
+      "/boom"
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("preserves a 429 HTTPException, e.g. from a built-in like bodyLimit", async () => {
+    const res = await appThatThrows(new HTTPException(429, { message: "too many requests" })).request(
+      "/boom"
+    );
+    expect(res.status).toBe(429);
   });
 
   it("maps an unexpected error to 500 without leaking its message", async () => {

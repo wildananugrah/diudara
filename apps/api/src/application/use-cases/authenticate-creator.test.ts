@@ -45,6 +45,26 @@ const fakeHasher: PasswordHasherPort = {
   },
 };
 
+/**
+ * A hasher that counts `verify` calls, so a test can assert the use-case
+ * pays the same hashing cost on every rejection path rather than
+ * short-circuiting before ever hashing — a message/status comparison alone
+ * cannot catch a timing side-channel.
+ */
+function fakeHasherWithCallCount(): { hasher: PasswordHasherPort; callCount: () => number } {
+  let verifyCalls = 0;
+  const hasher: PasswordHasherPort = {
+    async hash(plain) {
+      return `hashed:${plain}`;
+    },
+    async verify(plain, hash) {
+      verifyCalls++;
+      return hash === `hashed:${plain}`;
+    },
+  };
+  return { hasher, callCount: () => verifyCalls };
+}
+
 const fakeIssuer: TokenIssuerPort = {
   async issue(payload) {
     return `token-for-${payload.creatorId}`;
@@ -102,6 +122,37 @@ describe("AuthenticateCreator", () => {
     await expect(
       useCase.execute({ email: "budi@example.com", password: "supersecret123" })
     ).rejects.toBeInstanceOf(UnauthorizedError);
+  });
+
+  // Guards against a timing side channel: throwing before ever calling
+  // hasher.verify() makes the unknown-email path measurably faster than the
+  // wrong-password path (which does call it), even though both throw an
+  // identical error. This test fails against the pre-fix implementation,
+  // which returns with zero verify() calls for an unknown email.
+  it("calls hasher.verify on an unknown email, paying the same cost as a wrong password", async () => {
+    const { hasher, callCount } = fakeHasherWithCallCount();
+    const useCase = new AuthenticateCreator(fakeRepository([credentials()]), hasher, fakeIssuer);
+
+    await useCase
+      .execute({ email: "nobody@example.com", password: "supersecret123" })
+      .catch(() => {});
+
+    expect(callCount()).toBe(1);
+  });
+
+  // Same leak, second flavor: a password-less (e.g. WhatsApp-only) account
+  // must not be distinguishable-by-timing from a wrong password either.
+  it("calls hasher.verify for an account with no password set, paying the same cost as a wrong password", async () => {
+    const { hasher, callCount } = fakeHasherWithCallCount();
+    const useCase = new AuthenticateCreator(
+      fakeRepository([credentials({ passwordHash: null })]),
+      hasher,
+      fakeIssuer
+    );
+
+    await useCase.execute({ email: "budi@example.com", password: "supersecret123" }).catch(() => {});
+
+    expect(callCount()).toBe(1);
   });
 
   it("never returns the password hash", async () => {
