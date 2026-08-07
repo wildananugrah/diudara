@@ -31,7 +31,11 @@ export class DrizzleCreatorRepository implements CreatorRepositoryPort {
   }
 
   async findByEmail(email: string): Promise<CreatorRecord | null> {
-    const [row] = await this.db.select().from(creators).where(eq(creators.email, email));
+    const [row] = await this.db
+      .select()
+      .from(creators)
+      .where(eq(creators.email, email))
+      .limit(1);
     return row ?? null;
   }
 }
