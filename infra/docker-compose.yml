@@ -3,13 +3,22 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: diudara
-      POSTGRES_PASSWORD: diudara_dev_password
-      POSTGRES_DB: diudara
+      # Sourced from infra/.env, which is gitignored. `:?` makes Compose refuse
+      # to start rather than silently falling back to a committed default.
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in infra/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in infra/.env}
     ports:
-      - "5432:5432"
+      # Bound to loopback, not 0.0.0.0. Spec 12 makes infra/ the VPS deploy
+      # path, so a 0.0.0.0 binding would expose Postgres to the internet.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres_data:
