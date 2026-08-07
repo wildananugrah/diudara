@@ -3,10 +3,14 @@ import type { Dependencies } from "./bootstrap";
 import { createApp } from "./app";
 import { RegisterCreator } from "./application/use-cases/register-creator";
 import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
+import { CreateCommunity } from "./application/use-cases/create-community";
+import { ListCommunities } from "./application/use-cases/list-communities";
+import { UpdateCommunity } from "./application/use-cases/update-community";
 import type {
   CreatorRecord,
   CreatorRepositoryPort,
 } from "./application/ports/creator-repository.port";
+import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 
@@ -17,11 +21,12 @@ import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
  * and `bun run typecheck` fails. No `as` casts are allowed in this file — a cast
  * would hide exactly the regression this test exists to catch.
  *
- * `registerCreator`/`authenticateCreator` are typed as the concrete use-case
- * classes (there's only one implementation of each, so no port exists for
- * them) — a class with private members can't be satisfied by a plain object
- * literal without a cast, so the fakes below construct real instances of
- * those classes wrapping hand-written fake ports instead.
+ * `registerCreator`/`authenticateCreator`/`createCommunity`/`listCommunities`/
+ * `updateCommunity` are typed as the concrete use-case classes (there's only
+ * one implementation of each, so no port exists for them) — a class with
+ * private members can't be satisfied by a plain object literal without a
+ * cast, so the fakes below construct real instances of those classes
+ * wrapping hand-written fake ports instead.
  */
 const fakeTokenIssuer: TokenIssuerPort = {
   async issue() {
@@ -38,6 +43,24 @@ const fakePasswordHasher: PasswordHasherPort = {
   },
   async verify() {
     return false;
+  },
+};
+
+const fakeCommunityRepository: CommunityRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async findByIdForCreator() {
+    return null;
+  },
+  async listByCreator() {
+    return [];
+  },
+  async slugExists() {
+    return false;
+  },
+  async update() {
+    return null;
   },
 };
 
@@ -82,6 +105,9 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeTokenIssuer
       ),
+      createCommunity: new CreateCommunity(fakeCommunityRepository),
+      listCommunities: new ListCommunities(fakeCommunityRepository),
+      updateCommunity: new UpdateCommunity(fakeCommunityRepository),
       sql: async () => [{ one: 1 }],
     };
 
@@ -124,6 +150,9 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeTokenIssuer
       ),
+      createCommunity: new CreateCommunity(fakeCommunityRepository),
+      listCommunities: new ListCommunities(fakeCommunityRepository),
+      updateCommunity: new UpdateCommunity(fakeCommunityRepository),
       sql: async () => [{ one: 1 }],
     };
 

@@ -1,9 +1,13 @@
 import { db, sql } from "./db/client";
 import { DrizzleCreatorRepository } from "./infrastructure/repositories/drizzle-creator.repository";
+import { DrizzleCommunityRepository } from "./infrastructure/repositories/drizzle-community.repository";
 import { BunPasswordHasher } from "./infrastructure/auth/bun-password.hasher";
 import { HonoJwtTokenIssuer } from "./infrastructure/auth/hono-jwt.token-issuer";
 import { RegisterCreator } from "./application/use-cases/register-creator";
 import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
+import { CreateCommunity } from "./application/use-cases/create-community";
+import { ListCommunities } from "./application/use-cases/list-communities";
+import { UpdateCommunity } from "./application/use-cases/update-community";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 
@@ -37,6 +41,9 @@ export interface Dependencies {
   tokenIssuer: TokenIssuerPort;
   registerCreator: RegisterCreator;
   authenticateCreator: AuthenticateCreator;
+  createCommunity: CreateCommunity;
+  listCommunities: ListCommunities;
+  updateCommunity: UpdateCommunity;
   sql: DatabasePing;
 }
 
@@ -59,11 +66,19 @@ export function bootstrap(): Dependencies {
     tokenIssuer
   );
 
+  const communityRepository = new DrizzleCommunityRepository(db);
+  const createCommunity = new CreateCommunity(communityRepository);
+  const listCommunities = new ListCommunities(communityRepository);
+  const updateCommunity = new UpdateCommunity(communityRepository);
+
   return {
     creatorRepository,
     tokenIssuer,
     registerCreator,
     authenticateCreator,
+    createCommunity,
+    listCommunities,
+    updateCommunity,
     sql,
   };
 }
