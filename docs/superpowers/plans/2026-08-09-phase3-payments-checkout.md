@@ -394,17 +394,11 @@ Write `apps/api/src/routes/payment-account.test.ts` covering: unauthenticated �
 call → 201 and the id is persisted; second call → 409; and that the response body does
 **not** contain `passwordHash`.
 
-- [ ] **Step 5: Add the `updated_at` trigger (carry-forward from Phase 2)**
+- [ ] **Step 5: (moved) — the `updated_at` carry-forward now belongs to Task 6**
 
-`subscription` and `transaction` carry `updated_at` with no `BEFORE UPDATE` trigger, so it
-would freeze at creation time. This phase writes those rows for the first time, so it is the
-right moment.
-
-Set `updatedAt: new Date()` explicitly in every repository method that updates a
-`subscription` or `transaction` row. Prefer this over a database trigger: the migration
-constraint forbids hand-written SQL, and drizzle-kit does not generate triggers. Add an
-assertion to Task 7's webhook test that `updated_at` moved past `created_at` after
-activation.
+Originally placed here, but the subscription and transaction repositories do not exist until
+Task 6, so there is nothing to edit at this point. Do not fabricate code for files that do
+not yet exist. Task 6 carries the requirement.
 
 - [ ] **Step 6: Verify, then commit**
 
@@ -996,6 +990,14 @@ git commit -m "feat(checkout): add public community endpoint"
 - `SubscriptionRepositoryPort` — `createPending({ memberId, tierId })`,
   `createTransaction({ subscriptionId, amount, paymentMethod })`,
   `findTransactionByExternalId(id)`, `markPaid(...)` (last two used in Task 7)
+
+**Carry-forward from Phase 2, moved here from Task 2:** `subscription` and `transaction`
+have an `updated_at` column with no `BEFORE UPDATE` trigger, so it would silently freeze at
+creation time. This task creates the first repositories that write those rows, so it is the
+right place to fix it. Set `updatedAt: new Date()` explicitly in **every** method that
+updates a `subscription` or `transaction`. Prefer this over a database trigger: the
+migration constraint forbids hand-written SQL and drizzle-kit does not generate triggers.
+Task 7 asserts `updated_at` moved past `created_at` after activation.
 - `StartCheckout.execute({ slug, tierId, payerName, payerWhatsappNumber })` →
   `{ invoiceUrl, subscriptionId, transactionId }`. **`transactionId` is required** — Task 7's
   webhook tests use it as the `external_id` Xendit echoes back, and the status page needs
