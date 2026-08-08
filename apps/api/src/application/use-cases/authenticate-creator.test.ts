@@ -32,6 +32,9 @@ function fakeRepository(seed: CreatorCredentials[]) {
     async findCredentialsByEmail(email) {
       return seed.find((r) => r.email === email) ?? null;
     },
+    async setXenditAccountId() {
+      throw new Error("not used in these tests");
+    },
   };
   return repository;
 }

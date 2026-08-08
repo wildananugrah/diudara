@@ -4,6 +4,7 @@ export interface CreatorRecord {
   whatsappNumber: string | null;
   email: string | null;
   tierPlan: string;
+  xenditAccountId: string | null;
   createdAt: Date;
 }
 
@@ -31,4 +32,5 @@ export interface CreatorRepositoryPort {
   findById(id: string): Promise<CreatorRecord | null>;
   findByEmail(email: string): Promise<CreatorRecord | null>;
   findCredentialsByEmail(email: string): Promise<CreatorCredentials | null>;
+  setXenditAccountId(id: string, accountId: string): Promise<void>;
 }

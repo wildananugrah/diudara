@@ -16,8 +16,11 @@ import {
 } from "./application/use-cases/manage-tiers";
 import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
+import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
+import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
+import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 
 /** Values that may be interpolated into a `DatabasePing` tagged template. */
 type PingValue = string | number | boolean | Date | null;
@@ -47,6 +50,7 @@ export type DatabasePing = (
 export interface Dependencies {
   creatorRepository: CreatorRepositoryPort;
   tokenIssuer: TokenIssuerPort;
+  payments: PaymentProviderPort;
   registerCreator: RegisterCreator;
   authenticateCreator: AuthenticateCreator;
   createCommunity: CreateCommunity;
@@ -57,6 +61,7 @@ export interface Dependencies {
   updateTier: UpdateTier;
   connectChannel: ConnectChannel;
   listChannels: ListChannels;
+  createPaymentAccount: CreatePaymentAccount;
   sql: DatabasePing;
 }
 
@@ -125,9 +130,17 @@ export function bootstrap(): Dependencies {
   const connectChannel = new ConnectChannel(communityRepository, channelRepository);
   const listChannels = new ListChannels(communityRepository, channelRepository);
 
+  // TODO(Task 4): swap for the real Xendit adapter once it lands. Wiring the
+  // fake here — rather than leaving payments unwired — is what lets
+  // CreatePaymentAccount and the /payment-account route be real end to end
+  // today; only the provider underneath is a stand-in.
+  const payments: PaymentProviderPort = new FakePaymentAdapter();
+  const createPaymentAccount = new CreatePaymentAccount(creatorRepository, payments);
+
   return {
     creatorRepository,
     tokenIssuer,
+    payments,
     registerCreator,
     authenticateCreator,
     createCommunity,
@@ -138,6 +151,7 @@ export function bootstrap(): Dependencies {
     updateTier,
     connectChannel,
     listChannels,
+    createPaymentAccount,
     sql,
   };
 }

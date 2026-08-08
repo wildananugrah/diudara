@@ -22,6 +22,7 @@ const creatorColumns = {
   whatsappNumber: creators.whatsappNumber,
   email: creators.email,
   tierPlan: creators.tierPlan,
+  xenditAccountId: creators.xenditAccountId,
   createdAt: creators.createdAt,
 } as const;
 
@@ -89,5 +90,12 @@ export class DrizzleCreatorRepository implements CreatorRepositoryPort {
       .where(eq(creators.email, email))
       .limit(1);
     return row ?? null;
+  }
+
+  async setXenditAccountId(id: string, accountId: string): Promise<void> {
+    await this.db
+      .update(creators)
+      .set({ xenditAccountId: accountId })
+      .where(eq(creators.id, id));
   }
 }

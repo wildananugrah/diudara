@@ -118,6 +118,11 @@ export const subscriptions = pgTable(
     // startedAt is null until the first successful payment, so churn timing
     // (spec 8.3) needs an independent record of when the row came into being.
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // No BEFORE UPDATE trigger backs this column — the migration constraint
+    // forbids hand-written SQL and drizzle-kit does not generate triggers — so
+    // it would otherwise freeze at creation time. Every repository method that
+    // updates a subscription row (added starting Task 6/7, which write these
+    // rows for the first time) MUST set `updatedAt: new Date()` explicitly.
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -141,6 +146,10 @@ export const transactions = pgTable(
     // paidAt is NULL for pending/failed attempts, so revenue-over-time and
     // funnel analysis (spec 2 dashboard) cannot be built from it alone.
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Same carry-forward as subscription.updatedAt above: no trigger backs
+    // this column, so every repository method that updates a transaction row
+    // MUST set `updatedAt: new Date()` explicitly. Task 7's webhook test
+    // should assert updated_at moved past created_at after activation.
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("transaction_subscription_id_idx").on(table.subscriptionId)],

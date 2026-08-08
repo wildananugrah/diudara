@@ -4,6 +4,7 @@ import { authRoutes } from "./routes/auth";
 import { communityRoutes } from "./routes/communities";
 import { tierRoutes } from "./routes/tiers";
 import { channelRoutes } from "./routes/channels";
+import { paymentAccountRoutes } from "./routes/payment-account";
 import { errorHandler } from "./http/error-handler";
 import type { AuthVariables } from "./http/auth.middleware";
 import type { Dependencies } from "./bootstrap";
@@ -13,6 +14,7 @@ export function createApp(deps: Dependencies) {
   app.onError(errorHandler);
   app.route("/health", healthRoute(deps));
   app.route("/auth", authRoutes(deps));
+  app.route("/payment-account", paymentAccountRoutes(deps));
   // Nested routes for tiers/channels (Tasks 10, 11) mount at
   // /communities/:communityId/tiers and /communities/:communityId/channels.
   // They must be registered BEFORE this line so the more specific path

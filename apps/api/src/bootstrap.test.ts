@@ -14,6 +14,7 @@ import {
   UpdateTier,
 } from "./application/use-cases/manage-tiers";
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
+import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import type {
   CreatorRecord,
   CreatorRepositoryPort,
@@ -23,6 +24,7 @@ import type { MembershipTierRepositoryPort } from "./application/ports/membershi
 import type { ChannelRepositoryPort } from "./application/ports/channel-repository.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
+import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 
 /**
  * Guards dependency inversion: `Dependencies` must be typed against PORTS, not
@@ -33,8 +35,8 @@ import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
  *
  * `registerCreator`/`authenticateCreator`/`createCommunity`/`listCommunities`/
  * `updateCommunity`/`defineTier`/`listTiers`/`updateTier`/`connectChannel`/
- * `listChannels` are typed as the concrete use-case classes (there's only one
- * implementation of each, so no
+ * `listChannels`/`createPaymentAccount` are typed as the concrete use-case
+ * classes (there's only one implementation of each, so no
  * port exists for them) — a class with private members can't be satisfied by
  * a plain object literal without a cast, so the fakes below construct real
  * instances of those classes wrapping hand-written fake ports instead.
@@ -96,6 +98,15 @@ const fakeChannelRepository: ChannelRepositoryPort = {
   },
 };
 
+const fakePaymentProvider: PaymentProviderPort = {
+  async createPaymentAccount() {
+    return { accountId: "fake-acct" };
+  },
+  async createInvoice() {
+    throw new Error("not used");
+  },
+};
+
 describe("Dependencies (composition root contract)", () => {
   it("accepts a hand-written fake CreatorRepositoryPort with no casts", async () => {
     const stored: CreatorRecord[] = [];
@@ -108,6 +119,7 @@ describe("Dependencies (composition root contract)", () => {
           whatsappNumber: input.whatsappNumber ?? null,
           email: input.email ?? null,
           tierPlan: "starter",
+          xenditAccountId: null,
           createdAt: new Date(0),
         };
         stored.push(record);
@@ -122,11 +134,16 @@ describe("Dependencies (composition root contract)", () => {
       async findCredentialsByEmail() {
         return null;
       },
+      async setXenditAccountId(id, accountId) {
+        const record = stored.find((r) => r.id === id);
+        if (record) record.xenditAccountId = accountId;
+      },
     };
 
     const deps: Dependencies = {
       creatorRepository: fakeCreatorRepository,
       tokenIssuer: fakeTokenIssuer,
+      payments: fakePaymentProvider,
       registerCreator: new RegisterCreator(
         fakeCreatorRepository,
         fakePasswordHasher,
@@ -145,6 +162,7 @@ describe("Dependencies (composition root contract)", () => {
       updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
       connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
       listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
+      createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
       sql: async () => [{ one: 1 }],
     };
 
@@ -172,11 +190,15 @@ describe("Dependencies (composition root contract)", () => {
       async findCredentialsByEmail() {
         return null;
       },
+      async setXenditAccountId() {
+        // not used
+      },
     };
 
     const deps: Dependencies = {
       creatorRepository: fakeCreatorRepository,
       tokenIssuer: fakeTokenIssuer,
+      payments: fakePaymentProvider,
       registerCreator: new RegisterCreator(
         fakeCreatorRepository,
         fakePasswordHasher,
@@ -195,6 +217,7 @@ describe("Dependencies (composition root contract)", () => {
       updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
       connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
       listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
+      createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
       sql: async () => [{ one: 1 }],
     };
 

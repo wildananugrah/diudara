@@ -60,4 +60,15 @@ describe("DrizzleCreatorRepository", () => {
     expect("passwordHash" in (byId as object)).toBe(false);
     expect("passwordHash" in (byEmail as object)).toBe(false);
   });
+
+  it("persists a xendit account id via setXenditAccountId", async () => {
+    const repository = new DrizzleCreatorRepository(db);
+    const created = await repository.create({ name: "Hendra", email: "hendra@example.com" });
+    expect(created.xenditAccountId).toBeNull();
+
+    await repository.setXenditAccountId(created.id, "xnd-acct-123");
+
+    const updated = await repository.findById(created.id);
+    expect(updated?.xenditAccountId).toBe("xnd-acct-123");
+  });
 });
