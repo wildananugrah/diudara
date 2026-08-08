@@ -73,4 +73,113 @@ describe("XenditPaymentAdapter.createInvoice", () => {
     expect(error).toBeInstanceOf(Error);
     expect(error.message).not.toContain("sk_test_SUPERSECRET");
   });
+
+  // Measured before the fix: a 200 with an empty body returned
+  // {"invoiceId":"undefined","invoiceUrl":"undefined"} and reported success.
+  // The buyer would be redirected to the URL "undefined", and Task 7 would
+  // store "undefined" as the gateway reference for EVERY such invoice, so they
+  // would all collide. This adapter is explicitly unverified against the live
+  // API, so an unrecognised shape must fail loudly.
+  it("throws on a 200 whose body carries no invoice", async () => {
+    const { fetchFn } = captureFetch({});
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    const error = (await adapter.createInvoice(INPUT).catch((e) => e)) as Error;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain("createInvoice");
+    expect(error.message).toContain('"id"');
+  });
+
+  it("throws on a 200 with the right keys but non-string values", async () => {
+    const { fetchFn } = captureFetch({ id: 12345, invoice_url: { href: "https://x/inv_1" } });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    const error = (await adapter.createInvoice(INPUT).catch((e) => e)) as Error;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain('"id"');
+  });
+
+  it("throws when the id is present but the invoice url is missing", async () => {
+    const { fetchFn } = captureFetch({ id: "inv_1" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    const error = (await adapter.createInvoice(INPUT).catch((e) => e)) as Error;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain('"invoice_url"');
+  });
+
+  it("rejects an empty string as an invoice id", async () => {
+    const { fetchFn } = captureFetch({ id: "", invoice_url: "https://x/inv_1" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    await expect(adapter.createInvoice(INPUT)).rejects.toThrow(/"id"/);
+  });
+
+  it("does not leak the secret key when the response shape is wrong", async () => {
+    const { fetchFn } = captureFetch({});
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test_SUPERSECRET", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    const error = (await adapter.createInvoice(INPUT).catch((e) => e)) as Error;
+    expect(error.message).not.toContain("sk_test_SUPERSECRET");
+  });
+
+  // Bare fetch has no timeout: a hung Xendit response would hold a checkout
+  // request open indefinitely once StartCheckout (Task 6) calls this.
+  it("gives up on a hung Xendit response instead of hanging the checkout", async () => {
+    const { calls, fetchFn } = captureFetch({ id: "inv_1", invoice_url: "https://x/inv_1" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    await adapter.createInvoice(INPUT);
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe("XenditPaymentAdapter.createPaymentAccount", () => {
+  const ACCOUNT_INPUT = { creatorId: "c1", email: "a@b.co", name: "Budi" };
+
+  it("returns the sub-account id", async () => {
+    const { fetchFn } = captureFetch({ id: "acct_1" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    expect(await adapter.createPaymentAccount(ACCOUNT_INPUT)).toEqual({ accountId: "acct_1" });
+  });
+
+  // Before the fix this returned { accountId: "undefined" }, which
+  // CreatePaymentAccount would have written into creator.xendit_account_id —
+  // and then 409'd on forever, with no reset path.
+  it("throws on a 200 whose body carries no account id", async () => {
+    const { fetchFn } = captureFetch({});
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    const error = (await adapter.createPaymentAccount(ACCOUNT_INPUT).catch((e) => e)) as Error;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain("createPaymentAccount");
+    expect(error.message).toContain('"id"');
+  });
+
+  it("carries an abort signal", async () => {
+    const { calls, fetchFn } = captureFetch({ id: "acct_1" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    await adapter.createPaymentAccount(ACCOUNT_INPUT);
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+  });
 });

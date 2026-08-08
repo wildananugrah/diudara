@@ -9,6 +9,15 @@ type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
 const DEFAULT_BASE_URL = "https://api.xendit.co";
 
 /**
+ * Bare `fetch` has no timeout, so a hung Xendit response would hold a checkout
+ * request open indefinitely once StartCheckout (Task 6) calls this. 30s is
+ * generous for an invoice creation and still well inside any sane reverse-proxy
+ * or load-balancer idle timeout, so the failure surfaces here — with an error we
+ * control — rather than as a dropped connection somewhere upstream.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
  * !!! UNVERIFIED AGAINST THE LIVE XENDIT API !!!
  *
  * Written from Xendit's published documentation without an account, so request
@@ -60,10 +69,11 @@ export class XenditPaymentAdapter implements PaymentProviderPort {
         type: "MANAGED",
         public_profile: { business_name: input.name },
       }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     const body = await this.readJson(response, "createPaymentAccount");
-    return { accountId: String(body.id) };
+    return { accountId: this.requireString(body, "id", "createPaymentAccount") };
   }
 
   async createInvoice(input: CreateInvoiceInput): Promise<CreateInvoiceResult> {
@@ -84,10 +94,14 @@ export class XenditPaymentAdapter implements PaymentProviderPort {
           mobile_number: input.payerWhatsappNumber,
         },
       }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     const body = await this.readJson(response, "createInvoice");
-    return { invoiceId: String(body.id), invoiceUrl: String(body.invoice_url) };
+    return {
+      invoiceId: this.requireString(body, "id", "createInvoice"),
+      invoiceUrl: this.requireString(body, "invoice_url", "createInvoice"),
+    };
   }
 
   /**
@@ -103,5 +117,40 @@ export class XenditPaymentAdapter implements PaymentProviderPort {
       throw new Error(`xendit ${operation} failed with status ${response.status}`);
     }
     return (await response.json()) as Record<string, unknown>;
+  }
+
+  /**
+   * Reads a field this adapter cannot function without, refusing anything that
+   * is not a non-empty string.
+   *
+   * `String(body.id)` on an unrecognised 200 produced the literal string
+   * "undefined" and reported SUCCESS: a 200 with an empty body yielded
+   * `{"invoiceId":"undefined","invoiceUrl":"undefined"}`. The buyer would be
+   * redirected to the URL "undefined", and Task 7 would store "undefined" as
+   * the gateway reference for every such invoice, so they would all collide.
+   *
+   * This is precisely the failure the UNVERIFIED warning at the top of this
+   * file predicts — the real response nesting the invoice under a different
+   * key. For an adapter acknowledged as guesswork, failing loudly on a shape it
+   * does not recognise is the only safe behaviour.
+   *
+   * The message names the field and nothing else: no request, no headers, no
+   * response body, so the secret key cannot reach a log through here.
+   */
+  private requireString(
+    body: Record<string, unknown>,
+    key: string,
+    operation: string
+  ): string {
+    const value = body[key];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error(
+        `xendit ${operation} returned a response with no usable "${key}" ` +
+          "(expected a non-empty string). The response shape does not match what " +
+          "this adapter assumes — see the UNVERIFIED warning in " +
+          "xendit-payment.adapter.ts."
+      );
+    }
+    return value;
   }
 }
