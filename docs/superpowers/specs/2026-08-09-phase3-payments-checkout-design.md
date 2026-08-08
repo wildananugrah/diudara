@@ -157,12 +157,27 @@ Additional requirements:
 6. Member returns to a confirmation page that polls subscription status.
 
 **Rejected explicitly at step 3:** a creator with no `xendit_account_id`, an inactive tier,
-or an archived community.
+an archived community, or a **paused** community.
+
+### 9.1 Community status semantics (ruled 2026-08-09)
+
+`status` has three values and they mean different things to a visitor:
+
+- `active` — page renders, checkout works.
+- `paused` — page **renders** with the community name and a "temporarily not accepting new
+  members" state; checkout is rejected. A creator pausing for a holiday keeps every
+  checkout link they have already broadcast to WhatsApp working, instead of telling
+  prospects the community does not exist.
+- `archived` — 404. The community is gone as far as the public is concerned.
+
+This was undefined in the original spec, which said only `status !== "active"`, collapsing
+`paused` into `archived`.
 
 ## 10. Frontend (`apps/web`)
 
 Minimal Vite + React app, no auth:
-- `/c/:slug` — tier selection and payer details
+- `/c/:slug` — tier selection and payer details, plus a distinct "temporarily closed"
+  state for a paused community (§9.1)
 - `/c/:slug/status/:subscriptionId` — post-payment confirmation, polls until active
 
 Mobile-first, since these links are shared into WhatsApp. Imports request/response types
@@ -174,6 +189,7 @@ the dashboard phase.
 | Condition | Status |
 |---|---|
 | Unknown slug, archived community | 404 |
+| Paused community — page renders; checkout rejected | 200 / 409 |
 | Inactive/unknown tier | 404 |
 | Creator not payment-onboarded | 409 |
 | Validation failure | 400 |

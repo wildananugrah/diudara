@@ -46,6 +46,13 @@ MVP spec. Every task's work implicitly includes these:
 - Password hashes never leave the repository layer. Error logs must never contain raw error
   objects (Phase 2 found argon2id hashes leaking that way) — Xendit payloads carry payer
   identifiers, so this must not regress.
+- **The fake payment adapter must be unreachable in production.** `bootstrap()` throws when
+  `NODE_ENV === "production"` and the Xendit configuration is missing, and throws on
+  *partial* configuration in **every** environment — a set secret key with an unset split
+  rule id is always a mistake, and it makes an operator believe payments are live. This
+  mirrors the existing `assertUsableJwtSecret` guard. A `console.log` is not sufficient:
+  it silently writes unrecoverable `fake-acct-*` values into `creator.xendit_account_id`,
+  which `CreatePaymentAccount` then 409s on forever with no reset path.
 - Bun throughout; `bun run test` and `bun run typecheck` from the repo root must stay green.
 - Tests use `resetDatabase()` from `apps/api/src/db/test-helpers.ts` in `beforeEach`; add any
   new table to its delete list.
@@ -726,7 +733,11 @@ export class XenditPaymentAdapter implements PaymentProviderPort {
 Add to `apps/api/.env.example`:
 
 ```
-# Xendit. Leave unset to use the fake payment adapter (all tests do).
+# Xendit. Unset outside production selects the fake payment adapter (all tests do).
+# In production, bootstrap() THROWS unless all three are set — a misconfigured
+# production box must not silently take fake payments and write fake-acct-* ids
+# into creator.xendit_account_id, which cannot be undone without manual SQL.
+# Partial configuration throws in EVERY environment: it is never intentional.
 # XENDIT_SECRET_KEY=
 # XENDIT_SPLIT_RULE_ID=
 # XENDIT_CALLBACK_TOKEN=
@@ -1263,8 +1274,8 @@ Add the route to `public-community.ts` (note the explicit generic — Phase 2's 
 
 Wire `startCheckout` into `Dependencies`/`bootstrap()`. `bootstrap()` selects the payment
 adapter: `XenditPaymentAdapter` when `XENDIT_SECRET_KEY` **and** `XENDIT_SPLIT_RULE_ID` are
-both set, otherwise `FakePaymentAdapter`. Log which one was chosen at startup — silently
-running fake payments in production would be severe.
+both set, otherwise `FakePaymentAdapter` — **subject to the guards in the Global
+Constraints section**. A log line is a courtesy, not the safety mechanism; the guards are.
 
 - [ ] **Step 4: Verify, then commit**
 
