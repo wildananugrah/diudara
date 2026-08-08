@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "channel_platform_group_unique" ON "channel" USING btree ("platform","external_group_id") WHERE "channel"."external_group_id" is not null;

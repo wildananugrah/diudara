@@ -29,6 +29,13 @@
       "when": 1786100924504,
       "tag": "0003_romantic_rattler",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786147022060,
+      "tag": "0004_plain_scarecrow",
+      "breakpoints": true
     }
   ]
 }

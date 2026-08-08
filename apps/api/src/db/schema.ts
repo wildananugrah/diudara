@@ -78,7 +78,18 @@ export const channels = pgTable(
     inviteLink: varchar("invite_link", { length: 512 }),
     botStatus: varchar("bot_status", { length: 32 }).notNull().default("disconnected"),
   },
-  (table) => [index("channel_community_id_idx").on(table.communityId)],
+  (table) => [
+    index("channel_community_id_idx").on(table.communityId),
+    // Phase 4's gating resolves an inbound group id back to exactly one
+    // community. Without this, two creators could both connect Telegram group
+    // -1001234567890 and the lookup would find two owners — and one community
+    // could connect the same group twice. Partial, because external_group_id is
+    // null until the creator supplies one. Added while the table is empty:
+    // retrofitting it after real rows exist needs a data-cleanup migration.
+    uniqueIndex("channel_platform_group_unique")
+      .on(table.platform, table.externalGroupId)
+      .where(sql`${table.externalGroupId} is not null`),
+  ],
 );
 
 export const members = pgTable("member", {
