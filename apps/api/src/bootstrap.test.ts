@@ -372,42 +372,102 @@ function captureConsoleLog(fn: () => void): string[] {
 
 describe("selectPaymentProvider", () => {
   it("selects XenditPaymentAdapter when both env vars are set", () => {
-    let provider: unknown;
+    const provider = selectPaymentProvider({
+      secretKey: "sk_live_x",
+      splitRuleId: "splitrule_1",
+      nodeEnv: "test",
+    });
+    expect(provider).toBeInstanceOf(XenditPaymentAdapter);
+  });
+
+  it("selects the real adapter in production when fully configured", () => {
+    // The other half of the production guard: a correctly configured
+    // production box must still boot.
     const logs = captureConsoleLog(() => {
-      provider = selectPaymentProvider({
+      const provider = selectPaymentProvider({
         secretKey: "sk_live_x",
         splitRuleId: "splitrule_1",
+        nodeEnv: "production",
       });
+      expect(provider).toBeInstanceOf(XenditPaymentAdapter);
     });
-
-    expect(provider).toBeInstanceOf(XenditPaymentAdapter);
     expect(logs.some((line) => /XenditPaymentAdapter/.test(line))).toBe(true);
   });
 
-  it("selects FakePaymentAdapter when both env vars are unset", () => {
-    let provider: unknown;
-    const logs = captureConsoleLog(() => {
-      provider = selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined });
+  it("selects FakePaymentAdapter when both env vars are unset outside production", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of ["test", "development", undefined]) {
+        expect(
+          selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv })
+        ).toBeInstanceOf(FakePaymentAdapter);
+      }
     });
-
-    expect(provider).toBeInstanceOf(FakePaymentAdapter);
-    expect(logs.some((line) => /FakePaymentAdapter/.test(line))).toBe(true);
   });
 
-  it("selects FakePaymentAdapter when only the secret key is set", () => {
-    const provider = selectPaymentProvider({
-      secretKey: "sk_live_x",
-      splitRuleId: undefined,
-    });
-    expect(provider).toBeInstanceOf(FakePaymentAdapter);
+  // CRITICAL, verified by probe before the fix: NODE_ENV=production with no
+  // Xendit config returned a FakePaymentAdapter. POST /payment-account then
+  // writes `fake-acct-1-<uuid>` into creator.xendit_account_id, and
+  // CreatePaymentAccount 409s forever after — the creator can never connect a
+  // real sub-account without manual SQL.
+  it("refuses to start in production with no Xendit configuration", () => {
+    expect(() =>
+      selectPaymentProvider({
+        secretKey: undefined,
+        splitRuleId: undefined,
+        nodeEnv: "production",
+      })
+    ).toThrow(/NODE_ENV is production/);
   });
 
-  it("selects FakePaymentAdapter when only the split rule id is set", () => {
-    const provider = selectPaymentProvider({
-      secretKey: undefined,
-      splitRuleId: "splitrule_1",
+  it("treats empty-string configuration as unset in production", () => {
+    // `XENDIT_SECRET_KEY=` in a .env file arrives as "", not undefined.
+    expect(() =>
+      selectPaymentProvider({ secretKey: "", splitRuleId: "", nodeEnv: "production" })
+    ).toThrow(/NODE_ENV is production/);
+  });
+
+  it("refuses to start on partial configuration in EVERY environment", () => {
+    // Never intentional: an operator who typo'd XENDIT_SPLIT_RULE_ID believes
+    // payments are live. Failing in dev/test is what surfaces the typo before
+    // it reaches production.
+    for (const nodeEnv of ["test", "development", "production", undefined]) {
+      expect(() =>
+        selectPaymentProvider({ secretKey: "sk_live_x", splitRuleId: undefined, nodeEnv })
+      ).toThrow(/half-configured/);
+      expect(() =>
+        selectPaymentProvider({ secretKey: undefined, splitRuleId: "splitrule_1", nodeEnv })
+      ).toThrow(/half-configured/);
+    }
+  });
+
+  it("treats an empty string as unset when detecting partial configuration", () => {
+    expect(() =>
+      selectPaymentProvider({ secretKey: "sk_live_x", splitRuleId: "   ", nodeEnv: "test" })
+    ).toThrow(/half-configured/);
+  });
+
+  it("names the missing variable, not the one that is set", () => {
+    expect(() =>
+      selectPaymentProvider({ secretKey: "sk_live_x", splitRuleId: undefined, nodeEnv: "test" })
+    ).toThrow(/XENDIT_SECRET_KEY is set but XENDIT_SPLIT_RULE_ID is not/);
+  });
+
+  it("stays silent under NODE_ENV=test and speaks up everywhere else", () => {
+    // One line per bootstrap() call printed 100+ times in a full suite run and
+    // buried a genuine `unhandled error` line.
+    const quiet = captureConsoleLog(() => {
+      selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv: "test" });
     });
-    expect(provider).toBeInstanceOf(FakePaymentAdapter);
+    expect(quiet).toEqual([]);
+
+    const loud = captureConsoleLog(() => {
+      selectPaymentProvider({
+        secretKey: undefined,
+        splitRuleId: undefined,
+        nodeEnv: "development",
+      });
+    });
+    expect(loud.some((line) => /FakePaymentAdapter/.test(line))).toBe(true);
   });
 });
 
@@ -433,6 +493,31 @@ describe("bootstrap() payment provider selection", () => {
           expect(deps.payments).toBeInstanceOf(FakePaymentAdapter);
         }
       );
+    });
+  });
+
+  it("refuses to boot a production process with no Xendit configuration", () => {
+    // Reads NODE_ENV from the environment, so this pins the wiring too — not
+    // just selectPaymentProvider in isolation.
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "production",
+          XENDIT_SECRET_KEY: undefined,
+          XENDIT_SPLIT_RULE_ID: undefined,
+        },
+        () => {
+          expect(() => bootstrap()).toThrow(/NODE_ENV is production/);
+        }
+      );
+    });
+  });
+
+  it("refuses to boot on partial Xendit configuration", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ XENDIT_SECRET_KEY: "sk_live_x", XENDIT_SPLIT_RULE_ID: undefined }, () => {
+        expect(() => bootstrap()).toThrow(/half-configured/);
+      });
     });
   });
 });
