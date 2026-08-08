@@ -37,6 +37,12 @@ MVP spec. Every task's work implicitly includes these:
   never hand-written, never editing an applied migration (`0000`-`0004`).
 - Cross-tenant rule from Phase 2 still holds: authenticated resource access scoped by
   `creatorId`, 404 not 403.
+- **`findBySlug` is a deliberate, single exception to that rule** (Task 5). Phase 2's review
+  specifically praised `CommunityRepositoryPort` for having *no* unscoped lookup, which made
+  the vulnerable query unwritable. Public checkout has no authenticated caller, so one
+  unscoped lookup is unavoidable — but it is the **only** one, it is documented at the port,
+  and it must never be used to serve an authenticated route. A reviewer should verify no
+  authenticated handler reaches for it.
 - Password hashes never leave the repository layer. Error logs must never contain raw error
   objects (Phase 2 found argon2id hashes leaking that way) — Xendit payloads carry payer
   identifiers, so this must not regress.
@@ -1483,6 +1489,14 @@ export function webhookRoutes(
 `bootstrap()` reads `XENDIT_CALLBACK_TOKEN`, defaulting to `"test-callback-token"` **only**
 when `NODE_ENV === "test"`; outside tests an unset token must throw, exactly like
 `JWT_SECRET`. Mount with `app.route("/webhooks", webhookRoutes(deps));`.
+
+**Owner ruling, 2026-08-09 — do not flag as a spec violation.** Phase 2 hardened
+`bootstrap()` to reject missing, weak, and placeholder `JWT_SECRET` values with no committed
+default, and this test-only default is a deliberate, narrower exception: the tests must send
+a token they know. The `NODE_ENV === "test"` guard is the same mechanism `resetDatabase()`
+already relies on to avoid truncating a real database. Two things a reviewer *should* still
+check: that the default is genuinely unreachable when `NODE_ENV !== "test"`, and that an
+unset token outside tests throws rather than silently accepting every webhook.
 
 - [ ] **Step 4: Verify, then mutation-check the security guards**
 
