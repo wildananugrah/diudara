@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { bootstrap, type Dependencies } from "./bootstrap";
+import { bootstrap, selectPaymentProvider, type Dependencies } from "./bootstrap";
 import { createApp } from "./app";
+import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
+import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { RegisterCreator } from "./application/use-cases/register-creator";
 import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
 import { CreateCommunity } from "./application/use-cases/create-community";
@@ -305,6 +307,120 @@ describe("bootstrap() JWT_SECRET guard", () => {
     expect(shipped).toBe(PLACEHOLDER);
     withJwtSecret(shipped, () => {
       expect(() => bootstrap()).toThrow();
+    });
+  });
+});
+
+/**
+ * Runs `fn` with each of `vars` set to its given value (or unset when the
+ * value is `undefined`), always restoring the originals — same rationale as
+ * `withJwtSecret` above: Bun auto-loads `apps/api/.env`, so mutating
+ * `process.env` in-process (rather than via the shell) is what actually takes
+ * effect for a call to `bootstrap()` made inside `fn`.
+ */
+function withEnv(vars: Record<string, string | undefined>, fn: () => void) {
+  const originals: Record<string, string | undefined> = {};
+  for (const key of Object.keys(vars)) {
+    originals[key] = process.env[key];
+  }
+  try {
+    for (const [key, value] of Object.entries(vars)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    fn();
+  } finally {
+    for (const [key, value] of Object.entries(originals)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+/** Captures `console.log` calls made during `fn`, restoring it afterwards. */
+function captureConsoleLog(fn: () => void): string[] {
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    fn();
+  } finally {
+    console.log = original;
+  }
+  return lines;
+}
+
+describe("selectPaymentProvider", () => {
+  it("selects XenditPaymentAdapter when both env vars are set", () => {
+    let provider: unknown;
+    const logs = captureConsoleLog(() => {
+      provider = selectPaymentProvider({
+        secretKey: "sk_live_x",
+        splitRuleId: "splitrule_1",
+      });
+    });
+
+    expect(provider).toBeInstanceOf(XenditPaymentAdapter);
+    expect(logs.some((line) => /XenditPaymentAdapter/.test(line))).toBe(true);
+  });
+
+  it("selects FakePaymentAdapter when both env vars are unset", () => {
+    let provider: unknown;
+    const logs = captureConsoleLog(() => {
+      provider = selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined });
+    });
+
+    expect(provider).toBeInstanceOf(FakePaymentAdapter);
+    expect(logs.some((line) => /FakePaymentAdapter/.test(line))).toBe(true);
+  });
+
+  it("selects FakePaymentAdapter when only the secret key is set", () => {
+    const provider = selectPaymentProvider({
+      secretKey: "sk_live_x",
+      splitRuleId: undefined,
+    });
+    expect(provider).toBeInstanceOf(FakePaymentAdapter);
+  });
+
+  it("selects FakePaymentAdapter when only the split rule id is set", () => {
+    const provider = selectPaymentProvider({
+      secretKey: undefined,
+      splitRuleId: "splitrule_1",
+    });
+    expect(provider).toBeInstanceOf(FakePaymentAdapter);
+  });
+});
+
+describe("bootstrap() payment provider selection", () => {
+  it("wires XenditPaymentAdapter when XENDIT_SECRET_KEY and XENDIT_SPLIT_RULE_ID are set", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        { XENDIT_SECRET_KEY: "sk_live_x", XENDIT_SPLIT_RULE_ID: "splitrule_1" },
+        () => {
+          const deps = bootstrap();
+          expect(deps.payments).toBeInstanceOf(XenditPaymentAdapter);
+        }
+      );
+    });
+  });
+
+  it("wires FakePaymentAdapter when Xendit env vars are absent", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        { XENDIT_SECRET_KEY: undefined, XENDIT_SPLIT_RULE_ID: undefined },
+        () => {
+          const deps = bootstrap();
+          expect(deps.payments).toBeInstanceOf(FakePaymentAdapter);
+        }
+      );
     });
   });
 });

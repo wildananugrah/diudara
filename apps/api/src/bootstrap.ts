@@ -18,6 +18,7 @@ import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
+import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -103,6 +104,32 @@ export function assertUsableJwtSecret(secret: string | undefined): string {
   return secret;
 }
 
+/**
+ * Chooses the real Xendit adapter over the in-memory fake when both required
+ * env vars are present, and logs the choice unconditionally. Silently running
+ * the fake adapter in production would settle no real money while looking,
+ * from the outside, exactly like it did — so the log line must make the
+ * choice obvious rather than relying on someone noticing an unset env var.
+ */
+export function selectPaymentProvider(env: {
+  secretKey: string | undefined;
+  splitRuleId: string | undefined;
+}): PaymentProviderPort {
+  if (env.secretKey && env.splitRuleId) {
+    console.log(
+      "[bootstrap] payments provider: XenditPaymentAdapter " +
+        "(XENDIT_SECRET_KEY and XENDIT_SPLIT_RULE_ID are set — real money will move)"
+    );
+    return new XenditPaymentAdapter({ secretKey: env.secretKey, splitRuleId: env.splitRuleId });
+  }
+  console.log(
+    "[bootstrap] payments provider: FakePaymentAdapter " +
+      "(XENDIT_SECRET_KEY/XENDIT_SPLIT_RULE_ID not set — no real money will move; " +
+      "set both to switch to the real Xendit adapter)"
+  );
+  return new FakePaymentAdapter();
+}
+
 export function bootstrap(): Dependencies {
   const jwtSecret = assertUsableJwtSecret(process.env.JWT_SECRET);
 
@@ -130,11 +157,10 @@ export function bootstrap(): Dependencies {
   const connectChannel = new ConnectChannel(communityRepository, channelRepository);
   const listChannels = new ListChannels(communityRepository, channelRepository);
 
-  // TODO(Task 4): swap for the real Xendit adapter once it lands. Wiring the
-  // fake here — rather than leaving payments unwired — is what lets
-  // CreatePaymentAccount and the /payment-account route be real end to end
-  // today; only the provider underneath is a stand-in.
-  const payments: PaymentProviderPort = new FakePaymentAdapter();
+  const payments: PaymentProviderPort = selectPaymentProvider({
+    secretKey: process.env.XENDIT_SECRET_KEY,
+    splitRuleId: process.env.XENDIT_SPLIT_RULE_ID,
+  });
   const createPaymentAccount = new CreatePaymentAccount(creatorRepository, payments);
 
   return {
