@@ -18,6 +18,7 @@ import {
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
+import { StartCheckout } from "./application/use-cases/start-checkout";
 import type {
   CreatorRecord,
   CreatorRepositoryPort,
@@ -25,6 +26,8 @@ import type {
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "./application/ports/membership-tier-repository.port";
 import type { ChannelRepositoryPort } from "./application/ports/channel-repository.port";
+import type { MemberRepositoryPort } from "./application/ports/member-repository.port";
+import type { SubscriptionRepositoryPort } from "./application/ports/subscription-repository.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -38,7 +41,7 @@ import type { PaymentProviderPort } from "./application/ports/payment-provider.p
  *
  * `registerCreator`/`authenticateCreator`/`createCommunity`/`listCommunities`/
  * `updateCommunity`/`defineTier`/`listTiers`/`updateTier`/`connectChannel`/
- * `listChannels`/`createPaymentAccount`/`getPublicCommunity` are typed as the
+ * `listChannels`/`createPaymentAccount`/`getPublicCommunity`/`startCheckout` are typed as the
  * concrete use-case classes (there's only one implementation of each, so no
  * port exists for them) — a class with private members can't be satisfied by
  * a plain object literal without a cast, so the fakes below construct real
@@ -101,6 +104,27 @@ const fakeChannelRepository: ChannelRepositoryPort = {
   },
   async listByCommunity() {
     return [];
+  },
+};
+
+const fakeMemberRepository: MemberRepositoryPort = {
+  async findOrCreateByWhatsappNumber() {
+    throw new Error("not used");
+  },
+};
+
+const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
+  async createPending() {
+    throw new Error("not used");
+  },
+  async createTransaction() {
+    throw new Error("not used");
+  },
+  async findTransactionByExternalId() {
+    return null;
+  },
+  async markPaid() {
+    throw new Error("not used");
   },
 };
 
@@ -173,6 +197,14 @@ describe("Dependencies (composition root contract)", () => {
         fakeCommunityRepository,
         fakeMembershipTierRepository
       ),
+      startCheckout: new StartCheckout(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository,
+        fakeMemberRepository,
+        fakeSubscriptionRepository,
+        fakeCreatorRepository,
+        fakePaymentProvider
+      ),
       sql: async () => [{ one: 1 }],
     };
 
@@ -231,6 +263,14 @@ describe("Dependencies (composition root contract)", () => {
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository
+      ),
+      startCheckout: new StartCheckout(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository,
+        fakeMemberRepository,
+        fakeSubscriptionRepository,
+        fakeCreatorRepository,
+        fakePaymentProvider
       ),
       sql: async () => [{ one: 1 }],
     };

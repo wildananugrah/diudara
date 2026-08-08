@@ -18,8 +18,11 @@ import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
+import { StartCheckout } from "./application/use-cases/start-checkout";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
+import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
+import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -65,6 +68,7 @@ export interface Dependencies {
   listChannels: ListChannels;
   createPaymentAccount: CreatePaymentAccount;
   getPublicCommunity: GetPublicCommunity;
+  startCheckout: StartCheckout;
   sql: DatabasePing;
 }
 
@@ -229,6 +233,17 @@ export function bootstrap(): Dependencies {
 
   const getPublicCommunity = new GetPublicCommunity(communityRepository, tierRepository);
 
+  const memberRepository = new DrizzleMemberRepository(db);
+  const subscriptionRepository = new DrizzleSubscriptionRepository(db);
+  const startCheckout = new StartCheckout(
+    communityRepository,
+    tierRepository,
+    memberRepository,
+    subscriptionRepository,
+    creatorRepository,
+    payments
+  );
+
   return {
     creatorRepository,
     tokenIssuer,
@@ -245,6 +260,7 @@ export function bootstrap(): Dependencies {
     listChannels,
     createPaymentAccount,
     getPublicCommunity,
+    startCheckout,
     sql,
   };
 }

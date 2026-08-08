@@ -41,8 +41,12 @@ export interface PublicCommunity {
  * An allowlist rather than `status !== "archived"`: `community.status` is a free
  * varchar in the schema, so a value nobody anticipated must fail closed (404)
  * rather than publish a community by default.
+ *
+ * Exported so StartCheckout (Task 6) can reuse the exact same set when it
+ * re-checks status server-side, rather than maintaining a second allowlist
+ * that could silently drift out of sync with this one.
  */
-const VISIBLE_STATUSES = new Set(["active", "paused"]);
+export const VISIBLE_STATUSES = new Set(["active", "paused"]);
 
 export class GetPublicCommunity {
   constructor(
