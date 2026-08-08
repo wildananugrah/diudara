@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { NotFoundError, ValidationError } from "../errors";
 import type { ActivityLogRepositoryPort } from "../ports/activity-log-repository.port";
+import type { PaymentActivationUnitOfWorkPort } from "../ports/payment-activation-unit-of-work.port";
 import type {
   MarkPaidResult,
   SubscriptionRepositoryPort,
@@ -34,7 +35,13 @@ interface Calls {
 }
 
 /** A recording harness whose call log is the assertion target for ORDERING. */
-function harness(options: { transaction?: TransactionRecord | null; alreadySeen?: boolean } = {}) {
+function harness(
+  options: {
+    transaction?: TransactionRecord | null;
+    alreadySeen?: boolean;
+    failMarkPaid?: boolean;
+  } = {}
+) {
   const calls: Calls = {
     findTransactionByExternalId: [],
     recordIfNew: [],
@@ -60,6 +67,9 @@ function harness(options: { transaction?: TransactionRecord | null; alreadySeen?
     async markPaid(input): Promise<MarkPaidResult> {
       calls.markPaid.push(input.transactionId);
       order.push("markPaid");
+      if (options.failMarkPaid === true) {
+        throw new Error("activation blew up");
+      }
       return {
         transaction: transactionRecord({ status: "success", paidAt: input.paidAt }),
         subscription: {
@@ -98,10 +108,30 @@ function harness(options: { transaction?: TransactionRecord | null; alreadySeen?
     },
   };
 
+  /**
+   * Stands in for the real transaction: records that a unit of work was opened,
+   * and — the part that matters — records whether it COMMITTED or rolled back,
+   * so a test can assert that a failure inside it does not leave the event id
+   * claimed.
+   */
+  const unitOfWork: PaymentActivationUnitOfWorkPort = {
+    async run(work) {
+      order.push("uow:begin");
+      try {
+        const result = await work({ subscriptions, webhookEvents, activityLog });
+        order.push("uow:commit");
+        return result;
+      } catch (error) {
+        order.push("uow:rollback");
+        throw error;
+      }
+    },
+  };
+
   return {
     calls,
     order,
-    useCase: new HandlePaymentWebhook(subscriptions, webhookEvents, activityLog),
+    useCase: new HandlePaymentWebhook(subscriptions, unitOfWork),
   };
 }
 
@@ -129,7 +159,14 @@ describe("HandlePaymentWebhook", () => {
     expect(calls.activity).toEqual([
       { memberId: "member-1", communityId: "community-1", eventType: "joined" },
     ]);
-    expect(order).toEqual(["find", "recordIfNew", "markPaid", "activity"]);
+    expect(order).toEqual([
+      "find",
+      "uow:begin",
+      "recordIfNew",
+      "markPaid",
+      "activity",
+      "uow:commit",
+    ]);
   });
 
   it("passes the provider's invoice id through as the gateway reference", async () => {
@@ -156,6 +193,7 @@ describe("HandlePaymentWebhook", () => {
       await expect(useCase.execute(paidEvent({ amount: 1 }))).rejects.toBeInstanceOf(
         ValidationError
       );
+      // No transaction is even opened for a body that fails the amount check.
       expect(order).toEqual(["find"]);
       expect(calls.recordIfNew).toEqual([]);
       expect(calls.markPaid).toEqual([]);
@@ -176,7 +214,7 @@ describe("HandlePaymentWebhook", () => {
 
       expect(result.activated).toBe(false);
       expect(result.duplicate).toBe(true);
-      expect(order).toEqual(["find", "recordIfNew"]);
+      expect(order).toEqual(["find", "uow:begin", "recordIfNew", "uow:commit"]);
       expect(calls.markPaid).toEqual([]);
       expect(calls.activity).toEqual([]);
     });
@@ -207,6 +245,28 @@ describe("HandlePaymentWebhook", () => {
         expect(calls.markPaid).toEqual([]);
       }
     });
+  });
+
+  it("rolls the unit of work back when the activation fails", async () => {
+    // The event id was claimed inside the transaction, so the rollback releases
+    // it and Xendit's retry is processed normally instead of being swallowed as
+    // a replay. Without this, the member paid and never got access.
+    const { useCase, calls, order } = harness({ failMarkPaid: true });
+
+    await expect(useCase.execute(paidEvent())).rejects.toThrow(/activation blew up/);
+
+    expect(calls.recordIfNew).toEqual(["inv_1:PAID"]);
+    expect(order).toEqual(["find", "uow:begin", "recordIfNew", "markPaid", "uow:rollback"]);
+    expect(calls.activity).toEqual([]);
+  });
+
+  it("claims the event id INSIDE the unit of work, never before it", async () => {
+    // If recordIfNew committed on its own, no rollback could release the id.
+    const { useCase, order } = harness();
+    await useCase.execute(paidEvent());
+
+    expect(order.indexOf("uow:begin")).toBeLessThan(order.indexOf("recordIfNew"));
+    expect(order.indexOf("recordIfNew")).toBeLessThan(order.indexOf("uow:commit"));
   });
 
   it("still compares the amount when the status is not PAID", async () => {

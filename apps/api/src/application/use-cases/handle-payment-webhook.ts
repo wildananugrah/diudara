@@ -1,7 +1,6 @@
 import { NotFoundError, ValidationError } from "../errors";
-import type { ActivityLogRepositoryPort } from "../ports/activity-log-repository.port";
+import type { PaymentActivationUnitOfWorkPort } from "../ports/payment-activation-unit-of-work.port";
 import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
-import type { WebhookEventRepositoryPort } from "../ports/webhook-event-repository.port";
 
 /** The one provider status that turns money into access. Compared exactly. */
 const PAID = "PAID";
@@ -52,12 +51,16 @@ export interface HandlePaymentWebhookResult {
  *     that a genuine delivery needs.
  *  3. `recordIfNew`. Already seen → return, touching nothing.
  *  4. Only for `status === "PAID"`: activate, then write the audit entry.
+ *
+ * Steps 3 and 4 run inside ONE unit of work, so claiming the event id and using
+ * it commit together or not at all — see `PaymentActivationUnitOfWorkPort` for
+ * the failure that forces this. Steps 1 and 2 stay outside it: they are reads,
+ * and a body that fails them should not open a transaction at all.
  */
 export class HandlePaymentWebhook {
   constructor(
     private readonly subscriptions: SubscriptionRepositoryPort,
-    private readonly webhookEvents: WebhookEventRepositoryPort,
-    private readonly activityLog: ActivityLogRepositoryPort
+    private readonly unitOfWork: PaymentActivationUnitOfWorkPort
   ) {}
 
   async execute(input: HandlePaymentWebhookInput): Promise<HandlePaymentWebhookResult> {
@@ -79,43 +82,45 @@ export class HandlePaymentWebhook {
       throw new ValidationError("webhook amount does not match our record");
     }
 
-    const isNew = await this.webhookEvents.recordIfNew({
-      provider: "xendit",
-      providerEventId: input.providerEventId,
-      eventType: input.eventType,
-      payload: input.payload,
-    });
-    if (!isNew) {
-      return { activated: false, duplicate: true };
-    }
+    return this.unitOfWork.run(async (repositories) => {
+      const isNew = await repositories.webhookEvents.recordIfNew({
+        provider: "xendit",
+        providerEventId: input.providerEventId,
+        eventType: input.eventType,
+        payload: input.payload,
+      });
+      if (!isNew) {
+        return { activated: false, duplicate: true };
+      }
 
-    if (input.status !== PAID) {
-      // Recorded (so a replay of THIS event is a no-op) but not acted on.
-      // Phase 3 stops at the first successful payment; expiry/failure handling
-      // is a later phase's job.
-      return { activated: false, duplicate: false };
-    }
+      if (input.status !== PAID) {
+        // Recorded (so a replay of THIS event is a no-op) but not acted on.
+        // Phase 3 stops at the first successful payment; expiry/failure handling
+        // is a later phase's job.
+        return { activated: false, duplicate: false };
+      }
 
-    const { subscription, communityId } = await this.subscriptions.markPaid({
-      transactionId: transaction.id,
-      gatewayReferenceId: input.invoiceId,
-      paidAt: new Date(),
-    });
-
-    await this.activityLog.record({
-      memberId: subscription.memberId,
-      communityId,
-      eventType: "joined",
-      // Ids and integers only: `webhook_event.payload` is where the raw body
-      // lives, and this table is read by creator-facing dashboards.
-      metadata: {
-        source: "xendit_webhook",
+      const { subscription, communityId } = await repositories.subscriptions.markPaid({
         transactionId: transaction.id,
-        subscriptionId: subscription.id,
-        amount: transaction.amount,
-      },
-    });
+        gatewayReferenceId: input.invoiceId,
+        paidAt: new Date(),
+      });
 
-    return { activated: true, duplicate: false };
+      await repositories.activityLog.record({
+        memberId: subscription.memberId,
+        communityId,
+        eventType: "joined",
+        // Ids and integers only: `webhook_event.payload` is where the raw body
+        // lives, and this table is read by creator-facing dashboards.
+        metadata: {
+          source: "xendit_webhook",
+          transactionId: transaction.id,
+          subscriptionId: subscription.id,
+          amount: transaction.amount,
+        },
+      });
+
+      return { activated: true, duplicate: false };
+    });
   }
 }

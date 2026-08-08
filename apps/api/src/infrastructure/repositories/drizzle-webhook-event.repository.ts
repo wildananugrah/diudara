@@ -1,9 +1,9 @@
-import type { db as DbClient } from "../../db/client";
+import type { DatabaseExecutor } from "../../db/client";
 import { webhookEvents } from "../../db/schema";
 import type { WebhookEventRepositoryPort } from "../../application/ports/webhook-event-repository.port";
 
 export class DrizzleWebhookEventRepository implements WebhookEventRepositoryPort {
-  constructor(private readonly db: typeof DbClient) {}
+  constructor(private readonly db: DatabaseExecutor) {}
 
   /**
    * One statement, and the DATABASE decides. `INSERT ... ON CONFLICT DO NOTHING

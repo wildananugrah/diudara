@@ -37,6 +37,7 @@ import type { MemberRepositoryPort } from "./application/ports/member-repository
 import type { SubscriptionRepositoryPort } from "./application/ports/subscription-repository.port";
 import type { WebhookEventRepositoryPort } from "./application/ports/webhook-event-repository.port";
 import type { ActivityLogRepositoryPort } from "./application/ports/activity-log-repository.port";
+import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -149,6 +150,17 @@ const fakeActivityLogRepository: ActivityLogRepositoryPort = {
   },
 };
 
+/** Runs the work inline — no real transaction is needed to satisfy the type. */
+const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
+  async run(work) {
+    return work({
+      subscriptions: fakeSubscriptionRepository,
+      webhookEvents: fakeWebhookEventRepository,
+      activityLog: fakeActivityLogRepository,
+    });
+  },
+};
+
 const fakePaymentProvider: PaymentProviderPort = {
   async createPaymentAccount() {
     return { accountId: "fake-acct" };
@@ -228,8 +240,7 @@ describe("Dependencies (composition root contract)", () => {
       ),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
-        fakeWebhookEventRepository,
-        fakeActivityLogRepository
+        fakePaymentActivationUnitOfWork
       ),
       xenditCallbackToken: "fake-callback-token",
       sql: async () => [{ one: 1 }],
@@ -301,8 +312,7 @@ describe("Dependencies (composition root contract)", () => {
       ),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
-        fakeWebhookEventRepository,
-        fakeActivityLogRepository
+        fakePaymentActivationUnitOfWork
       ),
       xenditCallbackToken: "fake-callback-token",
       sql: async () => [{ one: 1 }],
@@ -597,32 +607,75 @@ describe("bootstrap() payment provider selection", () => {
 
 /**
  * `XENDIT_CALLBACK_TOKEN` is the ONLY thing authenticating `POST
- * /webhooks/xendit` — Xendit signs nothing, it just presents a static header —
- * so an unset value means either "reject every genuine payment" (fails closed,
- * but silently) or, if the comparison were ever loosened, "accept every forged
- * one". Nothing read the variable before Task 7, so it was outside the
- * configuration guard; these tests pin it inside.
+ * /webhooks/xendit` — Xendit signs nothing, it just presents a static header.
+ * Nothing read the variable before Task 7, so it sat outside the configuration
+ * guard; these tests pin it inside, at the SAME thresholds as
+ * `XENDIT_SECRET_KEY`/`XENDIT_SPLIT_RULE_ID` (owner ruling, 2026-08-09):
+ * partial configuration throws everywhere, absent configuration throws only in
+ * production, and a developer can boot without it.
  */
+const CONFIGURED_XENDIT = { secretKey: "sk_live_x", splitRuleId: "splitrule_1" };
+const NO_XENDIT = { secretKey: undefined, splitRuleId: undefined };
+
 describe("resolveCallbackToken", () => {
   it("uses a configured token as-is", () => {
     expect(
-      resolveCallbackToken({ callbackToken: "xnd_real_token", nodeEnv: "production" })
+      resolveCallbackToken({
+        callbackToken: "xnd_real_token",
+        ...CONFIGURED_XENDIT,
+        nodeEnv: "production",
+      })
     ).toBe("xnd_real_token");
   });
 
   it("defaults ONLY under NODE_ENV=test", () => {
     // The tests have to send a token they know. Same NODE_ENV mechanism
     // resetDatabase() already relies on to avoid truncating a real database.
-    expect(resolveCallbackToken({ callbackToken: undefined, nodeEnv: "test" })).toBe(
-      TEST_CALLBACK_TOKEN
-    );
+    expect(
+      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "test" })
+    ).toBe(TEST_CALLBACK_TOKEN);
   });
 
-  it("refuses to start when unset anywhere else, including development", () => {
-    for (const nodeEnv of ["production", "development", "staging", undefined]) {
-      expect(() => resolveCallbackToken({ callbackToken: undefined, nodeEnv })).toThrow(
-        /XENDIT_CALLBACK_TOKEN is not set/
-      );
+  it("lets a DEVELOPER boot without it, like the Xendit keys next to it", () => {
+    // The point of the owner ruling: a developer must not have to configure an
+    // endpoint they may never exercise locally. `undefined` is safe —
+    // verifyCallbackToken refuses an unset expected token, so the route rejects
+    // every delivery instead of accepting any.
+    for (const nodeEnv of ["development", "staging", undefined]) {
+      captureConsoleLog(() => {
+        expect(
+          resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv })
+        ).toBeUndefined();
+      });
+    }
+  });
+
+  it("says so out loud in development, and stays quiet under test", () => {
+    const loud = captureConsoleLog(() => {
+      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "development" });
+    });
+    expect(loud.some((line) => /XENDIT_CALLBACK_TOKEN not set/.test(line))).toBe(true);
+
+    const quiet = captureConsoleLog(() => {
+      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "test" });
+    });
+    expect(quiet).toEqual([]);
+  });
+
+  it("refuses to start in production with no callback token", () => {
+    expect(() =>
+      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "production" })
+    ).toThrow(/NODE_ENV is production/);
+  });
+
+  it("refuses to start on PARTIAL configuration in every environment", () => {
+    // Real invoices would be created and no callback could be authenticated, so
+    // nobody who paid would ever be activated. Same reasoning as
+    // selectPaymentProvider's half-configured check, extended to the third var.
+    for (const nodeEnv of ["development", "production", "staging", undefined]) {
+      expect(() =>
+        resolveCallbackToken({ callbackToken: undefined, ...CONFIGURED_XENDIT, nodeEnv })
+      ).toThrow(/half-configured/);
     }
   });
 
@@ -630,12 +683,12 @@ describe("resolveCallbackToken", () => {
     // `XENDIT_CALLBACK_TOKEN=` in a .env file arrives as "", and a value pasted
     // out of a dashboard with a trailing newline is not configuration either.
     for (const blank of ["", "   ", "\t", "\n"]) {
-      expect(() => resolveCallbackToken({ callbackToken: blank, nodeEnv: "production" })).toThrow(
-        /XENDIT_CALLBACK_TOKEN is not set/
-      );
-      expect(resolveCallbackToken({ callbackToken: blank, nodeEnv: "test" })).toBe(
-        TEST_CALLBACK_TOKEN
-      );
+      expect(() =>
+        resolveCallbackToken({ callbackToken: blank, ...NO_XENDIT, nodeEnv: "production" })
+      ).toThrow(/NODE_ENV is production/);
+      expect(
+        resolveCallbackToken({ callbackToken: blank, ...NO_XENDIT, nodeEnv: "test" })
+      ).toBe(TEST_CALLBACK_TOKEN);
     }
   });
 
@@ -644,24 +697,39 @@ describe("resolveCallbackToken", () => {
     // payment event for anyone who can read the source.
     for (const nodeEnv of ["production", "development", undefined]) {
       expect(() =>
-        resolveCallbackToken({ callbackToken: TEST_CALLBACK_TOKEN, nodeEnv })
+        resolveCallbackToken({
+          callbackToken: TEST_CALLBACK_TOKEN,
+          ...NO_XENDIT,
+          nodeEnv,
+        })
       ).toThrow(/committed to this repository/);
     }
   });
 
   it("never returns an empty string, which would vouch for an empty header", () => {
-    for (const nodeEnv of ["test", "production"]) {
-      const token = (() => {
-        try {
-          return resolveCallbackToken({ callbackToken: undefined, nodeEnv });
-        } catch {
-          return "threw";
-        }
-      })();
-      expect(token.length).toBeGreaterThan(0);
+    // undefined is fine — verifyCallbackToken refuses it. "" would once have
+    // matched a request sending `X-CALLBACK-TOKEN:` with no value.
+    for (const nodeEnv of ["test", "development"]) {
+      const token = resolveCallbackTokenQuietly(nodeEnv);
+      expect(token).not.toBe("");
     }
   });
+
+  it("mentions the file an operator has to edit", () => {
+    expect(() =>
+      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "production" })
+    ).toThrow(/apps\/api\/\.env/);
+  });
 });
+
+/** `resolveCallbackToken` with its development warning swallowed. */
+function resolveCallbackTokenQuietly(nodeEnv: string | undefined): string | undefined {
+  let token: string | undefined;
+  captureConsoleLog(() => {
+    token = resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv });
+  });
+  return token;
+}
 
 describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
   it("wires the configured token into Dependencies", () => {
@@ -680,7 +748,8 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
     });
   });
 
-  it("refuses to boot a non-test process with no callback token", () => {
+  it("boots a DEVELOPMENT process with no callback token", () => {
+    // `bun run dev` must work on a fresh clone that never touched Xendit.
     withJwtSecret("x".repeat(32), () => {
       withEnv(
         {
@@ -690,33 +759,50 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           XENDIT_SPLIT_RULE_ID: undefined,
         },
         () => {
-          expect(() => bootstrap()).toThrow(/XENDIT_CALLBACK_TOKEN is not set/);
+          captureConsoleLog(() => {
+            expect(bootstrap().xenditCallbackToken).toBeUndefined();
+          });
         }
       );
     });
   });
 
-  it("refuses to boot a fully-configured production process with no callback token", () => {
-    // The worst case: real money moves, and nothing can credit it.
+  it("refuses to boot a fully-configured process with no callback token", () => {
+    // The worst case: real money moves, and nothing can credit it. Throws in
+    // development too, because this combination is never intentional.
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "development",
+          XENDIT_SECRET_KEY: "sk_live_x",
+          XENDIT_SPLIT_RULE_ID: "splitrule_1",
+          XENDIT_CALLBACK_TOKEN: undefined,
+        },
+        () => {
+          captureConsoleLog(() => {
+            expect(() => bootstrap()).toThrow(/half-configured/);
+          });
+        }
+      );
+    });
+  });
+
+  it("refuses to boot a production process with no callback token", () => {
     withJwtSecret("x".repeat(32), () => {
       withEnv(
         {
           NODE_ENV: "production",
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
-          XENDIT_CALLBACK_TOKEN: undefined,
+          XENDIT_CALLBACK_TOKEN: "xnd_real_token",
         },
         () => {
-          expect(() => bootstrap()).toThrow(/XENDIT_CALLBACK_TOKEN is not set/);
+          captureConsoleLog(() => {
+            expect(() => bootstrap()).not.toThrow();
+          });
         }
       );
-    });
-  });
 
-  it("still reports the missing payment configuration first in production", () => {
-    // Ordering inside bootstrap(): with nothing configured at all, "you are
-    // about to take fake money" is the more urgent message.
-    withJwtSecret("x".repeat(32), () => {
       withEnv(
         {
           NODE_ENV: "production",
@@ -725,15 +811,12 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           XENDIT_CALLBACK_TOKEN: undefined,
         },
         () => {
+          // selectPaymentProvider still speaks first here: with nothing
+          // configured at all, "you are about to take fake money" is the more
+          // urgent message, and this pins that ordering.
           expect(() => bootstrap()).toThrow(/NODE_ENV is production/);
         }
       );
     });
-  });
-
-  it("mentions the file an operator has to edit", () => {
-    expect(() =>
-      resolveCallbackToken({ callbackToken: undefined, nodeEnv: "production" })
-    ).toThrow(/apps\/api\/\.env/);
   });
 });

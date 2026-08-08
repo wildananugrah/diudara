@@ -1,9 +1,9 @@
-import type { db as DbClient } from "../../db/client";
+import type { DatabaseExecutor } from "../../db/client";
 import { activityLogs } from "../../db/schema";
 import type { ActivityLogRepositoryPort } from "../../application/ports/activity-log-repository.port";
 
 export class DrizzleActivityLogRepository implements ActivityLogRepositoryPort {
-  constructor(private readonly db: typeof DbClient) {}
+  constructor(private readonly db: DatabaseExecutor) {}
 
   async record(input: {
     memberId: string | null;

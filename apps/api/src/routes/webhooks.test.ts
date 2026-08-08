@@ -3,7 +3,13 @@ import { eq } from "drizzle-orm";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { db } from "../db/client";
-import { activityLogs, subscriptions, transactions, webhookEvents } from "../db/schema";
+import {
+  activityLogs,
+  membershipTiers,
+  subscriptions,
+  transactions,
+  webhookEvents,
+} from "../db/schema";
 import { resetDatabase } from "../db/test-helpers";
 import { bearer, signupAndGetToken } from "./test-support";
 
@@ -235,6 +241,83 @@ describe("POST /webhooks/xendit", () => {
     expect(responses.map((r) => r.status)).toEqual([200, 200, 200]);
     expect((await subscriptionRow(subscriptionId)).status).toBe("active");
     expect(await db.select().from(activityLogs)).toHaveLength(1);
+  });
+
+  describe("a failed activation must not consume the event id", () => {
+    /**
+     * Breaks the tier's `billing_cycle` so `computeNextBillingDate` throws inside
+     * `markPaid` — a real failure path, already pinned at the repository level —
+     * and puts it back afterwards. This stands in for any transient failure
+     * (deadlock, connection drop, bug) that hits AFTER the event was recorded.
+     */
+    async function withBrokenActivation<T>(
+      subscriptionId: string,
+      fn: () => T | Promise<T>
+    ): Promise<T> {
+      const [sub] = await db
+        .select()
+        .from(subscriptions)
+        .where(eq(subscriptions.id, subscriptionId));
+      await db
+        .update(membershipTiers)
+        .set({ billingCycle: "weekly" })
+        .where(eq(membershipTiers.id, sub.tierId));
+      try {
+        return await fn();
+      } finally {
+        await db
+          .update(membershipTiers)
+          .set({ billingCycle: "monthly" })
+          .where(eq(membershipTiers.id, sub.tierId));
+      }
+    }
+
+    it("rolls the webhook_event row back when the activation fails", async () => {
+      const a = app();
+      const { subscriptionId, externalId } = await checkout(a);
+
+      const res = await withBrokenActivation(subscriptionId, () =>
+        post(a, paidEvent(externalId))
+      );
+
+      expect(res.status).toBe(500);
+      // If this row survived, the idempotency key is spent and every retry
+      // Xendit makes is a no-op: money taken, access never granted.
+      expect(await db.select().from(webhookEvents)).toHaveLength(0);
+      expect((await subscriptionRow(subscriptionId)).status).toBe("pending");
+    });
+
+    it("lets the RETRY of that same event succeed — the actual point", async () => {
+      const a = app();
+      const { subscriptionId, externalId } = await checkout(a);
+
+      await withBrokenActivation(subscriptionId, () => post(a, paidEvent(externalId)));
+
+      // Byte-identical body, so the same provider_event_id. Xendit's retry.
+      const retry = await post(a, paidEvent(externalId));
+
+      expect(retry.status).toBe(200);
+      const sub = await subscriptionRow(subscriptionId);
+      expect(sub.status).toBe("active");
+      expect(sub.nextBillingDate).not.toBeNull();
+      expect(await db.select().from(activityLogs)).toHaveLength(1);
+      expect(await db.select().from(webhookEvents)).toHaveLength(1);
+
+      const [tx] = await db.select().from(transactions).where(eq(transactions.id, externalId));
+      expect(tx.status).toBe("success");
+    });
+
+    it("leaves the transaction row untouched too, not just the event row", async () => {
+      const a = app();
+      const { subscriptionId, externalId } = await checkout(a);
+
+      await withBrokenActivation(subscriptionId, () => post(a, paidEvent(externalId)));
+
+      const [tx] = await db.select().from(transactions).where(eq(transactions.id, externalId));
+      expect(tx.status).toBe("pending");
+      expect(tx.paidAt).toBeNull();
+      expect(await db.select().from(activityLogs)).toHaveLength(0);
+    });
   });
 
   it("does not swallow an expired event that follows a paid one for the same invoice", async () => {

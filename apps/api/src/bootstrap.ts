@@ -24,8 +24,7 @@ import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapt
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
-import { DrizzleWebhookEventRepository } from "./infrastructure/repositories/drizzle-webhook-event.repository";
-import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
+import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -74,12 +73,15 @@ export interface Dependencies {
   startCheckout: StartCheckout;
   handlePaymentWebhook: HandlePaymentWebhook;
   /**
-   * The static token Xendit sends as `X-CALLBACK-TOKEN`. This is the ONLY thing
-   * authenticating the webhook route, so it is resolved by
-   * `resolveCallbackToken` below, which refuses to produce a usable value
-   * outside tests unless it was really configured.
+   * The static token Xendit sends as `X-CALLBACK-TOKEN`, the ONLY thing
+   * authenticating the webhook route. `undefined` when the box is not
+   * configured for webhooks (never in production — `resolveCallbackToken`
+   * throws there), in which case `verifyCallbackToken` rejects every delivery
+   * rather than accepting any. Deliberately NOT narrowed to `string`: that
+   * would force a `?? ""` at the call site, and an empty expected token used to
+   * match an empty header.
    */
-  xenditCallbackToken: string;
+  xenditCallbackToken: string | undefined;
   sql: DatabasePing;
 }
 
@@ -209,56 +211,83 @@ export const TEST_CALLBACK_TOKEN = "test-callback-token";
  * Resolves the static token that is the ONLY authentication on
  * `POST /webhooks/xendit`.
  *
- * Nothing read `XENDIT_CALLBACK_TOKEN` before Task 7, so it was left out of the
- * configuration guard above. It is now in it: a box that serves a webhook
- * endpoint with no configured token accepts nothing (`verifyCallbackToken`
- * refuses an empty `expected`), which fails closed but silently — every genuine
- * payment would 401 and no member would ever be activated. Refusing to start is
- * the honest failure.
- *
- * Three rules, mirroring `assertUsableJwtSecret` and `selectPaymentProvider`:
+ * Nothing read `XENDIT_CALLBACK_TOKEN` before Task 7, so it sat outside the
+ * configuration guard above. It is now inside it, and deliberately shaped like
+ * `selectPaymentProvider` rather than like `assertUsableJwtSecret` — same three
+ * cases, same thresholds (owner ruling, 2026-08-09):
  *
  *   1. A configured token is used as-is. Empty and whitespace-only count as
  *      unset (`XENDIT_CALLBACK_TOKEN=` in a .env file arrives as `""`).
- *   2. Unset under `NODE_ENV === "test"` returns `TEST_CALLBACK_TOKEN`. The
- *      tests have to send a token they know; this is the same `NODE_ENV`
- *      mechanism `resetDatabase()` relies on to avoid truncating a real
- *      database, and it is unreachable anywhere else.
- *   3. Unset anywhere else THROWS — including development, exactly like
- *      `JWT_SECRET`. A dev box that boots with no token has a webhook route
- *      that rejects every delivery, which is a confusing way to discover a
- *      missing line in `.env`.
+ *   2. PARTIAL configuration throws in EVERY environment. A box with
+ *      XENDIT_SECRET_KEY and XENDIT_SPLIT_RULE_ID set is taking real money; if
+ *      it cannot authenticate the callback that credits that money, no member
+ *      it charges is ever activated. Same reasoning as the half-configured
+ *      check in `selectPaymentProvider`, extended to the third variable.
+ *   3. ABSENT configuration throws when `NODE_ENV === "production"`, and
+ *      otherwise returns `undefined`. A developer must be able to `bun run dev`
+ *      without setting a variable for an endpoint they may never exercise
+ *      locally, exactly as they can without the Xendit keys.
  *
- * Plus one guard the JWT secret taught us: the test default is refused outside
+ * `undefined` is safe to return, and is why `verifyCallbackToken` takes
+ * `string | undefined`: it refuses an unset or empty `expected` before any
+ * comparison, so an unconfigured box rejects every webhook rather than
+ * accepting every forged one. It fails closed — the guard exists so that
+ * production fails LOUDLY instead.
+ *
+ * Plus one rule the JWT secret taught us: the test default is refused outside
  * tests, so `XENDIT_CALLBACK_TOKEN=test-callback-token` on a production box —
  * a value anyone can read in this file — cannot vouch for a payment.
  */
 export function resolveCallbackToken(env: {
   callbackToken: string | undefined;
+  secretKey: string | undefined;
+  splitRuleId: string | undefined;
   nodeEnv: string | undefined;
-}): string {
+}): string | undefined {
   const token = presentOrUndefined(env.callbackToken);
 
-  if (token === undefined) {
-    if (env.nodeEnv === "test") {
-      return TEST_CALLBACK_TOKEN;
+  if (token !== undefined) {
+    if (token === TEST_CALLBACK_TOKEN && env.nodeEnv !== "test") {
+      throw new Error(
+        "XENDIT_CALLBACK_TOKEN is the value committed to this repository for tests. " +
+          "Anyone can read it, so it would authenticate a forged payment event. Use the " +
+          "callback token from the Xendit dashboard."
+      );
     }
+    return token;
+  }
+
+  // Checked before the production rule so the suite, which never sets the
+  // variable, keeps working even when a test hands `selectPaymentProvider` a
+  // fully-configured Xendit environment.
+  if (env.nodeEnv === "test") {
+    return TEST_CALLBACK_TOKEN;
+  }
+
+  if (presentOrUndefined(env.secretKey) && presentOrUndefined(env.splitRuleId)) {
     throw new Error(
-      "XENDIT_CALLBACK_TOKEN is not set. Add it to apps/api/.env — see .env.example, " +
-        "and copy the callback token from the Xendit dashboard. Refusing to start rather " +
-        "than serving a webhook endpoint that rejects every real payment."
+      "Xendit is half-configured: XENDIT_SECRET_KEY and XENDIT_SPLIT_RULE_ID are set " +
+        "but XENDIT_CALLBACK_TOKEN is not. Real invoices would be created and no " +
+        "callback could be authenticated, so no member who paid would ever be " +
+        "activated. Set all three — see apps/api/.env.example."
     );
   }
 
-  if (token === TEST_CALLBACK_TOKEN && env.nodeEnv !== "test") {
+  if (env.nodeEnv === "production") {
     throw new Error(
-      "XENDIT_CALLBACK_TOKEN is the value committed to this repository for tests. " +
-        "Anyone can read it, so it would authenticate a forged payment event. Use the " +
-        "callback token from the Xendit dashboard."
+      "XENDIT_CALLBACK_TOKEN is not set, and NODE_ENV is production. Add it to " +
+        "apps/api/.env — see .env.example, and copy the callback token from the Xendit " +
+        "dashboard. Refusing to start rather than serving a webhook endpoint that " +
+        "rejects every real payment."
     );
   }
 
-  return token;
+  logProviderChoice(
+    env.nodeEnv,
+    "[bootstrap] XENDIT_CALLBACK_TOKEN not set — POST /webhooks/xendit will reject " +
+      "every delivery. Set it to test the webhook path locally."
+  );
+  return undefined;
 }
 
 /**
@@ -311,6 +340,8 @@ export function bootstrap(): Dependencies {
   // the two messages, and the existing test pins that wording.
   const xenditCallbackToken = resolveCallbackToken({
     callbackToken: process.env.XENDIT_CALLBACK_TOKEN,
+    secretKey: process.env.XENDIT_SECRET_KEY,
+    splitRuleId: process.env.XENDIT_SPLIT_RULE_ID,
     nodeEnv: process.env.NODE_ENV,
   });
 
@@ -327,12 +358,13 @@ export function bootstrap(): Dependencies {
     payments
   );
 
-  const webhookEventRepository = new DrizzleWebhookEventRepository(db);
-  const activityLogRepository = new DrizzleActivityLogRepository(db);
+  // The webhook's three writes commit together or not at all — see
+  // PaymentActivationUnitOfWorkPort. The read that precedes them uses the
+  // pooled repository directly.
+  const paymentActivationUnitOfWork = new DrizzlePaymentActivationUnitOfWork(db);
   const handlePaymentWebhook = new HandlePaymentWebhook(
     subscriptionRepository,
-    webhookEventRepository,
-    activityLogRepository
+    paymentActivationUnitOfWork
   );
 
   return {

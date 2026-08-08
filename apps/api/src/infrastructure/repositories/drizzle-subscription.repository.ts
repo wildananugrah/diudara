@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import type { db as DbClient } from "../../db/client";
+import type { DatabaseExecutor } from "../../db/client";
 import { membershipTiers, subscriptions, transactions } from "../../db/schema";
 import type {
   MarkPaidResult,
@@ -21,7 +21,7 @@ import { computeNextBillingDate } from "../../domain/billing-cycle";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort {
-  constructor(private readonly db: typeof DbClient) {}
+  constructor(private readonly db: DatabaseExecutor) {}
 
   async createPending(input: { memberId: string; tierId: string }): Promise<SubscriptionRecord> {
     const [row] = await this.db
