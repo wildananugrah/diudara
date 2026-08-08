@@ -1,4 +1,16 @@
+/** Must match `community.slug`'s varchar length in db/schema.ts. */
 const MAX_SLUG_LENGTH = 120;
+
+/**
+ * Room reserved at the end of a base slug for a collision suffix.
+ * `resolveSlugCollision` appends at most `-999` (4 characters); 5 leaves a
+ * character of headroom. Without this, a 120-character base produced a
+ * 122-character candidate on the SECOND community with that name, which
+ * `varchar(120)` rejects — a deterministic 500 reachable from the public API,
+ * since `createCommunitySchema.name` allows 255 characters.
+ */
+const RESERVED_SUFFIX_LENGTH = 5;
+const MAX_BASE_SLUG_LENGTH = MAX_SLUG_LENGTH - RESERVED_SUFFIX_LENGTH;
 const FALLBACK_SLUG = "komunitas";
 
 export function slugify(name: string): string {
@@ -18,8 +30,13 @@ export function slugify(name: string): string {
     return FALLBACK_SLUG;
   }
 
-  return base.slice(0, MAX_SLUG_LENGTH).replace(/-+$/g, "");
+  return base.slice(0, MAX_BASE_SLUG_LENGTH).replace(/-+$/g, "");
 }
+
+/** The largest string `slugify` can return, exported so tests can pin it. */
+export const MAX_BASE_SLUG = MAX_BASE_SLUG_LENGTH;
+/** The column's hard limit, exported so tests can pin the suffixed form to it. */
+export const MAX_SLUG = MAX_SLUG_LENGTH;
 
 /**
  * Finds a free slug by appending an incrementing suffix.

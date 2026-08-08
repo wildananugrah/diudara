@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { slugify, resolveSlugCollision } from "./slug";
+import { slugify, resolveSlugCollision, MAX_BASE_SLUG, MAX_SLUG } from "./slug";
 
 describe("slugify", () => {
   it("lowercases and hyphenates a normal name", () => {
@@ -56,6 +56,18 @@ describe("slugify", () => {
     expect(result.length).toBeLessThanOrEqual(120);
     expect(result.endsWith("-")).toBe(false);
   });
+
+  it("reserves room for a collision suffix, so a suffixed slug still fits the column", () => {
+    // slugify used to truncate to exactly MAX_SLUG. resolveSlugCollision then
+    // appended "-2" without re-truncating, producing a 122-character slug that
+    // varchar(120) rejects — a deterministic 500 on the SECOND community with a
+    // long name, reachable from the public API (name allows 255 characters).
+    const base = slugify("a".repeat(200));
+    expect(base.length).toBe(MAX_BASE_SLUG);
+    expect(base.length).toBeLessThan(MAX_SLUG);
+    // "-999" is the widest suffix resolveSlugCollision can append.
+    expect(`${base}-999`.length).toBeLessThanOrEqual(MAX_SLUG);
+  });
 });
 
 describe("resolveSlugCollision", () => {
@@ -74,5 +86,13 @@ describe("resolveSlugCollision", () => {
     const taken = new Set(["kelas-budi", "kelas-budi-2", "kelas-budi-3"]);
     const result = await resolveSlugCollision("kelas-budi", async (s) => taken.has(s));
     expect(result).toBe("kelas-budi-4");
+  });
+
+  it("stays inside the column limit at the maximum base length", async () => {
+    const base = slugify("a".repeat(200));
+    const taken = new Set([base]);
+    const result = await resolveSlugCollision(base, async (s) => taken.has(s));
+    expect(result).toBe(`${base}-2`);
+    expect(result.length).toBeLessThanOrEqual(MAX_SLUG);
   });
 });
