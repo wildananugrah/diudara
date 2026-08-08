@@ -60,14 +60,46 @@ export interface Dependencies {
   sql: DatabasePing;
 }
 
-export function bootstrap(): Dependencies {
-  const jwtSecret = process.env.JWT_SECRET;
-  if (!jwtSecret) {
+/**
+ * Minimum JWT_SECRET length. HS256 keys shorter than the hash output (32 bytes)
+ * weaken the MAC, and a short secret is offline-brute-forceable from a single
+ * captured token — which would forge any creator's session, since every
+ * creator's session depends on this one key. `openssl rand -base64 32` produces
+ * a conforming value.
+ */
+const MIN_JWT_SECRET_LENGTH = 32;
+
+/**
+ * The literal in `.env.example`. Copying the example file and forgetting to
+ * change this line is the single most likely way a real deployment ends up with
+ * a publicly-known signing key, and it is long enough to pass the length check.
+ */
+const PLACEHOLDER_JWT_SECRET = "change_me_to_a_long_random_string";
+
+export function assertUsableJwtSecret(secret: string | undefined): string {
+  if (!secret) {
     throw new Error(
       "JWT_SECRET is not set. Add it to apps/api/.env — see .env.example. " +
         "Refusing to start rather than signing tokens with a default secret."
     );
   }
+  if (secret === PLACEHOLDER_JWT_SECRET) {
+    throw new Error(
+      "JWT_SECRET is still the .env.example placeholder. Generate a real one: " +
+        "openssl rand -base64 32"
+    );
+  }
+  if (secret.length < MIN_JWT_SECRET_LENGTH) {
+    throw new Error(
+      `JWT_SECRET is too short (${secret.length} characters; ` +
+        `${MIN_JWT_SECRET_LENGTH} required). Generate one: openssl rand -base64 32`
+    );
+  }
+  return secret;
+}
+
+export function bootstrap(): Dependencies {
+  const jwtSecret = assertUsableJwtSecret(process.env.JWT_SECRET);
 
   const creatorRepository = new DrizzleCreatorRepository(db);
   const passwordHasher = new BunPasswordHasher();

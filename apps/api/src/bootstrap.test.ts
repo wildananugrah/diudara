@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import type { Dependencies } from "./bootstrap";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { bootstrap, type Dependencies } from "./bootstrap";
 import { createApp } from "./app";
 import { RegisterCreator } from "./application/use-cases/register-creator";
 import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
@@ -199,5 +201,87 @@ describe("Dependencies (composition root contract)", () => {
     const res = await createApp(deps).request("/health");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "ok" });
+  });
+});
+
+/**
+ * Runs `fn` with JWT_SECRET set to `value` (or unset for `undefined`), always
+ * restoring the original.
+ *
+ * The plan's own verification command for this guard —
+ * `env -u JWT_SECRET bun -e "..."` — is BROKEN: Bun auto-loads `apps/api/.env`,
+ * which re-supplies JWT_SECRET after the shell unset, so it prints "NO THROW"
+ * even when the guard works. That false negative is why no test existed. Set
+ * the variable in-process instead; nothing re-reads `.env` afterwards.
+ */
+function withJwtSecret(value: string | undefined, fn: () => void) {
+  const original = process.env.JWT_SECRET;
+  try {
+    if (value === undefined) {
+      delete process.env.JWT_SECRET;
+    } else {
+      process.env.JWT_SECRET = value;
+    }
+    fn();
+  } finally {
+    if (original === undefined) {
+      delete process.env.JWT_SECRET;
+    } else {
+      process.env.JWT_SECRET = original;
+    }
+  }
+}
+
+const PLACEHOLDER = "change_me_to_a_long_random_string";
+
+describe("bootstrap() JWT_SECRET guard", () => {
+  it("refuses to start when JWT_SECRET is unset", () => {
+    withJwtSecret(undefined, () => {
+      expect(() => bootstrap()).toThrow(/JWT_SECRET is not set/);
+    });
+  });
+
+  it("refuses the .env.example placeholder", () => {
+    // It is 33 characters, so a length check alone would wave it through — and
+    // it is the value every fresh `cp .env.example .env` starts with.
+    withJwtSecret(PLACEHOLDER, () => {
+      expect(() => bootstrap()).toThrow(/placeholder/);
+    });
+  });
+
+  it("refuses a secret shorter than 32 characters", () => {
+    // `JWT_SECRET=some-secret` booted fine. HS256 with a short key is
+    // brute-forceable offline from one captured token, and that token forges
+    // every creator's session.
+    withJwtSecret("some-secret", () => {
+      expect(() => bootstrap()).toThrow(/too short/);
+    });
+  });
+
+  it("accepts a 32-character secret", () => {
+    withJwtSecret("x".repeat(32), () => {
+      expect(() => bootstrap()).not.toThrow();
+    });
+  });
+
+  it("rejects one character below the limit", () => {
+    withJwtSecret("x".repeat(31), () => {
+      expect(() => bootstrap()).toThrow(/too short/);
+    });
+  });
+
+  it("rejects the exact JWT_SECRET line shipped in .env.example", () => {
+    // Pins the guard to the file rather than to a copy of its value: if
+    // .env.example's placeholder is ever reworded, this fails instead of
+    // silently letting the new placeholder through.
+    const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
+    const line = example.split("\n").find((l) => l.startsWith("JWT_SECRET="));
+    expect(line).toBeDefined();
+
+    const shipped = line!.slice("JWT_SECRET=".length).trim();
+    expect(shipped).toBe(PLACEHOLDER);
+    withJwtSecret(shipped, () => {
+      expect(() => bootstrap()).toThrow();
+    });
   });
 });
