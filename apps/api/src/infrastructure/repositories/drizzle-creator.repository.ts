@@ -1,6 +1,8 @@
 import { eq } from "drizzle-orm";
 import type { db as DbClient } from "../../db/client";
 import { creators } from "../../db/schema";
+import { UniqueRule } from "../../application/errors";
+import { rethrowUniqueViolation } from "./pg-errors";
 import type {
   CreatorCredentials,
   CreatorRecord,
@@ -32,16 +34,30 @@ export class DrizzleCreatorRepository implements CreatorRepositoryPort {
     email?: string;
     passwordHash?: string;
   }): Promise<CreatorRecord> {
-    const [row] = await this.db
-      .insert(creators)
-      .values({
-        name: input.name,
-        whatsappNumber: input.whatsappNumber,
-        email: input.email,
-        passwordHash: input.passwordHash,
-      })
-      .returning(creatorColumns);
-    return row;
+    try {
+      const [row] = await this.db
+        .insert(creators)
+        .values({
+          name: input.name,
+          whatsappNumber: input.whatsappNumber,
+          email: input.email,
+          passwordHash: input.passwordHash,
+        })
+        .returning(creatorColumns);
+      return row;
+    } catch (err) {
+      // RegisterCreator's findByEmail pre-check is TOCTOU: two concurrent
+      // signups for one address both see "free" and both insert. The partial
+      // unique index is the real arbiter, so translate its violation here.
+      // Letting it escape would land in the unhandled-error path, where the
+      // driver error's bound parameters include the argon2id hash.
+      rethrowUniqueViolation(err, {
+        creator_email_unique: {
+          rule: UniqueRule.creatorEmail,
+          message: "email is already registered",
+        },
+      });
+    }
   }
 
   async findById(id: string): Promise<CreatorRecord | null> {

@@ -51,6 +51,29 @@ describe("POST /auth/signup", () => {
     expect(res.status).toBe(409);
   });
 
+  it("resolves a race for one email to a single 201 and 409s, never a 500", async () => {
+    // `findByEmail` then `create` is check-then-act: concurrent signups all see
+    // the address as free. Before the unique index was translated into a 409,
+    // the losers hit the unhandled-error path — which logged the driver error
+    // object, and with it the argon2id hash bound to the failed INSERT.
+    const a = app();
+    const attempts = 3;
+    const responses = await Promise.all(
+      Array.from({ length: attempts }, () =>
+        a.request("/auth/signup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...VALID, email: "racer@example.com" }),
+        })
+      )
+    );
+
+    const statuses = responses.map((r) => r.status);
+    expect(statuses.filter((s) => s === 201)).toHaveLength(1);
+    expect(statuses.filter((s) => s === 409)).toHaveLength(attempts - 1);
+    expect(statuses).not.toContain(500);
+  });
+
   it("rejects a short password with 400", async () => {
     const res = await signup({ ...VALID, password: "short" });
     expect(res.status).toBe(400);
