@@ -51,7 +51,7 @@ async function seedCommunity() {
     .returning();
   const [community] = await db
     .insert(communities)
-    .values({ creatorId: creator.id, name: "Kelas Rina" })
+    .values({ creatorId: creator.id, name: "Kelas Rina", slug: "kelas-rina" })
     .returning();
   return { creator, community };
 }

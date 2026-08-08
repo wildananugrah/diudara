@@ -38,3 +38,19 @@ export function createMembershipTier(input: {
     isActive: input.isActive ?? true,
   };
 }
+
+export function assertValidTier(input: {
+  name: string;
+  priceAmount: number;
+  billingCycle: BillingCycle;
+}): void {
+  if (input.priceAmount < 0) {
+    throw new Error("priceAmount must not be negative");
+  }
+  if (!VALID_BILLING_CYCLES.includes(input.billingCycle)) {
+    throw new Error(`billingCycle must be one of ${VALID_BILLING_CYCLES.join(", ")}`);
+  }
+  if (input.name.trim().length === 0) {
+    throw new Error("name must not be empty");
+  }
+}

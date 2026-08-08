@@ -1,10 +1,28 @@
 import { describe, expect, it } from "bun:test";
-import type { Dependencies } from "./bootstrap";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { bootstrap, type Dependencies } from "./bootstrap";
 import { createApp } from "./app";
+import { RegisterCreator } from "./application/use-cases/register-creator";
+import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
+import { CreateCommunity } from "./application/use-cases/create-community";
+import { ListCommunities } from "./application/use-cases/list-communities";
+import { UpdateCommunity } from "./application/use-cases/update-community";
+import {
+  DefineMembershipTier,
+  ListTiers,
+  UpdateTier,
+} from "./application/use-cases/manage-tiers";
+import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import type {
   CreatorRecord,
   CreatorRepositoryPort,
 } from "./application/ports/creator-repository.port";
+import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
+import type { MembershipTierRepositoryPort } from "./application/ports/membership-tier-repository.port";
+import type { ChannelRepositoryPort } from "./application/ports/channel-repository.port";
+import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
+import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 
 /**
  * Guards dependency inversion: `Dependencies` must be typed against PORTS, not
@@ -12,7 +30,72 @@ import type {
  * `ReturnType<typeof bootstrap>`), the object literals below stop type-checking
  * and `bun run typecheck` fails. No `as` casts are allowed in this file — a cast
  * would hide exactly the regression this test exists to catch.
+ *
+ * `registerCreator`/`authenticateCreator`/`createCommunity`/`listCommunities`/
+ * `updateCommunity`/`defineTier`/`listTiers`/`updateTier`/`connectChannel`/
+ * `listChannels` are typed as the concrete use-case classes (there's only one
+ * implementation of each, so no
+ * port exists for them) — a class with private members can't be satisfied by
+ * a plain object literal without a cast, so the fakes below construct real
+ * instances of those classes wrapping hand-written fake ports instead.
  */
+const fakeTokenIssuer: TokenIssuerPort = {
+  async issue() {
+    return "fake.token.value";
+  },
+  async verify() {
+    return null;
+  },
+};
+
+const fakePasswordHasher: PasswordHasherPort = {
+  async hash(plain) {
+    return `hashed:${plain}`;
+  },
+  async verify() {
+    return false;
+  },
+};
+
+const fakeCommunityRepository: CommunityRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async findByIdForCreator() {
+    return null;
+  },
+  async listByCreator() {
+    return [];
+  },
+  async slugExists() {
+    return false;
+  },
+  async update() {
+    return null;
+  },
+};
+
+const fakeMembershipTierRepository: MembershipTierRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async listByCommunity() {
+    return [];
+  },
+  async updateForCommunity() {
+    return null;
+  },
+};
+
+const fakeChannelRepository: ChannelRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async listByCommunity() {
+    return [];
+  },
+};
+
 describe("Dependencies (composition root contract)", () => {
   it("accepts a hand-written fake CreatorRepositoryPort with no casts", async () => {
     const stored: CreatorRecord[] = [];
@@ -22,7 +105,7 @@ describe("Dependencies (composition root contract)", () => {
         const record: CreatorRecord = {
           id: `fake-${stored.length + 1}`,
           name: input.name,
-          whatsappNumber: input.whatsappNumber,
+          whatsappNumber: input.whatsappNumber ?? null,
           email: input.email ?? null,
           tierPlan: "starter",
           createdAt: new Date(0),
@@ -36,10 +119,32 @@ describe("Dependencies (composition root contract)", () => {
       async findByEmail(email) {
         return stored.find((record) => record.email === email) ?? null;
       },
+      async findCredentialsByEmail() {
+        return null;
+      },
     };
 
     const deps: Dependencies = {
       creatorRepository: fakeCreatorRepository,
+      tokenIssuer: fakeTokenIssuer,
+      registerCreator: new RegisterCreator(
+        fakeCreatorRepository,
+        fakePasswordHasher,
+        fakeTokenIssuer
+      ),
+      authenticateCreator: new AuthenticateCreator(
+        fakeCreatorRepository,
+        fakePasswordHasher,
+        fakeTokenIssuer
+      ),
+      createCommunity: new CreateCommunity(fakeCommunityRepository),
+      listCommunities: new ListCommunities(fakeCommunityRepository),
+      updateCommunity: new UpdateCommunity(fakeCommunityRepository),
+      defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
+      listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
+      updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
+      connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
+      listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       sql: async () => [{ one: 1 }],
     };
 
@@ -54,23 +159,129 @@ describe("Dependencies (composition root contract)", () => {
   });
 
   it("lets a fully faked Dependencies drive the app with no database", async () => {
-    const deps: Dependencies = {
-      creatorRepository: {
-        async create() {
-          throw new Error("not used");
-        },
-        async findById() {
-          return null;
-        },
-        async findByEmail() {
-          return null;
-        },
+    const fakeCreatorRepository: CreatorRepositoryPort = {
+      async create() {
+        throw new Error("not used");
       },
+      async findById() {
+        return null;
+      },
+      async findByEmail() {
+        return null;
+      },
+      async findCredentialsByEmail() {
+        return null;
+      },
+    };
+
+    const deps: Dependencies = {
+      creatorRepository: fakeCreatorRepository,
+      tokenIssuer: fakeTokenIssuer,
+      registerCreator: new RegisterCreator(
+        fakeCreatorRepository,
+        fakePasswordHasher,
+        fakeTokenIssuer
+      ),
+      authenticateCreator: new AuthenticateCreator(
+        fakeCreatorRepository,
+        fakePasswordHasher,
+        fakeTokenIssuer
+      ),
+      createCommunity: new CreateCommunity(fakeCommunityRepository),
+      listCommunities: new ListCommunities(fakeCommunityRepository),
+      updateCommunity: new UpdateCommunity(fakeCommunityRepository),
+      defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
+      listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
+      updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
+      connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
+      listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       sql: async () => [{ one: 1 }],
     };
 
     const res = await createApp(deps).request("/health");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "ok" });
+  });
+});
+
+/**
+ * Runs `fn` with JWT_SECRET set to `value` (or unset for `undefined`), always
+ * restoring the original.
+ *
+ * The plan's own verification command for this guard —
+ * `env -u JWT_SECRET bun -e "..."` — is BROKEN: Bun auto-loads `apps/api/.env`,
+ * which re-supplies JWT_SECRET after the shell unset, so it prints "NO THROW"
+ * even when the guard works. That false negative is why no test existed. Set
+ * the variable in-process instead; nothing re-reads `.env` afterwards.
+ */
+function withJwtSecret(value: string | undefined, fn: () => void) {
+  const original = process.env.JWT_SECRET;
+  try {
+    if (value === undefined) {
+      delete process.env.JWT_SECRET;
+    } else {
+      process.env.JWT_SECRET = value;
+    }
+    fn();
+  } finally {
+    if (original === undefined) {
+      delete process.env.JWT_SECRET;
+    } else {
+      process.env.JWT_SECRET = original;
+    }
+  }
+}
+
+const PLACEHOLDER = "change_me_to_a_long_random_string";
+
+describe("bootstrap() JWT_SECRET guard", () => {
+  it("refuses to start when JWT_SECRET is unset", () => {
+    withJwtSecret(undefined, () => {
+      expect(() => bootstrap()).toThrow(/JWT_SECRET is not set/);
+    });
+  });
+
+  it("refuses the .env.example placeholder", () => {
+    // It is 33 characters, so a length check alone would wave it through — and
+    // it is the value every fresh `cp .env.example .env` starts with.
+    withJwtSecret(PLACEHOLDER, () => {
+      expect(() => bootstrap()).toThrow(/placeholder/);
+    });
+  });
+
+  it("refuses a secret shorter than 32 characters", () => {
+    // `JWT_SECRET=some-secret` booted fine. HS256 with a short key is
+    // brute-forceable offline from one captured token, and that token forges
+    // every creator's session.
+    withJwtSecret("some-secret", () => {
+      expect(() => bootstrap()).toThrow(/too short/);
+    });
+  });
+
+  it("accepts a 32-character secret", () => {
+    withJwtSecret("x".repeat(32), () => {
+      expect(() => bootstrap()).not.toThrow();
+    });
+  });
+
+  it("rejects one character below the limit", () => {
+    withJwtSecret("x".repeat(31), () => {
+      expect(() => bootstrap()).toThrow(/too short/);
+    });
+  });
+
+  it("rejects the exact JWT_SECRET line shipped in .env.example", () => {
+    // Pins the guard to the file rather than to a copy of its value: if
+    // .env.example's placeholder is ever reworded, this fails instead of
+    // silently letting the new placeholder through.
+    const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
+    const line = example.split("\n").find((l) => l.startsWith("JWT_SECRET="));
+    expect(line).toBeDefined();
+
+    const shipped = line!.slice("JWT_SECRET=".length).trim();
+    expect(shipped).toBe(PLACEHOLDER);
+    withJwtSecret(shipped, () => {
+      expect(() => bootstrap()).toThrow();
+    });
   });
 });

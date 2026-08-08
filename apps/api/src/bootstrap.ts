@@ -1,6 +1,23 @@
 import { db, sql } from "./db/client";
 import { DrizzleCreatorRepository } from "./infrastructure/repositories/drizzle-creator.repository";
+import { DrizzleCommunityRepository } from "./infrastructure/repositories/drizzle-community.repository";
+import { BunPasswordHasher } from "./infrastructure/auth/bun-password.hasher";
+import { HonoJwtTokenIssuer } from "./infrastructure/auth/hono-jwt.token-issuer";
+import { RegisterCreator } from "./application/use-cases/register-creator";
+import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
+import { CreateCommunity } from "./application/use-cases/create-community";
+import { ListCommunities } from "./application/use-cases/list-communities";
+import { UpdateCommunity } from "./application/use-cases/update-community";
+import { DrizzleMembershipTierRepository } from "./infrastructure/repositories/drizzle-membership-tier.repository";
+import {
+  DefineMembershipTier,
+  ListTiers,
+  UpdateTier,
+} from "./application/use-cases/manage-tiers";
+import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
+import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
+import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 
 /** Values that may be interpolated into a `DatabasePing` tagged template. */
 type PingValue = string | number | boolean | Date | null;
@@ -29,14 +46,98 @@ export type DatabasePing = (
  */
 export interface Dependencies {
   creatorRepository: CreatorRepositoryPort;
+  tokenIssuer: TokenIssuerPort;
+  registerCreator: RegisterCreator;
+  authenticateCreator: AuthenticateCreator;
+  createCommunity: CreateCommunity;
+  listCommunities: ListCommunities;
+  updateCommunity: UpdateCommunity;
+  defineTier: DefineMembershipTier;
+  listTiers: ListTiers;
+  updateTier: UpdateTier;
+  connectChannel: ConnectChannel;
+  listChannels: ListChannels;
   sql: DatabasePing;
 }
 
+/**
+ * Minimum JWT_SECRET length. HS256 keys shorter than the hash output (32 bytes)
+ * weaken the MAC, and a short secret is offline-brute-forceable from a single
+ * captured token — which would forge any creator's session, since every
+ * creator's session depends on this one key. `openssl rand -base64 32` produces
+ * a conforming value.
+ */
+const MIN_JWT_SECRET_LENGTH = 32;
+
+/**
+ * The literal in `.env.example`. Copying the example file and forgetting to
+ * change this line is the single most likely way a real deployment ends up with
+ * a publicly-known signing key, and it is long enough to pass the length check.
+ */
+const PLACEHOLDER_JWT_SECRET = "change_me_to_a_long_random_string";
+
+export function assertUsableJwtSecret(secret: string | undefined): string {
+  if (!secret) {
+    throw new Error(
+      "JWT_SECRET is not set. Add it to apps/api/.env — see .env.example. " +
+        "Refusing to start rather than signing tokens with a default secret."
+    );
+  }
+  if (secret === PLACEHOLDER_JWT_SECRET) {
+    throw new Error(
+      "JWT_SECRET is still the .env.example placeholder. Generate a real one: " +
+        "openssl rand -base64 32"
+    );
+  }
+  if (secret.length < MIN_JWT_SECRET_LENGTH) {
+    throw new Error(
+      `JWT_SECRET is too short (${secret.length} characters; ` +
+        `${MIN_JWT_SECRET_LENGTH} required). Generate one: openssl rand -base64 32`
+    );
+  }
+  return secret;
+}
+
 export function bootstrap(): Dependencies {
+  const jwtSecret = assertUsableJwtSecret(process.env.JWT_SECRET);
+
   const creatorRepository = new DrizzleCreatorRepository(db);
+  const passwordHasher = new BunPasswordHasher();
+  const tokenIssuer = new HonoJwtTokenIssuer(jwtSecret);
+  const registerCreator = new RegisterCreator(creatorRepository, passwordHasher, tokenIssuer);
+  const authenticateCreator = new AuthenticateCreator(
+    creatorRepository,
+    passwordHasher,
+    tokenIssuer
+  );
+
+  const communityRepository = new DrizzleCommunityRepository(db);
+  const createCommunity = new CreateCommunity(communityRepository);
+  const listCommunities = new ListCommunities(communityRepository);
+  const updateCommunity = new UpdateCommunity(communityRepository);
+
+  const tierRepository = new DrizzleMembershipTierRepository(db);
+  const defineTier = new DefineMembershipTier(communityRepository, tierRepository);
+  const listTiers = new ListTiers(communityRepository, tierRepository);
+  const updateTier = new UpdateTier(communityRepository, tierRepository);
+
+  const channelRepository = new DrizzleChannelRepository(db);
+  const connectChannel = new ConnectChannel(communityRepository, channelRepository);
+  const listChannels = new ListChannels(communityRepository, channelRepository);
 
   return {
     creatorRepository,
+    tokenIssuer,
+    registerCreator,
+    authenticateCreator,
+    createCommunity,
+    listCommunities,
+    updateCommunity,
+    defineTier,
+    listTiers,
+    updateTier,
+    connectChannel,
+    listChannels,
     sql,
   };
 }
