@@ -19,10 +19,13 @@ import { ConnectChannel, ListChannels } from "./application/use-cases/manage-cha
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
+import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
+import { DrizzleWebhookEventRepository } from "./infrastructure/repositories/drizzle-webhook-event.repository";
+import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -69,6 +72,14 @@ export interface Dependencies {
   createPaymentAccount: CreatePaymentAccount;
   getPublicCommunity: GetPublicCommunity;
   startCheckout: StartCheckout;
+  handlePaymentWebhook: HandlePaymentWebhook;
+  /**
+   * The static token Xendit sends as `X-CALLBACK-TOKEN`. This is the ONLY thing
+   * authenticating the webhook route, so it is resolved by
+   * `resolveCallbackToken` below, which refuses to produce a usable value
+   * outside tests unless it was really configured.
+   */
+  xenditCallbackToken: string;
   sql: DatabasePing;
 }
 
@@ -186,6 +197,71 @@ export function selectPaymentProvider(env: {
 }
 
 /**
+ * The token `resolveCallbackToken` hands back under `NODE_ENV=test`, and the
+ * one value it refuses to accept anywhere else. It is committed to this
+ * repository, so treating it as a real secret would mean shipping a publicly
+ * known webhook password — the same failure mode as the `.env.example`
+ * `JWT_SECRET` placeholder.
+ */
+export const TEST_CALLBACK_TOKEN = "test-callback-token";
+
+/**
+ * Resolves the static token that is the ONLY authentication on
+ * `POST /webhooks/xendit`.
+ *
+ * Nothing read `XENDIT_CALLBACK_TOKEN` before Task 7, so it was left out of the
+ * configuration guard above. It is now in it: a box that serves a webhook
+ * endpoint with no configured token accepts nothing (`verifyCallbackToken`
+ * refuses an empty `expected`), which fails closed but silently — every genuine
+ * payment would 401 and no member would ever be activated. Refusing to start is
+ * the honest failure.
+ *
+ * Three rules, mirroring `assertUsableJwtSecret` and `selectPaymentProvider`:
+ *
+ *   1. A configured token is used as-is. Empty and whitespace-only count as
+ *      unset (`XENDIT_CALLBACK_TOKEN=` in a .env file arrives as `""`).
+ *   2. Unset under `NODE_ENV === "test"` returns `TEST_CALLBACK_TOKEN`. The
+ *      tests have to send a token they know; this is the same `NODE_ENV`
+ *      mechanism `resetDatabase()` relies on to avoid truncating a real
+ *      database, and it is unreachable anywhere else.
+ *   3. Unset anywhere else THROWS — including development, exactly like
+ *      `JWT_SECRET`. A dev box that boots with no token has a webhook route
+ *      that rejects every delivery, which is a confusing way to discover a
+ *      missing line in `.env`.
+ *
+ * Plus one guard the JWT secret taught us: the test default is refused outside
+ * tests, so `XENDIT_CALLBACK_TOKEN=test-callback-token` on a production box —
+ * a value anyone can read in this file — cannot vouch for a payment.
+ */
+export function resolveCallbackToken(env: {
+  callbackToken: string | undefined;
+  nodeEnv: string | undefined;
+}): string {
+  const token = presentOrUndefined(env.callbackToken);
+
+  if (token === undefined) {
+    if (env.nodeEnv === "test") {
+      return TEST_CALLBACK_TOKEN;
+    }
+    throw new Error(
+      "XENDIT_CALLBACK_TOKEN is not set. Add it to apps/api/.env — see .env.example, " +
+        "and copy the callback token from the Xendit dashboard. Refusing to start rather " +
+        "than serving a webhook endpoint that rejects every real payment."
+    );
+  }
+
+  if (token === TEST_CALLBACK_TOKEN && env.nodeEnv !== "test") {
+    throw new Error(
+      "XENDIT_CALLBACK_TOKEN is the value committed to this repository for tests. " +
+        "Anyone can read it, so it would authenticate a forged payment event. Use the " +
+        "callback token from the Xendit dashboard."
+    );
+  }
+
+  return token;
+}
+
+/**
  * Silent under `NODE_ENV=test` only. `bootstrap()` is called once per test that
  * builds an app, so this line printed 100+ times in one suite run and buried a
  * genuine `unhandled error` line. Everywhere else it still prints: the guards
@@ -230,6 +306,13 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
   const createPaymentAccount = new CreatePaymentAccount(creatorRepository, payments);
+  // After selectPaymentProvider on purpose: on a production box with nothing
+  // configured at all, "you are about to take fake money" is the more urgent of
+  // the two messages, and the existing test pins that wording.
+  const xenditCallbackToken = resolveCallbackToken({
+    callbackToken: process.env.XENDIT_CALLBACK_TOKEN,
+    nodeEnv: process.env.NODE_ENV,
+  });
 
   const getPublicCommunity = new GetPublicCommunity(communityRepository, tierRepository);
 
@@ -242,6 +325,14 @@ export function bootstrap(): Dependencies {
     subscriptionRepository,
     creatorRepository,
     payments
+  );
+
+  const webhookEventRepository = new DrizzleWebhookEventRepository(db);
+  const activityLogRepository = new DrizzleActivityLogRepository(db);
+  const handlePaymentWebhook = new HandlePaymentWebhook(
+    subscriptionRepository,
+    webhookEventRepository,
+    activityLogRepository
   );
 
   return {
@@ -261,6 +352,8 @@ export function bootstrap(): Dependencies {
     createPaymentAccount,
     getPublicCommunity,
     startCheckout,
+    handlePaymentWebhook,
+    xenditCallbackToken,
     sql,
   };
 }

@@ -6,6 +6,7 @@ import { tierRoutes } from "./routes/tiers";
 import { channelRoutes } from "./routes/channels";
 import { paymentAccountRoutes } from "./routes/payment-account";
 import { publicCommunityRoutes } from "./routes/public-community";
+import { webhookRoutes } from "./routes/webhooks";
 import { errorHandler } from "./http/error-handler";
 import type { AuthVariables } from "./http/auth.middleware";
 import type { Dependencies } from "./bootstrap";
@@ -17,6 +18,9 @@ export function createApp(deps: Dependencies) {
   app.route("/auth", authRoutes(deps));
   app.route("/payment-account", paymentAccountRoutes(deps));
   app.route("/c", publicCommunityRoutes(deps));
+  // Public by design and authenticated by X-CALLBACK-TOKEN instead of a bearer
+  // token — see routes/webhooks.ts. Never put this behind requireAuth.
+  app.route("/webhooks", webhookRoutes(deps));
   // Nested routes for tiers/channels (Tasks 10, 11) mount at
   // /communities/:communityId/tiers and /communities/:communityId/channels.
   // They must be registered BEFORE this line so the more specific path

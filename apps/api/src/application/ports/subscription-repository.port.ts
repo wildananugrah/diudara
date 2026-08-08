@@ -23,6 +23,21 @@ export interface TransactionRecord {
   updatedAt: Date;
 }
 
+export interface MarkPaidResult {
+  transaction: TransactionRecord;
+  subscription: SubscriptionRecord;
+  /**
+   * The community the activated subscription belongs to, resolved through
+   * `subscription → membership_tier → community` while activating.
+   *
+   * Returned rather than looked up again by the caller because the audit entry
+   * (`activity_log.community_id` is NOT NULL) needs it, and there is no
+   * unscoped tier-by-id port method to reach it with —
+   * `MembershipTierRepositoryPort` is deliberately community-scoped throughout.
+   */
+  communityId: string;
+}
+
 /**
  * `subscription` and `transaction` both have an `updated_at` column with no
  * `BEFORE UPDATE` trigger (drizzle-kit does not generate triggers, and the
@@ -37,15 +52,26 @@ export interface SubscriptionRepositoryPort {
     amount: number;
     paymentMethod: string;
   }): Promise<TransactionRecord>;
-  /** Used by Task 7's webhook handler: Xendit echoes our transaction id back as external_id. */
+  /**
+   * Used by the webhook handler: Xendit echoes our transaction id back as
+   * `external_id`. The argument therefore comes from an untrusted body, and a
+   * value that cannot possibly be an id must be reported as a MISS (`null`) —
+   * never raised as an error, which on this path would become a 500 instead of
+   * the 404 an unknown external id deserves.
+   */
   findTransactionByExternalId(id: string): Promise<TransactionRecord | null>;
   /**
-   * Used by Task 7: marks a transaction paid and activates its subscription.
-   * Both rows are updates, so both must carry `updatedAt: new Date()`.
+   * Marks a transaction `success` and activates its subscription: `active`,
+   * `started_at` (first activation only), and `next_billing_date` derived from
+   * the tier's `billing_cycle`.
+   *
+   * Both rows are updates, so both must carry `updatedAt: new Date()`. The two
+   * writes must be atomic with each other — a transaction recorded as collected
+   * against a subscription that never activated is unrecoverable money.
    */
   markPaid(input: {
     transactionId: string;
     gatewayReferenceId: string;
     paidAt: Date;
-  }): Promise<{ transaction: TransactionRecord; subscription: SubscriptionRecord }>;
+  }): Promise<MarkPaidResult>;
 }

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { bootstrap, selectPaymentProvider, type Dependencies } from "./bootstrap";
+import {
+  bootstrap,
+  resolveCallbackToken,
+  selectPaymentProvider,
+  TEST_CALLBACK_TOKEN,
+  type Dependencies,
+} from "./bootstrap";
 import { createApp } from "./app";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
@@ -19,6 +25,7 @@ import { ConnectChannel, ListChannels } from "./application/use-cases/manage-cha
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
+import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import type {
   CreatorRecord,
   CreatorRepositoryPort,
@@ -28,6 +35,8 @@ import type { MembershipTierRepositoryPort } from "./application/ports/membershi
 import type { ChannelRepositoryPort } from "./application/ports/channel-repository.port";
 import type { MemberRepositoryPort } from "./application/ports/member-repository.port";
 import type { SubscriptionRepositoryPort } from "./application/ports/subscription-repository.port";
+import type { WebhookEventRepositoryPort } from "./application/ports/webhook-event-repository.port";
+import type { ActivityLogRepositoryPort } from "./application/ports/activity-log-repository.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -128,6 +137,18 @@ const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   },
 };
 
+const fakeWebhookEventRepository: WebhookEventRepositoryPort = {
+  async recordIfNew() {
+    return true;
+  },
+};
+
+const fakeActivityLogRepository: ActivityLogRepositoryPort = {
+  async record() {
+    // not used
+  },
+};
+
 const fakePaymentProvider: PaymentProviderPort = {
   async createPaymentAccount() {
     return { accountId: "fake-acct" };
@@ -205,6 +226,12 @@ describe("Dependencies (composition root contract)", () => {
         fakeCreatorRepository,
         fakePaymentProvider
       ),
+      handlePaymentWebhook: new HandlePaymentWebhook(
+        fakeSubscriptionRepository,
+        fakeWebhookEventRepository,
+        fakeActivityLogRepository
+      ),
+      xenditCallbackToken: "fake-callback-token",
       sql: async () => [{ one: 1 }],
     };
 
@@ -272,6 +299,12 @@ describe("Dependencies (composition root contract)", () => {
         fakeCreatorRepository,
         fakePaymentProvider
       ),
+      handlePaymentWebhook: new HandlePaymentWebhook(
+        fakeSubscriptionRepository,
+        fakeWebhookEventRepository,
+        fakeActivityLogRepository
+      ),
+      xenditCallbackToken: "fake-callback-token",
       sql: async () => [{ one: 1 }],
     };
 
@@ -559,5 +592,148 @@ describe("bootstrap() payment provider selection", () => {
         expect(() => bootstrap()).toThrow(/half-configured/);
       });
     });
+  });
+});
+
+/**
+ * `XENDIT_CALLBACK_TOKEN` is the ONLY thing authenticating `POST
+ * /webhooks/xendit` — Xendit signs nothing, it just presents a static header —
+ * so an unset value means either "reject every genuine payment" (fails closed,
+ * but silently) or, if the comparison were ever loosened, "accept every forged
+ * one". Nothing read the variable before Task 7, so it was outside the
+ * configuration guard; these tests pin it inside.
+ */
+describe("resolveCallbackToken", () => {
+  it("uses a configured token as-is", () => {
+    expect(
+      resolveCallbackToken({ callbackToken: "xnd_real_token", nodeEnv: "production" })
+    ).toBe("xnd_real_token");
+  });
+
+  it("defaults ONLY under NODE_ENV=test", () => {
+    // The tests have to send a token they know. Same NODE_ENV mechanism
+    // resetDatabase() already relies on to avoid truncating a real database.
+    expect(resolveCallbackToken({ callbackToken: undefined, nodeEnv: "test" })).toBe(
+      TEST_CALLBACK_TOKEN
+    );
+  });
+
+  it("refuses to start when unset anywhere else, including development", () => {
+    for (const nodeEnv of ["production", "development", "staging", undefined]) {
+      expect(() => resolveCallbackToken({ callbackToken: undefined, nodeEnv })).toThrow(
+        /XENDIT_CALLBACK_TOKEN is not set/
+      );
+    }
+  });
+
+  it("treats empty and whitespace-only configuration as unset", () => {
+    // `XENDIT_CALLBACK_TOKEN=` in a .env file arrives as "", and a value pasted
+    // out of a dashboard with a trailing newline is not configuration either.
+    for (const blank of ["", "   ", "\t", "\n"]) {
+      expect(() => resolveCallbackToken({ callbackToken: blank, nodeEnv: "production" })).toThrow(
+        /XENDIT_CALLBACK_TOKEN is not set/
+      );
+      expect(resolveCallbackToken({ callbackToken: blank, nodeEnv: "test" })).toBe(
+        TEST_CALLBACK_TOKEN
+      );
+    }
+  });
+
+  it("refuses the committed test token outside tests", () => {
+    // It is in this repository in plain text, so it would authenticate a forged
+    // payment event for anyone who can read the source.
+    for (const nodeEnv of ["production", "development", undefined]) {
+      expect(() =>
+        resolveCallbackToken({ callbackToken: TEST_CALLBACK_TOKEN, nodeEnv })
+      ).toThrow(/committed to this repository/);
+    }
+  });
+
+  it("never returns an empty string, which would vouch for an empty header", () => {
+    for (const nodeEnv of ["test", "production"]) {
+      const token = (() => {
+        try {
+          return resolveCallbackToken({ callbackToken: undefined, nodeEnv });
+        } catch {
+          return "threw";
+        }
+      })();
+      expect(token.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
+  it("wires the configured token into Dependencies", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ XENDIT_CALLBACK_TOKEN: "xnd_real_token" }, () => {
+        expect(bootstrap().xenditCallbackToken).toBe("xnd_real_token");
+      });
+    });
+  });
+
+  it("falls back to the test token under bun test, so the suite can sign webhooks", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ XENDIT_CALLBACK_TOKEN: undefined }, () => {
+        expect(bootstrap().xenditCallbackToken).toBe(TEST_CALLBACK_TOKEN);
+      });
+    });
+  });
+
+  it("refuses to boot a non-test process with no callback token", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "development",
+          XENDIT_CALLBACK_TOKEN: undefined,
+          XENDIT_SECRET_KEY: undefined,
+          XENDIT_SPLIT_RULE_ID: undefined,
+        },
+        () => {
+          expect(() => bootstrap()).toThrow(/XENDIT_CALLBACK_TOKEN is not set/);
+        }
+      );
+    });
+  });
+
+  it("refuses to boot a fully-configured production process with no callback token", () => {
+    // The worst case: real money moves, and nothing can credit it.
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "production",
+          XENDIT_SECRET_KEY: "sk_live_x",
+          XENDIT_SPLIT_RULE_ID: "splitrule_1",
+          XENDIT_CALLBACK_TOKEN: undefined,
+        },
+        () => {
+          expect(() => bootstrap()).toThrow(/XENDIT_CALLBACK_TOKEN is not set/);
+        }
+      );
+    });
+  });
+
+  it("still reports the missing payment configuration first in production", () => {
+    // Ordering inside bootstrap(): with nothing configured at all, "you are
+    // about to take fake money" is the more urgent message.
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "production",
+          XENDIT_SECRET_KEY: undefined,
+          XENDIT_SPLIT_RULE_ID: undefined,
+          XENDIT_CALLBACK_TOKEN: undefined,
+        },
+        () => {
+          expect(() => bootstrap()).toThrow(/NODE_ENV is production/);
+        }
+      );
+    });
+  });
+
+  it("mentions the file an operator has to edit", () => {
+    expect(() =>
+      resolveCallbackToken({ callbackToken: undefined, nodeEnv: "production" })
+    ).toThrow(/apps\/api\/\.env/);
   });
 });
