@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { connectChannelSchema, type ConnectChannelInput } from "@diudara/shared";
-import { validate } from "../http/validate";
+import { z } from "zod";
+import { uuidParam, validate, validateParams } from "../http/validate";
 import { requireAuth, type AuthVariables } from "../http/auth.middleware";
 import type { Dependencies } from "../bootstrap";
 
@@ -9,6 +10,7 @@ export function channelRoutes(
 ) {
   const app = new Hono<{ Variables: AuthVariables }>();
   app.use("*", requireAuth(deps.tokenIssuer));
+  app.use("*", validateParams(z.object({ communityId: uuidParam })));
 
   app.post("/", validate(connectChannelSchema), async (c) => {
     const input = c.get("validated") as ConnectChannelInput;

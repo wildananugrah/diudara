@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { Hono } from "hono";
 import { z } from "zod";
 import { errorHandler } from "./error-handler";
-import { validate } from "./validate";
+import { uuidParam, validate, validateParams } from "./validate";
 
 const schema = z.object({
   name: z.string(),
@@ -78,5 +78,53 @@ describe("validate", () => {
     const body = await res.json();
     expect(body.validated).toEqual({ name: "Budi" });
     expect("extra" in body.validated).toBe(false);
+  });
+});
+
+const UUID = "8f1c2a5e-1d3b-4a6c-9e0f-2b7d4c6a8e10";
+
+function appWithParamValidation() {
+  const app = new Hono<{ Variables: { validatedParams: unknown } }>();
+  app.onError(errorHandler);
+
+  const sub = new Hono<{ Variables: { validatedParams: unknown } }>();
+  sub.use("*", validateParams(z.object({ communityId: uuidParam })));
+  sub.get("/", (c) => c.json({ params: c.get("validatedParams") }));
+  sub.patch(
+    "/:tierId",
+    validateParams(z.object({ communityId: uuidParam, tierId: uuidParam })),
+    (c) => c.json({ params: c.get("validatedParams") })
+  );
+
+  app.route("/communities/:communityId/tiers", sub);
+  return app;
+}
+
+describe("validateParams", () => {
+  it("returns 400 for a non-UUID path parameter instead of letting it reach the database", async () => {
+    const res = await appWithParamValidation().request("/communities/not-a-uuid/tiers");
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("communityId");
+  });
+
+  it("passes a well-formed parameter through", async () => {
+    const res = await appWithParamValidation().request(`/communities/${UUID}/tiers`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).params).toEqual({ communityId: UUID });
+  });
+
+  it("validates a parameter belonging to the route itself, not only the mount path", async () => {
+    // A `use("*")` middleware on a mounted sub-app sees only the PARENT's
+    // params, so route-level params must be checked on their own route.
+    const app = appWithParamValidation();
+
+    const badTier = await app.request(`/communities/${UUID}/tiers/not-a-uuid`, {
+      method: "PATCH",
+    });
+    expect(badTier.status).toBe(400);
+    expect((await badTier.json()).error).toContain("tierId");
+
+    const good = await app.request(`/communities/${UUID}/tiers/${UUID}`, { method: "PATCH" });
+    expect(good.status).toBe(200);
   });
 });

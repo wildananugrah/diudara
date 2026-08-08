@@ -5,6 +5,7 @@ import type { TokenIssuerPort } from "../application/ports/token-issuer.port";
 export interface AuthVariables {
   creatorId: string;
   validated: unknown;
+  validatedParams: unknown;
 }
 
 const BEARER_PREFIX = "Bearer ";
