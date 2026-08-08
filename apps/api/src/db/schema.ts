@@ -20,6 +20,7 @@ export const creators = pgTable(
     whatsappNumber: varchar("whatsapp_number", { length: 32 }),
     email: varchar("email", { length: 255 }),
     passwordHash: varchar("password_hash", { length: 255 }),
+    xenditAccountId: varchar("xendit_account_id", { length: 255 }),
     tierPlan: varchar("tier_plan", { length: 32 }).notNull().default("starter"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -239,3 +240,14 @@ export const eventRsvps = pgTable(
     index("event_rsvp_event_id_idx").on(table.eventId),
   ],
 );
+
+export const webhookEvents = pgTable("webhook_event", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  provider: varchar("provider", { length: 32 }).notNull(),
+  // Unique: the existence of a row means "already handled". This is the
+  // entire replay defence — Xendit's static token cannot provide one.
+  providerEventId: varchar("provider_event_id", { length: 255 }).notNull().unique(),
+  eventType: varchar("event_type", { length: 64 }).notNull(),
+  payload: jsonb("payload"),
+  processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
+});
