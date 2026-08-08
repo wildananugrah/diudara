@@ -66,6 +66,34 @@ describe("GET /c/:slug", () => {
     expect(body.tiers.length).toBe(0);
   });
 
+  it("marks an active community as accepting new members", async () => {
+    const a = app();
+    const { community } = await seedCommunity(a);
+
+    const body = await (await a.request(`/c/${community.slug}`)).json();
+    expect(body.acceptingNewMembers).toBe(true);
+  });
+
+  // Spec §9.1: a creator pausing for a holiday keeps every checkout link they
+  // have already broadcast into WhatsApp working. Before this, `paused`
+  // collapsed into `archived` and the page 404'd.
+  it("still renders a paused community, flagged as closed to new members", async () => {
+    const a = app();
+    const { token, community } = await seedCommunity(a);
+    await a.request(`/communities/${community.id}`, {
+      method: "PATCH",
+      headers: bearer(token),
+      body: JSON.stringify({ status: "paused" }),
+    });
+
+    const res = await a.request(`/c/${community.slug}`);
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.name).toBe("Kelas Bimbel Budi");
+    expect(body.acceptingNewMembers).toBe(false);
+  });
+
   it("returns 404 for an unknown slug", async () => {
     expect((await app().request("/c/tidak-ada")).status).toBe(404);
   });

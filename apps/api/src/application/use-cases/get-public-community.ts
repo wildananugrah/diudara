@@ -14,8 +14,35 @@ export interface PublicCommunity {
   name: string;
   niche: string | null;
   slug: string;
+  /**
+   * False for a `paused` community. The page still renders — see
+   * `VISIBLE_STATUSES` below — but the frontend must show a
+   * "temporarily not accepting new members" state instead of the tier picker,
+   * and StartCheckout (Task 6) must reject with 409.
+   *
+   * Deliberately NOT the raw `status`: buyers have no business knowing the
+   * platform's internal status vocabulary, and a status added later (say
+   * `suspended`) must not become part of the public contract by accident.
+   */
+  acceptingNewMembers: boolean;
   tiers: PublicTier[];
 }
+
+/**
+ * Statuses a visitor is allowed to see, per spec §9.1 (ruled 2026-08-09):
+ *
+ *   active   — page renders, checkout works.
+ *   paused   — page RENDERS, with acceptingNewMembers false; checkout rejected.
+ *              A creator pausing for a holiday keeps every checkout link they
+ *              have already broadcast into WhatsApp working, instead of telling
+ *              prospects the community does not exist.
+ *   archived — 404. Gone as far as the public is concerned.
+ *
+ * An allowlist rather than `status !== "archived"`: `community.status` is a free
+ * varchar in the schema, so a value nobody anticipated must fail closed (404)
+ * rather than publish a community by default.
+ */
+const VISIBLE_STATUSES = new Set(["active", "paused"]);
 
 export class GetPublicCommunity {
   constructor(
@@ -25,7 +52,7 @@ export class GetPublicCommunity {
 
   async execute(slug: string): Promise<PublicCommunity> {
     const community = await this.communities.findBySlug(slug);
-    if (!community || community.status !== "active") {
+    if (!community || !VISIBLE_STATUSES.has(community.status)) {
       throw new NotFoundError("community not found");
     }
 
@@ -38,6 +65,7 @@ export class GetPublicCommunity {
       name: community.name,
       niche: community.niche,
       slug: community.slug,
+      acceptingNewMembers: community.status === "active",
       tiers: all
         .filter((t) => t.isActive)
         .map((t) => ({
