@@ -39,6 +39,9 @@ function fakeRepository(existingSlugs: string[] = []) {
       Object.assign(row, patch);
       return row;
     },
+    async findBySlug() {
+      throw new Error("not used: CreateCommunity is an authenticated use-case");
+    },
   };
 
   return { repository, rows };

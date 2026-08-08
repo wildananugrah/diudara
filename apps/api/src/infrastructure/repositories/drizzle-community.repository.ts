@@ -55,6 +55,15 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
     return this.db.select().from(communities).where(eq(communities.creatorId, creatorId));
   }
 
+  async findBySlug(slug: string): Promise<CommunityRecord | null> {
+    const [row] = await this.db
+      .select()
+      .from(communities)
+      .where(eq(communities.slug, slug))
+      .limit(1);
+    return row ?? null;
+  }
+
   async slugExists(slug: string): Promise<boolean> {
     const [row] = await this.db
       .select({ id: communities.id })

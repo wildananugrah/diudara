@@ -17,6 +17,7 @@ import {
 import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
+import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
@@ -63,6 +64,7 @@ export interface Dependencies {
   connectChannel: ConnectChannel;
   listChannels: ListChannels;
   createPaymentAccount: CreatePaymentAccount;
+  getPublicCommunity: GetPublicCommunity;
   sql: DatabasePing;
 }
 
@@ -163,6 +165,8 @@ export function bootstrap(): Dependencies {
   });
   const createPaymentAccount = new CreatePaymentAccount(creatorRepository, payments);
 
+  const getPublicCommunity = new GetPublicCommunity(communityRepository, tierRepository);
+
   return {
     creatorRepository,
     tokenIssuer,
@@ -178,6 +182,7 @@ export function bootstrap(): Dependencies {
     connectChannel,
     listChannels,
     createPaymentAccount,
+    getPublicCommunity,
     sql,
   };
 }

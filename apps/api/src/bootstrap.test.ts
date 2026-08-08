@@ -17,6 +17,7 @@ import {
 } from "./application/use-cases/manage-tiers";
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
+import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import type {
   CreatorRecord,
   CreatorRepositoryPort,
@@ -37,8 +38,8 @@ import type { PaymentProviderPort } from "./application/ports/payment-provider.p
  *
  * `registerCreator`/`authenticateCreator`/`createCommunity`/`listCommunities`/
  * `updateCommunity`/`defineTier`/`listTiers`/`updateTier`/`connectChannel`/
- * `listChannels`/`createPaymentAccount` are typed as the concrete use-case
- * classes (there's only one implementation of each, so no
+ * `listChannels`/`createPaymentAccount`/`getPublicCommunity` are typed as the
+ * concrete use-case classes (there's only one implementation of each, so no
  * port exists for them) — a class with private members can't be satisfied by
  * a plain object literal without a cast, so the fakes below construct real
  * instances of those classes wrapping hand-written fake ports instead.
@@ -75,6 +76,9 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
     return false;
   },
   async update() {
+    return null;
+  },
+  async findBySlug() {
     return null;
   },
 };
@@ -165,6 +169,10 @@ describe("Dependencies (composition root contract)", () => {
       connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
       listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
+      getPublicCommunity: new GetPublicCommunity(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository
+      ),
       sql: async () => [{ one: 1 }],
     };
 
@@ -220,6 +228,10 @@ describe("Dependencies (composition root contract)", () => {
       connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
       listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
+      getPublicCommunity: new GetPublicCommunity(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository
+      ),
       sql: async () => [{ one: 1 }],
     };
 
