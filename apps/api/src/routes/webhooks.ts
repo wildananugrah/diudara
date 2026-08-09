@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { UnauthorizedError, ValidationError } from "../application/errors";
-import { verifyCallbackToken } from "../infrastructure/payments/webhook-token";
+import { verifyCallbackToken } from "../infrastructure/webhooks/webhook-token";
 import { parseXenditInvoiceCallback } from "../infrastructure/payments/xendit-webhook-payload";
 import type { Dependencies } from "../bootstrap";
 
