@@ -178,7 +178,14 @@ export const subscriptions = pgTable(
 );
 
 /**
- * One row per renewal reminder actually sent, keyed by the stage it was sent for.
+ * One row per reminder stage that has been CLAIMED for a subscription.
+ *
+ * "Claimed", not "sent": `ProcessRenewals` inserts here and only then enqueues the
+ * outbox row, so a row here means "this stage has been dealt with and must never be
+ * dealt with again". Usually that means a message was queued and delivered. It also
+ * covers the one case where the pass deliberately sends nothing — a community that has
+ * been archived — because the claim is what stops a daily pass writing one
+ * `renewal_reminder_skipped` audit row per subscription per day, for ever.
  *
  * THIS TABLE IS A LOCK, NOT A LOG. Its reason to exist is the unique
  * `(subscription_id, stage)` below: the reminder pass INSERTS here as the act of
