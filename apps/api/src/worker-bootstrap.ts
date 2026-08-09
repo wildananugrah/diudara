@@ -10,8 +10,15 @@ import {
   GrantChannelAccess,
   grantAccessOutboxHandler,
 } from "./application/use-cases/grant-channel-access";
+import {
+  RetryChannelAccessRevocation,
+  revokeAccessOutboxHandler,
+} from "./application/use-cases/revoke-channel-access";
 import { ProcessOutbox, type OutboxHandler } from "./application/use-cases/process-outbox";
-import { OUTBOX_GRANT_ACCESS } from "./application/ports/outbox-repository.port";
+import {
+  OUTBOX_GRANT_ACCESS,
+  OUTBOX_REVOKE_ACCESS,
+} from "./application/ports/outbox-repository.port";
 
 /**
  * What `apps/worker` needs to do its job. `messaging` is exposed so a test can
@@ -21,6 +28,12 @@ import { OUTBOX_GRANT_ACCESS } from "./application/ports/outbox-repository.port"
 export interface WorkerDependencies {
   processOutbox: ProcessOutbox;
   grantChannelAccess: GrantChannelAccess;
+  /**
+   * Exposed for the same reason as `grantChannelAccess`: a test must be able to prove
+   * the worker can actually complete a removal the API failed to make, rather than
+   * only that a handler is registered under the right string.
+   */
+  retryChannelAccessRevocation: RetryChannelAccessRevocation;
   messaging: MessagingProviders;
 }
 
@@ -59,13 +72,26 @@ export function bootstrapWorker(): WorkerDependencies {
     messaging.notifier
   );
 
+  // The other direction, and the half that had no retry at all: a platform removal
+  // the API could not perform. `RevokeChannelAccess` enqueues one of these instead of
+  // dropping it, so a churned member does not stay in the paid group forever with no
+  // record that a removal is owed — which is what Phase 5's churn job would otherwise
+  // inherit. Same bounded retries as every other event type.
+  const retryChannelAccessRevocation = new RetryChannelAccessRevocation(
+    new DrizzleChannelMembershipRepository(db),
+    new DrizzleActivityLogRepository(db),
+    messaging.gating
+  );
+
   const handlers = new Map<string, OutboxHandler>([
     [OUTBOX_GRANT_ACCESS, grantAccessOutboxHandler(grantChannelAccess)],
+    [OUTBOX_REVOKE_ACCESS, revokeAccessOutboxHandler(retryChannelAccessRevocation)],
   ]);
 
   return {
     processOutbox: new ProcessOutbox(new DrizzleOutboxRepository(db), handlers),
     grantChannelAccess,
+    retryChannelAccessRevocation,
     messaging,
   };
 }

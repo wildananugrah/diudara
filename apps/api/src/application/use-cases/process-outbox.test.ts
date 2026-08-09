@@ -21,6 +21,7 @@ function processor(
     maxAttempts?: number;
     baseBackoffMs?: number;
     staleProcessingMs?: number;
+    maxPassMs?: number;
   } = {}
 ) {
   return new ProcessOutbox(repository(), new Map(Object.entries(handlers)), config);
@@ -53,14 +54,28 @@ describe("ProcessOutbox", () => {
       },
     }).execute();
 
-    expect(result).toEqual({ reclaimed: 0, claimed: 1, sent: 1, retried: 0, failed: 0 });
+    expect(result).toEqual({
+      reclaimed: 0,
+      claimed: 1,
+      sent: 1,
+      retried: 0,
+      failed: 0,
+      released: 0,
+    });
     expect(seen).toEqual([{ subscriptionId: "sub-1" }]);
     expect((await rowById(id)).status).toBe("sent");
   });
 
   it("does nothing, quietly, when the outbox is empty", async () => {
     const result = await processor({}).execute();
-    expect(result).toEqual({ reclaimed: 0, claimed: 0, sent: 0, retried: 0, failed: 0 });
+    expect(result).toEqual({
+      reclaimed: 0,
+      claimed: 0,
+      sent: 0,
+      retried: 0,
+      failed: 0,
+      released: 0,
+    });
   });
 
   it("marks a row sent only after its handler RESOLVES", async () => {
@@ -94,7 +109,14 @@ describe("ProcessOutbox", () => {
       },
     }).execute();
 
-    expect(result).toEqual({ reclaimed: 0, claimed: 3, sent: 2, retried: 1, failed: 0 });
+    expect(result).toEqual({
+      reclaimed: 0,
+      claimed: 3,
+      sent: 2,
+      retried: 1,
+      failed: 0,
+      released: 0,
+    });
   });
 
   it("backs off exponentially between attempts", async () => {
@@ -198,7 +220,14 @@ describe("ProcessOutbox", () => {
       { staleProcessingMs: 60_000 }
     ).execute();
 
-    expect(result).toEqual({ reclaimed: 0, claimed: 0, sent: 0, retried: 0, failed: 0 });
+    expect(result).toEqual({
+      reclaimed: 0,
+      claimed: 0,
+      sent: 0,
+      retried: 0,
+      failed: 0,
+      released: 0,
+    });
   });
 
   it("honours the batch size", async () => {
@@ -353,6 +382,116 @@ describe("ProcessOutbox", () => {
       // unsanitised reason forged a second line in the worker's output — the very
       // thing `safeLabel` exists to stop for event types.
       expect(lines.every((line) => !line.includes("\n"))).toBe(true);
+    });
+  });
+
+  /**
+   * I2, final whole-branch review: the stale-processing clock was PER BATCH.
+   *
+   * `claimBatch` stamps `updated_at` once for all the rows it claims, and they are
+   * then handled serially with nothing touching them again. With `batchSize: 10` and
+   * a 15s adapter timeout, a degraded Telegram makes one pass outlive
+   * `staleProcessingMs`, so a second worker reclaims rows the first has not reached —
+   * and both then run them. For a `grant_access` row that is a double claim, which is
+   * one member and two invite links.
+   */
+  describe("a slow pass cannot let a second worker claim rows it still holds", () => {
+    it("touches each row as it is dequeued, so the clock measures the ROW not the batch", async () => {
+      const { id: first } = await repository().enqueue({
+        eventType: OUTBOX_GRANT_ACCESS,
+        payload: { n: 1 },
+      });
+      const { id: second } = await repository().enqueue({
+        eventType: OUTBOX_GRANT_ACCESS,
+        payload: { n: 2 },
+      });
+
+      // Both rows share a claim timestamp. The handler for the first takes long
+      // enough that, without a per-row touch, the second would already look stale by
+      // the time it is reached.
+      const stampsWhenHandled = new Map<string, Date>();
+      await processor(
+        {
+          [OUTBOX_GRANT_ACCESS]: async (payload) => {
+            const n = (payload as { n: number }).n;
+            const rows = await db.select().from(outbox);
+            for (const row of rows) {
+              if (row.status === "processing" && (row.payload as { n: number }).n === n) {
+                stampsWhenHandled.set(row.id, row.updatedAt);
+              }
+            }
+            await Bun.sleep(60);
+          },
+        },
+        { staleProcessingMs: 60_000 }
+      ).execute();
+
+      // The second row's clock was restarted when its turn came, so it is strictly
+      // later than the first's — proof the stamp is per row and not per batch.
+      expect(stampsWhenHandled.get(second)!.getTime()).toBeGreaterThan(
+        stampsWhenHandled.get(first)!.getTime()
+      );
+    });
+
+    it("releases rows it did not reach instead of holding them past the threshold", async () => {
+      for (const n of [1, 2, 3]) {
+        await repository().enqueue({ eventType: OUTBOX_GRANT_ACCESS, payload: { n } });
+      }
+
+      const handled: number[] = [];
+      const result = await processor(
+        {
+          [OUTBOX_GRANT_ACCESS]: async (payload) => {
+            handled.push((payload as { n: number }).n);
+            await Bun.sleep(40);
+          },
+        },
+        // A pass budget one row's work can exceed, so the bound fires mid-batch.
+        { batchSize: 10, maxPassMs: 30 }
+      ).execute();
+
+      // It stopped early rather than working through a batch it could not finish in
+      // time, and handed the rest back as `pending` — claimable immediately, by this
+      // worker's next pass or any other, with no window in which two hold them.
+      expect(handled.length).toBeLessThan(3);
+      expect(result.released).toBe(3 - handled.length);
+      const pending = (await db.select().from(outbox)).filter((row) => row.status === "pending");
+      expect(pending).toHaveLength(3 - handled.length);
+      // Not left in `processing`, which is what would have needed the reclaim timer.
+      expect((await db.select().from(outbox)).some((row) => row.status === "processing")).toBe(
+        false
+      );
+    });
+
+    it("does not release anything on a pass that finishes within its budget", async () => {
+      await repository().enqueue({ eventType: OUTBOX_GRANT_ACCESS, payload: {} });
+
+      const result = await processor(
+        { [OUTBOX_GRANT_ACCESS]: async () => undefined },
+        { maxPassMs: 60_000 }
+      ).execute();
+
+      expect(result).toMatchObject({ claimed: 1, sent: 1, released: 0 });
+    });
+
+    it("spends an attempt on a released row, so a row at the back cannot retry forever", async () => {
+      // A row that always lands after a slow one would otherwise be claimed and
+      // released endlessly, which is the unbounded retry this phase forbids.
+      for (const n of [1, 2]) {
+        await repository().enqueue({ eventType: OUTBOX_GRANT_ACCESS, payload: { n } });
+      }
+
+      await processor(
+        {
+          [OUTBOX_GRANT_ACCESS]: async () => {
+            await Bun.sleep(40);
+          },
+        },
+        { batchSize: 10, maxPassMs: 30 }
+      ).execute();
+
+      const rows = await db.select().from(outbox);
+      expect(rows.every((row) => row.attempts === 1)).toBe(true);
     });
   });
 

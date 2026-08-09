@@ -6,6 +6,19 @@
  */
 export const OUTBOX_GRANT_ACCESS = "grant_access";
 
+/**
+ * The `event_type` of the row a FAILED platform removal queues: "this member's
+ * entitlement is gone but they are still in the group — try the removal again".
+ *
+ * Revocation itself stays synchronous, because a creator clicking "remove" has to be
+ * told whether it worked. This is the durable record of what is still OUTSTANDING
+ * when the provider call failed. Without it the membership was marked `revoked`,
+ * `automated: false` was returned, and NOTHING ever retried — which for a creator
+ * clicking a button is honest, but for Phase 5's churn job means a churned member
+ * stays in the paid group forever with no record that a removal is owed.
+ */
+export const OUTBOX_REVOKE_ACCESS = "revoke_access";
+
 /** A row handed to a worker by `claimBatch`, already marked as being processed. */
 export interface ClaimedOutboxRow {
   id: string;
@@ -40,6 +53,34 @@ export interface OutboxRepositoryPort {
   enqueue(input: { eventType: string; payload: unknown }): Promise<{ id: string }>;
   claimBatch(limit: number): Promise<ClaimedOutboxRow[]>;
   /** Terminal success. The row is never claimed again. */
+  /**
+   * Restarts a row's staleness clock, called as the row is DEQUEUED for handling.
+   *
+   * `claimBatch` stamps `updated_at` once for the whole batch and the rows are then
+   * handled serially, so with `batchSize: 10` and a 15s adapter timeout a degraded
+   * provider makes a pass outlive `staleProcessingMs` — and a second worker reclaims
+   * rows the first has not reached yet. For a `grant_access` row that is a double
+   * claim, which is how a second invite link gets minted for one paying member.
+   *
+   * Touching per row means the clock measures "how long has THIS row been worked on",
+   * which is what the staleness threshold is actually about. `ProcessOutbox` also
+   * bounds a pass's wall time and RELEASES what it did not reach, so the rows behind
+   * a slow one are handed back deliberately rather than reclaimed out from under it.
+   */
+  touchProcessing(id: string): Promise<void>;
+  /**
+   * Returns rows this worker claimed but chose not to handle to `pending`, so they
+   * are immediately claimable by anyone — including this worker's next pass.
+   *
+   * The counterpart to bounding a pass's wall time. Leaving them `processing` would
+   * mean waiting for the reclaim timer, and the point of stopping early is to hand
+   * them back BEFORE they look stale.
+   *
+   * `attempts` is deliberately untouched: the row was claimed, and a claim spends an
+   * attempt whatever the outcome, or a row that always lands at the end of a slow
+   * batch would be retried forever.
+   */
+  releaseToPending(ids: string[]): Promise<number>;
   markSent(id: string): Promise<void>;
   /**
    * Transient failure: the row becomes claimable again at `nextAttemptAt`.

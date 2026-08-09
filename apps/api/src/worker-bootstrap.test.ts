@@ -4,7 +4,10 @@ import { db } from "./db/client";
 import { outbox } from "./db/schema";
 import { resetDatabase } from "./db/test-helpers";
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
-import { OUTBOX_GRANT_ACCESS } from "./application/ports/outbox-repository.port";
+import {
+  OUTBOX_GRANT_ACCESS,
+  OUTBOX_REVOKE_ACCESS,
+} from "./application/ports/outbox-repository.port";
 import { bootstrapWorker } from "./worker-bootstrap";
 
 beforeEach(resetDatabase);
@@ -43,6 +46,36 @@ describe("bootstrapWorker", () => {
     const row = await rowById(id);
     expect(row.lastError).toContain("subscription");
     expect(row.lastError).not.toContain("no handler is registered");
+  });
+
+  /**
+   * I3, final whole-branch review. A failed platform removal now becomes a
+   * `revoke_access` row, and this proves the WORKER actually handles it — a row
+   * nothing is wired for would fail permanently five attempts later, which is exactly
+   * the "no durable, actionable record" state the finding was about.
+   */
+  it("dispatches a real revoke_access row to the revocation retry, not to nothing", async () => {
+    const repository = new DrizzleOutboxRepository(db);
+    // A well-formed payload for a membership that does not exist. It reaches the
+    // use-case, which reports "nothing outstanding" and COMPLETES — so the row is
+    // `sent`. An unwired handler would instead leave "no handler is registered".
+    const { id } = await repository.enqueue({
+      eventType: OUTBOX_REVOKE_ACCESS,
+      payload: {
+        membershipId: "3f1c9e0a-1111-4222-8333-444455556666",
+        communityId: "3f1c9e0a-1111-4222-8333-444455556667",
+        memberId: "3f1c9e0a-1111-4222-8333-444455556668",
+      },
+    });
+
+    const result = await bootstrapWorker().processOutbox.execute();
+
+    expect(result.claimed).toBe(1);
+    expect(result.sent).toBe(1);
+    const row = await rowById(id);
+    expect(row.status).toBe("sent");
+    // Null, not an unwired-handler message: it never failed at all.
+    expect(row.lastError).toBeNull();
   });
 
   it("wires exactly the event types it knows about, and no more", async () => {

@@ -53,6 +53,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * The cap on the inbound link, matching `channel_membership.invite_link`'s
+ * varchar(512).
+ *
+ * Bounded here rather than left to the database: this value comes off an untrusted
+ * body and is used as a LOOKUP KEY, so an unbounded string is a megabyte of
+ * attacker-chosen text handed to an index scan on every delivery. A real `t.me/+…`
+ * link is well under a hundred characters, so nothing legitimate is near this. A
+ * MISS rather than an error, like every other rejection in this module: Telegram
+ * retries anything that is not a 2xx, and no retry makes an over-long link valid.
+ */
+const MAX_INVITE_LINK_LENGTH = 512;
+
+/**
  * Telegram ids are integers, and large ones (channel ids are around -1e12). They
  * arrive as JSON numbers, so a value outside the safe integer range has already
  * been corrupted by the parser and must be refused rather than stringified.
@@ -106,7 +119,13 @@ export function parseTelegramChatMemberJoin(body: unknown): TelegramChatMemberJo
   const link = update.invite_link;
   if (!isRecord(link)) return null;
   const inviteLink = link.invite_link;
-  if (typeof inviteLink !== "string" || inviteLink.length === 0) return null;
+  if (
+    typeof inviteLink !== "string" ||
+    inviteLink.length === 0 ||
+    inviteLink.length > MAX_INVITE_LINK_LENGTH
+  ) {
+    return null;
+  }
 
   return { chatId, externalMemberId, inviteLink };
 }

@@ -280,6 +280,49 @@ describe("DrizzleOutboxRepository.reclaimStaleProcessing", () => {
     expect((await rowById(id)).status).toBe("processing");
   });
 
+  it("KEEPS the previous diagnostic instead of overwriting it", async () => {
+    // A row is usually reclaimed because of what it did on an earlier attempt, so the
+    // earlier error is the clue to why its worker vanished. Overwriting it left an
+    // operator with "a worker died" and nothing about what killed it.
+    const { id } = await repository().enqueue(GRANT);
+    await repository().claimBatch(10);
+    // Due in the PAST, so the re-claim below really moves it back to `processing` —
+    // `next_attempt_at` is stamped from this clock and compared against the database's.
+    await repository().markFailed(
+      id,
+      "telegram returned 502 Bad Gateway",
+      new Date(Date.now() - 1_000)
+    );
+    expect(await repository().claimBatch(10)).toHaveLength(1);
+    await forceUpdatedAt(id, new Date(Date.now() - 10 * 60_000));
+
+    expect(await repository().reclaimStaleProcessing(new Date(Date.now() - 60_000))).toBe(1);
+
+    const row = await rowById(id);
+    // The current state comes FIRST — it is what an operator needs to read first —
+    // and the history is behind it.
+    expect(row.lastError!.startsWith("reclaimed")).toBe(true);
+    expect(row.lastError).toContain("telegram returned 502 Bad Gateway");
+  });
+
+  it("stays inside the last_error column when appending to a long diagnostic", async () => {
+    // `last_error` is varchar(500). Letting the concatenation overflow would make the
+    // reclaim UPDATE fail, stranding the row it was supposed to rescue in
+    // `processing` forever — the exact failure this method exists to fix.
+    const { id } = await repository().enqueue(GRANT);
+    await repository().claimBatch(10);
+    await repository().markFailed(id, "E".repeat(500), new Date(Date.now() - 1_000));
+    expect(await repository().claimBatch(10)).toHaveLength(1);
+    await forceUpdatedAt(id, new Date(Date.now() - 10 * 60_000));
+
+    expect(await repository().reclaimStaleProcessing(new Date(Date.now() - 60_000))).toBe(1);
+
+    const row = await rowById(id);
+    expect(row.lastError!.length).toBeLessThanOrEqual(500);
+    expect(row.lastError!.startsWith("reclaimed")).toBe(true);
+    expect((await rowById(id)).status).toBe("pending");
+  });
+
   it("never resurrects a sent or permanently failed row", async () => {
     const sent = await repository().enqueue(GRANT);
     const failed = await repository().enqueue(GRANT);
@@ -293,6 +336,68 @@ describe("DrizzleOutboxRepository.reclaimStaleProcessing", () => {
     expect((await rowById(sent.id)).status).toBe("sent");
     expect((await rowById(failed.id)).status).toBe("failed");
   });
+});
+
+/**
+ * I2, final whole-branch review. The two writes that stop a slow pass from letting a
+ * second worker claim rows the first still holds. See the port docstrings.
+ */
+describe("DrizzleOutboxRepository.touchProcessing / releaseToPending", () => {
+  it("restarts a processing row's staleness clock", async () => {
+    const { id } = await repository().enqueue(GRANT);
+    await repository().claimBatch(10);
+    const claimedAt = (await rowById(id)).updatedAt;
+    await Bun.sleep(25);
+
+    await repository().touchProcessing(id);
+
+    expect((await rowById(id)).updatedAt.getTime()).toBeGreaterThan(claimedAt.getTime());
+  });
+
+  it("does not resurrect the clock of a row that is no longer processing", async () => {
+    // A reclaim may already have fired. Touching unconditionally would undo it and
+    // leave the row looking freshly-worked-on while nobody holds it.
+    const { id } = await repository().enqueue(GRANT);
+    await repository().claimBatch(10);
+    await repository().markSent(id);
+    const sentAt = (await rowById(id)).updatedAt;
+    await Bun.sleep(25);
+
+    await repository().touchProcessing(id);
+
+    expect((await rowById(id)).updatedAt.getTime()).toBe(sentAt.getTime());
+    expect((await rowById(id)).status).toBe("sent");
+  });
+
+  it("hands claimed rows back to pending, immediately claimable, attempts intact", async () => {
+    const first = await repository().enqueue(GRANT);
+    const second = await repository().enqueue(GRANT);
+    await repository().claimBatch(10);
+
+    expect(await repository().releaseToPending([first.id, second.id])).toBe(2);
+
+    expect((await rowById(first.id)).status).toBe("pending");
+    // Claimable right now — the point of releasing rather than waiting for a reclaim.
+    const reclaimed = await repository().claimBatch(10);
+    expect(reclaimed).toHaveLength(2);
+    // The claim already spent is not refunded, or a row that always lands behind a
+    // slow one would be released and re-claimed forever.
+    expect(reclaimed.every((row) => row.attempts === 2)).toBe(true);
+  });
+
+  it("will not release a row that has already been marked sent", async () => {
+    const { id } = await repository().enqueue(GRANT);
+    await repository().claimBatch(10);
+    await repository().markSent(id);
+
+    expect(await repository().releaseToPending([id])).toBe(0);
+    expect((await rowById(id)).status).toBe("sent");
+  });
+
+  it("is a no-op for an empty list, with no statement issued", async () => {
+    expect(await repository().releaseToPending([])).toBe(0);
+  });
+
 });
 
 /**

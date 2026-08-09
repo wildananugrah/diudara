@@ -177,6 +177,12 @@ function harness(
     async claimBatch() {
       throw new Error("not used");
     },
+    async touchProcessing() {
+      // not used
+    },
+    async releaseToPending() {
+      return 0;
+    },
     async markSent() {
       throw new Error("not used");
     },

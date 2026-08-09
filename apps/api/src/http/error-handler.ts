@@ -1,7 +1,7 @@
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { AppError } from "../application/errors";
-import { firstLineWithoutParams } from "../application/log-safety";
+import { redactLinks, safeErrorSummary } from "../application/log-safety";
 
 export function errorHandler(err: Error, c: Context): Response {
   if (err instanceof AppError) {
@@ -23,28 +23,37 @@ export function errorHandler(err: Error, c: Context): Response {
   // password hash. `console.error("...", err)` printed that to stderr, breaking
   // "password hashes never leave the repository layer" via the log instead of
   // the response body. Only the error's name and a sanitised first line go out.
-  console.error(`unhandled error: ${err?.name ?? "Error"}: ${safeSummary(err?.message)}`);
+  console.error(`unhandled error: ${err?.name ?? "Error"}: ${safeSummary(err)}`);
   return c.json({ error: "internal server error" }, 500);
 }
 
 const MAX_LOGGED_MESSAGE_LENGTH = 200;
 
 /**
- * The first line of `message`, with anything from a `params:` marker onwards
- * removed, truncated to a fixed length.
+ * One log-safe line for an unexpected error: the cause chain summarised, invite
+ * links and tokens redacted, then truncated.
  *
- * The first-line/`params:` rule itself lives in `application/log-safety.ts`,
- * beside the cause-walking summariser the outbox worker uses — one
- * implementation, because a driver error reaches a log line from both processes
- * and the rule must not drift between them. The truncation stays here: this
- * caller has no `outbox.last_error` column to fill, so it is stricter.
+ * SYMMETRICAL WITH `ProcessOutbox` BY CONSTRUCTION — both now call
+ * `redactLinks(safeErrorSummary(err))`, and that is the point. This guard used to
+ * apply `firstLineWithoutParams` to `err.message` alone, so it differed from the
+ * worker's in two ways that both mattered:
+ *
+ *   - it did not walk `.cause`, so a drizzle `DrizzleQueryError` logged its SQL
+ *     statement and threw away the constraint violation behind it;
+ *   - it did not apply `redactLinks`, so a provider error that interpolated an
+ *     invite link (or a Bot API URL, which carries the bot token in its PATH) put
+ *     that credential straight into the API's log.
+ *
+ * Two processes log the same errors and the rule must not drift between them. The
+ * truncation stays local: this caller has no `outbox.last_error` column to fill, so
+ * it is stricter than the worker's.
  */
-function safeSummary(message: unknown): string {
-  if (typeof message !== "string" || message.length === 0) {
+function safeSummary(err: unknown): string {
+  if (!(err instanceof Error)) {
     return "(no message)";
   }
-  const beforeParams = firstLineWithoutParams(message);
-  return beforeParams.length > MAX_LOGGED_MESSAGE_LENGTH
-    ? `${beforeParams.slice(0, MAX_LOGGED_MESSAGE_LENGTH)}… (truncated)`
-    : beforeParams;
+  const summary = redactLinks(safeErrorSummary(err));
+  return summary.length > MAX_LOGGED_MESSAGE_LENGTH
+    ? `${summary.slice(0, MAX_LOGGED_MESSAGE_LENGTH)}… (truncated)`
+    : summary;
 }

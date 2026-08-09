@@ -189,6 +189,12 @@ const fakeOutboxRepository: OutboxRepositoryPort = {
   async claimBatch() {
     return [];
   },
+  async touchProcessing() {
+    // not used
+  },
+  async releaseToPending() {
+    return 0;
+  },
   async markSent() {
     // not used
   },
@@ -367,7 +373,8 @@ describe("Dependencies (composition root contract)", () => {
         fakeCommunityRepository,
         fakeChannelMembershipRepository,
         fakeActivityLogRepository,
-        new Map([["telegram", fakeMessagingProvider]])
+        new Map([["telegram", fakeMessagingProvider]]),
+        fakeOutboxRepository
       ),
       recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
       messaging: {
@@ -460,7 +467,8 @@ describe("Dependencies (composition root contract)", () => {
         fakeCommunityRepository,
         fakeChannelMembershipRepository,
         fakeActivityLogRepository,
-        new Map([["telegram", fakeMessagingProvider]])
+        new Map([["telegram", fakeMessagingProvider]]),
+        fakeOutboxRepository
       ),
       recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
       messaging: {

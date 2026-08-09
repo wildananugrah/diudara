@@ -30,6 +30,7 @@ import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/dri
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
 import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
+import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
 import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
@@ -803,7 +804,12 @@ export function bootstrap(): Dependencies {
     communityRepository,
     channelMembershipRepository,
     new DrizzleActivityLogRepository(db),
-    messaging.gating
+    messaging.gating,
+    // A removal the provider could not perform is enqueued here, and apps/worker
+    // retries it — see OUTBOX_REVOKE_ACCESS. The POOLED client: this use-case is
+    // synchronous and opens no transaction, so an outbox failure must not be able to
+    // undo a revocation the creator has already been told about.
+    new DrizzleOutboxRepository(db)
   );
 
   // The other half of revocation, and the half that was missing: without a

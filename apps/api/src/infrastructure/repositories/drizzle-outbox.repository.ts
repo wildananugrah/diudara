@@ -1,4 +1,4 @@
-import { and, eq, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { outbox } from "../../db/schema";
 import type {
@@ -102,6 +102,30 @@ export class DrizzleOutboxRepository implements OutboxRepositoryPort {
     }));
   }
 
+  /**
+   * The heartbeat. One narrow UPDATE, predicated on the row still being `processing`
+   * so a reclaim that already fired is not silently undone.
+   */
+  async touchProcessing(id: string): Promise<void> {
+    await this.db
+      .update(outbox)
+      .set({ updatedAt: new Date() })
+      .where(and(eq(outbox.id, id), eq(outbox.status, "processing")));
+  }
+
+  /** See the port docstring. `attempts` is deliberately untouched. */
+  async releaseToPending(ids: string[]): Promise<number> {
+    if (ids.length === 0) {
+      return 0;
+    }
+    const released = await this.db
+      .update(outbox)
+      .set({ status: "pending", updatedAt: new Date() })
+      .where(and(inArray(outbox.id, ids), eq(outbox.status, "processing")))
+      .returning({ id: outbox.id });
+    return released.length;
+  }
+
   async markSent(id: string): Promise<void> {
     await this.db
       .update(outbox)
@@ -146,7 +170,17 @@ export class DrizzleOutboxRepository implements OutboxRepositoryPort {
   async reclaimStaleProcessing(stuckBefore: Date): Promise<number> {
     const reclaimed = await this.db
       .update(outbox)
-      .set({ status: "pending", lastError: RECLAIM_NOTE, updatedAt: new Date() })
+      .set({
+        status: "pending",
+        // PREPENDED to whatever was there, not written over it. A row is usually
+        // reclaimed BECAUSE of what it did on an earlier attempt — a provider error,
+        // a validation failure — and that text is the only clue why its worker
+        // vanished. Overwriting it left an operator with a note saying "a worker
+        // died" and nothing about what killed it. Truncated from the left-hand end
+        // so the newest state survives the varchar(500) cap.
+        lastError: sql`left(${RECLAIM_NOTE} || coalesce(' | previously: ' || ${outbox.lastError}, ''), ${MAX_ERROR_LENGTH})`,
+        updatedAt: new Date(),
+      })
       .where(and(eq(outbox.status, "processing"), lt(outbox.updatedAt, stuckBefore)))
       .returning({ id: outbox.id });
     return reclaimed.length;
@@ -154,10 +188,10 @@ export class DrizzleOutboxRepository implements OutboxRepositoryPort {
 }
 
 /**
- * Written to `last_error` by a reclaim. It replaces whatever diagnostic was
- * there because the row's CURRENT state is what an operator needs: a row back in
- * `pending` after its worker vanished is a different situation from one that
- * failed cleanly, and a crash leaves no error message of its own.
+ * Written to `last_error` by a reclaim, in FRONT of whatever diagnostic was already
+ * there: the row's current state is what an operator needs first, and a crash leaves
+ * no message of its own, but the previous attempt's error is usually the reason the
+ * worker died and must not be thrown away.
  */
 const RECLAIM_NOTE =
   "reclaimed: this row was left in 'processing' by a worker that never reported back " +

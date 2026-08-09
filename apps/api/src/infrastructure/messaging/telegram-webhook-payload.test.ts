@@ -96,6 +96,30 @@ describe("parseTelegramChatMemberJoin", () => {
     }
   });
 
+  it("returns null for an invite_link longer than the column can hold", () => {
+    // MINORS, final whole-branch review: cap the inbound link.
+    //
+    // It comes off an untrusted body and is used as a LOOKUP KEY, so an unbounded
+    // string is a megabyte of attacker-chosen text handed to an index scan on every
+    // delivery — and it exceeds `channel_membership.invite_link`'s varchar(512)
+    // anyway. 512 is the boundary; a real `t.me/+…` link is under a hundred.
+    expect(
+      parseTelegramChatMemberJoin(
+        join({ inviteLink: { invite_link: `https://t.me/+${"A".repeat(600)}` } })
+      )
+    ).toBeNull();
+    expect(
+      parseTelegramChatMemberJoin(join({ inviteLink: { invite_link: "A".repeat(513) } }))
+    ).toBeNull();
+
+    // Exactly at the cap is still accepted — the bound must not reject a legitimate
+    // link one character short of the column's width.
+    const atCap = "A".repeat(512);
+    expect(
+      parseTelegramChatMemberJoin(join({ inviteLink: { invite_link: atCap } }))
+    ).toMatchObject({ inviteLink: atCap });
+  });
+
   it("returns null for an update that is not a chat_member at all", () => {
     for (const body of [
       {},
