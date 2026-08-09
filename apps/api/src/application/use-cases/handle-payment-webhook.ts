@@ -5,6 +5,26 @@ import type { SubscriptionRepositoryPort } from "../ports/subscription-repositor
 /** The one provider status that turns money into access. Compared exactly. */
 const PAID = "PAID";
 
+/**
+ * Renders an attacker-chosen string safe to put in a log line.
+ *
+ * `status` and `eventType` reach these logs straight off an untrusted webhook
+ * body. The parser bounds their LENGTH but not their characters, so a status of
+ * `"PAID\n[security] nothing to see here"` would otherwise forge a second log
+ * line — and these lines are what an operator reads when payments look wrong.
+ * Everything outside a conservative identifier set becomes `?`, so the value
+ * stays diagnosable without becoming trustworthy.
+ *
+ * This is a LABEL sanitiser, not a redactor: it must only ever be applied to
+ * provider enum values and our own ids. The raw payload belongs on
+ * `webhook_event.payload` and nowhere else — Xendit callbacks carry the payer's
+ * name, email and phone number, and Phase 2 found argon2id hashes leaking
+ * through raw error logging.
+ */
+function safeLabel(value: string): string {
+  return value.slice(0, 64).replace(/[^A-Za-z0-9_.:-]/g, "?");
+}
+
 export interface HandlePaymentWebhookInput {
   /** Per-delivery replay key, derived by the adapter that parsed the payload. */
   providerEventId: string;
@@ -77,7 +97,7 @@ export class HandlePaymentWebhook {
       console.warn(
         `[security] webhook amount mismatch: provider=xendit ` +
           `transaction=${transaction.id} expected=${transaction.amount} ` +
-          `claimed=${input.amount} event=${input.eventType}`
+          `claimed=${input.amount} event=${safeLabel(input.eventType)}`
       );
       throw new ValidationError("webhook amount does not match our record");
     }
@@ -97,6 +117,22 @@ export class HandlePaymentWebhook {
         // Recorded (so a replay of THIS event is a no-op) but not acted on.
         // Phase 3 stops at the first successful payment; expiry/failure handling
         // is a later phase's job.
+        //
+        // Probed before this line existed: a `SETTLED` delivery returned HTTP
+        // 200, left the subscription `pending`, wrote the webhook_event row, and
+        // printed NOTHING. `EXPIRED`, `SETTLED`, a typo, and a status Xendit adds
+        // next year were all indistinguishable from success on the wire. Given
+        // that XenditPaymentAdapter is explicitly unverified against the live
+        // API, "a real payment status we do not recognise" is the most likely
+        // production failure — and it was the one this system could not report.
+        //
+        // Ids and enum values only, sanitised: never the raw payload.
+        console.warn(
+          `[payments] webhook recorded but NOT actioned: provider=xendit ` +
+            `transaction=${transaction.id} subscription=${transaction.subscriptionId} ` +
+            `status=${safeLabel(input.status)} event=${safeLabel(input.eventType)} ` +
+            `activated=false (only ${PAID} activates)`
+        );
         return { activated: false, duplicate: false };
       }
 

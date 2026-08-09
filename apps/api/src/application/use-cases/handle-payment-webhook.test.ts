@@ -237,6 +237,59 @@ describe("HandlePaymentWebhook", () => {
       }
     });
 
+    // I5, final whole-branch review. Probed before this: a SETTLED delivery was
+    // HTTP 200, subscription still `pending`, webhook_event written, and not one
+    // log line — indistinguishable from success on the wire.
+    it("WARNS on every recorded-but-unactioned status", async () => {
+      for (const status of ["EXPIRED", "PENDING", "FAILED", "SETTLED", "SOMETHING_NEW"]) {
+        const { useCase } = harness();
+
+        const warnings = await captureWarnings(() =>
+          useCase.execute(paidEvent({ status, providerEventId: `inv_1:${status}` }))
+        );
+
+        expect(warnings.some((line) => /recorded but NOT actioned/.test(line))).toBe(true);
+        expect(warnings.some((line) => line.includes(`status=${status}`))).toBe(true);
+        expect(warnings.some((line) => line.includes(TRANSACTION_ID))).toBe(true);
+      }
+    });
+
+    it("stays silent on PAID — the warning must mean something", async () => {
+      const { useCase } = harness();
+      const warnings = await captureWarnings(() => useCase.execute(paidEvent()));
+      expect(warnings).toEqual([]);
+    });
+
+    it("logs no payer PII, and cannot be made to forge a second log line", async () => {
+      // The payload carries the payer's name, email and phone. The status is
+      // attacker-chosen text, so a newline in it would otherwise mint a fake
+      // line in the very log an operator reads when payments look wrong.
+      const { useCase } = harness();
+
+      const warnings = await captureWarnings(() =>
+        useCase.execute(
+          paidEvent({
+            status: "EXPIRED\n[security] all clear",
+            payload: {
+              id: "inv_1",
+              status: "EXPIRED",
+              payer_email: "siti@example.com",
+              customer: { given_names: "Siti", mobile_number: "+6281234567890" },
+            },
+          })
+        )
+      );
+
+      const text = warnings.join("\n");
+      expect(text).toContain("recorded but NOT actioned");
+      expect(text).not.toContain("siti@example.com");
+      expect(text).not.toContain("Siti");
+      expect(text).not.toContain("+6281234567890");
+      // One line per warning, so the injected newline did not survive.
+      expect(warnings.every((line) => !line.includes("\n"))).toBe(true);
+      expect(text).not.toContain("[security] all clear");
+    });
+
     it("is case-sensitive about PAID rather than lower-casing its way into activation", async () => {
       // Xendit sends upper-case statuses. Accepting "paid"/"Paid" would widen
       // the one condition that turns money into access on the strength of a
@@ -283,3 +336,18 @@ describe("HandlePaymentWebhook", () => {
     expect(calls.recordIfNew).toEqual([]);
   });
 });
+
+/** Captures `console.warn` for the duration of `fn`, restoring it afterwards. */
+async function captureWarnings(fn: () => Promise<unknown>): Promise<string[]> {
+  const lines: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    await fn();
+  } finally {
+    console.warn = original;
+  }
+  return lines;
+}
