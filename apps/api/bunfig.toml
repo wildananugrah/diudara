@@ -1,0 +1,10 @@
+# Bun reads bunfig.toml from the CURRENT WORKING DIRECTORY and does not search
+# upwards, and `bun run test` at the repo root runs each workspace's `bun test` from
+# that workspace's own directory. So the root bunfig.toml — which has carried this
+# preload since Phase 2 — never applied to the command developers actually use, and
+# without this file the primary path would be the one with no test isolation.
+#
+# Same preload as the root's, reached by a different relative path. See
+# src/test-env-preload.ts.
+[test]
+preload = ["./src/test-env-preload.ts"]

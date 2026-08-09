@@ -1,4 +1,10 @@
 [test]
-# Loads apps/api/.env so `bun test` works from the repo root, not just apps/api.
+# Loads apps/api/.env and gives the run a database of its own, so `bun test` works
+# from the repo root and cannot collide with another run or with a running worker.
 # See apps/api/src/test-env-preload.ts.
+#
+# DUPLICATED in apps/api/bunfig.toml on purpose: Bun reads bunfig.toml from the
+# current working directory and does not search upwards, and `bun run test` runs each
+# workspace's `bun test` from that workspace's own directory. This file alone would
+# leave the primary command with no isolation.
 preload = ["./apps/api/src/test-env-preload.ts"]

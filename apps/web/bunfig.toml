@@ -1,6 +1,10 @@
 [test]
 # Registers a happy-dom environment before tests run, so
-# @testing-library/react has document/window to render into. Bun resolves
-# the nearest bunfig.toml walking up from cwd, so this file — not the root
-# one — applies when `bun test` runs with apps/web as its working directory.
+# @testing-library/react has document/window to render into.
+#
+# This file — not the root one — applies when `bun test` runs with apps/web as its
+# working directory, and the reason is stronger than "nearest wins": Bun reads
+# bunfig.toml from the CURRENT WORKING DIRECTORY and does not search upwards at all
+# (measured in Task 8, by removing apps/api/bunfig.toml and watching the root's
+# preload not run). So a workspace that needs a preload needs its own bunfig.
 preload = ["./src/test/happy-dom.setup.ts"]

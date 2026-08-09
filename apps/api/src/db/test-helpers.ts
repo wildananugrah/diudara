@@ -1,4 +1,5 @@
 import { db } from "./client";
+import { isolationIsEnabled } from "./test-database";
 import {
   eventRsvps,
   events,
@@ -24,6 +25,14 @@ import {
  * Spec 12 deploys this codebase to a VPS via Docker Compose, where a stray
  * `docker compose run api bun test` or a CI job holding production env would
  * otherwise wipe the live database. Bun sets NODE_ENV=test inside `bun test`.
+ *
+ * SECOND GUARD, added with per-run test databases (Task 8): NODE_ENV=test is not
+ * enough, because a `bun test` that somehow ran without the preload has
+ * NODE_ENV=test and a DATABASE_URL pointing at the DEVELOPMENT database, and this
+ * function would truncate it. That is not hypothetical — it is what every test run
+ * did before Task 8, and `drizzle/README.md` records the migration failure it caused.
+ * The preload publishes the name of the database it created; without that name, an
+ * un-isolated run now says so instead of quietly wiping somebody's local data.
  */
 export function assertTestEnvironment() {
   if (process.env.NODE_ENV !== "test") {
@@ -31,6 +40,16 @@ export function assertTestEnvironment() {
       `resetDatabase() refused: NODE_ENV is not 'test' (got ${
         process.env.NODE_ENV === undefined ? "undefined" : `'${process.env.NODE_ENV}'`
       })`,
+    );
+  }
+
+  if (isolationIsEnabled(process.env) && !process.env.DIUDARA_TEST_DATABASE) {
+    throw new Error(
+      "resetDatabase() refused: this run has no database of its own, so truncating " +
+        "would destroy whatever DATABASE_URL points at (usually your development " +
+        "database). The test preload creates one — check that `bunfig.toml` in the " +
+        "directory you ran from has `[test] preload = [\"…/test-env-preload.ts\"]`. " +
+        "To run against DATABASE_URL on purpose, set DIUDARA_TEST_DB_ISOLATION=off.",
     );
   }
 }
