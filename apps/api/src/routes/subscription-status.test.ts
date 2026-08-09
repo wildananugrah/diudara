@@ -2,6 +2,9 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { resetDatabase } from "../db/test-helpers";
+import { eq } from "drizzle-orm";
+import { db } from "../db/client";
+import { transactions } from "../db/schema";
 import { bearer, signupAndGetToken } from "./test-support";
 
 beforeEach(resetDatabase);
@@ -43,14 +46,27 @@ async function checkout(a: ReturnType<typeof app>) {
     })
   ).json();
 
-  return { subscriptionId: result.subscriptionId as string, externalId: result.transactionId as string };
+  // The webhook now verifies `body.id` against the invoice id StartCheckout
+  // recorded, so a test delivery has to echo back the real one rather than an
+  // invented "evt-1". Read from the column, not from the fake adapter, because
+  // that is what the handler compares against.
+  const [tx] = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.id, result.transactionId));
+
+  return {
+    subscriptionId: result.subscriptionId as string,
+    externalId: result.transactionId as string,
+    invoiceId: tx.gatewayReferenceId!,
+  };
 }
 
-function postWebhook(a: ReturnType<typeof app>, externalId: string) {
+function postWebhook(a: ReturnType<typeof app>, externalId: string, invoiceId: string) {
   return a.request("/webhooks/xendit", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-CALLBACK-TOKEN": TOKEN },
-    body: JSON.stringify({ id: "evt-status-1", external_id: externalId, status: "PAID", amount: 50000 }),
+    body: JSON.stringify({ id: invoiceId, external_id: externalId, status: "PAID", amount: 50000 }),
   });
 }
 
@@ -68,9 +84,9 @@ describe("GET /c/subscription/:subscriptionId/status", () => {
 
   it("flips to active once the webhook activates the subscription", async () => {
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
-    expect((await postWebhook(a, externalId)).status).toBe(200);
+    expect((await postWebhook(a, externalId, invoiceId)).status).toBe(200);
 
     const body = await (await a.request(`/c/subscription/${subscriptionId}/status`)).json();
     expect(body.status).toBe("active");
@@ -132,8 +148,8 @@ describe("GET /c/subscription/:subscriptionId/status", () => {
 
   it("leaks nothing even once active — same projection after activation", async () => {
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
-    await postWebhook(a, externalId);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
+    await postWebhook(a, externalId, invoiceId);
 
     const text = await (await a.request(`/c/subscription/${subscriptionId}/status`)).text();
     expect(text).toBe(JSON.stringify({ status: "active" }));

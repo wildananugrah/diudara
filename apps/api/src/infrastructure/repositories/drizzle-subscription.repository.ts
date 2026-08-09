@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { membershipTiers, subscriptions, transactions } from "../../db/schema";
 import type {
@@ -19,6 +19,12 @@ import { computeNextBillingDate } from "../../domain/billing-cycle";
  * of the plain 404 an unknown external id deserves.
  */
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * `transaction.status` as created by `createTransaction` (the column's own
+ * default). The only status `markPaid` will settle — see its docstring.
+ */
+const PENDING = "pending";
 
 export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
@@ -45,6 +51,27 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
       })
       .returning();
     return row;
+  }
+
+  /**
+   * Conditional on the column still being empty — see the port docstring. Also
+   * bumps `updatedAt`, because `transaction` has no BEFORE UPDATE trigger.
+   */
+  async attachGatewayReference(
+    transactionId: string,
+    gatewayReferenceId: string
+  ): Promise<boolean> {
+    if (!UUID_PATTERN.test(transactionId)) {
+      return false;
+    }
+    const rows = await this.db
+      .update(transactions)
+      .set({ gatewayReferenceId, updatedAt: new Date() })
+      .where(
+        and(eq(transactions.id, transactionId), isNull(transactions.gatewayReferenceId))
+      )
+      .returning({ id: transactions.id });
+    return rows.length > 0;
   }
 
   /**
@@ -98,12 +125,20 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
    * `startedAt` is only written on the FIRST activation: churn timing (spec 8.3)
    * measures from the day the membership began, so a renewal must not move it.
    * The read and the write are in the same transaction, so there is no race.
+   *
+   * `status = 'pending'` is IN the UPDATE predicate, which makes this the second
+   * line of replay defence and the only one that does not depend on a provider
+   * field. Probed before it was: 12 concurrent PAID deliveries with 12 DIFFERENT
+   * `body.id` values produced 12 `activity_log` "joined" rows — 12 WhatsApp
+   * invites in Phase 4 — because `provider_event_id` derives from `body.id` and
+   * every one of them was distinct. Zero affected rows is now a no-op (`null`),
+   * not an error and never a second activation.
    */
   async markPaid(input: {
     transactionId: string;
     gatewayReferenceId: string;
     paidAt: Date;
-  }): Promise<MarkPaidResult> {
+  }): Promise<MarkPaidResult | null> {
     return this.db.transaction(async (tx) => {
       const now = new Date();
 
@@ -115,10 +150,23 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
           paidAt: input.paidAt,
           updatedAt: now,
         })
-        .where(eq(transactions.id, input.transactionId))
+        .where(and(eq(transactions.id, input.transactionId), eq(transactions.status, PENDING)))
         .returning();
       if (!transaction) {
-        throw new Error(`markPaid: transaction ${input.transactionId} not found`);
+        // Zero rows means either "no such transaction" or "not pending any
+        // more". Only the first is a programming error; the second is the
+        // duplicate-activation case this predicate exists to absorb, so it is
+        // worth one extra read inside the already-open transaction to tell an
+        // operator which happened.
+        const [existing] = await tx
+          .select({ status: transactions.status })
+          .from(transactions)
+          .where(eq(transactions.id, input.transactionId))
+          .limit(1);
+        if (!existing) {
+          throw new Error(`markPaid: transaction ${input.transactionId} not found`);
+        }
+        return null;
       }
 
       // The tier carries the billing cycle, and the community the audit entry

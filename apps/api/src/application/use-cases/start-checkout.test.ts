@@ -34,6 +34,7 @@ describe("StartCheckout — funds routing", () => {
    */
   it("wires the creator's own xenditAccountId into the invoice, not any hardcoded value", async () => {
     const CREATOR_ACCOUNT_ID = "acct-creator-xyz";
+    const attached: { transactionId: string; gatewayReferenceId: string }[] = [];
 
     const communities: CommunityRepositoryPort = {
       async create() {
@@ -130,6 +131,10 @@ describe("StartCheckout — funds routing", () => {
       async findTransactionByExternalId() {
         return null;
       },
+      async attachGatewayReference(transactionId, gatewayReferenceId) {
+        attached.push({ transactionId, gatewayReferenceId });
+        return true;
+      },
       async markPaid() {
         throw new Error("not used");
       },
@@ -183,5 +188,13 @@ describe("StartCheckout — funds routing", () => {
     expect(result.subscriptionId).toBe("subscription-1");
     expect(payments.invoices).toHaveLength(1);
     expect(payments.invoices[0].forAccountId).toBe(CREATOR_ACCOUNT_ID);
+
+    // I2, final whole-branch review: the provider's invoice id has to be
+    // persisted against OUR transaction, or the webhook has nothing to check
+    // `body.id` against and the whole replay defence rests on an unverified
+    // field. "fake-inv-1" is what FakePaymentAdapter returns.
+    expect(attached).toEqual([
+      { transactionId: "transaction-1", gatewayReferenceId: "fake-inv-1" },
+    ]);
   });
 });

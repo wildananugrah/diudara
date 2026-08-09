@@ -19,7 +19,12 @@ function transactionRecord(overrides: Partial<TransactionRecord> = {}): Transact
     amount: 50000,
     paymentMethod: "invoice",
     status: "pending",
-    gatewayReferenceId: null,
+    // Written by StartCheckout from the provider's createInvoice result, and the
+    // value `paidEvent()` below echoes back as `body.id`. It is NOT null by
+    // default any more: the handler now verifies `body.id` against it, so a null
+    // here would mean "checkout never recorded the invoice id", which is its own
+    // (tested) rejection path.
+    gatewayReferenceId: "inv_1",
     paidAt: null,
     createdAt: new Date("2026-08-09T09:00:00Z"),
     updatedAt: new Date("2026-08-09T09:00:00Z"),
@@ -40,6 +45,8 @@ function harness(
     transaction?: TransactionRecord | null;
     alreadySeen?: boolean;
     failMarkPaid?: boolean;
+    /** `markPaid` returns null: the transaction was no longer `pending`. */
+    alreadySettled?: boolean;
   } = {}
 ) {
   const calls: Calls = {
@@ -67,11 +74,17 @@ function harness(
       order.push("find");
       return transaction;
     },
-    async markPaid(input): Promise<MarkPaidResult> {
+    async attachGatewayReference() {
+      throw new Error("not used");
+    },
+    async markPaid(input): Promise<MarkPaidResult | null> {
       calls.markPaid.push(input.transactionId);
       order.push("markPaid");
       if (options.failMarkPaid === true) {
         throw new Error("activation blew up");
+      }
+      if (options.alreadySettled === true) {
+        return null;
       }
       return {
         transaction: transactionRecord({ status: "success", paidAt: input.paidAt }),
@@ -176,6 +189,95 @@ describe("HandlePaymentWebhook", () => {
     const { useCase } = harness();
     const result = await useCase.execute(paidEvent());
     expect(result.activated).toBe(true);
+  });
+
+  /**
+   * I2, final whole-branch review. `provider_event_id` is derived from
+   * `body.id`, so before this check the ENTIRE replay defence rested on a field
+   * we never verified against anything of ours. Probed: 12 concurrent PAID
+   * deliveries with 12 distinct `body.id` values → 12 `activity_log` "joined"
+   * rows, all HTTP 200. In Phase 4 that is 12 WhatsApp invites.
+   */
+  describe("verifying body.id against the invoice id we stored at checkout", () => {
+    it("400s an invoice id that is not the one we recorded, and never activates", async () => {
+      const { useCase, calls, order } = harness();
+
+      await expect(
+        useCase.execute(paidEvent({ invoiceId: "forged-inv-7", providerEventId: "forged-inv-7:PAID" }))
+      ).rejects.toBeInstanceOf(ValidationError);
+
+      // Rejected on a read, before anything is written — so a forger cannot even
+      // consume the event id a genuine delivery needs.
+      expect(order).toEqual(["find"]);
+      expect(calls.recordIfNew).toEqual([]);
+      expect(calls.markPaid).toEqual([]);
+      expect(calls.activity).toEqual([]);
+    });
+
+    it("is checked BEFORE the amount, because the event id derives from it", async () => {
+      const { useCase } = harness();
+      const warnings = await captureWarnings(() =>
+        useCase
+          .execute(paidEvent({ invoiceId: "forged-inv-7", amount: 1 }))
+          .catch(() => undefined)
+      );
+      expect(warnings.some((line) => /invoice id mismatch/.test(line))).toBe(true);
+      expect(warnings.some((line) => /amount mismatch/.test(line))).toBe(false);
+    });
+
+    it("fails CLOSED when checkout never recorded an invoice id at all", async () => {
+      // Trusting body.id when we have nothing to compare it against is exactly
+      // the hole this closes, so a null reference must reject rather than adopt.
+      const { useCase, calls } = harness({
+        transaction: transactionRecord({ gatewayReferenceId: null }),
+      });
+
+      await expect(useCase.execute(paidEvent())).rejects.toBeInstanceOf(ValidationError);
+      expect(calls.recordIfNew).toEqual([]);
+      expect(calls.markPaid).toEqual([]);
+    });
+
+    it("logs the mismatch with ids only, sanitised", async () => {
+      const { useCase } = harness();
+      const warnings = await captureWarnings(() =>
+        useCase
+          .execute(
+            paidEvent({
+              invoiceId: "forged\n[security] fine",
+              payload: { payer_email: "siti@example.com" },
+            })
+          )
+          .catch(() => undefined)
+      );
+
+      const text = warnings.join("\n");
+      expect(text).toContain("invoice id mismatch");
+      expect(text).toContain("expected=inv_1");
+      expect(text).not.toContain("siti@example.com");
+      expect(warnings.every((line) => !line.includes("\n"))).toBe(true);
+    });
+  });
+
+  // I2(b). The second line of defence, and the only one that does not depend on
+  // a provider field: even a delivery that passes every check above must not
+  // activate a transaction that is already `success`.
+  it("does not activate twice when markPaid reports the transaction is already settled", async () => {
+    const { useCase, calls, order } = harness({ alreadySettled: true });
+
+    const result = await useCase.execute(paidEvent());
+
+    expect(result).toEqual({ activated: false, duplicate: true });
+    expect(calls.markPaid).toEqual([TRANSACTION_ID]);
+    // The audit entry is what Phase 4 turns into a WhatsApp invite.
+    expect(calls.activity).toEqual([]);
+    expect(order).toEqual(["find", "uow:begin", "recordIfNew", "markPaid", "uow:commit"]);
+  });
+
+  it("says out loud that it saw an already-settled transaction", async () => {
+    const { useCase } = harness({ alreadySettled: true });
+    const warnings = await captureWarnings(() => useCase.execute(paidEvent()));
+    expect(warnings.some((line) => /already-settled transaction/.test(line))).toBe(true);
+    expect(warnings.some((line) => line.includes(TRANSACTION_ID))).toBe(true);
   });
 
   describe("order of operations", () => {

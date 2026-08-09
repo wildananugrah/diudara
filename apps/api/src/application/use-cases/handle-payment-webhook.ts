@@ -89,6 +89,37 @@ export class HandlePaymentWebhook {
       throw new NotFoundError("unknown transaction");
     }
 
+    // Checked BEFORE the amount, because this is the anchor the replay guard
+    // itself hangs from: `provider_event_id` is derived from `body.id`, so until
+    // `body.id` is verified against a reference WE stored at checkout, an
+    // attacker (or a confused provider) can mint a fresh event id at will and
+    // walk straight past the UNIQUE constraint. Probed before this check: 12
+    // concurrent PAID deliveries with 12 distinct `body.id`s all returned 200 and
+    // wrote 12 `activity_log` "joined" rows.
+    if (transaction.gatewayReferenceId === null) {
+      // StartCheckout writes this two statements after creating the row, so an
+      // absent reference means that write failed. Fail CLOSED and say so: the
+      // alternative — trusting `body.id` when we have nothing to compare it
+      // against — is exactly the hole this check exists to close.
+      console.warn(
+        `[security] webhook for a transaction with no gateway reference: provider=xendit ` +
+          `transaction=${transaction.id} event=${safeLabel(input.eventType)} — checkout ` +
+          "never recorded the provider invoice id, so this delivery cannot be verified"
+      );
+      throw new ValidationError("this transaction cannot be verified against the provider");
+    }
+
+    if (input.invoiceId !== transaction.gatewayReferenceId) {
+      // Ids only. Both sides are provider/our own identifiers, and the claimed
+      // one is attacker-chosen, so it is sanitised.
+      console.warn(
+        `[security] webhook invoice id mismatch: provider=xendit ` +
+          `transaction=${transaction.id} expected=${safeLabel(transaction.gatewayReferenceId)} ` +
+          `claimed=${safeLabel(input.invoiceId)} event=${safeLabel(input.eventType)}`
+      );
+      throw new ValidationError("webhook invoice id does not match our record");
+    }
+
     if (input.amount !== transaction.amount) {
       // A forged body claiming amount 1 for a 50,000 tier is the whole reason
       // this comparison exists, so it is worth knowing about. Ids and integers
@@ -136,11 +167,26 @@ export class HandlePaymentWebhook {
         return { activated: false, duplicate: false };
       }
 
-      const { subscription, communityId } = await repositories.subscriptions.markPaid({
+      const paid = await repositories.subscriptions.markPaid({
         transactionId: transaction.id,
         gatewayReferenceId: input.invoiceId,
         paidAt: new Date(),
       });
+      if (!paid) {
+        // The transaction was not `pending` any more, so this delivery is a
+        // second activation attempt that got past the event-id guard — which is
+        // possible whenever two deliveries differ in `body.id` or `status`. The
+        // UPDATE's own predicate absorbed it; nothing else in here may run,
+        // because `activity_log` "joined" is what Phase 4 turns into a WhatsApp
+        // invite and a duplicate row is a duplicate invite.
+        console.warn(
+          `[payments] webhook for an already-settled transaction: provider=xendit ` +
+            `transaction=${transaction.id} event=${safeLabel(input.eventType)} — no second ` +
+            "activation was performed"
+        );
+        return { activated: false, duplicate: true };
+      }
+      const { subscription, communityId } = paid;
 
       await repositories.activityLog.record({
         memberId: subscription.memberId,

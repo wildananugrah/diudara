@@ -59,10 +59,20 @@ async function checkout(
     })
   ).json();
 
+  // StartCheckout records the provider's invoice id on the transaction, and the
+  // handler now verifies `body.id` against it — so a test delivery has to echo
+  // back the REAL one. Read from the column rather than from the fake adapter:
+  // that column is what the handler compares against.
+  const [tx] = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.id, result.transactionId));
+
   return {
     communityId: community.id,
     subscriptionId: result.subscriptionId,
     externalId: result.transactionId,
+    invoiceId: tx.gatewayReferenceId!,
   };
 }
 
@@ -72,8 +82,23 @@ function post(a: ReturnType<typeof app>, body: unknown, token: string | null = T
   return a.request("/webhooks/xendit", { method: "POST", headers, body: JSON.stringify(body) });
 }
 
+/**
+ * A delivery Xendit could plausibly have sent for `externalId`. `id` defaults to
+ * a placeholder that will NOT match the recorded gateway reference, so every
+ * call site must pass the real invoice id — that is deliberate: a helper that
+ * quietly produced a verifiable body would hide the check under test.
+ */
 function paidEvent(externalId: string, overrides: Record<string, unknown> = {}) {
   return { id: "evt-1", external_id: externalId, status: "PAID", amount: 50000, ...overrides };
+}
+
+/** `paidEvent` with the invoice id the handler will accept. */
+function verifiedEvent(
+  externalId: string,
+  invoiceId: string,
+  overrides: Record<string, unknown> = {}
+) {
+  return paidEvent(externalId, { id: invoiceId, ...overrides });
 }
 
 async function subscriptionRow(id: string) {
@@ -84,9 +109,9 @@ async function subscriptionRow(id: string) {
 describe("POST /webhooks/xendit", () => {
   it("activates the subscription on a verified PAID event", async () => {
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
-    expect((await post(a, paidEvent(externalId))).status).toBe(200);
+    expect((await post(a, verifiedEvent(externalId, invoiceId))).status).toBe(200);
 
     const sub = await subscriptionRow(subscriptionId);
     expect(sub.status).toBe("active");
@@ -96,24 +121,28 @@ describe("POST /webhooks/xendit", () => {
 
   it("marks our own transaction success with the provider's invoice id", async () => {
     const a = app();
-    const { externalId } = await checkout(a);
+    const { externalId, invoiceId } = await checkout(a);
 
-    await post(a, paidEvent(externalId, { id: "inv_xendit_9" }));
+    // The reference is written at CHECKOUT now, not by the webhook, and the
+    // handler refuses any body whose id disagrees with it — so this asserts the
+    // settled row still carries the invoice id the provider actually issued.
+    expect(invoiceId).toBeTruthy();
+    await post(a, verifiedEvent(externalId, invoiceId));
 
     const [tx] = await db.select().from(transactions).where(eq(transactions.id, externalId));
     expect(tx.status).toBe("success");
     expect(tx.paidAt).not.toBeNull();
-    expect(tx.gatewayReferenceId).toBe("inv_xendit_9");
+    expect(tx.gatewayReferenceId).toBe(invoiceId);
   });
 
   it("moves subscription.updated_at past created_at", async () => {
     // The updated_at carry-forward has no BEFORE UPDATE trigger behind it, so
     // this proves the column is not frozen at creation time.
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
     await Bun.sleep(25);
 
-    await post(a, paidEvent(externalId));
+    await post(a, verifiedEvent(externalId, invoiceId));
 
     const sub = await subscriptionRow(subscriptionId);
     expect(sub.updatedAt.getTime()).toBeGreaterThan(sub.createdAt.getTime());
@@ -121,9 +150,9 @@ describe("POST /webhooks/xendit", () => {
 
   it("writes exactly one activity_log 'joined' entry for the member", async () => {
     const a = app();
-    const { communityId, subscriptionId, externalId } = await checkout(a);
+    const { communityId, subscriptionId, externalId, invoiceId } = await checkout(a);
 
-    await post(a, paidEvent(externalId));
+    await post(a, verifiedEvent(externalId, invoiceId));
 
     const logs = await db.select().from(activityLogs);
     expect(logs).toHaveLength(1);
@@ -144,9 +173,9 @@ describe("POST /webhooks/xendit", () => {
     for (const billingCycle of ["monthly", "quarterly", "yearly"] as const) {
       await resetDatabase();
       const a = app();
-      const { subscriptionId, externalId } = await checkout(a, { billingCycle });
+      const { subscriptionId, externalId, invoiceId } = await checkout(a, { billingCycle });
 
-      await post(a, paidEvent(externalId));
+      await post(a, verifiedEvent(externalId, invoiceId));
 
       const sub = await subscriptionRow(subscriptionId);
       expect(sub.nextBillingDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
@@ -161,18 +190,18 @@ describe("POST /webhooks/xendit", () => {
 
   it("rejects a wrong token with 401 and does not activate", async () => {
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
-    expect((await post(a, paidEvent(externalId), "wrong-token")).status).toBe(401);
+    expect((await post(a, verifiedEvent(externalId, invoiceId), "wrong-token")).status).toBe(401);
 
     expect((await subscriptionRow(subscriptionId)).status).not.toBe("active");
   });
 
   it("rejects a missing token with 401", async () => {
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
-    expect((await post(a, paidEvent(externalId), null)).status).toBe(401);
+    expect((await post(a, verifiedEvent(externalId, invoiceId), null)).status).toBe(401);
 
     expect((await subscriptionRow(subscriptionId)).status).not.toBe("active");
   });
@@ -181,28 +210,28 @@ describe("POST /webhooks/xendit", () => {
     // `X-CALLBACK-TOKEN:` with no value used to compare equal to an unset
     // configured token. It must never vouch for anything.
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
-    expect((await post(a, paidEvent(externalId), "")).status).toBe(401);
+    expect((await post(a, verifiedEvent(externalId, invoiceId), "")).status).toBe(401);
 
     expect((await subscriptionRow(subscriptionId)).status).not.toBe("active");
   });
 
   it("rejects a token that is a PREFIX of the real one with 401", async () => {
     const a = app();
-    const { externalId } = await checkout(a);
+    const { externalId, invoiceId } = await checkout(a);
 
-    expect((await post(a, paidEvent(externalId), TOKEN.slice(0, -1))).status).toBe(401);
-    expect((await post(a, paidEvent(externalId), `${TOKEN}x`)).status).toBe(401);
+    expect((await post(a, verifiedEvent(externalId, invoiceId), TOKEN.slice(0, -1))).status).toBe(401);
+    expect((await post(a, verifiedEvent(externalId, invoiceId), `${TOKEN}x`)).status).toBe(401);
   });
 
   it("records nothing at all when the token is wrong", async () => {
     // A 401 that still burned the provider_event_id would let an attacker who
     // does NOT have the token block a genuine delivery.
     const a = app();
-    const { externalId } = await checkout(a);
+    const { externalId, invoiceId } = await checkout(a);
 
-    await post(a, paidEvent(externalId), "wrong-token");
+    await post(a, verifiedEvent(externalId, invoiceId), "wrong-token");
 
     expect(await db.select().from(webhookEvents)).toHaveLength(0);
     expect(await db.select().from(activityLogs)).toHaveLength(0);
@@ -210,10 +239,10 @@ describe("POST /webhooks/xendit", () => {
 
   it("is idempotent — a replayed event does not activate twice", async () => {
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
-    const first = await post(a, paidEvent(externalId));
-    const second = await post(a, paidEvent(externalId));
+    const first = await post(a, verifiedEvent(externalId, invoiceId));
+    const second = await post(a, verifiedEvent(externalId, invoiceId));
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(200); // no-op, not an error
@@ -230,17 +259,118 @@ describe("POST /webhooks/xendit", () => {
     // Xendit retries do not wait for the first delivery to finish. A
     // check-then-insert replay guard passes for both and one of them 500s.
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
     const responses = await Promise.all([
-      post(a, paidEvent(externalId)),
-      post(a, paidEvent(externalId)),
-      post(a, paidEvent(externalId)),
+      post(a, verifiedEvent(externalId, invoiceId)),
+      post(a, verifiedEvent(externalId, invoiceId)),
+      post(a, verifiedEvent(externalId, invoiceId)),
     ]);
 
     expect(responses.map((r) => r.status)).toEqual([200, 200, 200]);
     expect((await subscriptionRow(subscriptionId)).status).toBe("active");
     expect(await db.select().from(activityLogs)).toHaveLength(1);
+  });
+
+  /**
+   * I2, final whole-branch review — the probe, as a test.
+   *
+   * `provider_event_id` is `<body.id>:<status>`, so a sender who varies `body.id`
+   * gets a fresh idempotency key every time and the UNIQUE constraint never
+   * fires. Measured before the fix: 12 concurrent PAID deliveries with 12
+   * DISTINCT `body.id` values → all HTTP 200, 12 `webhook_event` rows and **12
+   * `activity_log` "joined" rows**. In Phase 4 each of those is a WhatsApp
+   * invite.
+   *
+   * Two independent defences now stop it: `body.id` is verified against the
+   * gateway reference StartCheckout recorded, and `markPaid` only settles a
+   * transaction that is still `pending`.
+   */
+  it("does not activate 12 times for 12 concurrent deliveries with DIFFERENT invoice ids", async () => {
+    const a = app();
+    const { subscriptionId, externalId } = await checkout(a);
+
+    const responses = await Promise.all(
+      Array.from({ length: 12 }, (_, i) =>
+        post(a, paidEvent(externalId, { id: `forged-inv-${i}` }))
+      )
+    );
+
+    // Every one of them is now rejected: not one carries the invoice id we
+    // recorded at checkout.
+    expect(responses.map((r) => r.status)).toEqual(Array.from({ length: 12 }, () => 400));
+    expect((await subscriptionRow(subscriptionId)).status).toBe("pending");
+    expect(await db.select().from(activityLogs)).toHaveLength(0);
+    expect(await db.select().from(webhookEvents)).toHaveLength(0);
+  });
+
+  it("writes ONE joined row even when a genuine and a forged delivery race", async () => {
+    // The realistic version: one delivery carries the real invoice id, eleven
+    // carry forged ones, and they all arrive at once.
+    const a = app();
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
+
+    const responses = await Promise.all([
+      post(a, verifiedEvent(externalId, invoiceId)),
+      ...Array.from({ length: 11 }, (_, i) =>
+        post(a, paidEvent(externalId, { id: `forged-inv-${i}` }))
+      ),
+    ]);
+
+    expect(responses.filter((r) => r.status === 200)).toHaveLength(1);
+    expect(responses.filter((r) => r.status === 400)).toHaveLength(11);
+    expect((await subscriptionRow(subscriptionId)).status).toBe("active");
+    expect(await db.select().from(activityLogs)).toHaveLength(1);
+  });
+
+  it("does not activate twice for two deliveries that differ only in status", async () => {
+    // Both bodies are verifiable and their provider_event_ids DIFFER
+    // (`<invoice>:PAID` vs `<invoice>:SETTLED`), so the UNIQUE constraint cannot
+    // stop the second one from being recorded. Today the `status !== "PAID"`
+    // branch is what keeps it from activating again; `markPaid`'s
+    // `status = 'pending'` predicate is the backstop for the day some future
+    // status also activates, and it is pinned directly in
+    // drizzle-subscription.repository.test.ts because — with the invoice-id check
+    // in place — no HTTP path can reach markPaid twice any more.
+    const a = app();
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
+
+    expect((await post(a, verifiedEvent(externalId, invoiceId))).status).toBe(200);
+    // Xendit sends SETTLED after PAID for the same invoice. Under a stricter
+    // future rule this might activate; today it must not activate AGAIN.
+    expect(
+      (await post(a, verifiedEvent(externalId, invoiceId, { status: "SETTLED" }))).status
+    ).toBe(200);
+
+    expect((await subscriptionRow(subscriptionId)).status).toBe("active");
+    expect(await db.select().from(webhookEvents)).toHaveLength(2);
+    expect(await db.select().from(activityLogs)).toHaveLength(1);
+  });
+
+  it("400s a delivery whose invoice id is not the one checkout recorded", async () => {
+    const a = app();
+    const { subscriptionId, externalId } = await checkout(a);
+
+    const res = await post(a, paidEvent(externalId, { id: "inv_forged" }));
+
+    expect(res.status).toBe(400);
+    expect((await subscriptionRow(subscriptionId)).status).toBe("pending");
+    // Nothing written — so a forger cannot consume the event id a genuine
+    // delivery needs.
+    expect(await db.select().from(webhookEvents)).toHaveLength(0);
+    expect(await db.select().from(activityLogs)).toHaveLength(0);
+  });
+
+  it("records the provider's invoice id on the transaction at CHECKOUT, before any webhook", async () => {
+    // The anchor everything above depends on. Before this, gateway_reference_id
+    // was null until a webhook arrived and then held whatever the body claimed.
+    const a = app();
+    const { externalId, invoiceId } = await checkout(a);
+
+    const [tx] = await db.select().from(transactions).where(eq(transactions.id, externalId));
+    expect(tx.gatewayReferenceId).toBe(invoiceId);
+    expect(tx.gatewayReferenceId).toBeTruthy();
+    expect(tx.status).toBe("pending");
   });
 
   describe("a failed activation must not consume the event id", () => {
@@ -274,10 +404,10 @@ describe("POST /webhooks/xendit", () => {
 
     it("rolls the webhook_event row back when the activation fails", async () => {
       const a = app();
-      const { subscriptionId, externalId } = await checkout(a);
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
       const res = await withBrokenActivation(subscriptionId, () =>
-        post(a, paidEvent(externalId))
+        post(a, verifiedEvent(externalId, invoiceId))
       );
 
       expect(res.status).toBe(500);
@@ -289,12 +419,12 @@ describe("POST /webhooks/xendit", () => {
 
     it("lets the RETRY of that same event succeed — the actual point", async () => {
       const a = app();
-      const { subscriptionId, externalId } = await checkout(a);
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
-      await withBrokenActivation(subscriptionId, () => post(a, paidEvent(externalId)));
+      await withBrokenActivation(subscriptionId, () => post(a, verifiedEvent(externalId, invoiceId)));
 
       // Byte-identical body, so the same provider_event_id. Xendit's retry.
-      const retry = await post(a, paidEvent(externalId));
+      const retry = await post(a, verifiedEvent(externalId, invoiceId));
 
       expect(retry.status).toBe(200);
       const sub = await subscriptionRow(subscriptionId);
@@ -309,9 +439,9 @@ describe("POST /webhooks/xendit", () => {
 
     it("leaves the transaction row untouched too, not just the event row", async () => {
       const a = app();
-      const { subscriptionId, externalId } = await checkout(a);
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
-      await withBrokenActivation(subscriptionId, () => post(a, paidEvent(externalId)));
+      await withBrokenActivation(subscriptionId, () => post(a, verifiedEvent(externalId, invoiceId)));
 
       const [tx] = await db.select().from(transactions).where(eq(transactions.id, externalId));
       expect(tx.status).toBe("pending");
@@ -324,12 +454,12 @@ describe("POST /webhooks/xendit", () => {
     // provider_event_id must be per-DELIVERY. If it derived from the invoice id
     // alone, this second, legitimate event would look like a replay.
     const a = app();
-    const { externalId } = await checkout(a);
+    const { externalId, invoiceId } = await checkout(a);
 
-    expect((await post(a, paidEvent(externalId, { id: "inv_1" }))).status).toBe(200);
-    expect((await post(a, paidEvent(externalId, { id: "inv_1", status: "EXPIRED" }))).status).toBe(
-      200
-    );
+    expect((await post(a, verifiedEvent(externalId, invoiceId))).status).toBe(200);
+    expect(
+      (await post(a, verifiedEvent(externalId, invoiceId, { status: "EXPIRED" }))).status
+    ).toBe(200);
 
     const events = await db.select().from(webhookEvents);
     expect(events).toHaveLength(2);
@@ -338,11 +468,13 @@ describe("POST /webhooks/xendit", () => {
 
   it("rejects an amount that does not match our own record", async () => {
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
     // The token authenticates the SENDER, not the message. A forged or tampered
     // body must not be able to activate a 50,000 subscription by claiming 1.
-    const res = await post(a, paidEvent(externalId, { id: "evt-2", amount: 1 }));
+    // The invoice id is the REAL one, so the amount is the only thing wrong —
+    // otherwise this would be passing for the id check's reason, not its own.
+    const res = await post(a, verifiedEvent(externalId, invoiceId, { amount: 1 }));
     expect(res.status).toBe(400);
 
     expect((await subscriptionRow(subscriptionId)).status).not.toBe("active");
@@ -352,9 +484,9 @@ describe("POST /webhooks/xendit", () => {
 
   it("rejects an amount HIGHER than our record too", async () => {
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
-    expect((await post(a, paidEvent(externalId, { amount: 5_000_000 }))).status).toBe(400);
+    expect((await post(a, verifiedEvent(externalId, invoiceId, { amount: 5_000_000 }))).status).toBe(400);
     expect((await subscriptionRow(subscriptionId)).status).not.toBe("active");
   });
 
@@ -375,11 +507,11 @@ describe("POST /webhooks/xendit", () => {
 
   it("ignores a non-PAID status without activating", async () => {
     const a = app();
-    const { subscriptionId, externalId } = await checkout(a);
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
 
-    expect((await post(a, paidEvent(externalId, { id: "evt-4", status: "EXPIRED" }))).status).toBe(
-      200
-    );
+    expect(
+      (await post(a, verifiedEvent(externalId, invoiceId, { status: "EXPIRED" }))).status
+    ).toBe(200);
 
     const sub = await subscriptionRow(subscriptionId);
     expect(sub.status).not.toBe("active");
@@ -423,11 +555,11 @@ describe("POST /webhooks/xendit", () => {
 
   it("never echoes the payer's details back in a rejection", async () => {
     const a = app();
-    const { externalId } = await checkout(a);
+    const { externalId, invoiceId } = await checkout(a);
 
     const res = await post(
       a,
-      paidEvent(externalId, { amount: 1, payer_email: "siti@example.com" })
+      verifiedEvent(externalId, invoiceId, { amount: 1, payer_email: "siti@example.com" })
     );
     const text = await res.text();
 
@@ -437,13 +569,17 @@ describe("POST /webhooks/xendit", () => {
 
   it("stores the raw payload on the webhook_event row for audit", async () => {
     const a = app();
-    const { externalId } = await checkout(a);
+    const { externalId, invoiceId } = await checkout(a);
 
-    await post(a, paidEvent(externalId, { id: "inv_audit" }));
+    await post(a, verifiedEvent(externalId, invoiceId, { some_extra_field: "kept verbatim" }));
 
     const [event] = await db.select().from(webhookEvents);
     expect(event.provider).toBe("xendit");
     expect(event.eventType).toBe("invoice.paid");
-    expect(event.payload).toMatchObject({ id: "inv_audit", status: "PAID" });
+    expect(event.payload).toMatchObject({
+      id: invoiceId,
+      status: "PAID",
+      some_extra_field: "kept verbatim",
+    });
   });
 });

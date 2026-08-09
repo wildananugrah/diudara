@@ -71,6 +71,16 @@ export interface SubscriptionRepositoryPort {
    */
   findTransactionByExternalId(id: string): Promise<TransactionRecord | null>;
   /**
+   * Records the provider's own invoice id against a transaction we just created,
+   * so the webhook has something of OURS to check `body.id` against.
+   *
+   * Returns false when the transaction does not exist or already carries a
+   * reference: the column is written exactly once, at checkout, and overwriting
+   * it would destroy the anchor the replay guard depends on. Conditional for the
+   * same reason as `CreatorRepositoryPort.setXenditAccountId`.
+   */
+  attachGatewayReference(transactionId: string, gatewayReferenceId: string): Promise<boolean>;
+  /**
    * Marks a transaction `success` and activates its subscription: `active`,
    * `started_at` (first activation only), and `next_billing_date` derived from
    * the tier's `billing_cycle`.
@@ -78,10 +88,18 @@ export interface SubscriptionRepositoryPort {
    * Both rows are updates, so both must carry `updatedAt: new Date()`. The two
    * writes must be atomic with each other — a transaction recorded as collected
    * against a subscription that never activated is unrecoverable money.
+   *
+   * Returns **null** when the transaction was not `pending` — it has already
+   * been settled, so this call is a no-op and the caller must not treat it as an
+   * activation. The implementation MUST decide that with the status IN the UPDATE
+   * predicate, not with a preceding read: `webhook_event.provider_event_id` is
+   * the first line of replay defence, and this is the second, so it has to hold
+   * even when two deliveries with different event ids reach the same transaction.
+   * Throws only when the transaction does not exist at all.
    */
   markPaid(input: {
     transactionId: string;
     gatewayReferenceId: string;
     paidAt: Date;
-  }): Promise<MarkPaidResult>;
+  }): Promise<MarkPaidResult | null>;
 }

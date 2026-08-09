@@ -139,6 +139,9 @@ const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   async findTransactionByExternalId() {
     return null;
   },
+  async attachGatewayReference() {
+    return true;
+  },
   async markPaid() {
     throw new Error("not used");
   },

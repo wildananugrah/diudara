@@ -75,6 +75,30 @@ export class StartCheckout {
       forAccountId: creator.xenditAccountId,
     });
 
+    // The idempotency ANCHOR. Without this write the webhook has nothing of ours
+    // to check `body.id` against, so it accepts whatever the body claims — and
+    // since `provider_event_id` derives from that same `body.id`, the entire
+    // replay defence would rest on a field we never verify. Probed before it
+    // existed: 12 concurrent PAID deliveries with 12 different `body.id`s
+    // produced 12 `activity_log` "joined" rows, all 200.
+    //
+    // Deliberately AFTER createInvoice and as a second write, rather than
+    // folding the reference into `createTransaction` by pre-generating the id and
+    // calling the provider first. Reversing the order would mean a failure
+    // between the two leaves a live invoice at the provider whose `external_id`
+    // matches no transaction row at all — a member could pay it and the webhook
+    // would 404 forever, with nothing to reconstruct the row from. This way the
+    // same failure leaves a transaction we can still find from the webhook and
+    // repair with the invoice id the provider's dashboard shows.
+    if (!(await this.subscriptions.attachGatewayReference(transaction.id, invoice.invoiceId))) {
+      // Only reachable if the column was already set, which cannot happen for a
+      // row created two statements ago — so this is a bug, not a race, and it
+      // must not be swallowed: the webhook would reject every delivery for it.
+      throw new Error(
+        `StartCheckout: could not record the gateway reference for transaction ${transaction.id}`
+      );
+    }
+
     return {
       invoiceUrl: invoice.invoiceUrl,
       subscriptionId: subscription.id,
