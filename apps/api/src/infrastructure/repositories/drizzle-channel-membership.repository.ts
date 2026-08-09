@@ -25,8 +25,9 @@ const REVOKED = "revoked";
  * Erring long is the safe direction. A lease that outlives its holder delays a
  * legitimate retry by up to a minute; a lease that expires UNDER its holder makes the
  * next caller report `mint_lost` and ask for a manual reissue. Neither mints a second
- * credential — that is the property the lease exists for, and it does not depend on
- * this number being well tuned.
+ * credential, and that does not depend on this number being well tuned — MUTUAL
+ * EXCLUSION IS `link_minted_at` BEING WRITTEN IN THE CLAIM, not the lease. The lease
+ * only decides whether an excluded caller retries or reports.
  */
 const DEFAULT_MINT_LEASE_SECONDS = 60;
 
@@ -190,7 +191,11 @@ export class DrizzleChannelMembershipRepository implements ChannelMembershipRepo
     return recorded.length > 0;
   }
 
-  /** See the port docstring — only ever after a SUCCESSFUL provider-side revoke. */
+  /**
+   * See the port docstring — only ever from a state where NO credential can exist: a
+   * lost link that was successfully revoked at the provider, or a `grantAccess` that
+   * failed with a response received and therefore minted nothing.
+   */
   async releaseMintWindow(membershipId: string): Promise<void> {
     await this.db
       .update(channelMemberships)

@@ -367,26 +367,43 @@ export const channelMemberships = pgTable(
      * whose `invite_link` was NULL — five credentials the system had no record of and
      * therefore no way to revoke. Measured, before this column existed.
      *
-     * So: link is null + this is NOT null means A LINK WAS MINTED AND LOST. Minting
-     * another would stack a second credential on an orphan we cannot kill (Telegram's
-     * `revokeChatInviteLink` needs the link's value, and no Bot API method enumerates
-     * a bot's links), so the grant FAILS CLOSED — reported to the member as manual
-     * addition and to the creator in `activity_log`, for a deliberate reissue.
+     * So: link is null + this is NOT null means A LINK MAY BE LIVE AND UNRECORDED.
+     * Minting another would stack a second credential on an orphan we cannot kill
+     * (Telegram's `revokeChatInviteLink` needs the link's value, and no Bot API method
+     * enumerates a bot's links), so the grant FAILS CLOSED — reported to the member as
+     * manual addition and to the creator in `activity_log`, for a deliberate reissue.
      *
-     * Cleared by `recordGrant` on success, and by `releaseMintWindow` when a lost
-     * link was successfully revoked at the provider — at which point no live
-     * credential exists and a retry may safely mint again.
+     * "MAY BE" IS EXACT, AND THE COLUMN HAS TO BE CLEARED WHENEVER IT CANNOT BE. It is
+     * cleared by `recordGrant` on success, and by `releaseMintWindow` in the two states
+     * where no credential can exist: a lost link that WAS revoked at the provider, and
+     * a `grantAccess` that failed with an HTTP response received, which mints nothing.
+     * Leaving it set in that second case cost a paying member their access
+     * PERMANENTLY — one transient Telegram failure, then a healthy provider, and every
+     * later attempt reported `mint_lost` with no reissue tool to clear it. Measured.
      */
     linkMintedAt: timestamp("link_minted_at", { withTimezone: true }),
     /**
      * How long the caller inside the mint window holds it. Set with
      * `link_minted_at`, in the SAME statement as the claim.
      *
-     * This is the serialization half of the invariant, and it is needed even with the
-     * marker: two callers arriving together — a member who bought two tiers of one
-     * community, or a reclaimed outbox row racing the worker still holding it — both
-     * found `link_minted_at IS NULL`, both passed the marker check, and both minted.
-     * Measured at two live links for one (member, channel).
+     * IT DOES NOT PROVIDE SERIALIZATION, and an earlier version of this comment
+     * claiming it did was wrong in a way worth correcting: a misleading invariant
+     * comment is how the next person removes the wrong thing.
+     *
+     * MUTUAL EXCLUSION COMES FROM `link_minted_at` BEING WRITTEN IN THE CLAIM ITSELF.
+     * The second of two callers arriving together has its `DO UPDATE` predicate
+     * re-evaluated against the locked, already-updated tuple, finds `link_minted_at`
+     * non-null, and is excluded — no lease consulted, no read, nothing to race. (The
+     * measured two-live-links case was the version that checked the marker in a
+     * SEPARATE statement from the claim; both callers read NULL and both minted.)
+     *
+     * WHAT THIS COLUMN DOES IS CLASSIFY THE EXCLUDED CALLER, which is the difference
+     * between a retry and a manual reissue and therefore between a member who gets
+     * their link a second later and one who waits for a person:
+     *
+     *   marker + live lease   -> `mint_in_progress`  the holder is mid-flight; RETRY
+     *   marker + lapsed lease -> `mint_lost`         a link may be live and unrecorded;
+     *                                                FAIL CLOSED, report for reissue
      *
      * A LEASE rather than `pg_advisory_xact_lock` because the window spans an
      * external HTTP call: an advisory lock would have to be held in an open
@@ -396,7 +413,13 @@ export const channelMemberships = pgTable(
      *
      * Its expiry FAILS CLOSED: a second caller arriving after it lapses sees the
      * marker still set and reports "minted and lost" rather than minting. So a lease
-     * that is too short costs a spurious manual report, never a second credential.
+     * that is too short costs a spurious manual report, never a second credential —
+     * which follows from exclusion living in the marker, not here.
+     *
+     * Cleared alongside `link_minted_at`: by `recordGrant` on success, and by
+     * `releaseMintWindow` whenever no credential can exist — a lost link that WAS
+     * revoked at the provider, or a `grantAccess` that failed with a response received
+     * (nothing was minted). Left SET only where a link may be live and unheld.
      */
     mintLeaseUntil: timestamp("mint_lease_until", { withTimezone: true }),
     grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),

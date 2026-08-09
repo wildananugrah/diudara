@@ -137,14 +137,33 @@ The leak scaled linearly with `maxAttempts`. The whole suite passed throughout.
    statement as the claim**. `invite_link IS NULL` on a claimed row otherwise conflates
    three states — nobody has minted, somebody is minting, somebody minted and lost it — and
    reading all three as "finish the grant" is what produced the table above.
-3. Marker set with no link means **a link was minted and lost, so do NOT mint another**.
-   This **fails closed**: it is reported as `manual` with an `activity_log` reason for a
-   deliberate reissue. A caller that died between the claim and the provider call lands
-   here too, and a spurious manual reissue is the correct price for never issuing a second
-   key.
-4. The mint window must be **serialised per membership** (`mint_lease_until`), so a
-   concurrent or reclaimed caller reports "grant in progress" and retries instead of
-   minting beside the holder.
+3. Marker set with no link means **a link MAY be live and unrecorded, so do NOT mint
+   another**. This **fails closed**: it is reported as `manual` with an `activity_log`
+   reason for a deliberate reissue. A caller that died between the claim and the provider
+   call lands here too, and a spurious manual reissue is the correct price for never
+   issuing a second key.
+4. `mint_lease_until` **classifies** the excluded caller — live lease → retryable "grant in
+   progress", lapsed lease → fail-closed "minted and lost". It does **not** provide the
+   mutual exclusion; rule 2 does, because the marker is written in the claim itself and the
+   second caller's `DO UPDATE` predicate is re-evaluated against the locked tuple. (An
+   earlier version of this spec and of the column's docstring credited the lease with
+   serialisation. The re-review demonstrated otherwise, and a misleading invariant note is
+   how the next person removes the wrong guard.)
+4b. **The marker must be RELEASED when nothing can have been minted**, and that requires the
+   adapter to say whether **a response was received**. A `grantAccess` that fails with an
+   HTTP response — a Telegram `ok: false`, any non-2xx — minted nothing, so
+   `link_minted_at` and `mint_lease_until` go back to NULL and the retry mints normally.
+   Only a request that **never completed** (abort, timeout, process death) or completed
+   unreadably keeps the marker.
+
+   This is not a refinement; without it the invariant's own enforcement becomes the outage.
+   Measured with the marker always kept, one transient provider failure followed by a
+   perfectly healthy provider: 5 retries, outbox `failed`, **0 links minted, 0 WhatsApp
+   messages, 0 `activity_log` rows**, and three further `execute` calls that minted
+   nothing — a paying member permanently ungrantable, silently, with no reissue tool. The
+   distinction is carried by a **typed error** (`ProviderCallError.outcome`), never sniffed
+   from a message string, and anything unclassified is treated as ambiguous so fail-closed
+   is reached by *not knowing*.
 5. `recordGrant` must be **conditional on `invite_link IS NULL`** and report whether it
    recorded. A loser that overwrites the winner's link orphans a credential that has
    already reached a member.
@@ -173,6 +192,18 @@ One generated Drizzle migration:
   mint lease). A partial unique index on `invite_link` keeps the credential an
   unambiguous lookup key.
 - `channel` already has `external_group_id`, `invite_link`, and `bot_status` from Phase 1.
+  **`POST /communities/:id/channels` now requires a NUMERIC `external_group_id` for
+  `platform: "telegram"`** — a tightening of an existing endpoint, with a validation
+  message naming the numeric chat id. Telegram accepts `@channelusername` as a `chat_id`,
+  so such a channel granted access perfectly; but the inbound `chat_member` update carries
+  `chat.id` as a **number**, and §4.2's chat-scoped membership lookup then never matches.
+  Measured: stored `@kelasbudi`, update with `-1001234567890` → `unknown_invite_link`,
+  `external_member_id` stays NULL, and every revocation for that community reports
+  `no_provider_member_id_recorded` **forever** — a log line documented as ordinary noise.
+  Members grantable and never removable, with nothing to notice. Normalising instead would
+  need a `getChat` round-trip from a shared validation schema; constraining at the door
+  tells the creator while they can still go and find the right id. WhatsApp is untouched
+  (`120363…@g.us`, and `canGateAccess` is false, so nothing inbound is matched).
 
 ## 6. Architecture
 
@@ -257,7 +288,9 @@ know whether it worked, and there is no transaction to protect.
 |---|---|
 | Member/community not owned by caller | 404 |
 | Channel's adapter cannot gate access | 409 (`UnsupportedOperationError`) |
-| Telegram rejects the invite creation | outbox retry, then `failed` |
+| **Telegram rejects the invite creation (a response was received)** | **mint window released — nothing was minted — then outbox retry, which mints cleanly** |
+| **The invite request never completed (timeout/abort), or answered unreadably** | **marker kept; later attempts report `mint_lost` for a deliberate reissue** |
+| **A telegram channel connected by `@username` instead of a numeric chat id** | **400 at connect time, naming the numeric id** |
 | Member already has active access | idempotent no-op |
 | Revoking a member with no membership | 404 |
 | **Member already holds an active subscription to this tier** | **409, BEFORE the invoice is created** |
@@ -301,6 +334,22 @@ decisions rather than table rows:
      to order them safely; a concurrency test that depends on the scheduler proves nothing.
 - A test proving a link that cannot be recorded is **revoked at the provider**, and that
   when that cleanup ALSO fails no replacement is ever minted on top of the orphan.
+- **A fail-closed guard needs a test for the RECOVERY case too, not only the refusal**
+  (added by the scoped re-review, which found rule 4b missing). The two must be a pair, and
+  each fails against the other's implementation:
+  1. `grantAccess` failing **with a response received** on the first attempt and succeeding
+     on the second → exactly **1 live link**, a granted membership, the member notified.
+     Before rule 4b: 0 minted, outbox `failed`, 0 notifications, marker still set.
+  2. `grantAccess` failing with **no response** → marker retained, **no second mint** on any
+     later attempt, reported as manual.
+
+  The general lesson: a guard that refuses to act is only correct if the path back is
+  tested. Asserting only that nothing bad happened cannot distinguish "safe" from "broken".
+- **A concurrency barrier must be CAUSAL, not temporal.** The forced-interleaving test above
+  originally released its first caller after a 250 ms timeout whether or not the second had
+  claimed, so on a slow database it could pass **vacuously** without the race occurring. It
+  now counts completed `claim` calls, and its safety timeout **rejects** rather than
+  releasing.
 
 ## 11. Carry-forward items to address here
 
