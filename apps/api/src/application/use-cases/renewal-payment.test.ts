@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "bun:test";
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import { db } from "../../db/client";
 import {
   activityLogs,
@@ -477,7 +477,102 @@ describe("renewal payment — paying while still active, inside the reminder win
     expect(telegram.issuedLinks).toHaveLength(1);
     expect(telegram.liveInviteLinks).toHaveLength(1);
   });
+
+  it("TWO CONCURRENT PAYMENTS BUY TWO PERIODS, not one", async () => {
+    // `renewalAnchor` exists so that two payments inside the window stack instead of
+    // both landing on the same date — see its docstring. That only holds if the read of
+    // `next_billing_date` and the write derived from it cannot interleave. They can:
+    // `markPaid` reads the column with a plain SELECT under READ COMMITTED, so two
+    // deliveries that both read before either writes compute the SAME new date, and the
+    // member pays twice for one month. Found by driving the real API in Task 9.
+    const { community, tier } = await seedCommunity();
+    const h = harness();
+    const { subscriptionId } = await firstPurchase(h, community.slug, tier.id);
+
+    // Inside the reminder window, where a member can legitimately hold two invoices:
+    // one from the `pre_3d` link and one from opening the page again.
+    h.clock.set(at(-3));
+    const first = await h.startCheckout.execute({
+      slug: community.slug,
+      tierId: tier.id,
+      ...PAYER,
+    });
+    const second = await h.startCheckout.execute({
+      slug: community.slug,
+      tierId: tier.id,
+      ...PAYER,
+    });
+    expect(first.subscriptionId).toBe(subscriptionId);
+    expect(second.subscriptionId).toBe(subscriptionId);
+    expect(first.transactionId).not.toBe(second.transactionId);
+
+    // THE INTERLEAVING IS FORCED, NOT RACED. A third connection holds the subscription
+    // row, so both activations are provably contending for it — reported by Postgres,
+    // not by a timer — before either is allowed to write. A bare `Promise.all` here
+    // serialises on a fast database and proves nothing (see test-support/arrival-latch).
+    const holder = db.transaction(async (tx) => {
+      await tx
+        .select({ id: subscriptions.id })
+        .from(subscriptions)
+        .where(eq(subscriptions.id, subscriptionId))
+        .for("update");
+      await waitUntilTwoBackendsBlockedOnSubscription();
+    });
+    const deliveries = Promise.all([pay(h, first.transactionId), pay(h, second.transactionId)]);
+    await holder;
+    const results = await deliveries;
+
+    // Both payments were collected: this is not a replay, and the money is real.
+    expect(results.map((r) => r.activated)).toEqual([true, true]);
+    const paidTransactions = await db.select().from(transactions);
+    expect(paidTransactions.filter((t) => t.status === "success")).toHaveLength(3);
+
+    // TWO periods from the due date, not one. `at(-3)` is before the due date, so the
+    // anchor is the due date both times: 2026-03-10 -> 2026-04-10 -> 2026-05-10.
+    const row = await reloadSubscription(subscriptionId);
+    expect(row.status).toBe("active");
+    expect(row.nextBillingDate).toBe("2026-05-10");
+
+    // And the audit trail agrees with the row, which is the half that made the bug
+    // invisible: both `renewed` entries used to claim the same `nextBillingDate`.
+    const renewedDates = (
+      await db.select().from(activityLogs).where(eq(activityLogs.eventType, RENEWED))
+    )
+      .map((entry) => (entry.metadata as { nextBillingDate: string }).nextBillingDate)
+      .sort();
+    expect(renewedDates).toEqual(["2026-04-10", "2026-05-10"]);
+  });
 });
+
+/**
+ * Resolves once Postgres reports TWO backends of this database waiting on a lock while
+ * running a statement against `subscription`.
+ *
+ * The database is what says the interleaving was constructed — the same technique
+ * `drizzle-webhook-event.repository.test.ts` uses for its uncommitted-winner test, and
+ * for the same reason: it THROWS rather than resolving if the contention never happens,
+ * so the test cannot pass from a precondition it did not reach.
+ */
+async function waitUntilTwoBackendsBlockedOnSubscription(timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let waiting = 0;
+  while (Date.now() < deadline) {
+    const [row] = await db.execute<{ waiting: number }>(sql`
+      select count(*)::int as waiting
+      from pg_stat_activity
+      where datname = current_database()
+        and wait_event_type = 'Lock'
+        and query ilike '%subscription%'
+    `);
+    waiting = Number(row.waiting);
+    if (waiting >= 2) return;
+    await Bun.sleep(5);
+  }
+  throw new Error(
+    `timed out after ${timeoutMs}ms waiting for two backends to contend for the ` +
+      `subscription row; only ${waiting} were blocked, so the interleaving was never built`
+  );
+}
 
 describe("payment AFTER revocation — a genuinely new grant", () => {
   it("unbans BEFORE issuing the invite, at the provider boundary", async () => {

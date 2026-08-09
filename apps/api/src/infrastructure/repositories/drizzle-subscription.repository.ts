@@ -103,6 +103,12 @@ const RENEWABLE_STATUSES = [ACTIVE_SUBSCRIPTION, PAST_DUE_SUBSCRIPTION];
  *     instead of vanishing. Two payments anchored on `paidAt` both land on nearly the
  *     same date, so the member pays twice and gets one period.
  *
+ * THAT SECOND PROPERTY NEEDS THE ROW LOCK IN `markPaid` TO HOLD AT ALL. This function is
+ * pure, and its caller reads `next_billing_date` and then writes a value derived from it:
+ * without `for update of subscription` on that read, two concurrent deliveries both see
+ * the old due date and both compute the same new one, which is exactly the vanishing this
+ * exists to prevent. See the block comment on that read.
+ *
  * `next_billing_date` is a `date`, so `new Date("2026-03-10")` is UTC midnight — inside
  * the WIB day the column names, which is the frame the rest of this phase reads it in.
  */
@@ -516,6 +522,37 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
       // belongs to. Joined here rather than fetched by the use-case because
       // there is no unscoped tier-by-id port method, and this is one round trip
       // inside the transaction that is already open.
+      //
+      // ===================================================================
+      // `for update of subscription` — WHY THIS READ TAKES A ROW LOCK
+      //
+      // `next_billing_date` is read here and WRITTEN BELOW from a value derived
+      // from it (`renewalAnchor` picks the later of the due date and `paidAt`).
+      // That is a read-modify-write, and under READ COMMITTED nothing else
+      // serialises it: two deliveries for two invoices against the SAME
+      // subscription both read the old due date, both compute the same new one,
+      // and the second UPDATE — which blocks on the row lock the first takes and
+      // then proceeds with the value it read BEFORE that — overwrites the first
+      // with an identical date. The member pays twice and gets ONE period, and
+      // both `activity_log` "renewed" entries claim that one date, so the audit
+      // trail agrees with itself and hides it.
+      //
+      // Measured against the running API in Phase 5 Task 9, interleaving forced
+      // with a third session holding this row: two payments moved a 2026-08-12
+      // due date to 2026-09-12, not 2026-10-12.
+      //
+      // Locking here rather than in the UPDATE's predicate is deliberate: the
+      // stale value is consumed by `computeNextBillingDate` in JS, so the write
+      // has to be made to wait at the READ. Nothing else in this transaction has
+      // touched `subscription` yet, and the only other row it holds is this
+      // transaction's own `transaction` row — which no other caller takes before
+      // a subscription row — so there is no lock-ordering cycle to deadlock on.
+      //
+      // `of subscription` restricts the lock to the subscription row: without it
+      // the join makes Postgres lock `membership_tier` too, and a tier row is
+      // shared by every member of that tier, so two unrelated members renewing at
+      // once would queue behind each other for no reason.
+      // ===================================================================
       const [context] = await tx
         .select({
           memberId: subscriptions.memberId,
@@ -529,6 +566,7 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         .from(subscriptions)
         .innerJoin(membershipTiers, eq(subscriptions.tierId, membershipTiers.id))
         .where(eq(subscriptions.id, transaction.subscriptionId))
+        .for("update", { of: subscriptions })
         .limit(1);
       if (!context) {
         throw new Error(`markPaid: subscription for transaction ${input.transactionId} not found`);

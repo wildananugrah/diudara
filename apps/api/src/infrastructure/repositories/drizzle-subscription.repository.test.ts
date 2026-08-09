@@ -1,6 +1,9 @@
 import { describe, expect, it, beforeEach } from "bun:test";
 import { eq } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import { db } from "../../db/client";
+import * as schema from "../../db/schema";
 import {
   communities,
   creators,
@@ -799,6 +802,45 @@ describe("DrizzleSubscriptionRepository.markPaid", () => {
       .where(eq(transactions.id, transaction.id));
     expect(row.status).toBe("pending");
     expect(row.paidAt).toBeNull();
+  });
+
+  it("LOCKS the subscription row it is about to derive the next billing date from", async () => {
+    // `next_billing_date` is read and then written from a value derived from it, so
+    // without this lock two concurrent activations for one subscription both read the
+    // old due date and write the same new one — the member pays twice for one period.
+    // The behaviour is pinned by "TWO CONCURRENT PAYMENTS BUY TWO PERIODS" in
+    // renewal-payment.test.ts; this asserts the mechanism in the SQL that reaches the
+    // driver, the same way `claimBatch`'s `for update skip locked` is asserted, so a
+    // refactor of the read cannot silently drop it.
+    const { transaction } = await seedPendingCheckout();
+
+    const statements: string[] = [];
+    const debugClient = postgres(process.env.DATABASE_URL!, {
+      max: 1,
+      debug: (_connection, query) => statements.push(query),
+    });
+    try {
+      const debugRepo = new DrizzleSubscriptionRepository(drizzle(debugClient, { schema }));
+      const result = await debugRepo.markPaid({
+        transactionId: transaction.id,
+        gatewayReferenceId: "inv_xendit_lock",
+        paidAt: new Date("2026-08-09T10:00:00Z"),
+      });
+      expect(result.outcome).toBe("activated");
+
+      const reads = statements.filter(
+        (query) => /^\s*select/i.test(query) && /"subscription"/i.test(query)
+      );
+      expect(reads).toHaveLength(1);
+      const read = reads[0].toLowerCase();
+      // The lock itself, and scoped to `subscription`: an unqualified `for update`
+      // would also lock the joined `membership_tier` row, which every member of that
+      // tier shares, so unrelated members renewing at once would queue for no reason.
+      expect(read).toContain('for update of "subscription"');
+      expect(read.slice(read.indexOf("for update"))).not.toContain("membership_tier");
+    } finally {
+      await debugClient.end();
+    }
   });
 });
 
