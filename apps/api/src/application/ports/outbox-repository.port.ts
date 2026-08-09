@@ -19,6 +19,23 @@ export const OUTBOX_GRANT_ACCESS = "grant_access";
  */
 export const OUTBOX_REVOKE_ACCESS = "revoke_access";
 
+/**
+ * The `event_type` of the row the renewal pass queues: "tell this member their
+ * membership is coming up for renewal, at this stage of the schedule".
+ *
+ * It goes through the outbox rather than being sent inline for the same reason a grant
+ * does — a WhatsApp send is an external HTTP call, and a Fonnte outage must delay a
+ * reminder rather than fail the whole pass and leave every later member in the batch
+ * unreminded. It also inherits the bounded retries, which is what makes "the reminder
+ * was claimed" and "the reminder was delivered" two different things.
+ *
+ * The payload carries the subscription id and the STAGE. The stage travels with the row
+ * because the message's wording depends on it (a warning three days out reads nothing
+ * like a final notice), and because re-deriving it at send time from a clock that has
+ * since moved would word the message for a stage the member was never claimed for.
+ */
+export const OUTBOX_SEND_RENEWAL_REMINDER = "send_renewal_reminder";
+
 /** A row handed to a worker by `claimBatch`, already marked as being processed. */
 export interface ClaimedOutboxRow {
   id: string;

@@ -1,7 +1,8 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { membershipTiers, subscriptions, transactions } from "../../db/schema";
+import { communities, membershipTiers, subscriptions, transactions } from "../../db/schema";
 import type {
+  DueRenewalRecord,
   MarkPaidOutcome,
   SubscriptionRecord,
   SubscriptionRepositoryPort,
@@ -43,6 +44,19 @@ const ACTIVE_SUBSCRIPTION = "active";
  * unrecognised status would make a superseded row look like a live membership.
  */
 const SUPERSEDED_SUBSCRIPTION = "cancelled";
+
+/** `subscription.status` for a member whose renewal is late but still inside grace. */
+const PAST_DUE_SUBSCRIPTION = "past_due";
+
+/**
+ * The only statuses the renewal pass may look at — see `findDueForRenewal`'s port
+ * docstring for why this filter is load-bearing rather than tidy.
+ *
+ * An ALLOWLIST, in the same spirit as `VISIBLE_STATUSES`: `subscription.status` is a
+ * free varchar, so a status added later must be excluded until somebody decides it
+ * should be dunned, rather than start receiving payment reminders by default.
+ */
+const RENEWABLE_STATUSES = [ACTIVE_SUBSCRIPTION, PAST_DUE_SUBSCRIPTION];
 
 export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
@@ -151,6 +165,88 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
       .where(eq(subscriptions.id, id))
       .limit(1);
     return row ?? null;
+  }
+
+  /**
+   * The renewal pass's batch. One join down to `community`, for the same reason
+   * `findByIdWithCommunity` exists: the pass has no creator, and
+   * `CommunityRepositoryPort` has no unscoped by-id read to reach the community's
+   * status with.
+   *
+   * `inArray` on the status is the filter the port docstring insists on. No
+   * shape-check on `dueOnOrBefore`: it is built by `latestDueDateInReminderWindow`
+   * from the injected clock, never by a caller, so an unparseable value here is a
+   * programming error that should surface rather than be turned into an empty batch
+   * that silently reminds nobody.
+   *
+   * Ordered longest-overdue first, with `id` as the tie-break so the order is TOTAL
+   * and the keyset cursor in `after` can walk it without skipping or repeating a row —
+   * see the port docstring for why a bare `limit` starves the tail of the backlog.
+   */
+  async findDueForRenewal(input: {
+    dueOnOrBefore: string;
+    limit: number;
+    after?: { nextBillingDate: string; id: string };
+  }): Promise<DueRenewalRecord[]> {
+    const { after } = input;
+    return this.db
+      .select({
+        subscription: subscriptions,
+        communityId: communities.id,
+        communityStatus: communities.status,
+      })
+      .from(subscriptions)
+      .innerJoin(membershipTiers, eq(subscriptions.tierId, membershipTiers.id))
+      .innerJoin(communities, eq(membershipTiers.communityId, communities.id))
+      .where(
+        and(
+          inArray(subscriptions.status, RENEWABLE_STATUSES),
+          // Redundant with the comparison below in Postgres (NULL <= anything is
+          // NULL, so the row is excluded either way), and kept because it states the
+          // intent: a subscription that never activated has no due date to be late
+          // for.
+          isNotNull(subscriptions.nextBillingDate),
+          lte(subscriptions.nextBillingDate, input.dueOnOrBefore),
+          // The keyset: strictly after (date, id) in the SAME order as the ORDER BY
+          // below. A tuple comparison, spelled out because the two columns are
+          // different types.
+          after === undefined
+            ? undefined
+            : or(
+                gt(subscriptions.nextBillingDate, after.nextBillingDate),
+                and(
+                  eq(subscriptions.nextBillingDate, after.nextBillingDate),
+                  gt(subscriptions.id, after.id)
+                )
+              )
+        )
+      )
+      .orderBy(asc(subscriptions.nextBillingDate), asc(subscriptions.id))
+      .limit(input.limit);
+  }
+
+  /**
+   * The `active` → `past_due` transition, with the grace deadline written in the same
+   * statement. See the port docstring: `status = 'active'` is IN the predicate, which
+   * is what makes the deadline write-once under a second pass and under a concurrent
+   * one, and `updatedAt` is set explicitly because no trigger backs the column.
+   *
+   * A malformed id is a MISS rather than a driver error, the same rule as `findById` —
+   * though unlike that method the id here always comes from a row this process just
+   * read, so it is a belt-and-braces guard rather than an untrusted-input one.
+   */
+  async markPastDue(subscriptionId: string, graceEndsAt: Date): Promise<boolean> {
+    if (!UUID_PATTERN.test(subscriptionId)) {
+      return false;
+    }
+    const moved = await this.db
+      .update(subscriptions)
+      .set({ status: PAST_DUE_SUBSCRIPTION, graceEndsAt, updatedAt: new Date() })
+      .where(
+        and(eq(subscriptions.id, subscriptionId), eq(subscriptions.status, ACTIVE_SUBSCRIPTION))
+      )
+      .returning({ id: subscriptions.id });
+    return moved.length > 0;
   }
 
   /**

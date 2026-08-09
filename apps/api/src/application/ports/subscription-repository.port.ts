@@ -3,12 +3,44 @@ export interface SubscriptionRecord {
   memberId: string;
   tierId: string;
   status: string;
+  /**
+   * The `date` column verbatim — `"2026-03-10"`, a DAY and not an instant. Phase 5's
+   * reminder pass turns it into `new Date("2026-03-10")` (UTC midnight, 07:00 WIB,
+   * comfortably inside the intended Asia/Jakarta day) and compares WIB calendar days;
+   * see `jakartaDayNumber` for why anything else moves the boundary by seven hours.
+   */
   nextBillingDate: string | null;
+  /**
+   * When this subscription's grace period runs out, or null when it is not `past_due`.
+   *
+   * WRITTEN ONCE, when the subscription ENTERS `past_due`, and never recomputed — see
+   * the column comment in db/schema.ts and `markPastDue` below. It is a promise made to
+   * a member about the day they lose access, so a later pass, a config change or a
+   * timezone correction must not be able to move it.
+   */
+  graceEndsAt: Date | null;
   startedAt: Date | null;
   retryCount: number;
   lastAttemptAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * A subscription the renewal pass has to consider, with the community it belongs to
+ * resolved through `subscription → membership_tier → community`.
+ *
+ * The community's STATUS travels with it because the pass has to decide whether the
+ * community still wants renewals at all (an archived one gets no reminders and no
+ * revocation, spec §8) — and there is no unscoped community-by-id port method to look
+ * it up with, for exactly the same reason `MarkPaidResult` carries `communityId`:
+ * `CommunityRepositoryPort` is deliberately creator-scoped, and the renewal pass has no
+ * creator.
+ */
+export interface DueRenewalRecord {
+  subscription: SubscriptionRecord;
+  communityId: string;
+  communityStatus: string;
 }
 
 export interface TransactionRecord {
@@ -186,4 +218,56 @@ export interface SubscriptionRepositoryPort {
      */
     paymentMethod?: string | undefined;
   }): Promise<MarkPaidOutcome>;
+  /**
+   * Subscriptions the renewal pass has to look at: those due on or before
+   * `dueOnOrBefore`, longest-overdue first.
+   *
+   * IT MUST FILTER BY STATUS — `active` and `past_due` only. Two reasons, and the
+   * second is the one that bites: `dueStageFor` saturates at `overdue_7d` rather than
+   * ever returning null again, so a `churned` subscription from a year ago would be
+   * read on every pass for ever and the pass would keep attempting inserts the unique
+   * index rejects (safe, but noisy); and a `pending` subscription that never activated,
+   * or a `cancelled` one, would be dunned for a membership nobody holds.
+   *
+   * `dueOnOrBefore` is INCLUSIVE and is a `YYYY-MM-DD` date string, not an instant —
+   * `next_billing_date` names a day. Callers build it with
+   * `latestDueDateInReminderWindow`, so the SQL cut-off and the schedule agree about
+   * which Asia/Jakarta day it is; a row filtered out here is never offered to the
+   * schedule at all, and the member is simply never reminded.
+   *
+   * `limit` bounds ONE QUERY, and `after` is how the caller walks past it — a keyset
+   * cursor on the same `(next_billing_date, id)` the results are ordered by. That
+   * pairing is not an optimisation, it is the only correct shape: unlike the outbox,
+   * a reminded subscription does NOT leave this result set (the claim lives in
+   * `renewal_reminder`, and adding a "not yet claimed" predicate here would need the
+   * stage, which only the schedule knows). So a bare `limit` returns the SAME rows on
+   * every pass, and any subscription past the limit is never reminded at all — a
+   * silent starvation that grows with the backlog. Measured as exactly that: with a
+   * limit of 1 and two due members, the second was never reached.
+   *
+   * `id` is in both the order and the cursor because `next_billing_date` is a DAY: a
+   * whole cohort ties on it, and a cursor that only carried the date would either skip
+   * or repeat the rest of the cohort.
+   */
+  findDueForRenewal(input: {
+    dueOnOrBefore: string;
+    limit: number;
+    /** Exclusive: return rows ordered strictly after this one. */
+    after?: { nextBillingDate: string; id: string };
+  }): Promise<DueRenewalRecord[]>;
+  /**
+   * Moves an `active` subscription to `past_due` and records the grace deadline it is
+   * measured against. Answers whether it actually made the transition.
+   *
+   * `status = 'active'` MUST be in the UPDATE predicate, not read first. That is what
+   * makes `grace_ends_at` WRITE-ONCE: a later pass — or a concurrent one — never
+   * reaches a row that is already `past_due`, so a deadline a member has already been
+   * given cannot move under them. A read followed by an unconditional write would look
+   * identical in every sequential test and shift the deadline the moment two passes
+   * overlapped, or the moment the grace length was reconfigured.
+   *
+   * `subscription` has no `BEFORE UPDATE` trigger, so this must set `updatedAt`
+   * explicitly like every other write here.
+   */
+  markPastDue(subscriptionId: string, graceEndsAt: Date): Promise<boolean>;
 }

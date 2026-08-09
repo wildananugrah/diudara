@@ -48,6 +48,9 @@ function activationResult(paidAt: Date) {
       tierId: "tier-1",
       status: "active",
       nextBillingDate: "2026-09-09",
+      // Phase 5's grace deadline. Null here because an ACTIVATED subscription has no
+      // deadline — only entering `past_due` writes one.
+      graceEndsAt: null,
       startedAt: paidAt,
       retryCount: 0,
       lastAttemptAt: null,
@@ -120,6 +123,12 @@ function harness(
       return transaction;
     },
     async attachGatewayReference() {
+      throw new Error("not used");
+    },
+    async findDueForRenewal() {
+      throw new Error("not used");
+    },
+    async markPastDue() {
       throw new Error("not used");
     },
     async markPaid(input): Promise<MarkPaidOutcome> {

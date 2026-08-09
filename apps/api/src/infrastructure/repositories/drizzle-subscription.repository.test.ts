@@ -11,6 +11,7 @@ import {
 } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import type { MarkPaidResult } from "../../application/ports/subscription-repository.port";
+import { ArrivalLatch } from "../../test-support/arrival-latch";
 import { DrizzleSubscriptionRepository } from "./drizzle-subscription.repository";
 
 beforeEach(resetDatabase);
@@ -749,5 +750,213 @@ describe("DrizzleSubscriptionRepository.markPaid", () => {
       .where(eq(transactions.id, transaction.id));
     expect(row.status).toBe("pending");
     expect(row.paidAt).toBeNull();
+  });
+});
+
+/**
+ * The two reads and one write Phase 5's reminder pass needs. Both are SQL-level
+ * claims — a status filter and a conditional UPDATE — so they are asserted here
+ * rather than only through `ProcessRenewals`.
+ */
+describe("DrizzleSubscriptionRepository.findDueForRenewal", () => {
+  /** Puts an existing subscription into a given status with a given due date. */
+  async function put(
+    subscriptionId: string,
+    values: { status?: string; nextBillingDate?: string | null }
+  ) {
+    await db
+      .update(subscriptions)
+      .set({ ...values, updatedAt: new Date() })
+      .where(eq(subscriptions.id, subscriptionId));
+  }
+
+  it("returns an active subscription due on or before the cut-off, with its community", async () => {
+    const { subscription, community } = await seedPendingCheckout();
+    await put(subscription.id, { status: "active", nextBillingDate: "2026-03-10" });
+
+    const due = await repo.findDueForRenewal({ dueOnOrBefore: "2026-03-13", limit: 10 });
+
+    expect(due).toHaveLength(1);
+    expect(due[0].subscription.id).toBe(subscription.id);
+    expect(due[0].communityId).toBe(community.id);
+    expect(due[0].communityStatus).toBe("active");
+    // The pass compares WIB calendar days, so it needs the stored date verbatim.
+    expect(due[0].subscription.nextBillingDate).toBe("2026-03-10");
+  });
+
+  it("returns a past_due subscription too — the escalating stages are still owed", async () => {
+    const { subscription } = await seedPendingCheckout();
+    await put(subscription.id, { status: "past_due", nextBillingDate: "2026-03-10" });
+
+    const due = await repo.findDueForRenewal({ dueOnOrBefore: "2026-03-13", limit: 10 });
+
+    expect(due).toHaveLength(1);
+    expect(due[0].subscription.status).toBe("past_due");
+  });
+
+  it("EXCLUDES every other status", async () => {
+    // Without the filter, a churned subscription from a year ago is read on every
+    // pass for ever: `dueStageFor` saturates at overdue_7d rather than returning
+    // null, so the pass would keep attempting inserts the unique index rejects —
+    // safe, but noisy — and a `pending` row that never activated would be dunned.
+    for (const status of ["pending", "cancelled", "superseded", "churned"]) {
+      const { subscription } = await seedPendingCheckout();
+      await put(subscription.id, { status, nextBillingDate: "2026-01-10" });
+    }
+
+    expect(await repo.findDueForRenewal({ dueOnOrBefore: "2026-03-13", limit: 10 })).toHaveLength(
+      0
+    );
+  });
+
+  it("excludes a subscription due after the cut-off, and includes one due exactly on it", async () => {
+    const later = await seedPendingCheckout();
+    await put(later.subscription.id, { status: "active", nextBillingDate: "2026-03-14" });
+    const exactly = await seedPendingCheckout();
+    await put(exactly.subscription.id, { status: "active", nextBillingDate: "2026-03-13" });
+
+    const due = await repo.findDueForRenewal({ dueOnOrBefore: "2026-03-13", limit: 10 });
+
+    expect(due.map((row) => row.subscription.id)).toEqual([exactly.subscription.id]);
+  });
+
+  it("excludes a subscription with no next_billing_date", async () => {
+    const { subscription } = await seedPendingCheckout();
+    await put(subscription.id, { status: "active", nextBillingDate: null });
+
+    expect(await repo.findDueForRenewal({ dueOnOrBefore: "2026-03-13", limit: 10 })).toHaveLength(
+      0
+    );
+  });
+
+  it("bounds the batch and takes the longest-overdue first", async () => {
+    const oldest = await seedPendingCheckout();
+    await put(oldest.subscription.id, { status: "active", nextBillingDate: "2026-03-01" });
+    const newest = await seedPendingCheckout();
+    await put(newest.subscription.id, { status: "active", nextBillingDate: "2026-03-10" });
+
+    const due = await repo.findDueForRenewal({ dueOnOrBefore: "2026-03-13", limit: 1 });
+
+    expect(due.map((row) => row.subscription.id)).toEqual([oldest.subscription.id]);
+  });
+
+  it("walks past a keyset cursor without skipping or repeating a row", async () => {
+    // Every one of these ties on `next_billing_date` — it is a DAY, so a whole cohort
+    // does. The cursor therefore has to carry the id as well, or a paged pass either
+    // loops for ever on the same page or jumps the rest of the cohort. Both failures
+    // end with a member who is never reminded.
+    const created = [];
+    for (let index = 0; index < 4; index += 1) {
+      const { subscription } = await seedPendingCheckout();
+      await put(subscription.id, { status: "active", nextBillingDate: "2026-03-10" });
+      created.push(subscription.id);
+    }
+
+    const seen: string[] = [];
+    let after: { nextBillingDate: string; id: string } | undefined;
+    for (let page = 0; page < 10; page += 1) {
+      const rows = await repo.findDueForRenewal({
+        dueOnOrBefore: "2026-03-13",
+        limit: 1,
+        ...(after === undefined ? {} : { after }),
+      });
+      if (rows.length === 0) break;
+      seen.push(rows[0].subscription.id);
+      after = { nextBillingDate: "2026-03-10", id: rows[0].subscription.id };
+    }
+
+    expect(seen).toHaveLength(4);
+    expect(new Set(seen).size).toBe(4);
+    expect(seen.slice().sort()).toEqual(created.slice().sort());
+  });
+
+  it("carries grace_ends_at back with the row", async () => {
+    const deadline = new Date("2026-03-17T00:00:00.000Z");
+    const { subscription } = await seedPendingCheckout();
+    await db
+      .update(subscriptions)
+      .set({
+        status: "past_due",
+        nextBillingDate: "2026-03-10",
+        graceEndsAt: deadline,
+        updatedAt: new Date(),
+      })
+      .where(eq(subscriptions.id, subscription.id));
+
+    const due = await repo.findDueForRenewal({ dueOnOrBefore: "2026-03-13", limit: 10 });
+
+    expect(due[0].subscription.graceEndsAt?.toISOString()).toBe(deadline.toISOString());
+  });
+});
+
+describe("DrizzleSubscriptionRepository.markPastDue", () => {
+  it("moves an active subscription to past_due and stores the deadline", async () => {
+    const deadline = new Date("2026-03-17T00:00:00.000Z");
+    const { subscription } = await seedPendingCheckout();
+    await db
+      .update(subscriptions)
+      .set({ status: "active", updatedAt: new Date() })
+      .where(eq(subscriptions.id, subscription.id));
+
+    expect(await repo.markPastDue(subscription.id, deadline)).toBe(true);
+
+    const [row] = await db
+      .select()
+      .from(subscriptions)
+      .where(eq(subscriptions.id, subscription.id));
+    expect(row.status).toBe("past_due");
+    expect(row.graceEndsAt?.toISOString()).toBe(deadline.toISOString());
+    // No BEFORE UPDATE trigger backs updated_at, so the method must set it.
+    expect(row.updatedAt.getTime()).toBeGreaterThan(row.createdAt.getTime());
+  });
+
+  it("REFUSES to touch a subscription that is no longer active, deadline included", async () => {
+    // `status = 'active'` is IN the UPDATE predicate, which is what makes
+    // `grace_ends_at` write-once: the second pass cannot move a deadline the member
+    // has already been given, because it never reaches the row at all.
+    const alreadyPromised = new Date("2026-03-20T05:00:00.000Z");
+    const { subscription } = await seedPendingCheckout();
+    await db
+      .update(subscriptions)
+      .set({ status: "past_due", graceEndsAt: alreadyPromised, updatedAt: new Date() })
+      .where(eq(subscriptions.id, subscription.id));
+
+    expect(await repo.markPastDue(subscription.id, new Date("2026-04-01T00:00:00.000Z"))).toBe(
+      false
+    );
+
+    const [row] = await db
+      .select()
+      .from(subscriptions)
+      .where(eq(subscriptions.id, subscription.id));
+    expect(row.graceEndsAt?.toISOString()).toBe(alreadyPromised.toISOString());
+  });
+
+  it("reports a malformed id as a miss rather than raising a driver error", async () => {
+    expect(await repo.markPastDue("not-a-uuid", new Date())).toBe(false);
+  });
+
+  it("lets exactly ONE of several concurrent passes make the transition", async () => {
+    // Two overlapping passes both see an `active` row. The predicate is what decides,
+    // so only one of them may report the transition — and only one may write a
+    // deadline.
+    const { subscription } = await seedPendingCheckout();
+    await db
+      .update(subscriptions)
+      .set({ status: "active", updatedAt: new Date() })
+      .where(eq(subscriptions.id, subscription.id));
+    const latch = new ArrivalLatch(4);
+
+    const outcomes = await Promise.all(
+      Array.from({ length: 4 }, async (_unused, index) => {
+        await latch.arriveAndWait();
+        return repo.markPastDue(
+          subscription.id,
+          new Date(Date.UTC(2026, 2, 17, index))
+        );
+      })
+    );
+
+    expect(outcomes.filter((moved) => moved)).toHaveLength(1);
   });
 });

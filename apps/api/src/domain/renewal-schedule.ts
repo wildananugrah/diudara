@@ -111,6 +111,41 @@ export function dueStageFor(nextBillingDate: Date, now: Date): ReminderStage | n
 }
 
 /**
+ * The latest `next_billing_date` that can be inside the reminder window at `now`, as
+ * the `YYYY-MM-DD` string the `date` column stores.
+ *
+ * The renewal pass cannot read every subscription in the table on every tick, so it
+ * needs a SQL cut-off — and the cut-off has to be derived from the same Asia/Jakarta
+ * day `dueStageFor` compares in. Deriving it in UTC instead would move the edge by
+ * seven hours, and a subscription filtered out here is never offered to the schedule at
+ * all: the member would simply never be reminded, with nothing anywhere saying why.
+ *
+ * It is the FIRST stage's offset that sets the edge (three days before the due date
+ * today), read out of the table rather than written as a literal, so adding an earlier
+ * stage widens the query automatically instead of silently starving it.
+ */
+export function latestDueDateInReminderWindow(now: Date): string {
+  const cutOffDayNumber = jakartaDayNumber(now) - STAGE_DAY_OFFSET[REMINDER_STAGES[0]];
+  // Exact: a day number times 86_400_000 is UTC midnight of that civil date, so the
+  // first ten characters are its calendar date with no rounding.
+  return new Date(cutOffDayNumber * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Whether a stage means the due date has arrived or gone past — i.e. whether the
+ * member is now LATE rather than being warned in advance.
+ *
+ * The reminder pass uses it for the `active` → `past_due` transition, and it has to be
+ * a property of the stage rather than `stage === "due"`: a pass that has been down for
+ * three days is answered `overdue_3d` and never sees `"due"` at all, so an equality
+ * test would leave that member `active` for ever — never churned, keeping paid access
+ * indefinitely, with every later pass agreeing that nothing needs doing.
+ */
+export function isDueOrOverdue(stage: ReminderStage): boolean {
+  return STAGE_DAY_OFFSET[stage] >= 0;
+}
+
+/**
  * When the grace period for a subscription due on `nextBillingDate` runs out.
  *
  * Whole days of elapsed time, not a calendar-day rollover: this is a DEADLINE the

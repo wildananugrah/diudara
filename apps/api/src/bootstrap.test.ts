@@ -165,6 +165,13 @@ const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   async attachGatewayReference() {
     return true;
   },
+  async findDueForRenewal() {
+    // Phase 5's renewal pass runs in the worker, not behind an HTTP route.
+    return [];
+  },
+  async markPastDue() {
+    return false;
+  },
   async markPaid() {
     throw new Error("not used");
   },

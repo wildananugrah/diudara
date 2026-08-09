@@ -112,6 +112,8 @@ describe("StartCheckout — funds routing", () => {
           tierId: input.tierId,
           status: "pending",
           nextBillingDate: null,
+          // No grace deadline: only entering `past_due` (Phase 5) writes one.
+          graceEndsAt: null,
           startedAt: null,
           retryCount: 0,
           lastAttemptAt: null,
@@ -147,6 +149,12 @@ describe("StartCheckout — funds routing", () => {
       async attachGatewayReference(transactionId, gatewayReferenceId) {
         attached.push({ transactionId, gatewayReferenceId });
         return true;
+      },
+      async findDueForRenewal() {
+        throw new Error("not used");
+      },
+      async markPastDue() {
+        throw new Error("not used");
       },
       async markPaid() {
         throw new Error("not used");
@@ -470,6 +478,7 @@ function harness(
         tierId: input.tierId,
         status: "pending",
         nextBillingDate: null,
+        graceEndsAt: null,
         startedAt: null,
         retryCount: 0,
         lastAttemptAt: null,
@@ -505,6 +514,12 @@ function harness(
     },
     async attachGatewayReference() {
       return true;
+    },
+    async findDueForRenewal() {
+      throw new Error("not used");
+    },
+    async markPastDue() {
+      throw new Error("not used");
     },
     async markPaid() {
       throw new Error("not used");

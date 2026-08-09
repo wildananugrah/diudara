@@ -3,7 +3,9 @@ import {
   REMINDER_STAGES,
   computeGraceEndsAt,
   dueStageFor,
+  isDueOrOverdue,
   isPastGrace,
+  latestDueDateInReminderWindow,
 } from "./renewal-schedule";
 
 /** 2026-03-10 00:00 Asia/Jakarta (UTC+7) === 2026-03-09T17:00:00Z */
@@ -142,5 +144,71 @@ describe("dueStageFor with a next_billing_date read off the date column", () => 
   it("is pre_3d at 23:30 WIB four days before, not null", () => {
     // 2026-03-07 23:30 WIB === 2026-03-07T16:30:00Z, three WIB days before the 10th.
     expect(dueStageFor(dueFromColumn, new Date("2026-03-07T16:30:00.000Z"))).toBe("pre_3d");
+  });
+});
+
+/**
+ * What the renewal pass hands to SQL. The pass must not read every subscription in
+ * the table on every tick, so it needs a cut-off — and the cut-off has to be
+ * computed in the SAME frame `dueStageFor` compares in, or a member on the edge of
+ * the window is filtered out before the schedule is ever consulted.
+ */
+describe("latestDueDateInReminderWindow", () => {
+  it("is three days after today in Asia/Jakarta, as a date-column string", () => {
+    // 2026-03-10 09:00 WIB. The first stage fires three days BEFORE the due date, so
+    // a subscription due on the 13th is already inside the window today.
+    expect(latestDueDateInReminderWindow(new Date("2026-03-10T02:00:00.000Z"))).toBe("2026-03-13");
+  });
+
+  it("uses the WIB day, not the UTC one, either side of midnight", () => {
+    // 2026-03-10 00:30 WIB is still 2026-03-09 in UTC. Taking the UTC day here would
+    // shrink the window by a day for every pass that ran in the WIB small hours, and
+    // a member due exactly at the edge would never be reminded at all.
+    expect(latestDueDateInReminderWindow(new Date("2026-03-09T17:30:00.000Z"))).toBe("2026-03-13");
+    // 2026-03-09 23:30 WIB is still the 9th locally.
+    expect(latestDueDateInReminderWindow(new Date("2026-03-09T16:30:00.000Z"))).toBe("2026-03-12");
+  });
+
+  it("never filters out a subscription the schedule would remind", () => {
+    // The two functions have to agree: anything `dueStageFor` gives a stage to must be
+    // inside the cut-off. Checked across a month of due dates around `now`.
+    const now = new Date("2026-03-10T02:00:00.000Z");
+    const cutOff = latestDueDateInReminderWindow(now);
+    for (let offset = -20; offset <= 20; offset += 1) {
+      const dueDate = new Date(Date.UTC(2026, 2, 10 + offset));
+      const stage = dueStageFor(dueDate, now);
+      const inWindow = dueDate.toISOString().slice(0, 10) <= cutOff;
+      if (stage !== null) {
+        expect(inWindow).toBe(true);
+      }
+    }
+  });
+
+  it("rolls over a month and a year boundary correctly", () => {
+    expect(latestDueDateInReminderWindow(new Date("2026-01-30T02:00:00.000Z"))).toBe("2026-02-02");
+    expect(latestDueDateInReminderWindow(new Date("2026-12-30T02:00:00.000Z"))).toBe("2027-01-02");
+  });
+});
+
+/**
+ * Which stages mean "the due date has arrived or passed". The reminder pass uses it to
+ * decide the `active` → `past_due` transition, and it must be a property of the STAGE
+ * rather than an equality test against `"due"` — a pass that comes back after three
+ * days of downtime never sees `"due"` at all, and a member who is never moved to
+ * `past_due` is never churned either.
+ */
+describe("isDueOrOverdue", () => {
+  it("is false for the pre-due warning only", () => {
+    expect(isDueOrOverdue("pre_3d")).toBe(false);
+    expect(isDueOrOverdue("due")).toBe(true);
+    expect(isDueOrOverdue("overdue_1d")).toBe(true);
+    expect(isDueOrOverdue("overdue_3d")).toBe(true);
+    expect(isDueOrOverdue("overdue_7d")).toBe(true);
+  });
+
+  it("agrees with every stage in REMINDER_STAGES", () => {
+    // Guards a stage added later with no thought about the transition: exactly one
+    // stage in the list is pre-due today, and if that changes this test says so.
+    expect(REMINDER_STAGES.filter((stage) => !isDueOrOverdue(stage))).toEqual(["pre_3d"]);
   });
 });
