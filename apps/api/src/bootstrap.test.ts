@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   bootstrap,
+  RELAXED_NODE_ENVS,
   resolveCallbackToken,
   selectPaymentProvider,
   TEST_CALLBACK_TOKEN,
@@ -413,6 +414,34 @@ describe("bootstrap() JWT_SECRET guard", () => {
   });
 });
 
+describe(".env.example", () => {
+  /**
+   * The other half of the C1 fix, and the half code alone cannot express: the
+   * allowlist only lets `bun run dev` work if a developer's `.env` actually
+   * carries a NODE_ENV, and the only thing that puts one there is this line in
+   * the file they copy. Before the fix `grep NODE_ENV .env.example` matched
+   * prose in a comment and no assignment at all.
+   */
+  it("ships an actual NODE_ENV assignment, not just prose about it", () => {
+    const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
+    const line = example.split("\n").find((l) => l.startsWith("NODE_ENV="));
+    expect(line).toBeDefined();
+
+    const shipped = line!.slice("NODE_ENV=".length).trim();
+    // Whatever it says must be a value the allowlist accepts, or a fresh clone
+    // cannot boot.
+    expect([...RELAXED_NODE_ENVS]).toContain(shipped);
+    expect(() =>
+      selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv: shipped })
+    ).not.toThrow();
+  });
+
+  it("documents APP_BASE_URL, without which the confirmation page is unreachable", () => {
+    const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
+    expect(example).toContain("APP_BASE_URL=");
+  });
+});
+
 /**
  * Runs `fn` with each of `vars` set to its given value (or unset when the
  * value is `undefined`), always restoring the originals — same rationale as
@@ -484,9 +513,9 @@ describe("selectPaymentProvider", () => {
     expect(logs.some((line) => /XenditPaymentAdapter/.test(line))).toBe(true);
   });
 
-  it("selects FakePaymentAdapter when both env vars are unset outside production", () => {
+  it("selects FakePaymentAdapter when both env vars are unset in development or test", () => {
     captureConsoleLog(() => {
-      for (const nodeEnv of ["test", "development", undefined]) {
+      for (const nodeEnv of ["test", "development"]) {
         expect(
           selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv })
         ).toBeInstanceOf(FakePaymentAdapter);
@@ -507,6 +536,56 @@ describe("selectPaymentProvider", () => {
         nodeEnv: "production",
       })
     ).toThrow(/NODE_ENV is production/);
+  });
+
+  // CRITICAL, second pass. The `nodeEnv === "production"` denylist above was
+  // never reachable on a real deployment: nothing in this repository sets
+  // NODE_ENV (no `start` script, no Dockerfile, no API service in
+  // infra/docker-compose.yml), so `bun -e 'console.log(process.env.NODE_ENV)'`
+  // printed `undefined` and the guard silently returned FakePaymentAdapter.
+  // The allowlist is what closes that: anything not explicitly relaxed throws.
+  it("refuses to start for ANY nodeEnv outside the allowlist, including unset", () => {
+    for (const nodeEnv of [
+      undefined,
+      "staging",
+      "prod",
+      "PRODUCTION",
+      "Production",
+      "dev",
+      "development ",
+      "",
+    ]) {
+      expect(() =>
+        selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv })
+      ).toThrow(/fake payment adapter is permitted ONLY/);
+    }
+  });
+
+  it("says whether NODE_ENV was unset or merely unrecognised", () => {
+    // An operator staring at "NODE_ENV is production" when they never set it
+    // would look in the wrong place.
+    expect(() =>
+      selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv: undefined })
+    ).toThrow(/NODE_ENV is not set/);
+    expect(() =>
+      selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv: "staging" })
+    ).toThrow(/NODE_ENV is staging/);
+  });
+
+  it("still starts on the allowlist when Xendit IS configured, whatever nodeEnv says", () => {
+    // The allowlist gates the FAKE adapter, not the real one: an unrecognised
+    // NODE_ENV on a properly configured box must not block a deployment.
+    captureConsoleLog(() => {
+      for (const nodeEnv of [undefined, "staging", "prod", "production"]) {
+        expect(
+          selectPaymentProvider({
+            secretKey: "sk_live_x",
+            splitRuleId: "splitrule_1",
+            nodeEnv,
+          })
+        ).toBeInstanceOf(XenditPaymentAdapter);
+      }
+    });
   });
 
   it("treats empty-string configuration as unset in production", () => {
@@ -624,15 +703,45 @@ describe("bootstrap() payment provider selection", () => {
 const CONFIGURED_XENDIT = { secretKey: "sk_live_x", splitRuleId: "splitrule_1" };
 const NO_XENDIT = { secretKey: undefined, splitRuleId: undefined };
 
+/**
+ * A stand-in for a real Xendit dashboard token. Long enough to clear the
+ * 32-character floor `resolveCallbackToken` now enforces — the previous
+ * 14-character "xnd_real_token" would (correctly) be refused, and `"x"` used to
+ * be accepted in production on the strength of nothing.
+ */
+const REAL_CALLBACK_TOKEN = `xnd_${"R".repeat(40)}`;
+
 describe("resolveCallbackToken", () => {
   it("uses a configured token as-is", () => {
     expect(
       resolveCallbackToken({
-        callbackToken: "xnd_real_token",
+        callbackToken: REAL_CALLBACK_TOKEN,
         ...CONFIGURED_XENDIT,
         nodeEnv: "production",
       })
-    ).toBe("xnd_real_token");
+    ).toBe(REAL_CALLBACK_TOKEN);
+  });
+
+  // MINOR from the final review: JWT_SECRET beside it requires 32 characters,
+  // while this — the webhook's ONLY authentication — accepted "x" in
+  // production. Same floor, same reasoning.
+  it("refuses a token shorter than 32 characters, in EVERY environment", () => {
+    for (const nodeEnv of ["production", "development", "test", undefined]) {
+      for (const short of ["x", "xnd_short", "a".repeat(31)]) {
+        expect(() =>
+          resolveCallbackToken({ callbackToken: short, ...NO_XENDIT, nodeEnv })
+        ).toThrow(/XENDIT_CALLBACK_TOKEN is too short/);
+      }
+      expect(
+        resolveCallbackToken({ callbackToken: "a".repeat(32), ...NO_XENDIT, nodeEnv })
+      ).toBe("a".repeat(32));
+    }
+  });
+
+  it("names the length it got and the length it needs", () => {
+    expect(() =>
+      resolveCallbackToken({ callbackToken: "x", ...NO_XENDIT, nodeEnv: "production" })
+    ).toThrow(/\(1 characters; 32 required\)/);
   });
 
   it("defaults ONLY under NODE_ENV=test", () => {
@@ -648,13 +757,41 @@ describe("resolveCallbackToken", () => {
     // endpoint they may never exercise locally. `undefined` is safe —
     // verifyCallbackToken refuses an unset expected token, so the route rejects
     // every delivery instead of accepting any.
-    for (const nodeEnv of ["development", "staging", undefined]) {
-      captureConsoleLog(() => {
-        expect(
-          resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv })
-        ).toBeUndefined();
-      });
+    captureConsoleLog(() => {
+      expect(
+        resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "development" })
+      ).toBeUndefined();
+    });
+  });
+
+  // CRITICAL, second pass — the same relocation as selectPaymentProvider's
+  // guard. "staging" and an UNSET NODE_ENV used to boot happily with no
+  // callback token, and an unset NODE_ENV is what a real deployment has,
+  // because nothing in this repository sets it. Every delivery would then be
+  // rejected: money taken, nobody activated, and no loud failure to say so.
+  it("refuses to boot without a token for ANY nodeEnv outside the allowlist", () => {
+    for (const nodeEnv of [
+      undefined,
+      "staging",
+      "prod",
+      "PRODUCTION",
+      "Production",
+      "dev",
+      "",
+    ]) {
+      expect(() =>
+        resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv })
+      ).toThrow(/permitted ONLY when NODE_ENV is exactly/);
     }
+  });
+
+  it("distinguishes an unset NODE_ENV from an unrecognised one here too", () => {
+    expect(() =>
+      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: undefined })
+    ).toThrow(/NODE_ENV is not set/);
+    expect(() =>
+      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "staging" })
+    ).toThrow(/NODE_ENV is staging/);
   });
 
   it("says so out loud in development, and stays quiet under test", () => {
@@ -741,8 +878,8 @@ function resolveCallbackTokenQuietly(nodeEnv: string | undefined): string | unde
 describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
   it("wires the configured token into Dependencies", () => {
     withJwtSecret("x".repeat(32), () => {
-      withEnv({ XENDIT_CALLBACK_TOKEN: "xnd_real_token" }, () => {
-        expect(bootstrap().xenditCallbackToken).toBe("xnd_real_token");
+      withEnv({ XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN }, () => {
+        expect(bootstrap().xenditCallbackToken).toBe(REAL_CALLBACK_TOKEN);
       });
     });
   });
@@ -801,7 +938,7 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           NODE_ENV: "production",
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
-          XENDIT_CALLBACK_TOKEN: "xnd_real_token",
+          XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
         },
         () => {
           captureConsoleLog(() => {

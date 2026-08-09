@@ -46,13 +46,31 @@ MVP spec. Every task's work implicitly includes these:
 - Password hashes never leave the repository layer. Error logs must never contain raw error
   objects (Phase 2 found argon2id hashes leaking that way) — Xendit payloads carry payer
   identifiers, so this must not regress.
-- **The fake payment adapter must be unreachable in production.** `bootstrap()` throws when
-  `NODE_ENV === "production"` and the Xendit configuration is missing, and throws on
-  *partial* configuration in **every** environment — a set secret key with an unset split
-  rule id is always a mistake, and it makes an operator believe payments are live. This
-  mirrors the existing `assertUsableJwtSecret` guard. A `console.log` is not sufficient:
-  it silently writes unrecoverable `fake-acct-*` values into `creator.xendit_account_id`,
-  which `CreatePaymentAccount` then 409s on forever with no reset path.
+- **The fake payment adapter must be unreachable in production.** `bootstrap()` permits the
+  fake adapter — and an absent `XENDIT_CALLBACK_TOKEN` — **only** when `NODE_ENV` is exactly
+  `"development"` or `"test"`, and throws for **every** other value **including `undefined`**.
+  It also throws on *partial* configuration in **every** environment — a set secret key with
+  an unset split rule id is always a mistake, and it makes an operator believe payments are
+  live. This mirrors the existing `assertUsableJwtSecret` guard. A `console.log` is not
+  sufficient: it silently writes unrecoverable `fake-acct-*` values into
+  `creator.xendit_account_id`, which `CreatePaymentAccount` then 409s on forever with no
+  reset path.
+
+  **AMENDED 2026-08-09 (final review, C1).** This constraint originally specified a
+  *denylist*: "throws when `NODE_ENV === "production"`". That shape was implemented faithfully
+  and **never fired**, because nothing in this repository establishes its trigger — Bun does
+  not default `NODE_ENV` (`bun -e 'console.log(process.env.NODE_ENV)'` → `undefined`),
+  `apps/api/package.json` has no `start` script, there is no Dockerfile, `infra/docker-compose.yml`
+  has no API service, and `.env.example` never mentioned `NODE_ENV`. So the first real
+  deployment would have taken the *unsafe* branch, as would `"staging"`, `"prod"` and
+  `"PRODUCTION"`. The rule is therefore an **allowlist** (`RELAXED_NODE_ENVS` in
+  `bootstrap.ts`), the same shape as `VISIBLE_STATUSES` in the public-community use-case and
+  for the same reason: an unanticipated value must fail **closed**. A plan that states a
+  guard must also state what establishes the guard's trigger — `.env.example` now ships
+  `NODE_ENV=development`, and a test pins that it does.
+
+  The same review also set a **32-character floor on `XENDIT_CALLBACK_TOKEN`**, mirroring
+  `JWT_SECRET`: it is the webhook's only authentication, and `"x"` was being accepted.
 - Bun throughout; `bun run test` and `bun run typecheck` from the repo root must stay green.
 - Tests use `resetDatabase()` from `apps/api/src/db/test-helpers.ts` in `beforeEach`; add any
   new table to its delete list.

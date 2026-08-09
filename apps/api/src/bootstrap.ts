@@ -126,6 +126,59 @@ export function assertUsableJwtSecret(secret: string | undefined): string {
 }
 
 /**
+ * The ONLY `NODE_ENV` values allowed to reach a relaxed configuration branch:
+ * the fake payment adapter, and an absent `XENDIT_CALLBACK_TOKEN`.
+ *
+ * An ALLOWLIST, deliberately — this is the same shape as `VISIBLE_STATUSES` in
+ * get-public-community.ts, for the same reason: an unanticipated value must fail
+ * CLOSED. The denylist this replaced (`if (nodeEnv === "production") throw`)
+ * looked equivalent and was not, because nothing in this repository ever sets
+ * `NODE_ENV`:
+ *
+ *   $ bun -e 'console.log(process.env.NODE_ENV)'   ->  undefined
+ *
+ * There is no `start` script, no Dockerfile, and no API service in
+ * infra/docker-compose.yml, so the FIRST real deployment would have run with
+ * `NODE_ENV` unset and taken the unsafe branch — booting the fake adapter,
+ * writing unrecoverable `fake-acct-*` ids into `creator.xendit_account_id`, and
+ * rejecting every webhook delivery. `"staging"`, `"prod"` and `"PRODUCTION"`
+ * were unsafe for the same reason. Under this allowlist all four throw.
+ *
+ * `"test"` is in here because `bun test` sets it (the same mechanism
+ * `resetDatabase()` relies on) and the whole suite depends on the fake adapter.
+ * `"development"` is here so `bun run dev` works — which is why
+ * `NODE_ENV=development` is now in `apps/api/.env.example`.
+ *
+ * Adding a value to this set is a decision to let that environment take fake
+ * money. Do not add `"staging"`: a staging box that charges nobody proves
+ * nothing about the payment path, and Xendit has a test-mode secret key for it.
+ */
+export const RELAXED_NODE_ENVS: ReadonlySet<string> = new Set(["development", "test"]);
+
+function isRelaxedNodeEnv(nodeEnv: string | undefined): boolean {
+  return nodeEnv !== undefined && RELAXED_NODE_ENVS.has(nodeEnv);
+}
+
+/** Renders `NODE_ENV` for an error message, distinguishing unset from a value. */
+function describeNodeEnv(nodeEnv: string | undefined): string {
+  return nodeEnv === undefined ? "not set" : nodeEnv;
+}
+
+/** The names in `RELAXED_NODE_ENVS`, for error messages. */
+const RELAXED_NODE_ENVS_LIST = [...RELAXED_NODE_ENVS].sort().join(" or ");
+
+/**
+ * Minimum `XENDIT_CALLBACK_TOKEN` length, mirroring `MIN_JWT_SECRET_LENGTH`
+ * above on purpose. This token is the ONLY authentication on
+ * `POST /webhooks/xendit` — Xendit signs nothing — so it is exactly as
+ * load-bearing as the JWT signing key, and it was accepting a value of `"x"`.
+ * A short token is brute-forceable against a live endpoint, and forging a
+ * callback grants free access to every paid community on the box. Real Xendit
+ * dashboard tokens are comfortably longer than this.
+ */
+const MIN_CALLBACK_TOKEN_LENGTH = 32;
+
+/**
  * Normalises an env var to `undefined` when it carries no value. A variable
  * exported as `XENDIT_SECRET_KEY=` arrives as `""`, which is indistinguishable
  * from a typo'd name in intent but NOT in truthiness once someone writes
@@ -150,8 +203,10 @@ function presentOrUndefined(value: string | undefined): string | undefined {
  *   1. PARTIAL configuration throws in EVERY environment. A set secret key with
  *      an unset split rule id is never intentional; it is a typo that makes an
  *      operator believe payments are live.
- *   2. ABSENT configuration throws when `NODE_ENV === "production"`. Outside
- *      production the fake adapter is the point, and every test relies on it.
+ *   2. ABSENT configuration throws UNLESS `NODE_ENV` is one of
+ *      `RELAXED_NODE_ENVS` — an allowlist, so `undefined`, `"staging"`,
+ *      `"prod"` and `"PRODUCTION"` all throw. See RELAXED_NODE_ENVS for why the
+ *      denylist this replaced never fired.
  *
  * Mirrors `assertUsableJwtSecret` above in shape and error wording.
  */
@@ -182,12 +237,14 @@ export function selectPaymentProvider(env: {
     );
   }
 
-  if (env.nodeEnv === "production") {
+  if (!isRelaxedNodeEnv(env.nodeEnv)) {
     throw new Error(
       "XENDIT_SECRET_KEY and XENDIT_SPLIT_RULE_ID are not set, and NODE_ENV is " +
-        "production. Add them to apps/api/.env — see .env.example. Refusing to start " +
-        "rather than taking fake payments and writing unrecoverable fake-acct-* ids " +
-        "into creator.xendit_account_id."
+        `${describeNodeEnv(env.nodeEnv)}. The fake payment adapter is permitted ONLY ` +
+        `when NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}. Add the keys to ` +
+        "apps/api/.env — see .env.example — or set NODE_ENV=development. Refusing to " +
+        "start rather than taking fake payments and writing unrecoverable fake-acct-* " +
+        "ids into creator.xendit_account_id."
     );
   }
 
@@ -225,10 +282,14 @@ export const TEST_CALLBACK_TOKEN = "test-callback-token";
  *      it cannot authenticate the callback that credits that money, no member
  *      it charges is ever activated. Same reasoning as the half-configured
  *      check in `selectPaymentProvider`, extended to the third variable.
- *   3. ABSENT configuration throws when `NODE_ENV === "production"`, and
- *      otherwise returns `undefined`. A developer must be able to `bun run dev`
- *      without setting a variable for an endpoint they may never exercise
- *      locally, exactly as they can without the Xendit keys.
+ *   3. ABSENT configuration returns `undefined` when `NODE_ENV` is one of
+ *      `RELAXED_NODE_ENVS`, and throws for EVERYTHING else — `undefined`,
+ *      `"staging"`, `"prod"`, `"PRODUCTION"`. A developer must be able to
+ *      `bun run dev` without setting a variable for an endpoint they may never
+ *      exercise locally, exactly as they can without the Xendit keys; nobody
+ *      else gets that.
+ *   4. A configured token shorter than `MIN_CALLBACK_TOKEN_LENGTH` throws in
+ *      every environment, exactly as a short `JWT_SECRET` does.
  *
  * `undefined` is safe to return, and is why `verifyCallbackToken` takes
  * `string | undefined`: it refuses an unset or empty `expected` before any
@@ -249,11 +310,25 @@ export function resolveCallbackToken(env: {
   const token = presentOrUndefined(env.callbackToken);
 
   if (token !== undefined) {
-    if (token === TEST_CALLBACK_TOKEN && env.nodeEnv !== "test") {
+    if (token === TEST_CALLBACK_TOKEN) {
+      if (env.nodeEnv !== "test") {
+        throw new Error(
+          "XENDIT_CALLBACK_TOKEN is the value committed to this repository for tests. " +
+            "Anyone can read it, so it would authenticate a forged payment event. Use the " +
+            "callback token from the Xendit dashboard."
+        );
+      }
+      // Exempt from the length floor below: it is the suite's own known value,
+      // and it is already refused everywhere else by the branch above.
+      return token;
+    }
+    if (token.length < MIN_CALLBACK_TOKEN_LENGTH) {
       throw new Error(
-        "XENDIT_CALLBACK_TOKEN is the value committed to this repository for tests. " +
-          "Anyone can read it, so it would authenticate a forged payment event. Use the " +
-          "callback token from the Xendit dashboard."
+        `XENDIT_CALLBACK_TOKEN is too short (${token.length} characters; ` +
+          `${MIN_CALLBACK_TOKEN_LENGTH} required). It is the ONLY authentication on ` +
+          "POST /webhooks/xendit, so a guessable value grants free access to every paid " +
+          "community. Copy the full token from Settings → Developers → Webhooks in the " +
+          "Xendit dashboard."
       );
     }
     return token;
@@ -275,12 +350,14 @@ export function resolveCallbackToken(env: {
     );
   }
 
-  if (env.nodeEnv === "production") {
+  if (!isRelaxedNodeEnv(env.nodeEnv)) {
     throw new Error(
-      "XENDIT_CALLBACK_TOKEN is not set, and NODE_ENV is production. Add it to " +
-        "apps/api/.env — see .env.example, and copy the callback token from the Xendit " +
-        "dashboard. Refusing to start rather than serving a webhook endpoint that " +
-        "rejects every real payment."
+      "XENDIT_CALLBACK_TOKEN is not set, and NODE_ENV is " +
+        `${describeNodeEnv(env.nodeEnv)}. Booting without it is permitted ONLY when ` +
+        `NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}. Add it to apps/api/.env — see ` +
+        ".env.example, and copy the callback token from the Xendit dashboard — or set " +
+        "NODE_ENV=development. Refusing to start rather than serving a webhook endpoint " +
+        "that rejects every real payment."
     );
   }
 
