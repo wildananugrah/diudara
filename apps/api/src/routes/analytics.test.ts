@@ -529,3 +529,380 @@ describe("GET /communities/:communityId/activity", () => {
     expect(text).not.toContain(member.member.whatsappNumber);
   });
 });
+
+// ===========================================================================
+// Task 4: GET /communities/:communityId/members and .../members.csv
+// ===========================================================================
+
+/** A member with a subscription, controlling the fields the roster reports. */
+async function seedRosterMember(
+  tierId: string,
+  status: string,
+  options: { name?: string | null; joinedAt?: Date; nextBillingDate?: string | null } = {}
+) {
+  seedCounter += 1;
+  const [member] = await db
+    .insert(members)
+    .values({
+      whatsappNumber: `+62813${String(seedCounter).padStart(7, "0")}`,
+      name: options.name === undefined ? `Member ${seedCounter}` : options.name,
+      ...(options.joinedAt === undefined ? {} : { joinedAt: options.joinedAt }),
+    })
+    .returning();
+  const [subscription] = await db
+    .insert(subscriptions)
+    .values({
+      memberId: member.id,
+      tierId,
+      status,
+      ...(options.nextBillingDate === undefined
+        ? {}
+        : { nextBillingDate: options.nextBillingDate }),
+    })
+    .returning();
+  return { member, subscription };
+}
+
+/** Runs `fn` with every console method captured, so a test can prove what was logged. */
+async function capturingConsole<T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
+  const lines: string[] = [];
+  const original = {
+    log: console.log,
+    warn: console.warn,
+    error: console.error,
+    info: console.info,
+    debug: console.debug,
+  };
+  const record = (...args: unknown[]) => {
+    lines.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+  };
+  console.log = record;
+  console.warn = record;
+  console.error = record;
+  console.info = record;
+  console.debug = record;
+  try {
+    return { result: await fn(), lines };
+  } finally {
+    Object.assign(console, original);
+  }
+}
+
+describe("GET /communities/:communityId/members", () => {
+  it("returns the roster, most recently joined first", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+    const tier = await makeTier(a, token, community.id, { name: "VIP", priceAmount: 250_000 });
+    const older = await seedRosterMember(tier.id, "active", {
+      name: "Siti Aminah",
+      joinedAt: new Date(Date.UTC(2026, 0, 1)),
+      nextBillingDate: "2026-09-01",
+    });
+    const newer = await seedRosterMember(tier.id, "past_due", {
+      name: "Budi Santoso",
+      joinedAt: new Date(Date.UTC(2026, 6, 1)),
+    });
+
+    const res = await a.request(`/communities/${community.id}/members`, {
+      headers: bearer(token),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.members.map((m: { memberId: string }) => m.memberId)).toEqual([
+      newer.member.id,
+      older.member.id,
+    ]);
+    expect(body.members[1]).toEqual({
+      memberId: older.member.id,
+      subscriptionId: older.subscription.id,
+      name: "Siti Aminah",
+      whatsappNumber: older.member.whatsappNumber,
+      tierName: "VIP",
+      status: "active",
+      joinedAt: "2026-01-01T00:00:00.000Z",
+      nextBillingDate: "2026-09-01",
+    });
+    expect(body.nextCursor).toBeNull();
+  });
+
+  it("paginates by keyset", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+    const tier = await makeTier(a, token, community.id, { name: "Basic", priceAmount: 50_000 });
+    const seeded = [];
+    for (let day = 1; day <= 5; day++) {
+      seeded.push(
+        await seedRosterMember(tier.id, "active", { joinedAt: new Date(Date.UTC(2026, 0, day)) })
+      );
+    }
+    const newestFirst = [...seeded].reverse().map((row) => row.subscription.id);
+
+    const page1 = await (
+      await a.request(`/communities/${community.id}/members?limit=2`, { headers: bearer(token) })
+    ).json();
+    expect(page1.members.map((m: { subscriptionId: string }) => m.subscriptionId)).toEqual(
+      newestFirst.slice(0, 2)
+    );
+    expect(page1.nextCursor).not.toBeNull();
+
+    const page2 = await (
+      await a.request(
+        `/communities/${community.id}/members?limit=2&before=${encodeURIComponent(page1.nextCursor)}`,
+        { headers: bearer(token) }
+      )
+    ).json();
+    expect(page2.members.map((m: { subscriptionId: string }) => m.subscriptionId)).toEqual(
+      newestFirst.slice(2, 4)
+    );
+  });
+
+  it("returns 404 for another creator's community and leaks nothing", async () => {
+    const a = app();
+    const owner = await signupAndGetToken(a);
+    const stranger = await signupAndGetToken(a);
+    const community = await makeCommunity(a, owner.token);
+    const tier = await makeTier(a, owner.token, community.id, {
+      name: "Kelas Rahasia VIP",
+      priceAmount: 987_654,
+    });
+    const member = await seedRosterMember(tier.id, "active", { name: "Siti Rahasia" });
+
+    const res = await a.request(`/communities/${community.id}/members`, {
+      headers: bearer(stranger.token),
+    });
+
+    expect(res.status).toBe(404);
+    const text = await res.text();
+    expect(text).not.toContain(member.member.whatsappNumber);
+    expect(text).not.toContain("Siti Rahasia");
+    expect(text).not.toContain("Kelas Rahasia VIP");
+    expect(text).not.toMatch(/[0-9]/);
+  });
+
+  it("rejects an unauthenticated request with 401", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+    const res = await a.request(`/communities/${community.id}/members`);
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a malformed cursor and a bad limit with 400", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+
+    expect(
+      (
+        await a.request(`/communities/${community.id}/members?before=nope`, {
+          headers: bearer(token),
+        })
+      ).status
+    ).toBe(400);
+    expect(
+      (
+        await a.request(`/communities/${community.id}/members?limit=0`, { headers: bearer(token) })
+      ).status
+    ).toBe(400);
+  });
+
+  it("leaves the existing revoke endpoint reachable", async () => {
+    // `POST /communities/:id/members/:memberId/revoke` is a DIFFERENT sub-app mounted
+    // at `/communities/:communityId/members`, and this new GET shares that path. Hono
+    // composes every matching handler, so this is the test that would notice one
+    // shadowing the other.
+    //
+    // Asserted on the MESSAGE, not on a 200: this member has no `channel_membership`
+    // row (nothing granted them access), and `RevokeChannelAccess` answers that with
+    // its own 404. That message is the proof the request reached the revoke use-case
+    // rather than being swallowed by the roster handler — a 404 alone would not be.
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+    const tier = await makeTier(a, token, community.id, { name: "Basic", priceAmount: 50_000 });
+    const member = await seedRosterMember(tier.id, "active");
+
+    const res = await a.request(
+      `/communities/${community.id}/members/${member.member.id}/revoke`,
+      { method: "POST", headers: bearer(token) }
+    );
+    expect(await res.json()).toEqual({
+      error: "member has no active access to this community",
+    });
+  });
+});
+
+describe("GET /communities/:communityId/members.csv", () => {
+  it("streams a text/csv attachment named after the community slug", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token, "Kelas Budi");
+    const tier = await makeTier(a, token, community.id, { name: "Basic", priceAmount: 50_000 });
+    await seedRosterMember(tier.id, "active", { name: "Siti Aminah" });
+
+    const res = await a.request(`/communities/${community.id}/members.csv`, {
+      headers: bearer(token),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/csv");
+    const disposition = res.headers.get("content-disposition") ?? "";
+    expect(disposition).toContain("attachment");
+    expect(disposition).toContain(community.slug);
+    expect(disposition).toContain(".csv");
+
+    // THE RAW BYTES, because `Response.text()` decodes with a TextDecoder and a
+    // TextDecoder strips a leading BOM — so reading the string would pass whether the
+    // BOM was emitted or not, which is the opposite of what this asserts.
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    expect([bytes[0], bytes[1], bytes[2]]).toEqual([0xef, 0xbb, 0xbf]);
+
+    const body = new TextDecoder().decode(bytes);
+    const lines = body.split("\r\n");
+    expect(lines[0]).toContain("Nama");
+    expect(lines[0]).toContain("Nomor WhatsApp");
+    expect(lines[1]).toContain("Siti Aminah");
+    // No trailing blank record — several readers show one as an empty member.
+    expect(lines[lines.length - 1]).not.toBe("");
+  });
+
+  it("escapes a member name containing a comma, a quote and a newline", async () => {
+    // A MEMBER TYPES THEIR OWN NAME AT CHECKOUT. All three of these break the file
+    // silently: the row still parses, and one member's columns are shifted.
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+    const tier = await makeTier(a, token, community.id, { name: "Basic", priceAmount: 50_000 });
+    const nasty = 'Aminah, "Siti"\nBaris Dua';
+    const member = await seedRosterMember(tier.id, "active", { name: nasty });
+
+    const body = await (
+      await a.request(`/communities/${community.id}/members.csv`, { headers: bearer(token) })
+    ).text();
+
+    expect(body).toContain('"Aminah, ""Siti""\nBaris Dua"');
+    // Exactly two RECORDS — the header and one member — even though the name itself
+    // contains a newline.
+    const records = body.replace(/^﻿/, "").split("\r\n");
+    expect(records).toHaveLength(2);
+    expect(records[1]).toContain(member.member.whatsappNumber.replace("+", "'+"));
+  });
+
+  it("neutralises a member name that is a spreadsheet formula", async () => {
+    // `=`, `+`, `-` and `@` all start a formula in Excel and Google Sheets, so a
+    // display name of `=HYPERLINK(...)` would be a live link — or, with IMPORTXML, an
+    // exfiltration of the WhatsApp numbers in the next column — on the creator's own
+    // machine.
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+    const tier = await makeTier(a, token, community.id, { name: "Basic", priceAmount: 50_000 });
+
+    for (const [index, leader] of ["=", "+", "-", "@"].entries()) {
+      await seedRosterMember(tier.id, "active", {
+        name: `${leader}HYPERLINK("http://evil.test","klik${index}")`,
+        joinedAt: new Date(Date.UTC(2026, 0, index + 1)),
+      });
+    }
+
+    const body = await (
+      await a.request(`/communities/${community.id}/members.csv`, { headers: bearer(token) })
+    ).text();
+
+    for (const leader of ["=", "+", "-", "@"]) {
+      // Present, so the creator can still read what the member called themselves…
+      expect(body).toContain(`${leader}HYPERLINK(`);
+      // …but never as the first character of a cell.
+      expect(body).toContain(`"'${leader}HYPERLINK(`);
+    }
+    // And no data cell begins with a bare formula leader.
+    for (const record of body.replace(/^﻿/, "").split("\r\n").slice(1)) {
+      expect(["=", "+", "-", "@"]).not.toContain(record.slice(0, 1));
+    }
+  });
+
+  it("never logs a WhatsApp number", async () => {
+    // The export is the ONE place these numbers legitimately travel, and a log line
+    // is not it: logs reach an aggregator, are retained, and are read by people who
+    // are not the creator. Indonesia's UU PDP 27/2022 applies to this column.
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+    const tier = await makeTier(a, token, community.id, { name: "Basic", priceAmount: 50_000 });
+    const member = await seedRosterMember(tier.id, "active", { name: "Siti Aminah" });
+
+    const { result, lines } = await capturingConsole(async () => {
+      const res = await a.request(`/communities/${community.id}/members.csv`, {
+        headers: bearer(token),
+      });
+      return { status: res.status, body: await res.text() };
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toContain(member.member.whatsappNumber.slice(1));
+    expect(lines.join("\n")).not.toContain(member.member.whatsappNumber);
+    expect(lines.join("\n")).not.toContain(member.member.whatsappNumber.slice(1));
+  });
+
+  it("returns 404 for another creator's community rather than a file", async () => {
+    const a = app();
+    const owner = await signupAndGetToken(a);
+    const stranger = await signupAndGetToken(a);
+    const community = await makeCommunity(a, owner.token);
+    const tier = await makeTier(a, owner.token, community.id, {
+      name: "Kelas Rahasia VIP",
+      priceAmount: 987_654,
+    });
+    const member = await seedRosterMember(tier.id, "active", { name: "Siti Rahasia" });
+
+    const res = await a.request(`/communities/${community.id}/members.csv`, {
+      headers: bearer(stranger.token),
+    });
+
+    expect(res.status).toBe(404);
+    // Not a CSV, and not a partial one: a stranger must not receive a file at all.
+    expect(res.headers.get("content-type") ?? "").not.toContain("text/csv");
+    expect(res.headers.get("content-disposition")).toBeNull();
+    const text = await res.text();
+    expect(text).not.toContain(member.member.whatsappNumber);
+    expect(text).not.toContain("Siti Rahasia");
+    expect(text).not.toContain(community.slug);
+  });
+
+  it("requires authentication — there is no signed-link shortcut", async () => {
+    // A download URL that authenticates itself would be a link to every member's
+    // phone number, and links get pasted into chats and turn up in browser history
+    // and server logs. The export is a normal bearer-authenticated request.
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+
+    const res = await a.request(`/communities/${community.id}/members.csv`);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("content-type") ?? "").not.toContain("text/csv");
+  });
+
+  it("rejects a non-UUID communityId with 400, not 500", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const res = await a.request("/communities/not-a-uuid/members.csv", { headers: bearer(token) });
+    expect(res.status).toBe(400);
+  });
+
+  it("exports a header and nothing else for a community with no members", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+
+    const body = await (
+      await a.request(`/communities/${community.id}/members.csv`, { headers: bearer(token) })
+    ).text();
+
+    const records = body.replace(/^﻿/, "").split("\r\n");
+    expect(records).toHaveLength(1);
+    expect(records[0]).toContain("Nama");
+  });
+});

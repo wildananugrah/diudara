@@ -27,7 +27,7 @@
  * could live.
  */
 
-import type { ActivityCursor } from "../../domain/activity-feed";
+import type { KeysetCursor } from "../../domain/keyset-cursor";
 
 /**
  * How many members a community has, by subscription status.
@@ -109,13 +109,48 @@ export interface ActivityLogRow {
  * between two "load more" clicks — and an offset drifts as rows arrive: a single
  * newly-prepended row makes page 2 repeat page 1's last entry and drop one of the
  * originals. A cursor anchored on the row itself cannot drift. See
- * `ActivityCursor` in `domain/activity-feed.ts` for why the id is in it.
+ * `KeysetCursor` in `domain/keyset-cursor.ts` for why the id is in it.
  */
 export interface ActivityPageRequest {
   /** Maximum rows to return. The caller may ask for one extra to detect a next page. */
   limit: number;
   /** Return only rows strictly OLDER than this row. Omitted for the first page. */
-  before?: ActivityCursor;
+  before?: KeysetCursor;
+}
+
+/**
+ * One row of the member roster — the screen a creator manages people from, and the
+ * CSV they export.
+ *
+ * SUBSCRIPTION-GRAINED, NOT MEMBER-GRAINED. `subscription_member_tier_active_unique`
+ * forbids two active subscriptions on the SAME tier, but a member may hold one on
+ * two different tiers of one community; collapsing those into a single row would hide
+ * what they actually pay for. That is also why `subscriptionId` is here: it is the
+ * keyset cursor's tiebreaker, and `memberId` cannot be, precisely because it repeats.
+ *
+ * `whatsappNumber` IS here, and it is the reason this port method exists as its own
+ * thing rather than being folded into the activity feed. It is members' PERSONAL DATA
+ * (Indonesia's UU PDP 27/2022 applies), so it travels only to the two endpoints a
+ * creator asks for deliberately, is never logged, and never appears in the feed.
+ */
+export interface MemberRosterRow {
+  memberId: string;
+  subscriptionId: string;
+  /** Nullable: checkout can create a member without one. */
+  name: string | null;
+  whatsappNumber: string;
+  tierName: string;
+  /** One of `active`, `past_due`, `churned` — see `listMembersForCreator`. */
+  status: string;
+  joinedAt: Date;
+  /** A calendar date (`YYYY-MM-DD`), or null when there is no next period. */
+  nextBillingDate: string | null;
+}
+
+/** Keyed on `(member.joined_at, subscription.id)`. See `KeysetCursor`. */
+export interface MemberPageRequest {
+  limit: number;
+  before?: KeysetCursor;
 }
 
 export interface AnalyticsRepositoryPort {
@@ -139,4 +174,24 @@ export interface AnalyticsRepositoryPort {
     creatorId: string,
     page: ActivityPageRequest
   ): Promise<ActivityLogRow[] | null>;
+
+  /**
+   * One page of the member roster, most recently joined first — or `null` when
+   * `creatorId` does not own `communityId`.
+   *
+   * Includes EXACTLY the three subscription statuses the metrics report (`active`,
+   * `past_due`, `churned`) so the roster and the counts cannot disagree: a creator
+   * who counts the rows gets the numbers on the overview screen. `pending` is an
+   * unpaid checkout — a name and a phone number belonging to somebody who never
+   * bought anything, which has no business on an exported contact list — `cancelled`
+   * never activated, and `superseded` is a duplicate folded into an existing
+   * membership rather than a person.
+   *
+   * `null` and `[]` mean different things, as above.
+   */
+  listMembersForCreator(
+    communityId: string,
+    creatorId: string,
+    page: MemberPageRequest
+  ): Promise<MemberRosterRow[] | null>;
 }

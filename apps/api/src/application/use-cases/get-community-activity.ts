@@ -1,9 +1,5 @@
-import {
-  describeActivityEvent,
-  encodeActivityCursor,
-  type ActivityCursor,
-  type ActivitySeverity,
-} from "../../domain/activity-feed";
+import { describeActivityEvent, type ActivitySeverity } from "../../domain/activity-feed";
+import { encodeKeysetCursor, type KeysetCursor } from "../../domain/keyset-cursor";
 import { NotFoundError } from "../errors";
 import type { AnalyticsRepositoryPort } from "../ports/analytics-repository.port";
 
@@ -52,7 +48,7 @@ export interface ActivityFeedRequest {
   communityId: string;
   creatorId: string;
   limit: number;
-  before?: ActivityCursor;
+  before?: KeysetCursor;
 }
 
 /**
@@ -107,7 +103,7 @@ export class GetCommunityActivity {
     const last = pageRows[pageRows.length - 1];
     const nextCursor =
       hasMore && last !== undefined
-        ? encodeActivityCursor({ createdAt: last.createdAt, id: last.id })
+        ? encodeKeysetCursor({ timestamp: last.createdAt, id: last.id })
         : null;
 
     return { entries, nextCursor };

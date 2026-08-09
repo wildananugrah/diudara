@@ -34,6 +34,8 @@ import { DrizzleActivityLogRepository } from "./infrastructure/repositories/driz
 import { DrizzleAnalyticsRepository } from "./infrastructure/repositories/drizzle-analytics.repository";
 import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
 import { GetCommunityActivity } from "./application/use-cases/get-community-activity";
+import { ListCommunityMembers } from "./application/use-cases/list-community-members";
+import { ExportCommunityMembers } from "./application/use-cases/export-community-members";
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import { SystemClock } from "./infrastructure/clock/system.clock";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
@@ -95,6 +97,14 @@ export interface Dependencies {
    */
   getCommunityMetrics: GetCommunityMetrics;
   getCommunityActivity: GetCommunityActivity;
+  listCommunityMembers: ListCommunityMembers;
+  /**
+   * The roster as a downloadable CSV. It STREAMS — see the use-case for why one
+   * unbounded select would put twice a successful creator's roster in memory per
+   * concurrent download — and it carries members' WhatsApp numbers, so it is
+   * authenticated like everything else and never logged.
+   */
+  exportCommunityMembers: ExportCommunityMembers;
   /**
    * The creator's manual "remove this member" action. It lives in the API rather
    * than the worker because revocation is SYNCHRONOUS: a creator removing someone
@@ -830,6 +840,14 @@ export function bootstrap(): Dependencies {
   const analyticsRepository = new DrizzleAnalyticsRepository(db);
   const getCommunityMetrics = new GetCommunityMetrics(analyticsRepository);
   const getCommunityActivity = new GetCommunityActivity(analyticsRepository);
+  const listCommunityMembers = new ListCommunityMembers(analyticsRepository);
+  // Takes the COMMUNITY repository too, for the slug the download's filename needs
+  // — and its `findByIdForCreator` is the ownership check, which has to happen
+  // before a single roster row is read because a stream cannot be un-sent.
+  const exportCommunityMembers = new ExportCommunityMembers(
+    communityRepository,
+    analyticsRepository
+  );
 
   // Revocation is the ONE messaging call the API process makes; granting happens
   // in apps/worker. Same allowlist as the payment adapter: on a box with no
@@ -896,6 +914,8 @@ export function bootstrap(): Dependencies {
     handlePaymentWebhook,
     getCommunityMetrics,
     getCommunityActivity,
+    listCommunityMembers,
+    exportCommunityMembers,
     revokeChannelAccess,
     recordChannelJoin,
     sendRenewalReminder,

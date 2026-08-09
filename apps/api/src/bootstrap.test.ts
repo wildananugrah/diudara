@@ -41,6 +41,8 @@ import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
 import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
 import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
 import { GetCommunityActivity } from "./application/use-cases/get-community-activity";
+import { ListCommunityMembers } from "./application/use-cases/list-community-members";
+import { ExportCommunityMembers } from "./application/use-cases/export-community-members";
 import { XENDIT_ACCOUNT_PROVISIONING } from "./domain/payment-account";
 import type {
   CreatorRecord,
@@ -228,6 +230,9 @@ const fakeAnalyticsRepository: AnalyticsRepositoryPort = {
     return null;
   },
   async listActivityForCreator() {
+    return null;
+  },
+  async listMembersForCreator() {
     return null;
   },
 };
@@ -423,6 +428,11 @@ describe("Dependencies (composition root contract)", () => {
       ),
       getCommunityMetrics: new GetCommunityMetrics(fakeAnalyticsRepository),
       getCommunityActivity: new GetCommunityActivity(fakeAnalyticsRepository),
+      listCommunityMembers: new ListCommunityMembers(fakeAnalyticsRepository),
+      exportCommunityMembers: new ExportCommunityMembers(
+        fakeCommunityRepository,
+        fakeAnalyticsRepository
+      ),
       revokeChannelAccess: new RevokeChannelAccess(
         fakeCommunityRepository,
         fakeChannelMembershipRepository,
@@ -528,6 +538,11 @@ describe("Dependencies (composition root contract)", () => {
       ),
       getCommunityMetrics: new GetCommunityMetrics(fakeAnalyticsRepository),
       getCommunityActivity: new GetCommunityActivity(fakeAnalyticsRepository),
+      listCommunityMembers: new ListCommunityMembers(fakeAnalyticsRepository),
+      exportCommunityMembers: new ExportCommunityMembers(
+        fakeCommunityRepository,
+        fakeAnalyticsRepository
+      ),
       revokeChannelAccess: new RevokeChannelAccess(
         fakeCommunityRepository,
         fakeChannelMembershipRepository,

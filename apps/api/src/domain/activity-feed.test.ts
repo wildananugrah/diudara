@@ -10,12 +10,7 @@ import {
   RENEWAL_REMINDER_NOT_SENT,
   RENEWAL_REMINDER_SENT,
 } from "../application/use-cases/send-renewal-reminder";
-import {
-  CREATOR_VISIBLE_EVENTS,
-  decodeActivityCursor,
-  describeActivityEvent,
-  encodeActivityCursor,
-} from "./activity-feed";
+import { CREATOR_VISIBLE_EVENTS, describeActivityEvent } from "./activity-feed";
 
 /**
  * Every `activity_log.event_type` written anywhere in this codebase, which is the
@@ -218,42 +213,6 @@ describe("describeActivityEvent", () => {
       expect(label).not.toContain(eventType);
       expect(label).not.toContain("s3cret-value");
       expect(label).not.toContain("+6281234567890");
-    }
-  });
-});
-
-describe("the keyset cursor", () => {
-  it("round-trips a created_at and an id", () => {
-    const createdAt = new Date("2026-08-10T04:05:06.789Z");
-    const id = "3f1c9e0a-1111-4222-8333-444455556666";
-
-    const decoded = decodeActivityCursor(encodeActivityCursor({ createdAt, id }));
-    expect(decoded).not.toBeNull();
-    expect(decoded!.createdAt.toISOString()).toBe(createdAt.toISOString());
-    expect(decoded!.id).toBe(id);
-  });
-
-  it("keeps the timestamp readable, so a cursor in a log is diagnosable", () => {
-    const cursor = encodeActivityCursor({
-      createdAt: new Date("2026-08-10T04:05:06.789Z"),
-      id: "3f1c9e0a-1111-4222-8333-444455556666",
-    });
-    expect(cursor).toContain("2026-08-10T04:05:06.789Z");
-  });
-
-  it("rejects a cursor it did not produce rather than guessing", () => {
-    // A malformed cursor must be a 400, not a silently-ignored parameter that
-    // restarts the feed at page 1 — a "load more" button that quietly loops is
-    // worse than one that errors.
-    for (const bad of [
-      "",
-      "not-a-cursor",
-      "2026-08-10T04:05:06.789Z",
-      "2026-08-10T04:05:06.789Z|not-a-uuid",
-      "not-a-date|3f1c9e0a-1111-4222-8333-444455556666",
-      "|",
-    ]) {
-      expect(decodeActivityCursor(bad)).toBeNull();
     }
   });
 });

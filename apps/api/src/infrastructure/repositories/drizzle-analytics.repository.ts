@@ -13,6 +13,8 @@ import type {
   ActivityLogRow,
   ActivityPageRequest,
   AnalyticsRepositoryPort,
+  MemberPageRequest,
+  MemberRosterRow,
   CommunityMemberCounts,
   CommunityMetrics,
   TierDistributionEntry,
@@ -36,6 +38,21 @@ const SUCCESSFUL_TRANSACTION = "success";
 const ACTIVE_SUBSCRIPTION = "active";
 const PAST_DUE_SUBSCRIPTION = "past_due";
 const CHURNED_SUBSCRIPTION = "churned";
+
+/**
+ * The statuses that put somebody ON THE ROSTER, and they are the same three the
+ * member counts report — on purpose, so a creator who counts the exported rows gets
+ * the numbers on the overview screen. Two screens that disagree about how many
+ * members a community has is a bug a creator finds and cannot explain.
+ *
+ * A non-empty tuple so `inArray` cannot be handed an empty list, which would match
+ * nothing and empty every roster.
+ */
+const ROSTER_STATUSES: readonly [string, ...string[]] = [
+  ACTIVE_SUBSCRIPTION,
+  PAST_DUE_SUBSCRIPTION,
+  CHURNED_SUBSCRIPTION,
+];
 
 /**
  * The creator dashboard's reads, all creator-scoped, none of them optional about
@@ -217,8 +234,8 @@ export class DrizzleAnalyticsRepository implements AnalyticsRepositoryPort {
       before === undefined
         ? undefined
         : or(
-            lt(activityLogs.createdAt, before.createdAt),
-            and(eq(activityLogs.createdAt, before.createdAt), lt(activityLogs.id, before.id))
+            lt(activityLogs.createdAt, before.timestamp),
+            and(eq(activityLogs.createdAt, before.timestamp), lt(activityLogs.id, before.id))
           );
 
     return this.db
@@ -245,6 +262,64 @@ export class DrizzleAnalyticsRepository implements AnalyticsRepositoryPort {
         )
       )
       .orderBy(desc(activityLogs.createdAt), desc(activityLogs.id))
+      .limit(page.limit);
+  }
+
+  /**
+   * One page of the member roster, most recently joined first.
+   *
+   * ORDERED AND WINDOWED ON `(member.joined_at, subscription.id)`. The subscription
+   * id is the tiebreaker and NOT the member id, for two independent reasons: a member
+   * may hold subscriptions to two tiers of one community, so `member.id` repeats; and
+   * `member.joined_at` defaults to `now()` — the TRANSACTION timestamp — so several
+   * members created together share it exactly. Either alone would make a
+   * timestamp-only cursor drop or repeat rows at a page boundary.
+   *
+   * `inArray(status, ROSTER_STATUSES)` is IN THE SQL rather than applied afterwards,
+   * for the same reason the activity feed's allowlist is: filtering in JS would make
+   * `limit` count rows that are never returned, so a community with many abandoned
+   * checkouts would hand back a short page and the reader would take it for the end
+   * of the roster.
+   */
+  async listMembersForCreator(
+    communityId: string,
+    creatorId: string,
+    page: MemberPageRequest
+  ): Promise<MemberRosterRow[] | null> {
+    const community = await this.findOwnedCommunity(communityId, creatorId);
+    if (!community) return null;
+
+    const before = page.before;
+    const keyset =
+      before === undefined
+        ? undefined
+        : or(
+            lt(members.joinedAt, before.timestamp),
+            and(eq(members.joinedAt, before.timestamp), lt(subscriptions.id, before.id))
+          );
+
+    return this.db
+      .select({
+        memberId: members.id,
+        subscriptionId: subscriptions.id,
+        name: members.name,
+        whatsappNumber: members.whatsappNumber,
+        tierName: membershipTiers.name,
+        status: subscriptions.status,
+        joinedAt: members.joinedAt,
+        nextBillingDate: subscriptions.nextBillingDate,
+      })
+      .from(subscriptions)
+      .innerJoin(membershipTiers, eq(subscriptions.tierId, membershipTiers.id))
+      .innerJoin(members, eq(subscriptions.memberId, members.id))
+      .where(
+        and(
+          eq(membershipTiers.communityId, community.id),
+          inArray(subscriptions.status, [...ROSTER_STATUSES]),
+          ...(keyset === undefined ? [] : [keyset])
+        )
+      )
+      .orderBy(desc(members.joinedAt), desc(subscriptions.id))
       .limit(page.limit);
   }
 }

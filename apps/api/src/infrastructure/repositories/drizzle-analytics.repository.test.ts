@@ -512,7 +512,7 @@ describe("DrizzleAnalyticsRepository.listActivityForCreator — keyset paginatio
     const last = page1![page1!.length - 1]!;
     const page2 = await repo.listActivityForCreator(community.id, creator.id, {
       limit: 2,
-      before: { createdAt: last.createdAt, id: last.id },
+      before: { timestamp: last.createdAt, id: last.id },
     });
 
     expect(page2!.map((row) => row.id)).toEqual(newestFirst.slice(2, 4));
@@ -538,7 +538,7 @@ describe("DrizzleAnalyticsRepository.listActivityForCreator — keyset paginatio
     const last = page1![1]!;
     const page2 = await repo.listActivityForCreator(community.id, creator.id, {
       limit: 2,
-      before: { createdAt: last.createdAt, id: last.id },
+      before: { timestamp: last.createdAt, id: last.id },
     });
 
     const seen = [...page1!, ...page2!].map((row) => row.id);
@@ -555,7 +555,249 @@ describe("DrizzleAnalyticsRepository.listActivityForCreator — keyset paginatio
 
     const page2 = await repo.listActivityForCreator(community.id, creator.id, {
       limit: 10,
-      before: { createdAt: only.createdAt, id: only.id },
+      before: { timestamp: only.createdAt, id: only.id },
+    });
+    expect(page2).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// Task 4: the member roster
+// ===========================================================================
+
+/** A member with a subscription, controlling every field the roster reports. */
+async function seedRosterMember(
+  tierId: string,
+  status: string,
+  options: { name?: string | null; joinedAt?: Date; nextBillingDate?: string | null } = {}
+) {
+  seedCounter += 1;
+  const [member] = await db
+    .insert(members)
+    .values({
+      whatsappNumber: `+62812${String(seedCounter).padStart(7, "0")}`,
+      name: options.name === undefined ? "Siti" : options.name,
+      ...(options.joinedAt === undefined ? {} : { joinedAt: options.joinedAt }),
+    })
+    .returning();
+  const [subscription] = await db
+    .insert(subscriptions)
+    .values({
+      memberId: member.id,
+      tierId,
+      status,
+      ...(options.nextBillingDate === undefined
+        ? {}
+        : { nextBillingDate: options.nextBillingDate }),
+    })
+    .returning();
+  return { member, subscription };
+}
+
+describe("DrizzleAnalyticsRepository.listMembersForCreator — scoping", () => {
+  it("returns null for a community another creator owns", async () => {
+    const owner = await seedCreatorWithCommunity("Rina");
+    const stranger = await seedCreatorWithCommunity("Budi");
+    const tier = await seedTier(owner.community.id);
+    await seedRosterMember(tier.id, "active");
+
+    expect(
+      await repo.listMembersForCreator(owner.community.id, stranger.creator.id, { limit: 10 })
+    ).toBeNull();
+  });
+
+  it("returns null for a community that does not exist", async () => {
+    const { creator } = await seedCreatorWithCommunity();
+    expect(
+      await repo.listMembersForCreator("00000000-0000-4000-8000-000000000000", creator.id, {
+        limit: 10,
+      })
+    ).toBeNull();
+  });
+
+  it("never returns another community's members", async () => {
+    const mine = await seedCreatorWithCommunity("Rina");
+    const theirs = await seedCreatorWithCommunity("Budi");
+    const myTier = await seedTier(mine.community.id, { name: "Mine" });
+    const theirTier = await seedTier(theirs.community.id, { name: "Theirs" });
+    const mineMember = await seedRosterMember(myTier.id, "active", { name: "Mine" });
+    await seedRosterMember(theirTier.id, "active", { name: "Theirs" });
+
+    const rows = await repo.listMembersForCreator(mine.community.id, mine.creator.id, {
+      limit: 10,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows![0]!.memberId).toBe(mineMember.member.id);
+  });
+});
+
+describe("DrizzleAnalyticsRepository.listMembersForCreator — who is on it", () => {
+  it("lists active, past_due and churned members", async () => {
+    // EXACTLY THE THREE STATUSES THE METRICS REPORT, so the roster and the counts
+    // cannot disagree: a creator who counts the rows gets the numbers on the
+    // overview screen. That agreement is the reason the set is fixed here rather
+    // than "everything".
+    const { creator, community } = await seedCreatorWithCommunity();
+    const tier = await seedTier(community.id);
+    await seedRosterMember(tier.id, "active");
+    await seedRosterMember(tier.id, "past_due");
+    await seedRosterMember(tier.id, "churned");
+
+    const rows = await repo.listMembersForCreator(community.id, creator.id, { limit: 10 });
+    expect([...rows!].map((row) => row.status).sort()).toEqual([
+      "active",
+      "churned",
+      "past_due",
+    ]);
+  });
+
+  it("leaves off statuses that are not a membership", async () => {
+    // `pending` is an unpaid checkout — a name and a phone number belonging to
+    // somebody who never bought anything, and putting them on a creator's exported
+    // contact list would be wrong on its own terms as well as inconsistent with the
+    // member counts. `cancelled` never activated; `superseded` is a duplicate that
+    // was folded into an existing membership, not a person.
+    const { creator, community } = await seedCreatorWithCommunity();
+    const tier = await seedTier(community.id);
+    await seedRosterMember(tier.id, "pending");
+    await seedRosterMember(tier.id, "cancelled");
+    await seedRosterMember(tier.id, "superseded");
+
+    expect(await repo.listMembersForCreator(community.id, creator.id, { limit: 10 })).toEqual([]);
+  });
+
+  it("carries every field the roster and the export need", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const tier = await seedTier(community.id, { name: "VIP", priceAmount: 250_000 });
+    const seeded = await seedRosterMember(tier.id, "active", {
+      name: "Siti Aminah",
+      joinedAt: new Date(Date.UTC(2026, 7, 1, 3, 4, 5)),
+      nextBillingDate: "2026-09-01",
+    });
+
+    const rows = await repo.listMembersForCreator(community.id, creator.id, { limit: 10 });
+    expect(rows).toHaveLength(1);
+    expect(rows![0]).toEqual({
+      memberId: seeded.member.id,
+      subscriptionId: seeded.subscription.id,
+      name: "Siti Aminah",
+      whatsappNumber: seeded.member.whatsappNumber,
+      tierName: "VIP",
+      status: "active",
+      joinedAt: new Date(Date.UTC(2026, 7, 1, 3, 4, 5)),
+      nextBillingDate: "2026-09-01",
+    });
+  });
+
+  it("reports a member with no name and no billing date as nulls, not empty strings", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const tier = await seedTier(community.id);
+    await seedRosterMember(tier.id, "churned", { name: null, nextBillingDate: null });
+
+    const rows = await repo.listMembersForCreator(community.id, creator.id, { limit: 10 });
+    expect(rows![0]!.name).toBeNull();
+    expect(rows![0]!.nextBillingDate).toBeNull();
+  });
+
+  it("returns one row per SUBSCRIPTION when a member holds two tiers", async () => {
+    // A member may hold an active subscription to two different tiers of one
+    // community — `subscription_member_tier_active_unique` only forbids two on the
+    // SAME tier. Collapsing them to one row would hide what the member actually pays
+    // for, so the roster is subscription-grained and the cursor is keyed on the
+    // subscription id (see below).
+    const { creator, community } = await seedCreatorWithCommunity();
+    const basic = await seedTier(community.id, { name: "Basic", priceAmount: 50_000 });
+    const vip = await seedTier(community.id, { name: "VIP", priceAmount: 250_000 });
+    const joinedAt = new Date(Date.UTC(2026, 7, 1));
+    const seeded = await seedRosterMember(basic.id, "active", { joinedAt });
+    await db
+      .insert(subscriptions)
+      .values({ memberId: seeded.member.id, tierId: vip.id, status: "active" });
+
+    const rows = await repo.listMembersForCreator(community.id, creator.id, { limit: 10 });
+    expect(rows).toHaveLength(2);
+    expect([...rows!].map((row) => row.tierName).sort()).toEqual(["Basic", "VIP"]);
+  });
+});
+
+describe("DrizzleAnalyticsRepository.listMembersForCreator — keyset pagination", () => {
+  it("returns the most recently joined first", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const tier = await seedTier(community.id);
+    const oldest = await seedRosterMember(tier.id, "active", {
+      joinedAt: new Date(Date.UTC(2026, 0, 1)),
+    });
+    const newest = await seedRosterMember(tier.id, "active", {
+      joinedAt: new Date(Date.UTC(2026, 6, 1)),
+    });
+
+    const rows = await repo.listMembersForCreator(community.id, creator.id, { limit: 10 });
+    expect(rows!.map((row) => row.memberId)).toEqual([newest.member.id, oldest.member.id]);
+  });
+
+  it("skips and duplicates nothing when a member joins between pages", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const tier = await seedTier(community.id);
+    const seeded = [];
+    for (let day = 1; day <= 5; day++) {
+      seeded.push(
+        await seedRosterMember(tier.id, "active", { joinedAt: new Date(Date.UTC(2026, 0, day)) })
+      );
+    }
+    const newestFirst = [...seeded].reverse().map((row) => row.subscription.id);
+
+    const page1 = await repo.listMembersForCreator(community.id, creator.id, { limit: 2 });
+    expect(page1!.map((row) => row.subscriptionId)).toEqual(newestFirst.slice(0, 2));
+
+    // Somebody buys while the creator is reading.
+    const interloper = await seedRosterMember(tier.id, "active", {
+      joinedAt: new Date(Date.UTC(2026, 11, 31)),
+    });
+
+    const last = page1![1]!;
+    const page2 = await repo.listMembersForCreator(community.id, creator.id, {
+      limit: 2,
+      before: { timestamp: last.joinedAt, id: last.subscriptionId },
+    });
+    expect(page2!.map((row) => row.subscriptionId)).toEqual(newestFirst.slice(2, 4));
+
+    const seen = [...page1!, ...page2!].map((row) => row.subscriptionId);
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).not.toContain(interloper.subscription.id);
+  });
+
+  it("loses nothing when several members share one joined_at", async () => {
+    // `member.joined_at` defaults to `now()` — the TRANSACTION timestamp — so a batch
+    // import or several activations in one transaction all share it. The cursor's
+    // subscription id is what stops the boundary row's ties being dropped.
+    const { creator, community } = await seedCreatorWithCommunity();
+    const tier = await seedTier(community.id);
+    const joinedAt = new Date(Date.UTC(2026, 3, 4, 5, 6, 7));
+    const ids = [];
+    for (let i = 0; i < 4; i++) {
+      ids.push((await seedRosterMember(tier.id, "active", { joinedAt })).subscription.id);
+    }
+
+    const page1 = await repo.listMembersForCreator(community.id, creator.id, { limit: 2 });
+    const last = page1![1]!;
+    const page2 = await repo.listMembersForCreator(community.id, creator.id, {
+      limit: 2,
+      before: { timestamp: last.joinedAt, id: last.subscriptionId },
+    });
+
+    const seen = [...page1!, ...page2!].map((row) => row.subscriptionId);
+    expect(seen).toHaveLength(4);
+    expect([...seen].sort()).toEqual([...ids].sort());
+  });
+
+  it("returns an empty page rather than null once the roster is exhausted", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const tier = await seedTier(community.id);
+    const only = await seedRosterMember(tier.id, "active");
+
+    const page2 = await repo.listMembersForCreator(community.id, creator.id, {
+      limit: 10,
+      before: { timestamp: only.member.joinedAt, id: only.subscription.id },
     });
     expect(page2).toEqual([]);
   });
