@@ -5,6 +5,7 @@ import { communityRoutes } from "./routes/communities";
 import { tierRoutes } from "./routes/tiers";
 import { channelRoutes } from "./routes/channels";
 import { membershipRoutes } from "./routes/memberships";
+import { analyticsRoutes } from "./routes/analytics";
 import { paymentAccountRoutes } from "./routes/payment-account";
 import { publicCommunityRoutes } from "./routes/public-community";
 import { publicSubscriptionRoutes } from "./routes/public-subscription";
@@ -35,6 +36,15 @@ export function createApp(deps: Dependencies) {
   app.route("/communities/:communityId/tiers", tierRoutes(deps));
   app.route("/communities/:communityId/channels", channelRoutes(deps));
   app.route("/communities/:communityId/members", membershipRoutes(deps));
+  // Phase 6's dashboard reads: /communities/:communityId/metrics, /activity,
+  // /members and /members.csv. Mounted at /communities rather than at
+  // /communities/:communityId because `members.csv` is a SIBLING path segment of
+  // `members`, so it falls outside the membershipRoutes mount above.
+  //
+  // Its middleware is per-route, never `use("*")` — a `*` under /communities also
+  // matches /communities itself, so a communityId check there would 400 the
+  // community list and create endpoints. See routes/analytics.ts.
+  app.route("/communities", analyticsRoutes(deps));
   app.route("/communities", communityRoutes(deps));
   return app;
 }

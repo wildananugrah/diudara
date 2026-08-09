@@ -39,6 +39,7 @@ import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-web
 import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
 import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
 import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
+import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
 import { XENDIT_ACCOUNT_PROVISIONING } from "./domain/payment-account";
 import type {
   CreatorRecord,
@@ -52,6 +53,7 @@ import type { MemberRepositoryPort } from "./application/ports/member-repository
 import type { SubscriptionRepositoryPort } from "./application/ports/subscription-repository.port";
 import type { WebhookEventRepositoryPort } from "./application/ports/webhook-event-repository.port";
 import type { ActivityLogRepositoryPort } from "./application/ports/activity-log-repository.port";
+import type { AnalyticsRepositoryPort } from "./application/ports/analytics-repository.port";
 import type { ChannelMembershipRepositoryPort } from "./application/ports/channel-membership-repository.port";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
@@ -212,6 +214,17 @@ const fakeWebhookEventRepository: WebhookEventRepositoryPort = {
 const fakeActivityLogRepository: ActivityLogRepositoryPort = {
   async record() {
     // not used
+  },
+};
+
+/**
+ * Phase 6's dashboard reads. Every method is creator-scoped by the port itself
+ * (there is no unscoped variant to fake), so this fake answers `null` — the
+ * "not yours / does not exist" answer — for everything.
+ */
+const fakeAnalyticsRepository: AnalyticsRepositoryPort = {
+  async getMetricsForCreator() {
+    return null;
   },
 };
 
@@ -404,6 +417,7 @@ describe("Dependencies (composition root contract)", () => {
         fakePaymentActivationUnitOfWork,
         fakeClock
       ),
+      getCommunityMetrics: new GetCommunityMetrics(fakeAnalyticsRepository),
       revokeChannelAccess: new RevokeChannelAccess(
         fakeCommunityRepository,
         fakeChannelMembershipRepository,
@@ -507,6 +521,7 @@ describe("Dependencies (composition root contract)", () => {
         fakePaymentActivationUnitOfWork,
         fakeClock
       ),
+      getCommunityMetrics: new GetCommunityMetrics(fakeAnalyticsRepository),
       revokeChannelAccess: new RevokeChannelAccess(
         fakeCommunityRepository,
         fakeChannelMembershipRepository,

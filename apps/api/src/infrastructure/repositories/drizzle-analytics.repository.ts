@@ -1,0 +1,172 @@
+import { and, asc, count, eq, sql } from "drizzle-orm";
+import type { DatabaseExecutor } from "../../db/client";
+import { communities, membershipTiers, subscriptions, transactions } from "../../db/schema";
+import type {
+  AnalyticsRepositoryPort,
+  CommunityMemberCounts,
+  CommunityMetrics,
+  TierDistributionEntry,
+} from "../../application/ports/analytics-repository.port";
+
+/**
+ * The transaction status that means MONEY ARRIVED, and the only one that counts
+ * toward revenue.
+ *
+ * Phase 5 leaves three other states in this table and none of them is income:
+ * `pending` is an invoice nobody paid, `failed` a payment that did not go through,
+ * and a `subscription_churned` settlement rolls the whole statement back — see
+ * `DrizzleSubscriptionRepository.markPaid` — so what survives that path is a
+ * `pending` row against a `churned` subscription. All three are excluded by this
+ * one predicate, which is why the predicate is a constant rather than inline: a
+ * creator seeing revenue they never received is worse than seeing none.
+ */
+const SUCCESSFUL_TRANSACTION = "success";
+
+/** Subscription statuses the member counts report on, in the order they are reported. */
+const ACTIVE_SUBSCRIPTION = "active";
+const PAST_DUE_SUBSCRIPTION = "past_due";
+const CHURNED_SUBSCRIPTION = "churned";
+
+/**
+ * The creator dashboard's reads, all creator-scoped, none of them optional about
+ * it. See `AnalyticsRepositoryPort` for why there is no unscoped variant.
+ */
+export class DrizzleAnalyticsRepository implements AnalyticsRepositoryPort {
+  constructor(private readonly db: DatabaseExecutor) {}
+
+  /**
+   * THE SCOPING QUERY, and the only place `creatorId` is compared.
+   *
+   * Every aggregate below keys on `community_id` alone, which is sound BECAUSE
+   * this ran first and returned a row: a community has exactly one owner, so
+   * "this community's tiers" and "this creator's tiers in this community" are the
+   * same set. Doing it in one place rather than repeating the join in four
+   * aggregates means there is exactly one predicate to delete, and deleting it
+   * fails `drizzle-analytics.repository.test.ts`'s scoping tests immediately —
+   * mutation-checked, not assumed.
+   *
+   * Returns `null` for "not yours" and "does not exist" alike; the caller turns
+   * both into the same 404 (see the port docstring).
+   */
+  private async findOwnedCommunity(
+    communityId: string,
+    creatorId: string
+  ): Promise<{ id: string; slug: string } | null> {
+    const [row] = await this.db
+      .select({ id: communities.id, slug: communities.slug })
+      .from(communities)
+      .where(and(eq(communities.id, communityId), eq(communities.creatorId, creatorId)))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async getMetricsForCreator(
+    communityId: string,
+    creatorId: string
+  ): Promise<CommunityMetrics | null> {
+    const community = await this.findOwnedCommunity(communityId, creatorId);
+    if (!community) return null;
+
+    const [members, grossRevenueAmount, tierDistribution] = await Promise.all([
+      this.countMembers(community.id),
+      this.sumGrossRevenue(community.id),
+      this.distributionByTier(community.id),
+    ]);
+
+    return { members, grossRevenueAmount, tierDistribution };
+  }
+
+  /**
+   * Member counts by subscription status, in ONE grouped query.
+   *
+   * A community's members are reached through its tiers — `subscription` has no
+   * `community_id` — so the join is the scope. Statuses outside the three reported
+   * ones are read and discarded rather than filtered in SQL, because the filter
+   * would have to enumerate them anyway and an unrecognised status silently
+   * vanishing is how `superseded` once read as a live membership.
+   */
+  private async countMembers(communityId: string): Promise<CommunityMemberCounts> {
+    const rows = await this.db
+      .select({ status: subscriptions.status, total: count() })
+      .from(subscriptions)
+      .innerJoin(membershipTiers, eq(subscriptions.tierId, membershipTiers.id))
+      .where(eq(membershipTiers.communityId, communityId))
+      .groupBy(subscriptions.status);
+
+    const byStatus = new Map(rows.map((row) => [row.status, row.total]));
+    return {
+      active: byStatus.get(ACTIVE_SUBSCRIPTION) ?? 0,
+      pastDue: byStatus.get(PAST_DUE_SUBSCRIPTION) ?? 0,
+      churned: byStatus.get(CHURNED_SUBSCRIPTION) ?? 0,
+    };
+  }
+
+  /**
+   * Gross revenue: `sum(amount)` over this community's SUCCESSFUL transactions.
+   *
+   * `coalesce(..., 0)` because `sum` over no rows is NULL, and a brand-new
+   * community must report 0 rather than null — Task 7 formats this into
+   * `Rp 1.250.000`, and `Rp NaN` on a creator's first day reads as broken.
+   *
+   * `::bigint` then `Number`: Postgres widens `sum(integer)` to bigint, which the
+   * driver hands back as a STRING, and a string here would concatenate rather
+   * than add in every caller downstream. Safe for money because the column is an
+   * INTEGER count of Rupiah — the sum is exact in Postgres, and
+   * `Number.MAX_SAFE_INTEGER` is ~9 × 10^15 Rupiah, several thousand times
+   * Indonesia's annual GDP. Never `parseFloat` on money.
+   */
+  private async sumGrossRevenue(communityId: string): Promise<number> {
+    const [row] = await this.db
+      .select({
+        total: sql<number>`coalesce(sum(${transactions.amount}), 0)::bigint`.mapWith(Number),
+      })
+      .from(transactions)
+      .innerJoin(subscriptions, eq(transactions.subscriptionId, subscriptions.id))
+      .innerJoin(membershipTiers, eq(subscriptions.tierId, membershipTiers.id))
+      .where(
+        and(
+          eq(membershipTiers.communityId, communityId),
+          eq(transactions.status, SUCCESSFUL_TRANSACTION)
+        )
+      );
+    return row?.total ?? 0;
+  }
+
+  /**
+   * Active members per tier, INCLUDING TIERS NOBODY HAS BOUGHT.
+   *
+   * A LEFT join, and the `status = 'active'` test is in the JOIN condition rather
+   * than the WHERE clause — that difference is the whole feature. In a WHERE
+   * clause it would discard the null-extended row a zero-member tier produces, and
+   * the tier would silently disappear from the dashboard. A tier with no members
+   * is exactly what a creator needs to see: it is either priced wrong or never
+   * advertised, and hiding the row hides the problem.
+   *
+   * `count(subscriptions.id)` rather than `count()`: the latter counts the
+   * null-extended row and reports 1 member for a tier that has none.
+   *
+   * Ordered by price then name then id so the dashboard's list is stable across
+   * requests and two identically-priced, identically-named tiers still have a
+   * fixed order.
+   */
+  private async distributionByTier(communityId: string): Promise<TierDistributionEntry[]> {
+    return this.db
+      .select({
+        tierId: membershipTiers.id,
+        tierName: membershipTiers.name,
+        priceAmount: membershipTiers.priceAmount,
+        activeMembers: count(subscriptions.id),
+      })
+      .from(membershipTiers)
+      .leftJoin(
+        subscriptions,
+        and(
+          eq(subscriptions.tierId, membershipTiers.id),
+          eq(subscriptions.status, ACTIVE_SUBSCRIPTION)
+        )
+      )
+      .where(eq(membershipTiers.communityId, communityId))
+      .groupBy(membershipTiers.id, membershipTiers.name, membershipTiers.priceAmount)
+      .orderBy(asc(membershipTiers.priceAmount), asc(membershipTiers.name), asc(membershipTiers.id));
+  }
+}

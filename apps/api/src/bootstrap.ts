@@ -31,6 +31,8 @@ import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/dri
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
 import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
+import { DrizzleAnalyticsRepository } from "./infrastructure/repositories/drizzle-analytics.repository";
+import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import { SystemClock } from "./infrastructure/clock/system.clock";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
@@ -85,6 +87,12 @@ export interface Dependencies {
   startCheckout: StartCheckout;
   getSubscriptionStatus: GetSubscriptionStatus;
   handlePaymentWebhook: HandlePaymentWebhook;
+  /**
+   * Phase 6's creator dashboard reads. All three go through
+   * `AnalyticsRepositoryPort`, whose every method is creator-scoped and which has
+   * no unscoped variant — see the port for why that absence is the protection.
+   */
+  getCommunityMetrics: GetCommunityMetrics;
   /**
    * The creator's manual "remove this member" action. It lives in the API rather
    * than the worker because revocation is SYNCHRONOUS: a creator removing someone
@@ -815,6 +823,11 @@ export function bootstrap(): Dependencies {
     clock
   );
 
+  // Phase 6's dashboard reads. One repository, three use-cases, every method
+  // creator-scoped at the port.
+  const analyticsRepository = new DrizzleAnalyticsRepository(db);
+  const getCommunityMetrics = new GetCommunityMetrics(analyticsRepository);
+
   // Revocation is the ONE messaging call the API process makes; granting happens
   // in apps/worker. Same allowlist as the payment adapter: on a box with no
   // tokens and a NODE_ENV outside the allowlist this throws rather than booting a
@@ -878,6 +891,7 @@ export function bootstrap(): Dependencies {
     startCheckout,
     getSubscriptionStatus,
     handlePaymentWebhook,
+    getCommunityMetrics,
     revokeChannelAccess,
     recordChannelJoin,
     sendRenewalReminder,
