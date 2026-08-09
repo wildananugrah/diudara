@@ -105,7 +105,12 @@ export interface ProcessRenewalsResult {
  *  3. THE GRACE DEADLINE IS WRITTEN ONCE. `markPastDue` is predicated on
  *     `status = 'active'`, so only the transition writes `grace_ends_at` and no later
  *     pass can move it. It is computed from the DUE DATE, not from `now`, so a pass
- *     that ran late does not silently extend everybody's grace either.
+ *     that ran late does not silently extend everybody's grace either — with one floor
+ *     under it: the stored value is never less than a minimum notice period from the
+ *     moment of transition, because a member the system is meeting for the first time
+ *     (every existing subscription, on the first pass after this phase deploys) would
+ *     otherwise be evicted in the same tick that first warned them. See
+ *     `computeGraceEndsAt`.
  *  4. TIME IS INJECTED. `clock.now()` is read once per `execute`, never at
  *     construction: this object lives for the lifetime of a worker process.
  *
@@ -243,8 +248,14 @@ export class ProcessRenewals {
     // churn.
     if (isDueOrOverdue(stage)) {
       // From the DUE DATE, never from `now`: a pass that has been down for three days
-      // must not hand everybody three extra days of grace.
-      if (await this.subscriptions.markPastDue(subscription.id, computeGraceEndsAt(dueDate))) {
+      // must not hand everybody three extra days of grace. `now` is passed as well
+      // because the deadline is CLAMPED to a minimum notice period from this instant —
+      // without it the first pass after this phase deploys would transition Phase 4's
+      // untracked subscriptions to `past_due` with a deadline already in the past and
+      // the churn pass would evict them in the same tick. See `computeGraceEndsAt`.
+      if (
+        await this.subscriptions.markPastDue(subscription.id, computeGraceEndsAt(dueDate, now))
+      ) {
         result.transitionedToPastDue += 1;
       }
     }

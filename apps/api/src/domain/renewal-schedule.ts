@@ -69,7 +69,8 @@ const STAGE_DAY_OFFSET: Record<ReminderStage, number> = {
  *
  * `renewal-schedule.test.ts` asserts this as a RELATIONSHIP (the last stage's offset
  * against the deadline this produces, with a stated minimum gap), not as two literals,
- * so editing one number alone fails.
+ * so editing one number alone fails. `MINIMUM_NOTICE_DAYS` below is that same gap,
+ * derived from these two numbers rather than written out again.
  *
  * Changing it does not move any deadline already stored: `grace_ends_at` is written once,
  * when a subscription enters `past_due`, precisely so a later config change cannot
@@ -208,16 +209,68 @@ export function isDueOrOverdue(stage: ReminderStage): boolean {
 }
 
 /**
- * When the grace period for a subscription due on `nextBillingDate` runs out.
+ * The smallest gap this system will ever put between a member becoming `past_due` and
+ * the deadline they are measured against.
+ *
+ * DERIVED, not chosen: it is exactly the gap the ordinary schedule already produces
+ * between the final warning and the deadline (see `GRACE_DAYS`). A member first
+ * discovered late therefore gets the same notice as a member the pass has been watching
+ * all along, and the two cannot drift apart — changing `GRACE_DAYS` or the last stage's
+ * offset moves both.
+ */
+const MINIMUM_NOTICE_DAYS =
+  GRACE_DAYS - STAGE_DAY_OFFSET[REMINDER_STAGES[REMINDER_STAGES.length - 1]];
+
+/**
+ * When the grace period runs out for a subscription due on `nextBillingDate` that is
+ * becoming `past_due` at `transitionedAt`.
  *
  * Whole days of elapsed time, not a calendar-day rollover: this is a DEADLINE the
  * member is measured against, and it is stored on the subscription when it enters
  * `past_due` precisely so a later timezone or config change cannot retroactively
  * move it (Global Constraints). Adding milliseconds keeps it exact, and since WIB
  * has no DST it also lands at the same wall-clock time of day.
+ *
+ * ==========================================================================
+ * WHY IT TAKES THE MOMENT OF TRANSITION AS WELL AS THE DUE DATE.
+ *
+ * The deadline is measured from the DUE DATE, which is right — a pass that has been down
+ * for three days must not hand everybody three extra days of grace. But taken alone it
+ * makes "three days between the final warning and eviction" true only while the pass has
+ * been RUNNING. Measured gaps for a pass cadence of k days were 3, 4, 3, 4, 5, 6, **0**,
+ * 11, **0** for k = 1, 2, 3, 4, 5, 6, **7**, 11, **15**: at k = 7 and k = 15 the member's
+ * final warning and their eviction became due in the SAME tick, and they run on two
+ * independent loops, so which reached them first was a race.
+ *
+ * THE CASE THAT MUST NOT SHIP is not an exotic cadence, though. Phase 4 delivered access
+ * with no renewal tracking at all, so production already holds subscriptions whose
+ * `next_billing_date` is well past. The FIRST pass after this phase deploys would
+ * transition them to `past_due` with a deadline ALREADY IN THE PAST and the churn pass
+ * would evict them in the same tick — `overdue_7d` queued to the same outbox as the
+ * revocation, with no defined order between the warning and the eviction. A mass
+ * eviction of paying members on the first tick after a deploy.
+ *
+ * So the stored deadline is CLAMPED to be at least `MINIMUM_NOTICE_DAYS` from the moment
+ * of transition. It is still written exactly once (`markPastDue` is predicated on
+ * `active`), it is still never recomputed afterwards, and it is unchanged for every
+ * member whose lapse the pass actually watched — `max` can only ever push it later, and
+ * for an ordinary lapse the due-date value is already later.
+ *
+ * THE REJECTED ALTERNATIVE was to have `ProcessChurn` require the final-stage
+ * `renewal_reminder` row to exist and be N days old, which asserts the invariant
+ * directly rather than through a proxy. It was rejected because it makes eviction
+ * conditional on a DELIVERY: a `renewal_reminder` row means the stage was CLAIMED, not
+ * that the member was told, and a permanently failed send would leave a subscription
+ * that can never be churned — a member keeping paid access indefinitely, with every pass
+ * agreeing nothing needs doing. It also needs a new port method and a second reading of
+ * a table whose rows are deleted on renewal. This clamp is one `max` in the function
+ * that already owns the deadline.
+ * ==========================================================================
  */
-export function computeGraceEndsAt(nextBillingDate: Date): Date {
-  return new Date(nextBillingDate.getTime() + GRACE_DAYS * 86_400_000);
+export function computeGraceEndsAt(nextBillingDate: Date, transitionedAt: Date): Date {
+  const fromDueDate = nextBillingDate.getTime() + GRACE_DAYS * 86_400_000;
+  const minimumNotice = transitionedAt.getTime() + MINIMUM_NOTICE_DAYS * 86_400_000;
+  return new Date(Math.max(fromDueDate, minimumNotice));
 }
 
 /**

@@ -62,8 +62,70 @@ describe("REMINDER_STAGES", () => {
 });
 
 describe("computeGraceEndsAt", () => {
-  it("is ten days after the due date", () => {
-    expect(computeGraceEndsAt(DUE).toISOString()).toBe(day(10).toISOString());
+  it("is ten days after the due date for a member the pass caught on time", () => {
+    expect(computeGraceEndsAt(DUE, DUE).toISOString()).toBe(day(10).toISOString());
+  });
+
+  it("is unchanged by a transition anywhere inside the ordinary schedule", () => {
+    // Every instant a normal lapse can be noticed at: the deadline must come from the
+    // DUE DATE, so a pass that ran late gives nobody extra grace.
+    for (const offset of [-3, 0, 1, 3, 6, 7]) {
+      expect(computeGraceEndsAt(DUE, day(offset)).toISOString()).toBe(day(10).toISOString());
+    }
+  });
+
+  /**
+   * I1, final whole-branch review. The deadline came from the due date and NOTHING ELSE,
+   * so "three days between the final warning and eviction" held only while the pass had
+   * been running. The case that must not ship: Phase 4 delivered access with no renewal
+   * tracking, so production already holds subscriptions whose due date is well past, and
+   * the first pass would transition them with a deadline ALREADY IN THE PAST — warned and
+   * evicted in the same tick, in an undefined order, on the first tick after a deploy.
+   */
+  describe("a subscription first noticed long after its due date", () => {
+    /** The gap the ordinary schedule leaves between the final warning and the deadline. */
+    function ordinaryNoticeDays(): number {
+      const finalStage = REMINDER_STAGES[REMINDER_STAGES.length - 1];
+      let firstDayOfFinalStage = -1;
+      for (let offset = 0; offset <= 400; offset += 1) {
+        if (dueStageFor(DUE, day(offset)) === finalStage) {
+          firstDayOfFinalStage = offset;
+          break;
+        }
+      }
+      return (computeGraceEndsAt(DUE, DUE).getTime() - day(firstDayOfFinalStage).getTime()) /
+        86_400_000;
+    }
+
+    it("is never in the past, however late the pass arrives", () => {
+      for (const offset of [8, 11, 15, 40, 400]) {
+        const now = day(offset);
+        expect(computeGraceEndsAt(DUE, now).getTime()).toBeGreaterThan(now.getTime());
+      }
+    });
+
+    it("gives the SAME notice the ordinary schedule gives, measured from the transition", () => {
+      // Derived rather than asserted as a literal: the clamp and the schedule share one
+      // number, so a change to GRACE_DAYS or to the last stage's offset moves both.
+      const notice = ordinaryNoticeDays();
+      expect(notice).toBeGreaterThanOrEqual(3);
+      for (const offset of [8, 11, 15, 40]) {
+        const now = day(offset);
+        expect(computeGraceEndsAt(DUE, now).getTime() - now.getTime()).toBe(
+          notice * 86_400_000
+        );
+      }
+    });
+
+    it("still leaves the member INSIDE grace at the instant of the transition", () => {
+      // The property the eviction turns on: `isPastGrace` must be false for the whole
+      // tick that first warned them, and for the days that follow.
+      const now = day(40);
+      const grace = computeGraceEndsAt(DUE, now);
+      expect(isPastGrace(grace, now)).toBe(false);
+      expect(isPastGrace(grace, new Date(now.getTime() + 2 * 86_400_000))).toBe(false);
+      expect(isPastGrace(grace, new Date(grace.getTime() + 1))).toBe(true);
+    });
   });
 });
 
@@ -91,7 +153,9 @@ describe("computeGraceEndsAt", () => {
 describe("the grace period against the last reminder stage", () => {
   /** Whole days between the due date and the deadline `computeGraceEndsAt` produces. */
   function graceDays(): number {
-    return (computeGraceEndsAt(DUE).getTime() - DUE.getTime()) / 86_400_000;
+    // From a transition ON the due date, i.e. the ordinary lapse this invariant is
+    // about. See `computeGraceEndsAt` for the floor that applies to a late-noticed one.
+    return (computeGraceEndsAt(DUE, DUE).getTime() - DUE.getTime()) / 86_400_000;
   }
 
   /** The first whole day after the due date on which the LAST stage is claimable. */
@@ -124,7 +188,7 @@ describe("the grace period against the last reminder stage", () => {
   });
 
   it("still has the member inside grace on the day the final warning is claimable", () => {
-    const grace = computeGraceEndsAt(DUE);
+    const grace = computeGraceEndsAt(DUE, DUE);
     // Every hour of that WIB day, not just one: the reminder pass may run at any of
     // them, and at none of them may the member already be revocable.
     for (let hour = 0; hour < 24; hour += 1) {
@@ -137,7 +201,7 @@ describe("the grace period against the last reminder stage", () => {
 
 describe("isPastGrace", () => {
   it("is false before and at the deadline, true after", () => {
-    const grace = computeGraceEndsAt(DUE);
+    const grace = computeGraceEndsAt(DUE, DUE);
     expect(isPastGrace(grace, day(6))).toBe(false);
     expect(isPastGrace(grace, grace)).toBe(false);
     expect(isPastGrace(grace, new Date(grace.getTime() + 1))).toBe(true);

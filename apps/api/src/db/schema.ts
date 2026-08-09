@@ -133,6 +133,14 @@ export const subscriptions = pgTable(
      * Nullable with no default, because a subscription that is not past due has no
      * deadline. A `defaultNow()` here would put every new subscriber a fixed time
      * from eviction.
+     *
+     * The value written is `max(due date + grace, transition + minimum notice)` — see
+     * `computeGraceEndsAt`. The floor exists for the subscription this system meets for
+     * the FIRST time long after its due date (every row Phase 4 left behind, on the first
+     * pass this phase runs): computed from the due date alone, its deadline would already
+     * be in the past and the churn pass would evict it in the same tick that first warned
+     * it. The floor does not make the value recomputable — it is still written exactly
+     * once, by the transition, and read as stored for ever after.
      */
     graceEndsAt: timestamp("grace_ends_at", { withTimezone: true }),
     startedAt: timestamp("started_at", { withTimezone: true }),

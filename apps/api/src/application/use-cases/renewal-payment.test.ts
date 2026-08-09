@@ -854,6 +854,73 @@ describe("payment AFTER revocation — a genuinely new grant", () => {
     });
   });
 
+  /**
+   * I1, final whole-branch review. THE FIRST TICK AFTER THIS PHASE DEPLOYS.
+   *
+   * Phase 4 delivered channel access with no renewal tracking, so production already
+   * holds subscriptions whose `next_billing_date` is well past. Both passes run on
+   * independent loops at the same cadence, so both get a turn at that first instant —
+   * and with the deadline computed from the due date alone, the churn pass found a
+   * member it had never warned sitting twenty days past their deadline.
+   */
+  describe("the first pass after deployment, on a subscription nothing had been tracking", () => {
+    it("warns the member and does NOT churn them in the same tick", async () => {
+      const { community, tier } = await seedCommunity();
+      const h = harness();
+      const { subscriptionId, membership } = await firstPurchase(h, community.slug, tier.id);
+      const telegram = fake(h.telegram);
+
+      // Forty days past due, and nothing has ever looked at this row: no reminders, no
+      // `past_due`, no deadline. The state Phase 4 leaves behind.
+      expect((await reloadSubscription(subscriptionId)).graceEndsAt).toBeNull();
+      h.clock.set(at(40));
+
+      // Both loops get their turn, renewals first — and then churn a second time, in
+      // case the order was what saved it.
+      const renewals = await h.renewals.execute();
+      const churn = await h.churn.execute();
+      const churnAgain = await h.churn.execute();
+
+      expect(renewals.transitionedToPastDue).toBe(1);
+      expect(renewals.reminded).toBe(1);
+      // THE ASSERTION: nobody was evicted on the first tick.
+      expect(churn.churned).toBe(0);
+      expect(churnAgain.churned).toBe(0);
+      expect((await reloadSubscription(subscriptionId)).status).toBe("past_due");
+      expect((await membershipRow(membership.id)).status).toBe("active");
+      expect(telegram.revocations).toHaveLength(0);
+      // The warning is queued and the eviction is not, so there is no undefined ordering
+      // between them to lose.
+      const rows = await outboxRows();
+      expect(rows.filter((r) => r.eventType === "revoke_subscription_access")).toHaveLength(0);
+      expect(
+        rows
+          .filter((r) => r.eventType === OUTBOX_SEND_RENEWAL_REMINDER)
+          .map((r) => (r.payload as { stage: string }).stage)
+      ).toEqual(["overdue_7d"]);
+    });
+
+    it("churns them three days later, so the clamp delays the eviction rather than cancelling it", async () => {
+      const { community, tier } = await seedCommunity();
+      const h = harness();
+      const { subscriptionId } = await firstPurchase(h, community.slug, tier.id);
+
+      h.clock.set(at(40));
+      await h.renewals.execute();
+      await h.churn.execute();
+
+      // Two days after the warning: still theirs.
+      h.clock.set(at(42));
+      expect((await h.churn.execute()).churned).toBe(0);
+      expect((await reloadSubscription(subscriptionId)).status).toBe("past_due");
+
+      // Past the deadline they were actually given.
+      h.clock.set(at(43, 10));
+      expect((await h.churn.execute()).churned).toBe(1);
+      expect((await reloadSubscription(subscriptionId)).status).toBe("churned");
+    });
+  });
+
   it("queues the grant through the outbox, as every activation does", async () => {
     const { community, tier } = await seedCommunity();
     const h = harness();

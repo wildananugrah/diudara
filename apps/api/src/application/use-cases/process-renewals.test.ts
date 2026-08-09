@@ -297,6 +297,65 @@ describe("ProcessRenewals", () => {
     expect(await outboxRows()).toHaveLength(2);
   });
 
+  /**
+   * I1, final whole-branch review. THE DEPLOYMENT CASE, which is not hypothetical: Phase
+   * 4 delivered channel access with no renewal tracking at all, so production already
+   * holds subscriptions whose `next_billing_date` is well past. The first pass this phase
+   * ever runs meets them all at once.
+   */
+  describe("the first pass ever, on a subscription that is long overdue", () => {
+    it("gives it a deadline in the FUTURE, not one that has already expired", async () => {
+      const { subscription } = await seedSubscription();
+      const firstPassEver = at(40);
+      const { useCase } = wire({ now: firstPassEver });
+
+      const result = await useCase.execute();
+
+      expect(result.transitionedToPastDue).toBe(1);
+      const reloaded = await reloadSubscription(subscription.id);
+      expect(reloaded.status).toBe("past_due");
+      // Before the clamp this was 2026-03-20 — twenty days before the pass ran — so the
+      // churn pass would have evicted them in the same tick that first warned them.
+      const graceEndsAt = reloaded.graceEndsAt;
+      if (graceEndsAt === null) throw new Error("no deadline was stored");
+      expect(graceEndsAt.getTime()).toBeGreaterThan(firstPassEver.getTime());
+      // Three whole days, the same notice the ordinary schedule gives between the final
+      // warning and the deadline.
+      expect(graceEndsAt.getTime() - firstPassEver.getTime()).toBe(3 * 86_400_000);
+    });
+
+    it("warns them FIRST: the final stage is queued, and it is the only thing queued", async () => {
+      const { subscription } = await seedSubscription();
+      const { useCase } = wire({ now: at(40) });
+
+      await useCase.execute();
+
+      // One message, the most advanced stage — the catch-up is `dueStageFor`'s job — and
+      // no eviction anywhere near it.
+      const rows = await outboxRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].eventType).toBe(OUTBOX_SEND_RENEWAL_REMINDER);
+      expect(rows[0].payload).toEqual({ subscriptionId: subscription.id, stage: "overdue_7d" });
+    });
+
+    it("is still WRITE-ONCE: a later pass does not push the clamped deadline out again", async () => {
+      // The clamp must not become a rolling deadline. `markPastDue` is predicated on
+      // `active`, so the second pass never reaches the row — but a future change that
+      // recomputed the deadline would extend it for ever and no member would ever churn.
+      const { subscription } = await seedSubscription();
+      const { useCase, clock } = wire({ now: at(40) });
+
+      await useCase.execute();
+      const afterFirst = await reloadSubscription(subscription.id);
+      clock.set(at(41));
+      await useCase.execute();
+
+      expect((await reloadSubscription(subscription.id)).graceEndsAt?.toISOString()).toBe(
+        afterFirst.graceEndsAt?.toISOString()
+      );
+    });
+  });
+
   it("leaves a deadline that was already recorded exactly as it found it", async () => {
     // The discriminating case, and the reason the previous test is not enough: a
     // deadline recomputed from `next_billing_date` on every pass would come out at the
