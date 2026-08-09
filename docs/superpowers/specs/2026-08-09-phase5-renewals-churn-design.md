@@ -182,6 +182,41 @@ A reminder carries a fresh checkout link to the existing public flow.
 | Community archived mid-cycle | No reminders, no revoke; recorded in `activity_log` |
 | Tier deleted or deactivated mid-cycle | Reminder still sent using the recorded amount |
 
+## 8b. What this phase leaves in `activity_log` — Phase 6's input contract
+
+`activity_log` is Phase 6's declared source for analytics, and this phase is the first to
+write to it from a clock rather than from a request. Everything below is a string Phase 6
+will have to `group by`, so it is written down here rather than only in the code that emits
+it.
+
+| `event_type` | Written by | Means |
+|---|---|---|
+| `renewal_reminder_queued` | `ProcessRenewals` | A stage was CLAIMED and an outbox row written. **Not a delivery.** |
+| `renewal_reminder_sent` | `SendRenewalReminder` | The WhatsApp message actually reached the provider. **This is the one that means "delivered".** |
+| `renewal_reminder_skipped` | `ProcessRenewals` | Deliberately not queued — the community does not accept renewals (archived). |
+| `renewal_reminder_not_sent` | `SendRenewalReminder` | Claimed, then deliberately not delivered: the subscription or the community stopped qualifying while the row waited. |
+| `churned` | `ProcessChurn` | `past_due` → `churned`. Carries the `graceEndsAt` the member was actually measured against. |
+| `churn_revoke_skipped` | `ProcessChurn` | Churned but NOT evicted — the community is archived (§8). |
+| `access_not_revoked` | `RevokeChannelAccessForSystem` | A queued revocation that no longer applied: the member is entitled again. |
+| `renewed` | `HandlePaymentWebhook` | A payment that EXTENDED a membership. |
+
+Three things a query has to know, all of which have already been got wrong once:
+
+1. **One reminder produces two rows**, `renewal_reminder_queued` then
+   `renewal_reminder_sent`. Counting "reminders" without filtering by `event_type` doubles
+   every figure. The queued row is written even when the send later fails; only the sent row
+   says a member was told.
+2. **`renewed` is not `joined`.** A renewal is the same member paying again, and this phase
+   is the first to produce one. Counting `joined` rows as new members is correct only
+   because renewals are recorded separately — collapsing them would inflate acquisition for
+   ever and make retention invisible. The distinction can only be made inside `markPaid`,
+   which is the one place that sees the status the row was in before activation.
+3. **`renewal_reminder` rows are DELETED on renewal.** That table is a LOCK — the unique
+   `(subscription_id, stage)` is what makes a reminder once-per-stage — and not a history:
+   `markPaid` clears a subscription's rows when the period they belong to ends, so the next
+   period's stages are claimable again. "How many reminders went out last month" must
+   therefore come from `activity_log`, never from `renewal_reminder`.
+
 ## 9. Testing
 
 - **Every time-dependent test injects the clock.** No `setTimeout`, no real waiting.

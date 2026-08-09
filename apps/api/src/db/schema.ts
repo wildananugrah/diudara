@@ -293,6 +293,24 @@ export const transactions = pgTable(
   (table) => [index("transaction_subscription_id_idx").on(table.subscriptionId)],
 );
 
+/**
+ * The audit trail, and PHASE 6'S DECLARED SOURCE for analytics.
+ *
+ * `event_type` is a free varchar, so the vocabulary is a contract held by convention.
+ * Phase 5's design spec (§8b, "What this phase leaves in `activity_log`") enumerates every
+ * type this phase writes and what each one means; `activity-log-contract.test.ts` fails if
+ * the code and that table drift apart. Three things a query has to know, all of which have
+ * been got wrong at least once already:
+ *
+ *  1. ONE REMINDER PRODUCES TWO ROWS — `renewal_reminder_queued` when the stage is claimed,
+ *     then `renewal_reminder_sent` when the message actually reaches the provider. Counting
+ *     reminders without filtering by `event_type` doubles every figure, and only the second
+ *     one means the member was told.
+ *  2. `renewed` IS NOT `joined`. A renewal is the same member paying again. Only `markPaid`
+ *     can tell them apart, because only it sees the status the row was in before activation.
+ *  3. `renewal_reminder` IS A LOCK, NOT A HISTORY. Its rows are DELETED on renewal (see the
+ *     table above), so "how many reminders went out last month" must be answered from HERE.
+ */
 export const activityLogs = pgTable(
   "activity_log",
   {

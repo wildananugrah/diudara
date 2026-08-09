@@ -202,6 +202,14 @@ export class StartCheckout {
    * fall through to a renewal of a period with no end.
    */
   private isRenewable(current: SubscriptionRecord): boolean {
+    // NOT DEAD CODE, THOUGH DELETING IT LEAVES THE WHOLE SUITE GREEN. The final
+    // whole-branch review checked: this branch is an EQUIVALENT MUTANT, because a
+    // `past_due` row always has a due date in the past, so the window check below
+    // returns true for it anyway. It is kept because it states the RULE — a late member
+    // may always pay, whatever the reminder schedule happens to be — while the window is
+    // a schedule that can change. Narrow the window to "the day before the due date" and
+    // the two stop agreeing; without this line, that change would silently start refusing
+    // every overdue member's payment, and no test would say so.
     if (current.status === PAST_DUE) return true;
     if (current.nextBillingDate === null) return false;
     // UTC midnight of the day the column names, i.e. 07:00 WIB — safely inside the
