@@ -12,6 +12,7 @@ import {
   communities,
   members,
   creators,
+  webhookEvents,
 } from "./schema";
 
 /**
@@ -33,6 +34,7 @@ export function assertTestEnvironment() {
 
 export async function resetDatabase() {
   assertTestEnvironment();
+  await db.delete(webhookEvents);
   await db.delete(eventRsvps);
   await db.delete(events);
   await db.delete(enrollments);

@@ -1,0 +1,6 @@
+[test]
+# Registers a happy-dom environment before tests run, so
+# @testing-library/react has document/window to render into. Bun resolves
+# the nearest bunfig.toml walking up from cwd, so this file — not the root
+# one — applies when `bun test` runs with apps/web as its working directory.
+preload = ["./src/test/happy-dom.setup.ts"]

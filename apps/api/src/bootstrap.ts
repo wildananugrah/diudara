@@ -16,8 +16,19 @@ import {
 } from "./application/use-cases/manage-tiers";
 import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
+import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
+import { GetPublicCommunity } from "./application/use-cases/get-public-community";
+import { StartCheckout } from "./application/use-cases/start-checkout";
+import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
+import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
+import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
+import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
+import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
+import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
+import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
+import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 
 /** Values that may be interpolated into a `DatabasePing` tagged template. */
 type PingValue = string | number | boolean | Date | null;
@@ -47,6 +58,7 @@ export type DatabasePing = (
 export interface Dependencies {
   creatorRepository: CreatorRepositoryPort;
   tokenIssuer: TokenIssuerPort;
+  payments: PaymentProviderPort;
   registerCreator: RegisterCreator;
   authenticateCreator: AuthenticateCreator;
   createCommunity: CreateCommunity;
@@ -57,6 +69,28 @@ export interface Dependencies {
   updateTier: UpdateTier;
   connectChannel: ConnectChannel;
   listChannels: ListChannels;
+  createPaymentAccount: CreatePaymentAccount;
+  getPublicCommunity: GetPublicCommunity;
+  startCheckout: StartCheckout;
+  getSubscriptionStatus: GetSubscriptionStatus;
+  handlePaymentWebhook: HandlePaymentWebhook;
+  /**
+   * The static token Xendit sends as `X-CALLBACK-TOKEN`, the ONLY thing
+   * authenticating the webhook route. `undefined` when the box is not
+   * configured for webhooks (never in production — `resolveCallbackToken`
+   * throws there), in which case `verifyCallbackToken` rejects every delivery
+   * rather than accepting any. Deliberately NOT narrowed to `string`: that
+   * would force a `?? ""` at the call site, and an empty expected token used to
+   * match an empty header.
+   */
+  xenditCallbackToken: string | undefined;
+  /**
+   * The resolved public origin of `apps/web` — see `resolveAppBaseUrl`. Exposed
+   * here rather than kept private inside `StartCheckout` so a test can prove the
+   * environment variable actually reaches the composition root: the confirmation
+   * page was unreachable for an entire phase because nothing checked the wiring.
+   */
+  appBaseUrl: string;
   sql: DatabasePing;
 }
 
@@ -98,6 +132,313 @@ export function assertUsableJwtSecret(secret: string | undefined): string {
   return secret;
 }
 
+/**
+ * The ONLY `NODE_ENV` values allowed to reach a relaxed configuration branch:
+ * the fake payment adapter, and an absent `XENDIT_CALLBACK_TOKEN`.
+ *
+ * An ALLOWLIST, deliberately — this is the same shape as `VISIBLE_STATUSES` in
+ * get-public-community.ts, for the same reason: an unanticipated value must fail
+ * CLOSED. The denylist this replaced (`if (nodeEnv === "production") throw`)
+ * looked equivalent and was not, because nothing in this repository ever sets
+ * `NODE_ENV`:
+ *
+ *   $ bun -e 'console.log(process.env.NODE_ENV)'   ->  undefined
+ *
+ * There is no `start` script, no Dockerfile, and no API service in
+ * infra/docker-compose.yml, so the FIRST real deployment would have run with
+ * `NODE_ENV` unset and taken the unsafe branch — booting the fake adapter,
+ * writing unrecoverable `fake-acct-*` ids into `creator.xendit_account_id`, and
+ * rejecting every webhook delivery. `"staging"`, `"prod"` and `"PRODUCTION"`
+ * were unsafe for the same reason. Under this allowlist all four throw.
+ *
+ * `"test"` is in here because `bun test` sets it (the same mechanism
+ * `resetDatabase()` relies on) and the whole suite depends on the fake adapter.
+ * `"development"` is here so `bun run dev` works — which is why
+ * `NODE_ENV=development` is now in `apps/api/.env.example`.
+ *
+ * Adding a value to this set is a decision to let that environment take fake
+ * money. Do not add `"staging"`: a staging box that charges nobody proves
+ * nothing about the payment path, and Xendit has a test-mode secret key for it.
+ */
+export const RELAXED_NODE_ENVS: ReadonlySet<string> = new Set(["development", "test"]);
+
+function isRelaxedNodeEnv(nodeEnv: string | undefined): boolean {
+  return nodeEnv !== undefined && RELAXED_NODE_ENVS.has(nodeEnv);
+}
+
+/** Renders `NODE_ENV` for an error message, distinguishing unset from a value. */
+function describeNodeEnv(nodeEnv: string | undefined): string {
+  return nodeEnv === undefined ? "not set" : nodeEnv;
+}
+
+/** The names in `RELAXED_NODE_ENVS`, for error messages. */
+const RELAXED_NODE_ENVS_LIST = [...RELAXED_NODE_ENVS].sort().join(" or ");
+
+/**
+ * Minimum `XENDIT_CALLBACK_TOKEN` length, mirroring `MIN_JWT_SECRET_LENGTH`
+ * above on purpose. This token is the ONLY authentication on
+ * `POST /webhooks/xendit` — Xendit signs nothing — so it is exactly as
+ * load-bearing as the JWT signing key, and it was accepting a value of `"x"`.
+ * A short token is brute-forceable against a live endpoint, and forging a
+ * callback grants free access to every paid community on the box. Real Xendit
+ * dashboard tokens are comfortably longer than this.
+ */
+const MIN_CALLBACK_TOKEN_LENGTH = 32;
+
+/**
+ * Normalises an env var to `undefined` when it carries no value. A variable
+ * exported as `XENDIT_SECRET_KEY=` arrives as `""`, which is indistinguishable
+ * from a typo'd name in intent but NOT in truthiness once someone writes
+ * `env.secretKey !== undefined`. Whitespace-only is treated the same way: a
+ * value copied out of a dashboard with a trailing space is not configuration.
+ */
+function presentOrUndefined(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return value.trim() === "" ? undefined : value;
+}
+
+/**
+ * Chooses the payment adapter, refusing to start rather than taking fake money.
+ *
+ * The fake adapter settles nothing while looking, from the outside, exactly
+ * like it did. Worse, `CreatePaymentAccount` writes its `fake-acct-*` id into
+ * `creator.xendit_account_id` and then 409s forever, so a creator onboarded on
+ * a misconfigured production box can never connect a real Xendit sub-account
+ * without manual SQL. A `console.log` is not a safety mechanism — these two
+ * guards are (see the plan's Global Constraints):
+ *
+ *   1. PARTIAL configuration throws in EVERY environment. A set secret key with
+ *      an unset split rule id is never intentional; it is a typo that makes an
+ *      operator believe payments are live.
+ *   2. ABSENT configuration throws UNLESS `NODE_ENV` is one of
+ *      `RELAXED_NODE_ENVS` — an allowlist, so `undefined`, `"staging"`,
+ *      `"prod"` and `"PRODUCTION"` all throw. See RELAXED_NODE_ENVS for why the
+ *      denylist this replaced never fired.
+ *
+ * Mirrors `assertUsableJwtSecret` above in shape and error wording.
+ */
+export function selectPaymentProvider(env: {
+  secretKey: string | undefined;
+  splitRuleId: string | undefined;
+  nodeEnv: string | undefined;
+}): PaymentProviderPort {
+  const secretKey = presentOrUndefined(env.secretKey);
+  const splitRuleId = presentOrUndefined(env.splitRuleId);
+
+  if (secretKey && splitRuleId) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] payments provider: XenditPaymentAdapter " +
+        "(XENDIT_SECRET_KEY and XENDIT_SPLIT_RULE_ID are set — real money will move)"
+    );
+    return new XenditPaymentAdapter({ secretKey, splitRuleId });
+  }
+
+  if (secretKey || splitRuleId) {
+    const missing = secretKey ? "XENDIT_SPLIT_RULE_ID" : "XENDIT_SECRET_KEY";
+    const present = secretKey ? "XENDIT_SECRET_KEY" : "XENDIT_SPLIT_RULE_ID";
+    throw new Error(
+      `Xendit is half-configured: ${present} is set but ${missing} is not. ` +
+        "Set both or neither — see apps/api/.env.example. Refusing to start rather " +
+        "than falling back to the fake payment adapter while looking configured."
+    );
+  }
+
+  if (!isRelaxedNodeEnv(env.nodeEnv)) {
+    throw new Error(
+      "XENDIT_SECRET_KEY and XENDIT_SPLIT_RULE_ID are not set, and NODE_ENV is " +
+        `${describeNodeEnv(env.nodeEnv)}. The fake payment adapter is permitted ONLY ` +
+        `when NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}. Add the keys to ` +
+        "apps/api/.env — see .env.example — or set NODE_ENV=development. Refusing to " +
+        "start rather than taking fake payments and writing unrecoverable fake-acct-* " +
+        "ids into creator.xendit_account_id."
+    );
+  }
+
+  logProviderChoice(
+    env.nodeEnv,
+    "[bootstrap] payments provider: FakePaymentAdapter " +
+      "(XENDIT_SECRET_KEY/XENDIT_SPLIT_RULE_ID not set — no real money will move; " +
+      "set both to switch to the real Xendit adapter)"
+  );
+  return new FakePaymentAdapter();
+}
+
+/**
+ * The token `resolveCallbackToken` hands back under `NODE_ENV=test`, and the
+ * one value it refuses to accept anywhere else. It is committed to this
+ * repository, so treating it as a real secret would mean shipping a publicly
+ * known webhook password — the same failure mode as the `.env.example`
+ * `JWT_SECRET` placeholder.
+ */
+export const TEST_CALLBACK_TOKEN = "test-callback-token";
+
+/**
+ * Resolves the static token that is the ONLY authentication on
+ * `POST /webhooks/xendit`.
+ *
+ * Nothing read `XENDIT_CALLBACK_TOKEN` before Task 7, so it sat outside the
+ * configuration guard above. It is now inside it, and deliberately shaped like
+ * `selectPaymentProvider` rather than like `assertUsableJwtSecret` — same three
+ * cases, same thresholds (owner ruling, 2026-08-09):
+ *
+ *   1. A configured token is used as-is. Empty and whitespace-only count as
+ *      unset (`XENDIT_CALLBACK_TOKEN=` in a .env file arrives as `""`).
+ *   2. PARTIAL configuration throws in EVERY environment. A box with
+ *      XENDIT_SECRET_KEY and XENDIT_SPLIT_RULE_ID set is taking real money; if
+ *      it cannot authenticate the callback that credits that money, no member
+ *      it charges is ever activated. Same reasoning as the half-configured
+ *      check in `selectPaymentProvider`, extended to the third variable.
+ *   3. ABSENT configuration returns `undefined` when `NODE_ENV` is one of
+ *      `RELAXED_NODE_ENVS`, and throws for EVERYTHING else — `undefined`,
+ *      `"staging"`, `"prod"`, `"PRODUCTION"`. A developer must be able to
+ *      `bun run dev` without setting a variable for an endpoint they may never
+ *      exercise locally, exactly as they can without the Xendit keys; nobody
+ *      else gets that.
+ *   4. A configured token shorter than `MIN_CALLBACK_TOKEN_LENGTH` throws in
+ *      every environment, exactly as a short `JWT_SECRET` does.
+ *
+ * `undefined` is safe to return, and is why `verifyCallbackToken` takes
+ * `string | undefined`: it refuses an unset or empty `expected` before any
+ * comparison, so an unconfigured box rejects every webhook rather than
+ * accepting every forged one. It fails closed — the guard exists so that
+ * production fails LOUDLY instead.
+ *
+ * Plus one rule the JWT secret taught us: the test default is refused outside
+ * tests, so `XENDIT_CALLBACK_TOKEN=test-callback-token` on a production box —
+ * a value anyone can read in this file — cannot vouch for a payment.
+ */
+export function resolveCallbackToken(env: {
+  callbackToken: string | undefined;
+  secretKey: string | undefined;
+  splitRuleId: string | undefined;
+  nodeEnv: string | undefined;
+}): string | undefined {
+  const token = presentOrUndefined(env.callbackToken);
+
+  if (token !== undefined) {
+    if (token === TEST_CALLBACK_TOKEN) {
+      if (env.nodeEnv !== "test") {
+        throw new Error(
+          "XENDIT_CALLBACK_TOKEN is the value committed to this repository for tests. " +
+            "Anyone can read it, so it would authenticate a forged payment event. Use the " +
+            "callback token from the Xendit dashboard."
+        );
+      }
+      // Exempt from the length floor below: it is the suite's own known value,
+      // and it is already refused everywhere else by the branch above.
+      return token;
+    }
+    if (token.length < MIN_CALLBACK_TOKEN_LENGTH) {
+      throw new Error(
+        `XENDIT_CALLBACK_TOKEN is too short (${token.length} characters; ` +
+          `${MIN_CALLBACK_TOKEN_LENGTH} required). It is the ONLY authentication on ` +
+          "POST /webhooks/xendit, so a guessable value grants free access to every paid " +
+          "community. Copy the full token from Settings → Developers → Webhooks in the " +
+          "Xendit dashboard."
+      );
+    }
+    return token;
+  }
+
+  // Checked before the production rule so the suite, which never sets the
+  // variable, keeps working even when a test hands `selectPaymentProvider` a
+  // fully-configured Xendit environment.
+  if (env.nodeEnv === "test") {
+    return TEST_CALLBACK_TOKEN;
+  }
+
+  if (presentOrUndefined(env.secretKey) && presentOrUndefined(env.splitRuleId)) {
+    throw new Error(
+      "Xendit is half-configured: XENDIT_SECRET_KEY and XENDIT_SPLIT_RULE_ID are set " +
+        "but XENDIT_CALLBACK_TOKEN is not. Real invoices would be created and no " +
+        "callback could be authenticated, so no member who paid would ever be " +
+        "activated. Set all three — see apps/api/.env.example."
+    );
+  }
+
+  if (!isRelaxedNodeEnv(env.nodeEnv)) {
+    throw new Error(
+      "XENDIT_CALLBACK_TOKEN is not set, and NODE_ENV is " +
+        `${describeNodeEnv(env.nodeEnv)}. Booting without it is permitted ONLY when ` +
+        `NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}. Add it to apps/api/.env — see ` +
+        ".env.example, and copy the callback token from the Xendit dashboard — or set " +
+        "NODE_ENV=development. Refusing to start rather than serving a webhook endpoint " +
+        "that rejects every real payment."
+    );
+  }
+
+  logProviderChoice(
+    env.nodeEnv,
+    "[bootstrap] XENDIT_CALLBACK_TOKEN not set — POST /webhooks/xendit will reject " +
+      "every delivery. Set it to test the webhook path locally."
+  );
+  return undefined;
+}
+
+/**
+ * The `APP_BASE_URL` a developer gets for free: Vite's default dev-server
+ * origin, which is what `apps/web` serves the confirmation page from.
+ */
+export const DEFAULT_APP_BASE_URL = "http://localhost:5173";
+
+/**
+ * Resolves the public origin of `apps/web`, used to build the
+ * `success_redirect_url` the payment provider sends the payer back to:
+ * `<base>/c/<slug>/status/<subscriptionId>`.
+ *
+ * Same allowlist rule as the two guards above (see RELAXED_NODE_ENVS): the
+ * localhost default is permitted only under `development`/`test`. Anywhere else
+ * it must be set, because a deployment silently falling back to
+ * `http://localhost:5173` sends every paying member to a page on their OWN
+ * machine — a failure that looks like the payment vanished, and one no test on a
+ * developer's laptop would ever surface.
+ *
+ * A trailing slash is stripped so callers can concatenate a rooted path without
+ * producing `//c/...`.
+ */
+export function resolveAppBaseUrl(env: {
+  appBaseUrl: string | undefined;
+  nodeEnv: string | undefined;
+}): string {
+  const configured = presentOrUndefined(env.appBaseUrl);
+
+  if (configured === undefined) {
+    if (!isRelaxedNodeEnv(env.nodeEnv)) {
+      throw new Error(
+        "APP_BASE_URL is not set, and NODE_ENV is " +
+          `${describeNodeEnv(env.nodeEnv)}. Falling back to ${DEFAULT_APP_BASE_URL} is ` +
+          `permitted ONLY when NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}: it is the ` +
+          "URL the payment provider sends a paying member back to, so a localhost " +
+          "default would strand every payer on their own machine. Add it to " +
+          "apps/api/.env — see .env.example."
+      );
+    }
+    return DEFAULT_APP_BASE_URL;
+  }
+
+  const trimmed = configured.trim().replace(/\/+$/, "");
+  if (!trimmed.startsWith("https://") && !trimmed.startsWith("http://")) {
+    throw new Error(
+      `APP_BASE_URL must start with https:// or http:// (got "${trimmed}"). It is ` +
+        "concatenated into a URL the payment provider redirects a browser to."
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Silent under `NODE_ENV=test` only. `bootstrap()` is called once per test that
+ * builds an app, so this line printed 100+ times in one suite run and buried a
+ * genuine `unhandled error` line. Everywhere else it still prints: the guards
+ * above are the safety mechanism, but an operator reading startup output should
+ * still see which adapter is live.
+ */
+function logProviderChoice(nodeEnv: string | undefined, message: string): void {
+  if (nodeEnv === "test") return;
+  console.log(message);
+}
+
 export function bootstrap(): Dependencies {
   const jwtSecret = assertUsableJwtSecret(process.env.JWT_SECRET);
 
@@ -125,9 +466,54 @@ export function bootstrap(): Dependencies {
   const connectChannel = new ConnectChannel(communityRepository, channelRepository);
   const listChannels = new ListChannels(communityRepository, channelRepository);
 
+  const payments: PaymentProviderPort = selectPaymentProvider({
+    secretKey: process.env.XENDIT_SECRET_KEY,
+    splitRuleId: process.env.XENDIT_SPLIT_RULE_ID,
+    nodeEnv: process.env.NODE_ENV,
+  });
+  const createPaymentAccount = new CreatePaymentAccount(creatorRepository, payments);
+  // After selectPaymentProvider on purpose: on a production box with nothing
+  // configured at all, "you are about to take fake money" is the more urgent of
+  // the two messages, and the existing test pins that wording.
+  const xenditCallbackToken = resolveCallbackToken({
+    callbackToken: process.env.XENDIT_CALLBACK_TOKEN,
+    secretKey: process.env.XENDIT_SECRET_KEY,
+    splitRuleId: process.env.XENDIT_SPLIT_RULE_ID,
+    nodeEnv: process.env.NODE_ENV,
+  });
+
+  const getPublicCommunity = new GetPublicCommunity(communityRepository, tierRepository);
+
+  const memberRepository = new DrizzleMemberRepository(db);
+  const subscriptionRepository = new DrizzleSubscriptionRepository(db);
+  const appBaseUrl = resolveAppBaseUrl({
+    appBaseUrl: process.env.APP_BASE_URL,
+    nodeEnv: process.env.NODE_ENV,
+  });
+  const startCheckout = new StartCheckout(
+    communityRepository,
+    tierRepository,
+    memberRepository,
+    subscriptionRepository,
+    creatorRepository,
+    payments,
+    { appBaseUrl }
+  );
+  const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository);
+
+  // The webhook's three writes commit together or not at all — see
+  // PaymentActivationUnitOfWorkPort. The read that precedes them uses the
+  // pooled repository directly.
+  const paymentActivationUnitOfWork = new DrizzlePaymentActivationUnitOfWork(db);
+  const handlePaymentWebhook = new HandlePaymentWebhook(
+    subscriptionRepository,
+    paymentActivationUnitOfWork
+  );
+
   return {
     creatorRepository,
     tokenIssuer,
+    payments,
     registerCreator,
     authenticateCreator,
     createCommunity,
@@ -138,6 +524,13 @@ export function bootstrap(): Dependencies {
     updateTier,
     connectChannel,
     listChannels,
+    createPaymentAccount,
+    getPublicCommunity,
+    startCheckout,
+    getSubscriptionStatus,
+    handlePaymentWebhook,
+    xenditCallbackToken,
+    appBaseUrl,
     sql,
   };
 }

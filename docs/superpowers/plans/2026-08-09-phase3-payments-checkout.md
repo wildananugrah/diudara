@@ -37,9 +37,40 @@ MVP spec. Every task's work implicitly includes these:
   never hand-written, never editing an applied migration (`0000`-`0004`).
 - Cross-tenant rule from Phase 2 still holds: authenticated resource access scoped by
   `creatorId`, 404 not 403.
+- **`findBySlug` is a deliberate, single exception to that rule** (Task 5). Phase 2's review
+  specifically praised `CommunityRepositoryPort` for having *no* unscoped lookup, which made
+  the vulnerable query unwritable. Public checkout has no authenticated caller, so one
+  unscoped lookup is unavoidable — but it is the **only** one, it is documented at the port,
+  and it must never be used to serve an authenticated route. A reviewer should verify no
+  authenticated handler reaches for it.
 - Password hashes never leave the repository layer. Error logs must never contain raw error
   objects (Phase 2 found argon2id hashes leaking that way) — Xendit payloads carry payer
   identifiers, so this must not regress.
+- **The fake payment adapter must be unreachable in production.** `bootstrap()` permits the
+  fake adapter — and an absent `XENDIT_CALLBACK_TOKEN` — **only** when `NODE_ENV` is exactly
+  `"development"` or `"test"`, and throws for **every** other value **including `undefined`**.
+  It also throws on *partial* configuration in **every** environment — a set secret key with
+  an unset split rule id is always a mistake, and it makes an operator believe payments are
+  live. This mirrors the existing `assertUsableJwtSecret` guard. A `console.log` is not
+  sufficient: it silently writes unrecoverable `fake-acct-*` values into
+  `creator.xendit_account_id`, which `CreatePaymentAccount` then 409s on forever with no
+  reset path.
+
+  **AMENDED 2026-08-09 (final review, C1).** This constraint originally specified a
+  *denylist*: "throws when `NODE_ENV === "production"`". That shape was implemented faithfully
+  and **never fired**, because nothing in this repository establishes its trigger — Bun does
+  not default `NODE_ENV` (`bun -e 'console.log(process.env.NODE_ENV)'` → `undefined`),
+  `apps/api/package.json` has no `start` script, there is no Dockerfile, `infra/docker-compose.yml`
+  has no API service, and `.env.example` never mentioned `NODE_ENV`. So the first real
+  deployment would have taken the *unsafe* branch, as would `"staging"`, `"prod"` and
+  `"PRODUCTION"`. The rule is therefore an **allowlist** (`RELAXED_NODE_ENVS` in
+  `bootstrap.ts`), the same shape as `VISIBLE_STATUSES` in the public-community use-case and
+  for the same reason: an unanticipated value must fail **closed**. A plan that states a
+  guard must also state what establishes the guard's trigger — `.env.example` now ships
+  `NODE_ENV=development`, and a test pins that it does.
+
+  The same review also set a **32-character floor on `XENDIT_CALLBACK_TOKEN`**, mirroring
+  `JWT_SECRET`: it is the webhook's only authentication, and `"x"` was being accepted.
 - Bun throughout; `bun run test` and `bun run typecheck` from the repo root must stay green.
 - Tests use `resetDatabase()` from `apps/api/src/db/test-helpers.ts` in `beforeEach`; add any
   new table to its delete list.
@@ -388,17 +419,11 @@ Write `apps/api/src/routes/payment-account.test.ts` covering: unauthenticated �
 call → 201 and the id is persisted; second call → 409; and that the response body does
 **not** contain `passwordHash`.
 
-- [ ] **Step 5: Add the `updated_at` trigger (carry-forward from Phase 2)**
+- [ ] **Step 5: (moved) — the `updated_at` carry-forward now belongs to Task 6**
 
-`subscription` and `transaction` carry `updated_at` with no `BEFORE UPDATE` trigger, so it
-would freeze at creation time. This phase writes those rows for the first time, so it is the
-right moment.
-
-Set `updatedAt: new Date()` explicitly in every repository method that updates a
-`subscription` or `transaction` row. Prefer this over a database trigger: the migration
-constraint forbids hand-written SQL, and drizzle-kit does not generate triggers. Add an
-assertion to Task 7's webhook test that `updated_at` moved past `created_at` after
-activation.
+Originally placed here, but the subscription and transaction repositories do not exist until
+Task 6, so there is nothing to edit at this point. Do not fabricate code for files that do
+not yet exist. Task 6 carries the requirement.
 
 - [ ] **Step 6: Verify, then commit**
 
@@ -726,7 +751,11 @@ export class XenditPaymentAdapter implements PaymentProviderPort {
 Add to `apps/api/.env.example`:
 
 ```
-# Xendit. Leave unset to use the fake payment adapter (all tests do).
+# Xendit. Unset outside production selects the fake payment adapter (all tests do).
+# In production, bootstrap() THROWS unless all three are set — a misconfigured
+# production box must not silently take fake payments and write fake-acct-* ids
+# into creator.xendit_account_id, which cannot be undone without manual SQL.
+# Partial configuration throws in EVERY environment: it is never intentional.
 # XENDIT_SECRET_KEY=
 # XENDIT_SPLIT_RULE_ID=
 # XENDIT_CALLBACK_TOKEN=
@@ -990,6 +1019,14 @@ git commit -m "feat(checkout): add public community endpoint"
 - `SubscriptionRepositoryPort` — `createPending({ memberId, tierId })`,
   `createTransaction({ subscriptionId, amount, paymentMethod })`,
   `findTransactionByExternalId(id)`, `markPaid(...)` (last two used in Task 7)
+
+**Carry-forward from Phase 2, moved here from Task 2:** `subscription` and `transaction`
+have an `updated_at` column with no `BEFORE UPDATE` trigger, so it would silently freeze at
+creation time. This task creates the first repositories that write those rows, so it is the
+right place to fix it. Set `updatedAt: new Date()` explicitly in **every** method that
+updates a `subscription` or `transaction`. Prefer this over a database trigger: the
+migration constraint forbids hand-written SQL and drizzle-kit does not generate triggers.
+Task 7 asserts `updated_at` moved past `created_at` after activation.
 - `StartCheckout.execute({ slug, tierId, payerName, payerWhatsappNumber })` →
   `{ invoiceUrl, subscriptionId, transactionId }`. **`transactionId` is required** — Task 7's
   webhook tests use it as the `external_id` Xendit echoes back, and the status page needs
@@ -1255,8 +1292,8 @@ Add the route to `public-community.ts` (note the explicit generic — Phase 2's 
 
 Wire `startCheckout` into `Dependencies`/`bootstrap()`. `bootstrap()` selects the payment
 adapter: `XenditPaymentAdapter` when `XENDIT_SECRET_KEY` **and** `XENDIT_SPLIT_RULE_ID` are
-both set, otherwise `FakePaymentAdapter`. Log which one was chosen at startup — silently
-running fake payments in production would be severe.
+both set, otherwise `FakePaymentAdapter` — **subject to the guards in the Global
+Constraints section**. A log line is a courtesy, not the safety mechanism; the guards are.
 
 - [ ] **Step 4: Verify, then commit**
 
@@ -1484,6 +1521,14 @@ export function webhookRoutes(
 when `NODE_ENV === "test"`; outside tests an unset token must throw, exactly like
 `JWT_SECRET`. Mount with `app.route("/webhooks", webhookRoutes(deps));`.
 
+**Owner ruling, 2026-08-09 — do not flag as a spec violation.** Phase 2 hardened
+`bootstrap()` to reject missing, weak, and placeholder `JWT_SECRET` values with no committed
+default, and this test-only default is a deliberate, narrower exception: the tests must send
+a token they know. The `NODE_ENV === "test"` guard is the same mechanism `resetDatabase()`
+already relies on to avoid truncating a real database. Two things a reviewer *should* still
+check: that the default is genuinely unreachable when `NODE_ENV !== "test"`, and that an
+unset token outside tests throws rather than silently accepting every webhook.
+
 - [ ] **Step 4: Verify, then mutation-check the security guards**
 
 ```bash
@@ -1523,6 +1568,10 @@ git commit -m "feat(payments): add token-verified, idempotent Xendit webhook han
 - Produces a Vite React app on port 5173, proxying `/c` and `/webhooks` to the API on 3000.
 - `CheckoutPage` fetches `GET /c/:slug`, renders tiers, and posts to
   `POST /c/:slug/checkout`, then redirects to the returned `invoiceUrl`.
+- **The return leg is part of this task.** `StartCheckout` must send the provider a
+  `success_redirect_url` of `<APP_BASE_URL>/c/<slug>/status/<subscriptionId>` (a new
+  required field on `CreateInvoiceInput`, forwarded by `XenditPaymentAdapter`), and a test
+  must assert the created invoice carries a URL containing the subscription id.
 
 Scaffold with React 18, `react-dom`, `react-router-dom`, and `vite` +
 `@vitejs/plugin-react`. Add `@diudara/shared` as a workspace dependency so request types
@@ -1532,8 +1581,21 @@ the root command** (verified in Phase 2). If no meaningful test exists yet, stil
 script.
 
 Testing uses `@testing-library/react` + `happy-dom`. Keep it to: renders tiers from a stubbed
-fetch; posting checkout calls the right endpoint with the selected tier. Do **not** test
-Xendit redirects.
+fetch; posting checkout calls the right endpoint with the selected tier. Do **not** drive a
+real browser through Xendit's hosted invoice page — but DO assert, on the API side, that the
+`success_redirect_url` we send it is correct.
+
+**AMENDED 2026-08-09 (final review, I1).** As written, this task's interface said only
+"redirects to the returned `invoiceUrl`" and "do not test Xendit redirects", so nobody was
+asked to close the loop: `CheckoutPage` discarded `subscriptionId`, no route linked to
+`/c/:slug/status/:subscriptionId`, and no `success_redirect_url` was sent. Task 9 therefore
+built and tested a page **no member could ever reach** — the end-to-end run navigated to it by
+hand, which is exactly why the gap read as cosmetic. "Do not test X" must never be phrased so
+broadly that it also excuses not BUILDING the half of X that is ours; the browser leg is
+untestable here, the request field is not.
+
+Lesson for future plans: when a flow leaves our process and comes back, the plan must name
+**both** legs and say which is asserted where. A page with no inbound link is not a feature.
 
 Mobile-first and legible; no design system. These links are opened on phones from WhatsApp.
 

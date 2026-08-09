@@ -20,6 +20,7 @@ function fakeRepository(seed: CreatorRecord[] = []) {
         whatsappNumber: input.whatsappNumber ?? null,
         email: input.email ?? null,
         tierPlan: "starter",
+        xenditAccountId: null,
         createdAt: new Date(),
       };
       rows.push(row);
@@ -41,6 +42,12 @@ function fakeRepository(seed: CreatorRecord[] = []) {
         email: row.email,
         passwordHash: hashes.get(row.id) ?? null,
       };
+    },
+    async setXenditAccountId(id, accountId) {
+      const row = rows.find((r) => r.id === id);
+      if (!row || row.xenditAccountId !== null) return false;
+      row.xenditAccountId = accountId;
+      return true;
     },
   };
   return { repository, rows, hashes };
@@ -117,6 +124,7 @@ describe("RegisterCreator", () => {
         whatsappNumber: null,
         email: "budi@example.com",
         tierPlan: "starter",
+        xenditAccountId: null,
         createdAt: new Date(),
       },
     ]);

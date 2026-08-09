@@ -130,10 +130,37 @@ signing and has three consequences the implementation must handle explicitly:
 2. **No payload integrity.** The token authenticates the *sender*, not the *message*.
    Anyone holding the token can forge any event. Therefore the handler **must never trust
    amounts or statuses from the webhook body** — it looks up our own `transaction` by
-   `external_id` and verifies the reported amount matches what we recorded. A mismatch is
-   rejected and logged as a security event.
+   `external_id` and verifies **both the reported amount and the reported invoice id**
+   (`body.id`) against what we recorded. Either mismatch is rejected and logged as a
+   security event.
 3. **Replay protection is ours to build.** `webhook_event.provider_event_id` is unique;
-   a duplicate delivery is a no-op, never a second activation.
+   a duplicate delivery is a no-op, never a second activation. Because that key is
+   *derived from* `body.id`, requirement 2's invoice-id check is what makes it meaningful,
+   and a second, independent guard sits behind it: `markPaid` only settles a transaction
+   whose status is still `pending`.
+
+**AMENDED 2026-08-09 (final review, I2).** As originally written, this section mandated
+re-verifying the **amount** and said nothing about the invoice id. Implemented faithfully,
+that left `transaction.gateway_reference_id` unwritten at checkout: the webhook stored
+whatever `body.id` claimed, and since `provider_event_id` is `<body.id>:<status>`, the
+*entire* replay defence rested on a field never checked against anything of ours. Probed:
+**12 concurrent `PAID` deliveries with 12 distinct `body.id` values produced 12
+`activity_log` "joined" rows, all HTTP 200** — which in Phase 4 is 12 WhatsApp invites.
+
+Two changes close it, and they are independent on purpose:
+
+- `StartCheckout` persists `createInvoice`'s `invoiceId` as
+  `transaction.gateway_reference_id` at checkout, before any webhook can arrive, via a
+  write-once conditional UPDATE. The handler then rejects `body.id !==
+  transaction.gateway_reference_id` exactly as it rejects an amount mismatch, and **fails
+  closed** when no reference was ever recorded.
+- `markPaid` scopes its UPDATE to `status = 'pending'` and treats zero affected rows as an
+  already-processed no-op, so a delivery that gets past the event-id guard by any means
+  still cannot activate twice.
+
+The general rule this section was missing: **a replay key derived from a provider field is
+only as strong as our independent verification of that field.** State the anchor, not just
+the key.
 
 Additional requirements:
 - The webhook route is **public** (no `requireAuth`) but must be excluded from any future
@@ -157,12 +184,27 @@ Additional requirements:
 6. Member returns to a confirmation page that polls subscription status.
 
 **Rejected explicitly at step 3:** a creator with no `xendit_account_id`, an inactive tier,
-or an archived community.
+an archived community, or a **paused** community.
+
+### 9.1 Community status semantics (ruled 2026-08-09)
+
+`status` has three values and they mean different things to a visitor:
+
+- `active` — page renders, checkout works.
+- `paused` — page **renders** with the community name and a "temporarily not accepting new
+  members" state; checkout is rejected. A creator pausing for a holiday keeps every
+  checkout link they have already broadcast to WhatsApp working, instead of telling
+  prospects the community does not exist.
+- `archived` — 404. The community is gone as far as the public is concerned.
+
+This was undefined in the original spec, which said only `status !== "active"`, collapsing
+`paused` into `archived`.
 
 ## 10. Frontend (`apps/web`)
 
 Minimal Vite + React app, no auth:
-- `/c/:slug` — tier selection and payer details
+- `/c/:slug` — tier selection and payer details, plus a distinct "temporarily closed"
+  state for a paused community (§9.1)
 - `/c/:slug/status/:subscriptionId` — post-payment confirmation, polls until active
 
 Mobile-first, since these links are shared into WhatsApp. Imports request/response types
@@ -174,6 +216,7 @@ the dashboard phase.
 | Condition | Status |
 |---|---|
 | Unknown slug, archived community | 404 |
+| Paused community — page renders; checkout rejected | 200 / 409 |
 | Inactive/unknown tier | 404 |
 | Creator not payment-onboarded | 409 |
 | Validation failure | 400 |

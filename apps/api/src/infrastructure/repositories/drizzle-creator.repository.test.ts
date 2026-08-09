@@ -60,4 +60,46 @@ describe("DrizzleCreatorRepository", () => {
     expect("passwordHash" in (byId as object)).toBe(false);
     expect("passwordHash" in (byEmail as object)).toBe(false);
   });
+
+  it("persists a xendit account id via setXenditAccountId", async () => {
+    const repository = new DrizzleCreatorRepository(db);
+    const created = await repository.create({ name: "Hendra", email: "hendra@example.com" });
+    expect(created.xenditAccountId).toBeNull();
+
+    expect(await repository.setXenditAccountId(created.id, "xnd-acct-123")).toBe(true);
+
+    const updated = await repository.findById(created.id);
+    expect(updated?.xenditAccountId).toBe("xnd-acct-123");
+  });
+
+  /**
+   * I4, final whole-branch review. The UPDATE used to be unconditional, so a
+   * second caller silently overwrote the first — and this column is what routes
+   * member money to a creator, so overwriting it redirects funds. The `is null`
+   * predicate is the guard; these two tests are what detect its removal.
+   */
+  it("refuses to overwrite an account id that is already set, and says so", async () => {
+    const repository = new DrizzleCreatorRepository(db);
+    const created = await repository.create({ name: "Hendra", email: "hendra2@example.com" });
+
+    expect(await repository.setXenditAccountId(created.id, "xnd-acct-first")).toBe(true);
+    expect(await repository.setXenditAccountId(created.id, "xnd-acct-second")).toBe(false);
+
+    expect((await repository.findById(created.id))?.xenditAccountId).toBe("xnd-acct-first");
+  });
+
+  it("lets exactly ONE of several concurrent writers claim the column", async () => {
+    const repository = new DrizzleCreatorRepository(db);
+    const created = await repository.create({ name: "Hendra", email: "hendra3@example.com" });
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        repository.setXenditAccountId(created.id, `xnd-acct-${i}`)
+      )
+    );
+
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const winner = results.indexOf(true);
+    expect((await repository.findById(created.id))?.xenditAccountId).toBe(`xnd-acct-${winner}`);
+  });
 });
