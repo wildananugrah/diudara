@@ -45,7 +45,9 @@ function fakeRepository(seed: CreatorRecord[] = []) {
     },
     async setXenditAccountId(id, accountId) {
       const row = rows.find((r) => r.id === id);
-      if (row) row.xenditAccountId = accountId;
+      if (!row || row.xenditAccountId !== null) return false;
+      row.xenditAccountId = accountId;
+      return true;
     },
   };
   return { repository, rows, hashes };

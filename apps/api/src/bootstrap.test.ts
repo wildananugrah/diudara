@@ -204,8 +204,12 @@ describe("Dependencies (composition root contract)", () => {
         return null;
       },
       async setXenditAccountId(id, accountId) {
+        // Mirrors the real repository's conditional UPDATE: only the caller that
+        // finds the column empty claims it.
         const record = stored.find((r) => r.id === id);
-        if (record) record.xenditAccountId = accountId;
+        if (!record || record.xenditAccountId !== null) return false;
+        record.xenditAccountId = accountId;
+        return true;
       },
     };
 
@@ -278,7 +282,7 @@ describe("Dependencies (composition root contract)", () => {
         return null;
       },
       async setXenditAccountId() {
-        // not used
+        return false;
       },
     };
 

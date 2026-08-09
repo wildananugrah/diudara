@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { db as DbClient } from "../../db/client";
 import { creators } from "../../db/schema";
 import { UniqueRule } from "../../application/errors";
@@ -92,10 +92,20 @@ export class DrizzleCreatorRepository implements CreatorRepositoryPort {
     return row ?? null;
   }
 
-  async setXenditAccountId(id: string, accountId: string): Promise<void> {
-    await this.db
+  /**
+   * Conditional by design — see the port docstring. `is null` in the WHERE
+   * clause is what makes the database, not a prior `findById`, decide who gets
+   * to fill this column, so concurrent callers cannot all believe they won.
+   * `.returning()` is how the row count comes back: postgres.js exposes a
+   * `count`, but reading a returned row is the shape the rest of this file
+   * already uses.
+   */
+  async setXenditAccountId(id: string, accountId: string): Promise<boolean> {
+    const rows = await this.db
       .update(creators)
       .set({ xenditAccountId: accountId })
-      .where(eq(creators.id, id));
+      .where(and(eq(creators.id, id), isNull(creators.xenditAccountId)))
+      .returning({ id: creators.id });
+    return rows.length > 0;
   }
 }

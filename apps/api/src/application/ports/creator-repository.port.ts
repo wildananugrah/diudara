@@ -32,5 +32,22 @@ export interface CreatorRepositoryPort {
   findById(id: string): Promise<CreatorRecord | null>;
   findByEmail(email: string): Promise<CreatorRecord | null>;
   findCredentialsByEmail(email: string): Promise<CreatorCredentials | null>;
-  setXenditAccountId(id: string, accountId: string): Promise<void>;
+  /**
+   * Attempts to claim the creator's empty `xendit_account_id` for `accountId`.
+   *
+   * Returns **true** only when this call was the one that filled it, and false
+   * when the column was already set — including by a concurrent caller that
+   * checked at the same time. The implementation MUST make that decision in a
+   * single conditional UPDATE (`where id = ? and xendit_account_id is null`) and
+   * report the affected row count; a `findById` in the use-case is a
+   * check-then-act and cannot arbitrate it. Probed before this became
+   * conditional: 5 concurrent `POST /payment-account` requests with one bearer
+   * token all returned 201, the last writer won nondeterministically, and every
+   * request believed it had connected the account.
+   *
+   * NOT idempotent on purpose: re-writing the same id would be indistinguishable
+   * from overwriting a different one, and this column is what routes member
+   * money to a creator. Overwriting it silently redirects funds.
+   */
+  setXenditAccountId(id: string, accountId: string): Promise<boolean>;
 }

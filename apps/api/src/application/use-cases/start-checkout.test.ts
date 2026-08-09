@@ -157,7 +157,7 @@ describe("StartCheckout — funds routing", () => {
         return null;
       },
       async setXenditAccountId() {
-        // not used
+        return false;
       },
     };
 
