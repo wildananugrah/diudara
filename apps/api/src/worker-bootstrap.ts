@@ -1,5 +1,9 @@
 import { db } from "./db/client";
-import { selectMessagingProviders, type MessagingProviders } from "./bootstrap";
+import {
+  resolveAppBaseUrl,
+  selectMessagingProviders,
+  type MessagingProviders,
+} from "./bootstrap";
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
 import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
@@ -14,10 +18,15 @@ import {
   RetryChannelAccessRevocation,
   revokeAccessOutboxHandler,
 } from "./application/use-cases/revoke-channel-access";
+import {
+  SendRenewalReminder,
+  sendRenewalReminderOutboxHandler,
+} from "./application/use-cases/send-renewal-reminder";
 import { ProcessOutbox, type OutboxHandler } from "./application/use-cases/process-outbox";
 import {
   OUTBOX_GRANT_ACCESS,
   OUTBOX_REVOKE_ACCESS,
+  OUTBOX_SEND_RENEWAL_REMINDER,
 } from "./application/ports/outbox-repository.port";
 
 /**
@@ -34,20 +43,36 @@ export interface WorkerDependencies {
    * only that a handler is registered under the right string.
    */
   retryChannelAccessRevocation: RetryChannelAccessRevocation;
+  /**
+   * Phase 5's reminder delivery. Exposed for the same reason as the two above, and for
+   * one more: its message carries a checkout link built from `APP_BASE_URL`, and this is
+   * the process that sends it — so a test has to be able to prove the value reached
+   * THIS root and not only the API's. Phase 3 shipped a confirmation page that was
+   * unreachable for a whole phase because nothing checked that wiring.
+   */
+  sendRenewalReminder: SendRenewalReminder;
   messaging: MessagingProviders;
 }
 
 /**
  * The WORKER's composition root, deliberately separate from `bootstrap()`.
  *
- * The worker serves no HTTP request, so it has no session tokens to sign, no
- * confirmation page to link to and no invoices to create — and making it refuse
- * to start without `JWT_SECRET`, `APP_BASE_URL` or the Xendit keys would be a
- * deployment hazard, not a safety guard. What it DOES need is the messaging
- * configuration, which is selected through the same allowlist
+ * The worker serves no HTTP request, so it has no session tokens to sign and no
+ * invoices to create — and making it refuse to start without `JWT_SECRET` or the
+ * Xendit keys would be a deployment hazard, not a safety guard. What it DOES need is
+ * the messaging configuration, which is selected through the same allowlist
  * (`selectMessagingProviders`): a worker running the fake adapters looks exactly
  * like a working one while every paying member waits for a message that never
  * arrives.
+ *
+ * IT ALSO NEEDS `APP_BASE_URL` NOW, which it did not before Phase 5. This comment used
+ * to say the worker had "no confirmation page to link to"; that stopped being true when
+ * renewal reminders started carrying a checkout link to `/c/:slug`, built from the same
+ * origin Phase 3 uses for `success_redirect_url`. It is resolved through the SAME
+ * `resolveAppBaseUrl` the API calls, deliberately — including its guard, so a
+ * production worker with the variable unset refuses to boot instead of sending every
+ * member a link to `localhost:5173` on their own phone. That is the loud failure; the
+ * quiet one is worse.
  *
  * The outbox is read with the POOLED client. Nothing here opens a transaction:
  * sends are external HTTP calls, and one must never be able to roll back a
@@ -83,15 +108,35 @@ export function bootstrapWorker(): WorkerDependencies {
     messaging.gating
   );
 
+  // Phase 5's reminder delivery. The base URL comes from the same resolver the API
+  // uses, so the link in a reminder and the `success_redirect_url` in an invoice can
+  // never disagree about which deployment they belong to.
+  const sendRenewalReminder = new SendRenewalReminder(
+    new DrizzleSubscriptionRepository(db),
+    new DrizzleMemberRepository(db),
+    new DrizzleActivityLogRepository(db),
+    // The WhatsApp provider, never the gating one — `TelegramBotAdapter.notify` throws,
+    // so a reminder routed there would leave the member unwarned before revocation.
+    messaging.notifier,
+    {
+      appBaseUrl: resolveAppBaseUrl({
+        appBaseUrl: process.env.APP_BASE_URL,
+        nodeEnv: process.env.NODE_ENV,
+      }),
+    }
+  );
+
   const handlers = new Map<string, OutboxHandler>([
     [OUTBOX_GRANT_ACCESS, grantAccessOutboxHandler(grantChannelAccess)],
     [OUTBOX_REVOKE_ACCESS, revokeAccessOutboxHandler(retryChannelAccessRevocation)],
+    [OUTBOX_SEND_RENEWAL_REMINDER, sendRenewalReminderOutboxHandler(sendRenewalReminder)],
   ]);
 
   return {
     processOutbox: new ProcessOutbox(new DrizzleOutboxRepository(db), handlers),
     grantChannelAccess,
     retryChannelAccessRevocation,
+    sendRenewalReminder,
     messaging,
   };
 }

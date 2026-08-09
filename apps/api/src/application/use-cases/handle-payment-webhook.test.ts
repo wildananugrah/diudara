@@ -131,6 +131,9 @@ function harness(
     async markPastDue() {
       throw new Error("not used");
     },
+    async findRenewalContext() {
+      throw new Error("not used");
+    },
     async markPaid(input): Promise<MarkPaidOutcome> {
       calls.markPaid.push(input.transactionId);
       order.push("markPaid");

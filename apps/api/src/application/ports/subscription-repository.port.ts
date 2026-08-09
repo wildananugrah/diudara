@@ -43,6 +43,25 @@ export interface DueRenewalRecord {
   communityStatus: string;
 }
 
+/**
+ * Everything a renewal reminder MESSAGE needs, resolved in one read.
+ *
+ * The message names the community and the amount and carries a checkout link to
+ * `/c/:slug`, so the sender needs the community's name and slug and the tier's price —
+ * and it runs in the worker, which has no creator to scope a community lookup by and no
+ * unscoped tier-by-id read to reach the price with. Rather than adding two unscoped
+ * by-id methods to two deliberately-scoped repositories, the join that already exists
+ * (`subscription → membership_tier → community`) hands back what the message needs.
+ *
+ * The community's `status` is included so a reminder is not sent for a community
+ * archived between the pass claiming the stage and the worker handling the row.
+ */
+export interface RenewalReminderContext {
+  subscription: SubscriptionRecord;
+  tier: { id: string; name: string; priceAmount: number; billingCycle: string };
+  community: { id: string; name: string; slug: string; status: string };
+}
+
 export interface TransactionRecord {
   id: string;
   subscriptionId: string;
@@ -270,4 +289,14 @@ export interface SubscriptionRepositoryPort {
    * explicitly like every other write here.
    */
   markPastDue(subscriptionId: string, graceEndsAt: Date): Promise<boolean>;
+  /**
+   * One subscription with the tier and community a reminder message needs — see
+   * `RenewalReminderContext`.
+   *
+   * Same MISS-not-error rule as `findById`: the id arrives out of an outbox payload,
+   * which is a jsonb column that can outlive a deploy, so a value that cannot be a uuid
+   * must be reported as a miss and turned into a clear "not found" by the caller rather
+   * than a driver error carrying bound parameters into the worker's log.
+   */
+  findRenewalContext(subscriptionId: string): Promise<RenewalReminderContext | null>;
 }

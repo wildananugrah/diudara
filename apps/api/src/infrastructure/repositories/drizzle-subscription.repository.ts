@@ -4,6 +4,7 @@ import { communities, membershipTiers, subscriptions, transactions } from "../..
 import type {
   DueRenewalRecord,
   MarkPaidOutcome,
+  RenewalReminderContext,
   SubscriptionRecord,
   SubscriptionRepositoryPort,
   TransactionRecord,
@@ -247,6 +248,39 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
       )
       .returning({ id: subscriptions.id });
     return moved.length > 0;
+  }
+
+  /**
+   * The reminder message's context, in one read. See the port docstring for why the
+   * join lives here rather than becoming two unscoped by-id methods on the community
+   * and tier repositories.
+   */
+  async findRenewalContext(subscriptionId: string): Promise<RenewalReminderContext | null> {
+    if (!UUID_PATTERN.test(subscriptionId)) {
+      return null;
+    }
+    const [row] = await this.db
+      .select({
+        subscription: subscriptions,
+        tier: {
+          id: membershipTiers.id,
+          name: membershipTiers.name,
+          priceAmount: membershipTiers.priceAmount,
+          billingCycle: membershipTiers.billingCycle,
+        },
+        community: {
+          id: communities.id,
+          name: communities.name,
+          slug: communities.slug,
+          status: communities.status,
+        },
+      })
+      .from(subscriptions)
+      .innerJoin(membershipTiers, eq(subscriptions.tierId, membershipTiers.id))
+      .innerJoin(communities, eq(membershipTiers.communityId, communities.id))
+      .where(eq(subscriptions.id, subscriptionId))
+      .limit(1);
+    return row ?? null;
   }
 
   /**

@@ -47,8 +47,13 @@ export const RENEWAL_REMINDER_SKIPPED = "renewal_reminder_skipped";
  * same members today. That set answers "may a stranger see this community's page";
  * this one answers "do we still bill its members". Sharing the constant would mean a
  * status added for one question silently changing the answer to the other.
+ *
+ * Exported so `SendRenewalReminder` re-checks the SAME set at the other end of the
+ * outbox — a community can be archived while a row waits — rather than keeping a second
+ * allowlist that could drift. Same reason `VISIBLE_STATUSES` is exported for
+ * `StartCheckout`.
  */
-const REMINDABLE_COMMUNITY_STATUSES: ReadonlySet<string> = new Set(["active", "paused"]);
+export const REMINDABLE_COMMUNITY_STATUSES: ReadonlySet<string> = new Set(["active", "paused"]);
 
 /**
  * Due subscriptions read per QUERY — not per pass. A pass walks the whole backlog in

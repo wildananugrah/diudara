@@ -23,6 +23,7 @@ import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
 import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
+import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
@@ -101,6 +102,23 @@ export interface Dependencies {
    * `RevokeChannelAccess` can only report `no_provider_member_id_recorded`.
    */
   recordChannelJoin: RecordChannelJoin;
+  /**
+   * Phase 5's renewal reminder delivery.
+   *
+   * The DISPATCHER lives in the worker — `bootstrapWorker` registers it against the
+   * `send_renewal_reminder` outbox event type, and this process claims no outbox rows.
+   * It is constructed here anyway, and exposed, for the reason `messaging` and
+   * `payments` are: so a test can prove what THIS process wired. Specifically that the
+   * reminder's checkout link is built from the same resolved `appBaseUrl` this root
+   * hands `StartCheckout` for `success_redirect_url` — the two must never disagree
+   * about which deployment a member is sent to, and the only way to check that is to
+   * be able to see both from one place.
+   *
+   * Phase 4's lesson, restated: a guard that exists in the API and has never crossed
+   * the workspace seam is not a guard. Both roots build this use-case, and both are
+   * tested.
+   */
+  sendRenewalReminder: SendRenewalReminder;
   /**
    * The messaging adapters THIS process selected. Exposed for the same reason
    * `payments` and `WorkerDependencies.messaging` are: a test must be able to prove
@@ -816,6 +834,18 @@ export function bootstrap(): Dependencies {
   // recorded platform member id, `revokeChannelAccess` above can only ever report
   // `no_provider_member_id_recorded`.
   const recordChannelJoin = new RecordChannelJoin(channelMembershipRepository);
+
+  // Phase 5. Built with the SAME `appBaseUrl` StartCheckout received above, and with
+  // `messaging.notifier` rather than a gating provider: `TelegramBotAdapter.notify`
+  // throws. See the `sendRenewalReminder` field on `Dependencies` for why the API root
+  // builds a use-case the worker dispatches.
+  const sendRenewalReminder = new SendRenewalReminder(
+    subscriptionRepository,
+    memberRepository,
+    new DrizzleActivityLogRepository(db),
+    messaging.notifier,
+    { appBaseUrl }
+  );
   const telegramWebhookSecret = resolveTelegramWebhookSecret({
     webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
@@ -843,6 +873,7 @@ export function bootstrap(): Dependencies {
     handlePaymentWebhook,
     revokeChannelAccess,
     recordChannelJoin,
+    sendRenewalReminder,
     messaging,
     telegramWebhookSecret,
     xenditCallbackToken,

@@ -53,6 +53,16 @@ export class FakeMessagingAdapter implements MessagingProviderPort {
   failNextGrant: boolean | ProviderCallOutcome = false;
   failNextRevoke = false;
   /**
+   * Makes the next `notify` throw, so a test can cover a WhatsApp gateway that is
+   * simply down.
+   *
+   * It matters for Phase 5 specifically: a renewal reminder's `renewal_reminder` row
+   * is a CLAIM on a stage, so what a failed send must not do is delete it — the outbox
+   * retry re-sends, and re-claiming would let a later pass send the same stage twice.
+   * That is a property about a failure, so a failure has to be constructible.
+   */
+  failNextNotify = false;
+  /**
    * Makes `revokeInviteLink` fail once, so a test can cover the case where the
    * best-effort cleanup ITSELF fails — the one path that legitimately leaves a live
    * orphan, and which must therefore leave the mint marker set so no replacement is
@@ -149,6 +159,10 @@ export class FakeMessagingAdapter implements MessagingProviderPort {
   }
 
   async notify(input: NotifyInput): Promise<void> {
+    if (this.failNextNotify) {
+      this.failNextNotify = false;
+      throw new Error("fake messaging provider: notify failed");
+    }
     this.notifications.push(input);
   }
 }
