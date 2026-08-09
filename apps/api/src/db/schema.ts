@@ -347,5 +347,19 @@ export const channelMemberships = pgTable(
   (table) => [
     uniqueIndex("channel_membership_member_channel_unique").on(table.memberId, table.channelId),
     index("channel_membership_channel_idx").on(table.channelId),
+    // `POST /webhooks/telegram` resolves an inbound invite link back to exactly one
+    // membership, so it can record the joining member's platform user id. That
+    // lookup is how revocation becomes automatable at all, and ambiguity in it
+    // would attach a Telegram user id to an arbitrary one of two rows — aiming a
+    // later `banChatMember` at the wrong member of the wrong group.
+    //
+    // Same reasoning as `event_stream_key_unique`: a lookup keyed on a CREDENTIAL
+    // must resolve to one row. Links are single-use per member and the column is
+    // nulled on revoke and on reactivation, so this holds by construction — the
+    // index is what makes it hold by GUARANTEE. Partial, because the column is null
+    // until a grant completes and null again after a revoke.
+    uniqueIndex("channel_membership_invite_link_unique")
+      .on(table.inviteLink)
+      .where(sql`${table.inviteLink} is not null`),
   ]
 );

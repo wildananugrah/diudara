@@ -22,6 +22,7 @@ import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
+import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
@@ -89,6 +90,25 @@ export interface Dependencies {
    * calls one from this process.
    */
   revokeChannelAccess: RevokeChannelAccess;
+  /**
+   * Attaches a joining member's Telegram user id to the membership whose
+   * single-use invite link they used. It lives in the API rather than the worker
+   * because it is driven by an INBOUND webhook — see routes/webhooks.ts for why a
+   * webhook rather than a `getUpdates` poll.
+   *
+   * Without it `channel_membership.external_member_id` is NULL forever and
+   * `RevokeChannelAccess` can only report `no_provider_member_id_recorded`.
+   */
+  recordChannelJoin: RecordChannelJoin;
+  /**
+   * The static secret Telegram sends as `X-Telegram-Bot-Api-Secret-Token`, the
+   * ONLY thing authenticating `POST /webhooks/telegram`. `undefined` when the box
+   * is not configured for it (never outside the NODE_ENV allowlist —
+   * `resolveTelegramWebhookSecret` throws there), in which case
+   * `verifyCallbackToken` rejects every delivery rather than accepting any. Not
+   * narrowed to `string` for the same reason as `xenditCallbackToken`.
+   */
+  telegramWebhookSecret: string | undefined;
   /**
    * The static token Xendit sends as `X-CALLBACK-TOKEN`, the ONLY thing
    * authenticating the webhook route. `undefined` when the box is not
@@ -501,6 +521,132 @@ export function resolveCallbackToken(env: {
 }
 
 /**
+ * The secret `resolveTelegramWebhookSecret` hands back under `NODE_ENV=test`, and
+ * the one value it refuses to accept anywhere else — same rule, and the same
+ * reason, as `TEST_CALLBACK_TOKEN` above: it is committed to this repository, so
+ * treating it as real would ship a publicly known webhook password.
+ */
+export const TEST_TELEGRAM_WEBHOOK_SECRET = "test-telegram-webhook-secret";
+
+/**
+ * Minimum `TELEGRAM_WEBHOOK_SECRET` length, mirroring `MIN_CALLBACK_TOKEN_LENGTH`
+ * and `MIN_JWT_SECRET_LENGTH` on purpose. This secret is the ONLY authentication
+ * on `POST /webhooks/telegram`, and forging a `chat_member` update means writing
+ * an attacker-chosen `external_member_id` onto a membership — which is the id
+ * `banChatMember` is aimed at, so it would turn a revocation into "remove somebody
+ * else from the creator's group".
+ */
+const MIN_TELEGRAM_WEBHOOK_SECRET_LENGTH = 32;
+
+/**
+ * Characters Telegram's `setWebhook` accepts in `secret_token`: 1–256 of
+ * `A-Z a-z 0-9 _ -`. Checked here so a secret with a space or a `+` in it fails at
+ * BOOT with an explanation, rather than as an opaque 400 from `setWebhook` on a
+ * box where the endpoint then rejects every real delivery.
+ */
+const TELEGRAM_WEBHOOK_SECRET_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
+
+/**
+ * Resolves the static secret that is the ONLY authentication on
+ * `POST /webhooks/telegram`, delivered in the `X-Telegram-Bot-Api-Secret-Token`
+ * header that `setWebhook`'s `secret_token` parameter installs.
+ *
+ * Deliberately the same four cases, thresholds and wording as
+ * `resolveCallbackToken` above, because it is the same kind of thing: a STATIC
+ * token that authenticates the sender and not the message.
+ *
+ *   1. A configured secret is used as-is (empty and whitespace-only count as
+ *      unset), subject to the length floor and Telegram's charset.
+ *   2. PARTIAL configuration throws in EVERY environment. A box with
+ *      `TELEGRAM_BOT_TOKEN` set is gating real Telegram groups; without this
+ *      secret the join endpoint rejects every delivery, so no
+ *      `external_member_id` is ever recorded and revocation can never be
+ *      automated — the exact gap this feature exists to close.
+ *   3. ABSENT configuration returns `undefined` when `NODE_ENV` is one of
+ *      `RELAXED_NODE_ENVS`, and throws for EVERYTHING else — `undefined`,
+ *      `"staging"`, `"prod"`, `"PRODUCTION"`. A developer must be able to
+ *      `bun run dev` without a public URL to point Telegram at.
+ *   4. The committed test value is refused outside `NODE_ENV=test`.
+ *
+ * `undefined` fails CLOSED: `verifyCallbackToken` refuses an unset `expected`
+ * before any comparison, so an unconfigured box rejects every update rather than
+ * accepting every forged one.
+ */
+export function resolveTelegramWebhookSecret(env: {
+  webhookSecret: string | undefined;
+  telegramBotToken: string | undefined;
+  nodeEnv: string | undefined;
+}): string | undefined {
+  const secret = presentOrUndefined(env.webhookSecret);
+
+  if (secret !== undefined) {
+    if (secret === TEST_TELEGRAM_WEBHOOK_SECRET) {
+      if (env.nodeEnv !== "test") {
+        throw new Error(
+          "TELEGRAM_WEBHOOK_SECRET is the value committed to this repository for tests. " +
+            "Anyone can read it, so it would authenticate a forged chat_member update — and " +
+            "that update writes the very user id banChatMember is aimed at. Generate a real " +
+            "one: openssl rand -hex 32"
+        );
+      }
+      // Exempt from the length floor: it is the suite's own known value, and it is
+      // already refused everywhere else by the branch above.
+      return secret;
+    }
+    if (secret.length < MIN_TELEGRAM_WEBHOOK_SECRET_LENGTH) {
+      throw new Error(
+        `TELEGRAM_WEBHOOK_SECRET is too short (${secret.length} characters; ` +
+          `${MIN_TELEGRAM_WEBHOOK_SECRET_LENGTH} required). It is the ONLY authentication on ` +
+          "POST /webhooks/telegram, and a forged update writes an attacker-chosen member id " +
+          "onto a membership. Generate one: openssl rand -hex 32"
+      );
+    }
+    if (!TELEGRAM_WEBHOOK_SECRET_PATTERN.test(secret)) {
+      throw new Error(
+        "TELEGRAM_WEBHOOK_SECRET contains characters Telegram's setWebhook will not accept " +
+          "(only A-Z, a-z, 0-9, _ and - are allowed, 1-256 of them). Refusing to start " +
+          "rather than serving an endpoint whose secret can never be installed. Generate " +
+          "one: openssl rand -hex 32"
+      );
+    }
+    return secret;
+  }
+
+  // Before the production rule, so the suite — which never sets the variable —
+  // keeps working even when a test hands this a configured bot token.
+  if (env.nodeEnv === "test") {
+    return TEST_TELEGRAM_WEBHOOK_SECRET;
+  }
+
+  if (presentOrUndefined(env.telegramBotToken)) {
+    throw new Error(
+      "TELEGRAM_BOT_TOKEN is set but TELEGRAM_WEBHOOK_SECRET is not. Real invite links " +
+        "would be issued and no chat_member update could be authenticated, so no member's " +
+        "Telegram user id would ever be recorded — and RevokeChannelAccess needs one, so " +
+        "the creator could never remove anybody. Set both — see apps/api/.env.example."
+    );
+  }
+
+  if (!isRelaxedNodeEnv(env.nodeEnv)) {
+    throw new Error(
+      "TELEGRAM_WEBHOOK_SECRET is not set, and NODE_ENV is " +
+        `${describeNodeEnv(env.nodeEnv)}. Booting without it is permitted ONLY when ` +
+        `NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}. Add it to apps/api/.env — see ` +
+        ".env.example — or set NODE_ENV=development. Refusing to start rather than serving " +
+        "a webhook endpoint that rejects every real delivery."
+    );
+  }
+
+  logProviderChoice(
+    env.nodeEnv,
+    "[bootstrap] TELEGRAM_WEBHOOK_SECRET not set — POST /webhooks/telegram will reject " +
+      "every delivery, so no member's Telegram user id will be recorded and revocation " +
+      "cannot be automated. Set it (and setWebhook's secret_token to match) to exercise it."
+  );
+  return undefined;
+}
+
+/**
  * The `APP_BASE_URL` a developer gets for free: Vite's default dev-server
  * origin, which is what `apps/web` serves the confirmation page from.
  */
@@ -643,12 +789,23 @@ export function bootstrap(): Dependencies {
     fonnteApiToken: process.env.FONNTE_API_TOKEN,
     nodeEnv: process.env.NODE_ENV,
   });
+  const channelMembershipRepository = new DrizzleChannelMembershipRepository(db);
   const revokeChannelAccess = new RevokeChannelAccess(
     communityRepository,
-    new DrizzleChannelMembershipRepository(db),
+    channelMembershipRepository,
     new DrizzleActivityLogRepository(db),
     messaging.gating
   );
+
+  // The other half of revocation, and the half that was missing: without a
+  // recorded platform member id, `revokeChannelAccess` above can only ever report
+  // `no_provider_member_id_recorded`.
+  const recordChannelJoin = new RecordChannelJoin(channelMembershipRepository);
+  const telegramWebhookSecret = resolveTelegramWebhookSecret({
+    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
+    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
+    nodeEnv: process.env.NODE_ENV,
+  });
 
   return {
     creatorRepository,
@@ -670,6 +827,8 @@ export function bootstrap(): Dependencies {
     getSubscriptionStatus,
     handlePaymentWebhook,
     revokeChannelAccess,
+    recordChannelJoin,
+    telegramWebhookSecret,
     xenditCallbackToken,
     appBaseUrl,
     sql,

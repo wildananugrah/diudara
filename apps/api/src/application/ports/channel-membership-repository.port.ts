@@ -55,6 +55,29 @@ export interface ChannelMembershipClaim {
 }
 
 /**
+ * The result of attaching a platform member id to the membership its invite link
+ * belongs to. Exported so the caller can branch without matching prose.
+ *
+ * All four cases must be reachable without an exception: the caller is an inbound
+ * webhook that Telegram RETRIES until it gets a 2xx, and none of the not-recorded
+ * cases becomes valid on a retry.
+ */
+export type RecordPlatformMemberIdOutcome =
+  /** The column was empty and this call filled it. */
+  | { outcome: "recorded"; membershipId: string }
+  /** Already held exactly this id. The idempotent case — a redelivered update. */
+  | { outcome: "already_recorded"; membershipId: string }
+  /**
+   * Already held a DIFFERENT id, and was left alone. The link is single-use, so
+   * this should be impossible; if it happens our record and the platform's
+   * disagree, and overwriting would point `banChatMember` at whichever account
+   * reported last.
+   */
+  | { outcome: "conflicting_member_id"; membershipId: string }
+  /** No membership carries this link. Nothing to do — see the port method. */
+  | { outcome: "unknown_invite_link" };
+
+/**
  * `channel_membership` is UNIQUE on `(member_id, channel_id)`, and that index is
  * this phase's ENTIRE grant-idempotency mechanism (plan, Global Constraints).
  *
@@ -70,6 +93,27 @@ export interface ChannelMembershipRepositoryPort {
   claim(input: { memberId: string; channelId: string }): Promise<ChannelMembershipClaim>;
   /** Records the link the provider issued against an already-claimed row. */
   recordGrant(membershipId: string, inviteLink: string): Promise<void>;
+  /**
+   * Attaches the member's id ON THE PLATFORM to the membership whose invite link
+   * this is — the write that makes revocation automatable at all.
+   *
+   * The invite link is the join key, and it works because Phase 4 issues a
+   * SINGLE-USE link per member: `banChatMember` needs a Telegram user id, and the
+   * only moment one becomes knowable is when the member joins, which Telegram
+   * reports along with the link they used.
+   *
+   * IDEMPOTENT, and the DATABASE decides — a single conditional UPDATE predicated
+   * on `external_member_id is null`, then a read only to CLASSIFY what the
+   * conflict was. A pre-check would be a TOCTOU, and the caller is a webhook that
+   * gets redelivered.
+   *
+   * `inviteLink` is a bearer credential: it may be used as a lookup key and
+   * nothing else. Never return it, never log it, never put it in an error.
+   */
+  recordPlatformMemberIdByInviteLink(input: {
+    inviteLink: string;
+    externalMemberId: string;
+  }): Promise<RecordPlatformMemberIdOutcome>;
   /**
    * Marks an ACTIVE membership `revoked` with `revoked_at` set, and reports
    * whether this call is the one that did it. Conditional on the current status,

@@ -7,9 +7,11 @@ import {
   RELAXED_NODE_ENVS,
   resolveAppBaseUrl,
   resolveCallbackToken,
+  resolveTelegramWebhookSecret,
   selectMessagingProviders,
   selectPaymentProvider,
   TEST_CALLBACK_TOKEN,
+  TEST_TELEGRAM_WEBHOOK_SECRET,
   type Dependencies,
 } from "./bootstrap";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
@@ -35,6 +37,7 @@ import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
+import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
 import { XENDIT_ACCOUNT_PROVISIONING } from "./domain/payment-account";
 import type {
   CreatorRecord,
@@ -221,6 +224,9 @@ const fakeChannelMembershipRepository: ChannelMembershipRepositoryPort = {
   async recordGrant() {
     // not used
   },
+  async recordPlatformMemberIdByInviteLink() {
+    return { outcome: "unknown_invite_link" };
+  },
   async revoke() {
     return false;
   },
@@ -351,6 +357,8 @@ describe("Dependencies (composition root contract)", () => {
         fakeActivityLogRepository,
         new Map([["telegram", fakeMessagingProvider]])
       ),
+      recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
+      telegramWebhookSecret: "fake-telegram-webhook-secret",
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
@@ -438,6 +446,8 @@ describe("Dependencies (composition root contract)", () => {
         fakeActivityLogRepository,
         new Map([["telegram", fakeMessagingProvider]])
       ),
+      recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
+      telegramWebhookSecret: "fake-telegram-webhook-secret",
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
@@ -638,7 +648,7 @@ describe(".env.example", () => {
     const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
     const lines = example.split("\n");
 
-    for (const name of ["TELEGRAM_BOT_TOKEN", "FONNTE_API_TOKEN"]) {
+    for (const name of ["TELEGRAM_BOT_TOKEN", "FONNTE_API_TOKEN", "TELEGRAM_WEBHOOK_SECRET"]) {
       const line = lines.find((l) => l.trim().startsWith(`# ${name}=`));
       expect(line).toBeDefined();
       // No committed value — these are bearer credentials.
@@ -653,6 +663,19 @@ describe(".env.example", () => {
     for (const nodeEnv of [...RELAXED_NODE_ENVS]) {
       expect(example).toContain(nodeEnv);
     }
+  });
+
+  it("tells an operator how to install the Telegram webhook, including allowed_updates", () => {
+    // The one step nothing in the code can do for them, and the one that silently
+    // breaks everything if it is missed: Telegram does NOT send `chat_member`
+    // updates unless `allowed_updates` asks for them, so a bot with a webhook
+    // installed the obvious way records no member ids at all and revocation stays
+    // unautomatable with no error anywhere.
+    const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
+    expect(example).toContain("setWebhook");
+    expect(example).toContain("secret_token=");
+    expect(example).toContain("allowed_updates");
+    expect(example).toContain("chat_member");
   });
 });
 
@@ -1155,9 +1178,13 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
           // Phase 4: the API now selects messaging providers too (revocation is
           // synchronous), under the same allowlist. A production box must
-          // configure them, so "fully configured" means all five variables.
+          // configure them, so "fully configured" means all SIX variables —
+          // TELEGRAM_WEBHOOK_SECRET joined the set in Task 7b, because a bot token
+          // without it means no member's Telegram user id is ever recorded and the
+          // creator can never remove anybody.
           TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
+          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
         },
         () => {
           captureConsoleLog(() => {
@@ -1320,3 +1347,234 @@ function captureConsoleLogValue<T>(fn: () => T): T {
   });
   return value;
 }
+
+/**
+ * Task 7b. `TELEGRAM_WEBHOOK_SECRET` is the ONLY authentication on
+ * `POST /webhooks/telegram`, and it is a sharper weapon than it looks: a forged
+ * `chat_member` update writes an attacker-chosen `external_member_id` onto a
+ * membership, and that is the id a later `banChatMember` is aimed at. Forging one
+ * turns a creator's "remove this member" into "remove somebody else from my group".
+ *
+ * So it is held to the SAME four rules as `resolveCallbackToken` above, and these
+ * tests are deliberately its mirror image.
+ */
+const REAL_TELEGRAM_WEBHOOK_SECRET = `tg_${"S".repeat(40)}`;
+const NO_TELEGRAM_BOT = { telegramBotToken: undefined };
+const CONFIGURED_TELEGRAM_BOT = { telegramBotToken: "123456:ABC-DEF" };
+
+describe("resolveTelegramWebhookSecret", () => {
+  it("uses a configured secret as-is", () => {
+    expect(
+      resolveTelegramWebhookSecret({
+        webhookSecret: REAL_TELEGRAM_WEBHOOK_SECRET,
+        ...CONFIGURED_TELEGRAM_BOT,
+        nodeEnv: "production",
+      })
+    ).toBe(REAL_TELEGRAM_WEBHOOK_SECRET);
+  });
+
+  it("refuses a secret shorter than 32 characters, in EVERY environment", () => {
+    for (const nodeEnv of ["production", "development", "test", undefined]) {
+      for (const short of ["x", "tg_short", "a".repeat(31)]) {
+        expect(() =>
+          resolveTelegramWebhookSecret({
+            webhookSecret: short,
+            ...NO_TELEGRAM_BOT,
+            nodeEnv,
+          })
+        ).toThrow(/TELEGRAM_WEBHOOK_SECRET is too short/);
+      }
+      expect(
+        resolveTelegramWebhookSecret({
+          webhookSecret: "a".repeat(32),
+          ...NO_TELEGRAM_BOT,
+          nodeEnv,
+        })
+      ).toBe("a".repeat(32));
+    }
+  });
+
+  it("refuses characters Telegram's setWebhook will not accept", () => {
+    // secret_token is 1-256 of A-Z a-z 0-9 _ - only. Caught at BOOT rather than as
+    // an opaque 400 from setWebhook on a box whose endpoint then rejects everything.
+    for (const bad of [`${"a".repeat(32)} b`, `${"a".repeat(32)}+`, `${"a".repeat(32)}=`, `å${"a".repeat(32)}`]) {
+      expect(() =>
+        resolveTelegramWebhookSecret({
+          webhookSecret: bad,
+          ...NO_TELEGRAM_BOT,
+          nodeEnv: "production",
+        })
+      ).toThrow(/setWebhook will not accept/);
+    }
+    // The output of the command the error message suggests.
+    expect(
+      resolveTelegramWebhookSecret({
+        webhookSecret: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        ...NO_TELEGRAM_BOT,
+        nodeEnv: "production",
+      })
+    ).toBeTruthy();
+  });
+
+  it("defaults ONLY under NODE_ENV=test", () => {
+    expect(
+      resolveTelegramWebhookSecret({
+        webhookSecret: undefined,
+        ...NO_TELEGRAM_BOT,
+        nodeEnv: "test",
+      })
+    ).toBe(TEST_TELEGRAM_WEBHOOK_SECRET);
+  });
+
+  it("lets a DEVELOPER boot without it — a webhook needs a public URL they may not have", () => {
+    captureConsoleLog(() => {
+      expect(
+        resolveTelegramWebhookSecret({
+          webhookSecret: undefined,
+          ...NO_TELEGRAM_BOT,
+          nodeEnv: "development",
+        })
+      ).toBeUndefined();
+    });
+  });
+
+  it("refuses to boot without it for ANY nodeEnv outside the allowlist", () => {
+    // Including UNSET, which is what a real deployment has: nothing in this
+    // repository sets NODE_ENV.
+    for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "Production", "dev", ""]) {
+      expect(() =>
+        resolveTelegramWebhookSecret({ webhookSecret: undefined, ...NO_TELEGRAM_BOT, nodeEnv })
+      ).toThrow(/permitted ONLY when NODE_ENV is exactly/);
+    }
+  });
+
+  it("distinguishes an unset NODE_ENV from an unrecognised one", () => {
+    expect(() =>
+      resolveTelegramWebhookSecret({
+        webhookSecret: undefined,
+        ...NO_TELEGRAM_BOT,
+        nodeEnv: undefined,
+      })
+    ).toThrow(/NODE_ENV is not set/);
+    expect(() =>
+      resolveTelegramWebhookSecret({
+        webhookSecret: undefined,
+        ...NO_TELEGRAM_BOT,
+        nodeEnv: "staging",
+      })
+    ).toThrow(/NODE_ENV is staging/);
+  });
+
+  it("refuses to start on PARTIAL configuration in every environment", () => {
+    // A bot token with no webhook secret means real invite links are issued and no
+    // join can be authenticated — so no member's Telegram user id is ever recorded
+    // and the creator can never remove anybody. Never intentional.
+    for (const nodeEnv of ["development", "production", "staging", undefined]) {
+      expect(() =>
+        resolveTelegramWebhookSecret({
+          webhookSecret: undefined,
+          ...CONFIGURED_TELEGRAM_BOT,
+          nodeEnv,
+        })
+      ).toThrow(/TELEGRAM_BOT_TOKEN is set but TELEGRAM_WEBHOOK_SECRET is not/);
+    }
+  });
+
+  it("treats empty and whitespace-only configuration as unset", () => {
+    for (const blank of ["", "   ", "\t", "\n"]) {
+      expect(() =>
+        resolveTelegramWebhookSecret({
+          webhookSecret: blank,
+          ...NO_TELEGRAM_BOT,
+          nodeEnv: "production",
+        })
+      ).toThrow(/NODE_ENV is production/);
+      expect(
+        resolveTelegramWebhookSecret({ webhookSecret: blank, ...NO_TELEGRAM_BOT, nodeEnv: "test" })
+      ).toBe(TEST_TELEGRAM_WEBHOOK_SECRET);
+    }
+  });
+
+  it("refuses the committed test secret outside tests", () => {
+    for (const nodeEnv of ["production", "development", undefined]) {
+      expect(() =>
+        resolveTelegramWebhookSecret({
+          webhookSecret: TEST_TELEGRAM_WEBHOOK_SECRET,
+          ...NO_TELEGRAM_BOT,
+          nodeEnv,
+        })
+      ).toThrow(/committed to this repository/);
+    }
+  });
+
+  it("never returns an empty string, which would vouch for an empty header", () => {
+    for (const nodeEnv of ["test", "development"]) {
+      let secret: string | undefined;
+      captureConsoleLog(() => {
+        secret = resolveTelegramWebhookSecret({
+          webhookSecret: undefined,
+          ...NO_TELEGRAM_BOT,
+          nodeEnv,
+        });
+      });
+      expect(secret).not.toBe("");
+    }
+  });
+
+  it("says out loud in development that revocation cannot be automated without it", () => {
+    const loud = captureConsoleLog(() => {
+      resolveTelegramWebhookSecret({
+        webhookSecret: undefined,
+        ...NO_TELEGRAM_BOT,
+        nodeEnv: "development",
+      });
+    });
+    expect(loud.some((line) => /TELEGRAM_WEBHOOK_SECRET not set/.test(line))).toBe(true);
+    expect(loud.some((line) => /revocation cannot be automated/.test(line))).toBe(true);
+
+    const quiet = captureConsoleLog(() => {
+      resolveTelegramWebhookSecret({
+        webhookSecret: undefined,
+        ...NO_TELEGRAM_BOT,
+        nodeEnv: "test",
+      });
+    });
+    expect(quiet).toEqual([]);
+  });
+
+  it("mentions the file an operator has to edit", () => {
+    expect(() =>
+      resolveTelegramWebhookSecret({
+        webhookSecret: undefined,
+        ...CONFIGURED_TELEGRAM_BOT,
+        nodeEnv: "production",
+      })
+    ).toThrow(/apps\/api\/\.env/);
+  });
+});
+
+describe("bootstrap() TELEGRAM_WEBHOOK_SECRET guard", () => {
+  it("wires the configured secret into Dependencies", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET }, () => {
+        expect(bootstrap().telegramWebhookSecret).toBe(REAL_TELEGRAM_WEBHOOK_SECRET);
+      });
+    });
+  });
+
+  it("falls back to the test secret under bun test, so the suite can sign updates", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ TELEGRAM_WEBHOOK_SECRET: undefined }, () => {
+        expect(bootstrap().telegramWebhookSecret).toBe(TEST_TELEGRAM_WEBHOOK_SECRET);
+      });
+    });
+  });
+
+  it("wires a RecordChannelJoin into Dependencies", () => {
+    // Without it nothing populates channel_membership.external_member_id, and
+    // RevokeChannelAccess can only ever report no_provider_member_id_recorded.
+    withJwtSecret("x".repeat(32), () => {
+      expect(bootstrap().recordChannelJoin).toBeInstanceOf(RecordChannelJoin);
+    });
+  });
+});

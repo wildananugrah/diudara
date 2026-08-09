@@ -49,7 +49,10 @@ async function seedGrantedMember(
     .values({
       memberId: member.id,
       channelId: channel.id,
-      inviteLink: "https://t.me/+granted",
+      // Unique per seed, like a real invite link — and now REQUIRED to be:
+      // `channel_membership_invite_link_unique` (Task 7b) makes the link the
+      // unambiguous lookup key for recording a joining member's platform user id.
+      inviteLink: `https://t.me/+granted-${seq}-${Date.now()}`,
       externalMemberId: options.externalMemberId ?? null,
     })
     .returning();

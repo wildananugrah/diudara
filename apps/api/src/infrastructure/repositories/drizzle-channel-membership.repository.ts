@@ -1,4 +1,4 @@
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { channelMemberships, channels } from "../../db/schema";
 import type {
@@ -6,6 +6,7 @@ import type {
   ChannelMembershipRecord,
   ChannelMembershipRepositoryPort,
   ChannelMembershipWithChannel,
+  RecordPlatformMemberIdOutcome,
 } from "../../application/ports/channel-membership-repository.port";
 
 /** Same guard, and the same reason, as `DrizzleSubscriptionRepository`. */
@@ -88,6 +89,58 @@ export class DrizzleChannelMembershipRepository implements ChannelMembershipRepo
       .update(channelMemberships)
       .set({ inviteLink, status: ACTIVE, updatedAt: new Date() })
       .where(eq(channelMemberships.id, membershipId));
+  }
+
+  /**
+   * ONE conditional UPDATE, then a read only to classify the conflict — see the
+   * port docstring. `external_member_id is null` in the predicate is what makes
+   * this idempotent under Telegram's redelivery without a pre-check.
+   *
+   * The empty-string guards matter: `invite_link` is nullable, so `= ''` would
+   * normally match nothing, but a row that somehow carried `''` would otherwise be
+   * matched by a caller sending no link at all. And an empty
+   * `external_member_id` would satisfy the "recorded" predicate while being
+   * useless to `banChatMember`.
+   */
+  async recordPlatformMemberIdByInviteLink(input: {
+    inviteLink: string;
+    externalMemberId: string;
+  }): Promise<RecordPlatformMemberIdOutcome> {
+    if (input.inviteLink.length === 0 || input.externalMemberId.length === 0) {
+      return { outcome: "unknown_invite_link" };
+    }
+
+    const [claimed] = await this.db
+      .update(channelMemberships)
+      .set({ externalMemberId: input.externalMemberId, updatedAt: new Date() })
+      .where(
+        and(
+          eq(channelMemberships.inviteLink, input.inviteLink),
+          isNull(channelMemberships.externalMemberId)
+        )
+      )
+      .returning({ id: channelMemberships.id });
+    if (claimed) {
+      return { outcome: "recorded", membershipId: claimed.id };
+    }
+
+    // Either no row carries this link, or one does and already has an id. Only a
+    // read can tell them apart, and it is safe to do it AFTER the write: the write
+    // already lost, so nothing it learns can change what was written.
+    const [existing] = await this.db
+      .select({
+        id: channelMemberships.id,
+        externalMemberId: channelMemberships.externalMemberId,
+      })
+      .from(channelMemberships)
+      .where(eq(channelMemberships.inviteLink, input.inviteLink))
+      .limit(1);
+    if (!existing) {
+      return { outcome: "unknown_invite_link" };
+    }
+    return existing.externalMemberId === input.externalMemberId
+      ? { outcome: "already_recorded", membershipId: existing.id }
+      : { outcome: "conflicting_member_id", membershipId: existing.id };
   }
 
   /** Conditional on the row still being active — see the port docstring. */

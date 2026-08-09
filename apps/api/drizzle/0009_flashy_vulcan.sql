@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "channel_membership_invite_link_unique" ON "channel_membership" USING btree ("invite_link") WHERE "channel_membership"."invite_link" is not null;

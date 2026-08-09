@@ -25,6 +25,16 @@ export class FakeMessagingAdapter implements MessagingProviderPort {
 
   private readonly canGate: boolean;
   private counter = 0;
+  /**
+   * Makes this instance's links distinct from every other instance's.
+   *
+   * Real invite links are globally unique, and
+   * `channel_membership_invite_link_unique` now holds the database to that. Without
+   * this suffix two adapters constructed in one test both issue
+   * `https://fake-invite.local/telegram/1`, and the second grant fails on a
+   * constraint that has nothing to do with what the test is checking.
+   */
+  private readonly instanceId = Math.random().toString(36).slice(2, 10);
 
   constructor(config: { platform: string; canGateAccess: boolean }) {
     this.platform = config.platform;
@@ -51,7 +61,8 @@ export class FakeMessagingAdapter implements MessagingProviderPort {
     }
     this.grants.push(input);
     this.counter += 1;
-    const inviteLink = `https://fake-invite.local/${this.platform}/${this.counter}`;
+    const inviteLink =
+      `https://fake-invite.local/${this.platform}/${this.instanceId}-${this.counter}`;
     this.issuedLinks.push(inviteLink);
     return { inviteLink };
   }

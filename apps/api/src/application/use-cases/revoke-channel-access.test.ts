@@ -49,7 +49,10 @@ async function seed(options: { platform?: string; externalMemberId?: string | nu
     .values({
       memberId: member.id,
       channelId: channel.id,
-      inviteLink: "https://t.me/+granted",
+      // Unique per seed, like a real invite link — and now REQUIRED to be:
+      // `channel_membership_invite_link_unique` (Task 7b) makes the link the
+      // unambiguous lookup key for recording a joining member's platform user id.
+      inviteLink: `https://t.me/+granted-${seq}-${Date.now()}`,
       // Phase 4 records no provider member id at grant time (there is nothing to
       // record it from). Tests that want the AUTOMATED path set it explicitly,
       // which is exactly the state Phase 5's chat_member handler will produce.

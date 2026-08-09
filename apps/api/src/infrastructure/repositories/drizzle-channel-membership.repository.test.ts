@@ -294,3 +294,218 @@ describe("DrizzleChannelMembershipRepository.listActiveForMemberInCommunity", ()
     expect(await repository().listActiveForMemberInCommunity("nope", "also-nope")).toEqual([]);
   });
 });
+
+/**
+ * Task 7b. This is the write that makes revocation automatable: `banChatMember`
+ * needs a Telegram user id, Phase 4 has none at grant time, and the only moment one
+ * becomes knowable is the join — which Telegram reports along with the invite link
+ * that was used. Since links are single-use per member, the link is the join key.
+ */
+describe("DrizzleChannelMembershipRepository.recordPlatformMemberIdByInviteLink", () => {
+  /** A granted membership, i.e. one that carries a link. */
+  async function granted(inviteLink: string) {
+    const { channel, member, community } = await seed();
+    const { membership } = await repository().claim({
+      memberId: member.id,
+      channelId: channel.id,
+    });
+    await repository().recordGrant(membership.id, inviteLink);
+    return { membership, member, channel, community };
+  }
+
+  async function row(id: string) {
+    const [found] = await db.select().from(channelMemberships).where(eq(channelMemberships.id, id));
+    return found;
+  }
+
+  it("records the id against the membership the link belongs to", async () => {
+    const link = `https://t.me/+rec-${Date.now()}`;
+    const { membership } = await granted(link);
+
+    const outcome = await repository().recordPlatformMemberIdByInviteLink({
+      inviteLink: link,
+      externalMemberId: "987654321",
+    });
+
+    expect(outcome).toEqual({ outcome: "recorded", membershipId: membership.id });
+    expect((await row(membership.id)).externalMemberId).toBe("987654321");
+  });
+
+  it("bumps updated_at, which has no trigger behind it", async () => {
+    const link = `https://t.me/+upd-${Date.now()}`;
+    const { membership } = await granted(link);
+    await Bun.sleep(25);
+
+    await repository().recordPlatformMemberIdByInviteLink({
+      inviteLink: link,
+      externalMemberId: "987654321",
+    });
+
+    const found = await row(membership.id);
+    expect(found.updatedAt.getTime()).toBeGreaterThan(found.grantedAt.getTime());
+  });
+
+  it("is idempotent: the same id twice is already_recorded, not an error", async () => {
+    const link = `https://t.me/+idem-${Date.now()}`;
+    const { membership } = await granted(link);
+    const input = { inviteLink: link, externalMemberId: "987654321" };
+
+    expect((await repository().recordPlatformMemberIdByInviteLink(input)).outcome).toBe("recorded");
+    const after = await row(membership.id);
+
+    expect(await repository().recordPlatformMemberIdByInviteLink(input)).toEqual({
+      outcome: "already_recorded",
+      membershipId: membership.id,
+    });
+    // Byte-identical, including updated_at: a redelivery must not even touch it.
+    expect(await row(membership.id)).toEqual(after);
+  });
+
+  it("keeps the recorded id when a DIFFERENT one arrives for the same link", async () => {
+    // The link is single-use, so this means our record and Telegram's disagree.
+    // Overwriting would aim a later banChatMember at whichever account reported last.
+    const link = `https://t.me/+conflict-${Date.now()}`;
+    const { membership } = await granted(link);
+    await repository().recordPlatformMemberIdByInviteLink({
+      inviteLink: link,
+      externalMemberId: "111",
+    });
+
+    expect(
+      await repository().recordPlatformMemberIdByInviteLink({
+        inviteLink: link,
+        externalMemberId: "222",
+      })
+    ).toEqual({ outcome: "conflicting_member_id", membershipId: membership.id });
+    expect((await row(membership.id)).externalMemberId).toBe("111");
+  });
+
+  it("reports an unknown link as a miss, and touches nothing", async () => {
+    const { membership } = await granted(`https://t.me/+known-${Date.now()}`);
+
+    expect(
+      await repository().recordPlatformMemberIdByInviteLink({
+        inviteLink: "https://t.me/+never-issued",
+        externalMemberId: "987654321",
+      })
+    ).toEqual({ outcome: "unknown_invite_link" });
+    expect((await row(membership.id)).externalMemberId).toBeNull();
+  });
+
+  it("treats an empty link or an empty member id as a miss, not a match", async () => {
+    // `invite_link` is nullable so `= ''` matches nothing today — but an empty member
+    // id would satisfy the `is null` predicate while being useless to banChatMember,
+    // and an empty link must never be able to match a row that somehow holds one.
+    const { membership } = await granted(`https://t.me/+empty-${Date.now()}`);
+
+    expect(
+      await repository().recordPlatformMemberIdByInviteLink({
+        inviteLink: "",
+        externalMemberId: "1",
+      })
+    ).toEqual({ outcome: "unknown_invite_link" });
+    expect(
+      await repository().recordPlatformMemberIdByInviteLink({
+        inviteLink: `https://t.me/+empty-${Date.now()}`,
+        externalMemberId: "",
+      })
+    ).toEqual({ outcome: "unknown_invite_link" });
+    expect((await row(membership.id)).externalMemberId).toBeNull();
+  });
+
+  it("lets exactly ONE of several concurrent updates record the id", async () => {
+    // Telegram can redeliver an update before the first delivery has finished, so
+    // the conditional UPDATE — not a preceding read — has to arbitrate.
+    const link = `https://t.me/+race-${Date.now()}`;
+    const { membership } = await granted(link);
+
+    const outcomes = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        repository().recordPlatformMemberIdByInviteLink({
+          inviteLink: link,
+          externalMemberId: String(100 + i),
+        })
+      )
+    );
+
+    expect(outcomes.filter((o) => o.outcome === "recorded")).toHaveLength(1);
+    const winner = outcomes.findIndex((o) => o.outcome === "recorded");
+    expect((await row(membership.id)).externalMemberId).toBe(String(100 + winner));
+  });
+
+  it("finds nothing once the membership has been revoked", async () => {
+    // `revoke` nulls the link — it is a bearer credential and a revoked row must not
+    // keep one — so a late join update for it is simply unknown.
+    const link = `https://t.me/+revoked-${Date.now()}`;
+    const { membership } = await granted(link);
+    await repository().revoke(membership.id);
+
+    expect(
+      await repository().recordPlatformMemberIdByInviteLink({
+        inviteLink: link,
+        externalMemberId: "987654321",
+      })
+    ).toEqual({ outcome: "unknown_invite_link" });
+  });
+
+  it("keeps the recorded id across a revoke and a re-grant, so a re-payer can be unbanned", async () => {
+    // `claim`'s reactivation clears the LINK but deliberately leaves
+    // `external_member_id`: TelegramBotAdapter needs it to `unbanChatMember` before
+    // a churned member who re-pays can use a new link at all.
+    const link = `https://t.me/+regrant-${Date.now()}`;
+    const { membership, member, channel } = await granted(link);
+    await repository().recordPlatformMemberIdByInviteLink({
+      inviteLink: link,
+      externalMemberId: "987654321",
+    });
+    await repository().revoke(membership.id);
+
+    const reclaimed = await repository().claim({ memberId: member.id, channelId: channel.id });
+
+    expect(reclaimed.won).toBe(true);
+    expect(reclaimed.membership.inviteLink).toBeNull();
+    expect(reclaimed.membership.externalMemberId).toBe("987654321");
+  });
+});
+
+describe("channel_membership_invite_link_unique", () => {
+  it("refuses two memberships carrying the same invite link", async () => {
+    // The link is the lookup key for recording a platform member id, and ambiguity
+    // in a lookup keyed on a CREDENTIAL would attach a Telegram user id to an
+    // arbitrary one of two rows.
+    const link = `https://t.me/+dup-${Date.now()}`;
+    const first = await seed();
+    const second = await seed();
+    const a = await repository().claim({
+      memberId: first.member.id,
+      channelId: first.channel.id,
+    });
+    const b = await repository().claim({
+      memberId: second.member.id,
+      channelId: second.channel.id,
+    });
+    await repository().recordGrant(a.membership.id, link);
+
+    let violation: { constraint_name?: string } | undefined;
+    try {
+      await repository().recordGrant(b.membership.id, link);
+    } catch (err) {
+      violation = (err as { cause?: { constraint_name?: string } }).cause;
+    }
+
+    expect(violation?.constraint_name).toBe("channel_membership_invite_link_unique");
+  });
+
+  it("permits many rows with NO link — it is partial on purpose", async () => {
+    // The column is null until a grant completes and null again after a revoke, so
+    // a total unique index would make the second unrevoked membership impossible.
+    const first = await seed();
+    const second = await seed();
+    await repository().claim({ memberId: first.member.id, channelId: first.channel.id });
+    await repository().claim({ memberId: second.member.id, channelId: second.channel.id });
+
+    const rows = await db.select().from(channelMemberships);
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.inviteLink === null)).toBe(true);
+  });
+});
