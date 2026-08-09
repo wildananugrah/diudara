@@ -47,6 +47,31 @@ const SUPERSEDED_SUBSCRIPTION = "cancelled";
 export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
 
+  /**
+   * See the port docstring. Scoped to `active` only: a `cancelled` or `past_due`
+   * subscription must not block a member from buying again, which is the whole point
+   * of letting a churned member re-pay.
+   */
+  async hasActiveSubscriptionForTier(memberId: string, tierId: string): Promise<boolean> {
+    if (!UUID_PATTERN.test(memberId) || !UUID_PATTERN.test(tierId)) {
+      // A MISS, not a driver error — same rule as `findById`. `tierId` arrives from
+      // the request body.
+      return false;
+    }
+    const [existing] = await this.db
+      .select({ id: subscriptions.id })
+      .from(subscriptions)
+      .where(
+        and(
+          eq(subscriptions.memberId, memberId),
+          eq(subscriptions.tierId, tierId),
+          eq(subscriptions.status, ACTIVE_SUBSCRIPTION)
+        )
+      )
+      .limit(1);
+    return existing !== undefined;
+  }
+
   async createPending(input: { memberId: string; tierId: string }): Promise<SubscriptionRecord> {
     const [row] = await this.db
       .insert(subscriptions)

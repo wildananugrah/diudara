@@ -141,6 +141,9 @@ describe("StartCheckout — funds routing", () => {
       async findTransactionByExternalId() {
         return null;
       },
+      async hasActiveSubscriptionForTier() {
+        return false;
+      },
       async attachGatewayReference(transactionId, gatewayReferenceId) {
         attached.push({ transactionId, gatewayReferenceId });
         return true;
@@ -308,13 +311,98 @@ describe("StartCheckout — a half-provisioned payment account is not payable", 
 });
 
 /**
+ * I1, final whole-branch review: checkout took money for a purchase it could never
+ * deliver.
+ *
+ * `createPending` never looked for an existing `active` subscription to the same
+ * tier. A member who re-paid — and re-paying is EXACTLY what someone does when the
+ * group invite did not arrive — was charged; `markPaid` then returned `superseded`,
+ * the subscription was `cancelled`, no `grant_access` outbox row was enqueued so no
+ * WhatsApp message was sent at all, and the status page they were redirected to read
+ * `cancelled`. Money in, nothing out, member never told.
+ */
+describe("StartCheckout — a member who already holds the tier is not charged again", () => {
+  it("409s BEFORE the invoice is created", async () => {
+    const { startCheckout, payments } = harness({ hasActiveSubscriptionForTier: true });
+
+    await expect(
+      startCheckout.execute({
+        slug: "kelas-budi",
+        tierId: "tier-1",
+        payerName: "Siti",
+        payerWhatsappNumber: "+6281234567890",
+      })
+    ).rejects.toBeInstanceOf(ConflictError);
+
+    // THE ASSERTION: no invoice exists, so nobody was shown a payment page. A 409
+    // after `createInvoice` would still have taken the money.
+    expect(payments.invoices).toHaveLength(0);
+  });
+
+  it("tells the member what to do instead of paying again", async () => {
+    // The refusal is read by a person who is trying to fix a missing invite, so it
+    // has to say that paying again will not produce one.
+    const { startCheckout } = harness({ hasActiveSubscriptionForTier: true });
+
+    const error = (await startCheckout
+      .execute({
+        slug: "kelas-budi",
+        tierId: "tier-1",
+        payerName: "Siti",
+        payerWhatsappNumber: "+6281234567890",
+      })
+      .catch((e) => e)) as ConflictError;
+
+    expect(error.message).toMatch(/already have an active membership/i);
+    expect(error.message).toMatch(/contact the community owner/i);
+  });
+
+  it("checks the resolved member and tier, not the request's raw values", async () => {
+    // The member id comes from `findOrCreateByWhatsappNumber` and the tier id from
+    // the tier row that was actually resolved and found active — checking the
+    // request body instead would miss a member who already exists under a
+    // normalised number.
+    const { startCheckout, activeSubscriptionChecks } = harness();
+
+    await startCheckout.execute({
+      slug: "kelas-budi",
+      tierId: "tier-1",
+      payerName: "Siti",
+      payerWhatsappNumber: "+6281234567890",
+    });
+
+    expect(activeSubscriptionChecks).toEqual([{ memberId: "member-1", tierId: "tier-1" }]);
+  });
+
+  it("still charges a member who does NOT hold the tier", async () => {
+    const { startCheckout, payments } = harness({ hasActiveSubscriptionForTier: false });
+
+    await startCheckout.execute({
+      slug: "kelas-budi",
+      tierId: "tier-1",
+      payerName: "Siti",
+      payerWhatsappNumber: "+6281234567890",
+    });
+
+    expect(payments.invoices).toHaveLength(1);
+  });
+});
+
+/**
  * A minimal StartCheckout wired to fake ports. Only the knobs the redirect tests
  * need are configurable; the exhaustive-fakes version above stays as it is
  * because it asserts the full port contract with no casts.
  */
 function harness(
-  options: { appBaseUrl?: string; canonicalSlug?: string; creatorXenditAccountId?: string } = {}
+  options: {
+    appBaseUrl?: string;
+    canonicalSlug?: string;
+    creatorXenditAccountId?: string;
+    /** Whether the member already holds this tier — see the I1 tests below. */
+    hasActiveSubscriptionForTier?: boolean;
+  } = {}
 ) {
+  const activeSubscriptionChecks: { memberId: string; tierId: string }[] = [];
   const communities: CommunityRepositoryPort = {
     async create() {
       throw new Error("not used");
@@ -411,6 +499,10 @@ function harness(
     async findTransactionByExternalId() {
       return null;
     },
+    async hasActiveSubscriptionForTier(memberId, tierId) {
+      activeSubscriptionChecks.push({ memberId, tierId });
+      return options.hasActiveSubscriptionForTier ?? false;
+    },
     async attachGatewayReference() {
       return true;
     },
@@ -455,5 +547,5 @@ function harness(
   const startCheckout = new StartCheckout(communities, tiers, members, subscriptions, creators, payments, {
     appBaseUrl: options.appBaseUrl ?? APP_BASE_URL,
   });
-  return { startCheckout, payments };
+  return { startCheckout, payments, activeSubscriptionChecks };
 }

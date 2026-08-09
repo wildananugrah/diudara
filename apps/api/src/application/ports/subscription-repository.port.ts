@@ -97,6 +97,23 @@ export type MarkPaidOutcome =
 export interface SubscriptionRepositoryPort {
   createPending(input: { memberId: string; tierId: string }): Promise<SubscriptionRecord>;
   /**
+   * Whether this member ALREADY holds an active subscription to this tier.
+   *
+   * Read by `StartCheckout` to refuse a purchase before an invoice exists, and it is
+   * not a nicety: re-paying is exactly what a member does when an invite did not
+   * arrive. Without this the member was charged, `markPaid` returned `superseded`,
+   * the subscription was `cancelled`, NO outbox row was enqueued so no WhatsApp
+   * message was sent at all, and the status page read `cancelled`. Money in, nothing
+   * out, member never told.
+   *
+   * A READ, so it is inherently racy — two checkouts a millisecond apart both see
+   * "no". That is fine and deliberate: `subscription_member_tier_active_unique` plus
+   * the `superseded` outcome remain the backstop for the race. This closes the
+   * ORDINARY case, which is a person tapping pay again a minute later, and it closes
+   * it at the only point where refusing costs nobody any money.
+   */
+  hasActiveSubscriptionForTier(memberId: string, tierId: string): Promise<boolean>;
+  /**
    * Backs the public, unauthenticated status endpoint
    * (`GET /c/subscription/:subscriptionId/status`) — the id travels in a
    * redirect URL after checkout and may sit in browser history, so a value

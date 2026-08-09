@@ -70,6 +70,69 @@ async function seedPendingCheckout(
   return { creator, community, tier, member, subscription, transaction };
 }
 
+/**
+ * I1, final whole-branch review. What `StartCheckout` reads to refuse a purchase it
+ * could never deliver, BEFORE an invoice exists. See the port docstring for the
+ * money-in-nothing-out sequence this closes.
+ */
+describe("DrizzleSubscriptionRepository.hasActiveSubscriptionForTier", () => {
+  it("is false while the subscription is only pending", async () => {
+    // The state StartCheckout itself leaves behind. If a pending row counted, a
+    // member whose first payment never completed could never retry.
+    const { member, tier } = await seedPendingCheckout();
+
+    expect(await repo.hasActiveSubscriptionForTier(member.id, tier.id)).toBe(false);
+  });
+
+  it("is true once the subscription is active", async () => {
+    const { member, tier, transaction } = await seedPendingCheckout();
+    await settle({
+      transactionId: transaction.id,
+      gatewayReferenceId: "inv-active",
+      paidAt: new Date(),
+    });
+
+    expect(await repo.hasActiveSubscriptionForTier(member.id, tier.id)).toBe(true);
+  });
+
+  it("is false again after the subscription is cancelled, so a churned member can re-pay", async () => {
+    // The scope is `active` ONLY. Treating any prior subscription as a block would
+    // lock a member out of a community they left and want to rejoin.
+    const { member, tier, subscription, transaction } = await seedPendingCheckout();
+    await settle({
+      transactionId: transaction.id,
+      gatewayReferenceId: "inv-churn",
+      paidAt: new Date(),
+    });
+    await db
+      .update(subscriptions)
+      .set({ status: "cancelled", updatedAt: new Date() })
+      .where(eq(subscriptions.id, subscription.id));
+
+    expect(await repo.hasActiveSubscriptionForTier(member.id, tier.id)).toBe(false);
+  });
+
+  it("does not confuse a different member or a different tier", async () => {
+    const { member, tier, transaction } = await seedPendingCheckout();
+    await settle({
+      transactionId: transaction.id,
+      gatewayReferenceId: "inv-scope",
+      paidAt: new Date(),
+    });
+    const other = await seedPendingCheckout();
+
+    expect(await repo.hasActiveSubscriptionForTier(other.member.id, tier.id)).toBe(false);
+    expect(await repo.hasActiveSubscriptionForTier(member.id, other.tier.id)).toBe(false);
+  });
+
+  it("reports a malformed id as a miss rather than raising a driver error", async () => {
+    // `tierId` arrives from a request body, and `uuid = 'nope'` is SQLSTATE 22P02 —
+    // which on the checkout path would be a 500 instead of the 404 the unknown tier
+    // gets a moment later.
+    expect(await repo.hasActiveSubscriptionForTier("nope", "also-nope")).toBe(false);
+  });
+});
+
 describe("DrizzleSubscriptionRepository.findByIdWithCommunity", () => {
   it("resolves the subscription and its community through the tier", async () => {
     const { community, subscription } = await seedPendingCheckout();

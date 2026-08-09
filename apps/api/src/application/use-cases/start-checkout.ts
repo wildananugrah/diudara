@@ -77,6 +77,24 @@ export class StartCheckout {
       name: input.payerName,
     });
 
+    // BEFORE the invoice exists, which is the only place this can be refused for
+    // free. A member who already holds this tier and pays again used to be charged
+    // for nothing: `markPaid` returned `superseded`, the new subscription was
+    // `cancelled`, no `grant_access` outbox row was enqueued — so no WhatsApp message
+    // was sent AT ALL — and the status page they were redirected to read
+    // `cancelled`. Money in, nothing out, and the member never told why.
+    //
+    // And it is the likely case, not an edge one: re-paying is exactly what someone
+    // does when the invite did not arrive. The `superseded` path stays as the
+    // backstop for the genuine race (two submits inside the same instant, which this
+    // read cannot see); this closes the ordinary one.
+    if (await this.subscriptions.hasActiveSubscriptionForTier(member.id, tier.id)) {
+      throw new ConflictError(
+        "you already have an active membership for this tier. If you have not received " +
+          "your group invite, contact the community owner — paying again would not send it."
+      );
+    }
+
     const subscription = await this.subscriptions.createPending({
       memberId: member.id,
       tierId: tier.id,

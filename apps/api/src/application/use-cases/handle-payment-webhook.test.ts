@@ -102,6 +102,9 @@ function harness(
     async createPending() {
       throw new Error("not used");
     },
+    async hasActiveSubscriptionForTier() {
+      return false;
+    },
     async createTransaction() {
       throw new Error("not used");
     },
