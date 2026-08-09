@@ -1,4 +1,4 @@
-import { redactLinks, safeLabel } from "../log-safety";
+import { redactLinks, safeErrorSummary, safeLabel } from "../log-safety";
 import type { OutboxRepositoryPort } from "../ports/outbox-repository.port";
 
 /**
@@ -113,9 +113,12 @@ export class ProcessOutbox {
         await this.outbox.markSent(row.id);
         sent += 1;
       } catch (err) {
-        // Redacted BEFORE it is stored or printed, once, here — so no call site
-        // can forget.
-        const reason = redactLinks(describeError(err));
+        // Summarised and redacted BEFORE it is stored or printed, once, here — so
+        // no call site can forget. `safeErrorSummary` is what keeps a driver
+        // error's bound parameters out of both, and `redactLinks` covers the
+        // separate case of a provider that interpolated a link into its own
+        // message.
+        const reason = redactLinks(safeErrorSummary(err));
 
         if (row.attempts >= this.maxAttempts) {
           const message = `giving up after ${row.attempts} attempts: ${reason}`;
@@ -148,14 +151,9 @@ export class ProcessOutbox {
   }
 }
 
-/**
- * The message of whatever was thrown, with no stack and no object dump: a driver
- * error carries the failed statement's bound parameters, and an adapter error can
- * carry a response body.
- */
-function describeError(err: unknown): string {
-  if (err instanceof Error) {
-    return err.message;
-  }
-  return `non-Error thrown: ${typeof err}`;
-}
+// Every diagnostic here goes through `safeErrorSummary` in `log-safety.ts`, which
+// is where the reasoning lives. What USED to be here was `err.message` verbatim,
+// with a comment claiming it carried "no object dump" — it did not hold: drizzle
+// puts the failed statement AND its bound parameters into the message itself, so a
+// real query failure printed both into the worker's log and into
+// `outbox.last_error`, and buried the actual reason on `.cause`.

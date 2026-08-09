@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client";
-import { outbox } from "../../db/schema";
+import { activityLogs, outbox } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { DrizzleOutboxRepository } from "../../infrastructure/repositories/drizzle-outbox.repository";
 import { OUTBOX_GRANT_ACCESS } from "../ports/outbox-repository.port";
@@ -286,6 +286,73 @@ describe("ProcessOutbox", () => {
       // Phase 3 found payer PII in webhook payloads. The worker logs ids, event
       // types and error text — never the row's payload.
       expect(lines.join("\n")).not.toContain("0812-payer-pii");
+    });
+
+    /**
+     * The failure mode a RUNNING worker produced during Phase 4's end-to-end
+     * verification, which no test until now could see: drizzle wraps every query
+     * failure in a `DrizzleQueryError` whose `message` is
+     *
+     *   Failed query: <the whole sql statement>
+     *   params: <every bound value, comma separated>
+     *
+     * so reading `err.message` dumps the bound parameters — the exact leak
+     * `pg-errors.ts` documents ("← password hashes live here") and
+     * `http/error-handler.ts` already guards against with `safeSummary`. The
+     * worker's path had no such guard, so a real query failure printed the
+     * statement and its values into the log AND into `outbox.last_error`, while
+     * the actual reason — which lives on `.cause`, not on the message — was
+     * thrown away.
+     *
+     * A REAL failing query rather than a hand-built error object: the shape above
+     * is drizzle's, not ours, and a fake would keep passing after an upgrade
+     * changed it.
+     */
+    it("reports why a real query failed, without the statement's bound values", async () => {
+      const { id } = await repository().enqueue({
+        eventType: OUTBOX_GRANT_ACCESS,
+        payload: { subscriptionId: "sub-1" },
+      });
+
+      await processor(
+        {
+          [OUTBOX_GRANT_ACCESS]: async () => {
+            // A foreign-key violation, with a link-shaped value and a
+            // PII-shaped value among the bound parameters.
+            await db.insert(activityLogs).values({
+              memberId: "00000000-0000-0000-0000-000000000000",
+              communityId: "00000000-0000-0000-0000-000000000000",
+              eventType: "0812-payer-pii",
+              metadata: { inviteLink: INVITE_LINK },
+            });
+          },
+        },
+        { maxAttempts: 1, baseBackoffMs: 0 }
+      ).execute();
+
+      const row = await rowById(id);
+      expect(row.status).toBe("failed");
+
+      // WHY it failed, which is the only thing `last_error` exists for.
+      expect(row.lastError).toContain("foreign key constraint");
+      // Not the statement, and above all not its values.
+      expect(row.lastError).not.toContain("params:");
+      expect(row.lastError).not.toContain("0812-payer-pii");
+      expect(row.lastError).not.toContain(INVITE_LINK);
+      expect(row.lastError).not.toContain("t.me");
+      // `detail` carries the offending key value; only `message` may be used.
+      expect(row.lastError).not.toContain("is not present in table");
+
+      const printed = lines.join("\n");
+      expect(printed).toContain("foreign key constraint");
+      expect(printed).not.toContain("params:");
+      expect(printed).not.toContain("0812-payer-pii");
+      expect(printed).not.toContain(INVITE_LINK);
+
+      // ONE log line. Drizzle's message embeds a newline before `params:`, so an
+      // unsanitised reason forged a second line in the worker's output — the very
+      // thing `safeLabel` exists to stop for event types.
+      expect(lines.every((line) => !line.includes("\n"))).toBe(true);
     });
   });
 
