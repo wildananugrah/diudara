@@ -11,6 +11,24 @@ export interface MessagingCapabilities {
 export interface GrantAccessInput {
   externalGroupId: string;
   memberWhatsappNumber: string;
+  /**
+   * The provider-specific member id recorded the LAST time this member had
+   * access to this group, when there was one. Absent for a first-ever grant,
+   * where no such id can exist.
+   *
+   * It exists because of a Telegram rule that is easy to miss and produces a
+   * confusing failure: `banChatMember` (how `revokeAccess` removes someone) also
+   * blocks them from joining by ANY invite link, so a churned member who
+   * re-pays gets a link that silently does not work until they are unbanned —
+   * and `unbanChatMember` needs their user id. Nothing else in `GrantAccessInput`
+   * carries one: at grant time all we know is a WhatsApp number, which is
+   * precisely why access is granted with a link rather than by adding the member.
+   *
+   * Optional, and provider-specific by design: a provider with no ban concept
+   * ignores it, and the ordering rule ("unban BEFORE issuing the link") lives in
+   * the adapter that has the rule, not in a use-case.
+   */
+  previousExternalMemberId?: string;
 }
 
 export interface RevokeAccessInput {

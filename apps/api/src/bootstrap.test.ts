@@ -523,6 +523,33 @@ describe(".env.example", () => {
     const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
     expect(example).toContain("APP_BASE_URL=");
   });
+
+  /**
+   * The messaging tokens are what turn a payment into access. They ship COMMENTED
+   * OUT, exactly like the Xendit ones: an uncommented empty value is
+   * indistinguishable from a typo, and absence is a meaningful state here (it
+   * selects FakeMessagingAdapter under the NODE_ENV allowlist).
+   */
+  it("documents the messaging tokens as commented placeholders", () => {
+    const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
+    const lines = example.split("\n");
+
+    for (const name of ["TELEGRAM_BOT_TOKEN", "FONNTE_API_TOKEN"]) {
+      const line = lines.find((l) => l.trim().startsWith(`# ${name}=`));
+      expect(line).toBeDefined();
+      // No committed value — these are bearer credentials.
+      expect(line!.trim()).toBe(`# ${name}=`);
+      // And no ACTIVE assignment, which would make an empty token look configured.
+      expect(lines.some((l) => l.startsWith(`${name}=`))).toBe(false);
+    }
+
+    // The half a comment has to carry that code cannot: absence is a choice, and
+    // it is only allowed on the allowlist.
+    expect(example).toContain("FakeMessagingAdapter");
+    for (const nodeEnv of [...RELAXED_NODE_ENVS]) {
+      expect(example).toContain(nodeEnv);
+    }
+  });
 });
 
 /**
