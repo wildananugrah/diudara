@@ -358,6 +358,10 @@ describe("Dependencies (composition root contract)", () => {
         new Map([["telegram", fakeMessagingProvider]])
       ),
       recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
+      messaging: {
+        gating: new Map([["telegram", fakeMessagingProvider]]),
+        notifier: fakeMessagingProvider,
+      },
       telegramWebhookSecret: "fake-telegram-webhook-secret",
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
@@ -447,6 +451,10 @@ describe("Dependencies (composition root contract)", () => {
         new Map([["telegram", fakeMessagingProvider]])
       ),
       recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
+      messaging: {
+        gating: new Map([["telegram", fakeMessagingProvider]]),
+        notifier: fakeMessagingProvider,
+      },
       telegramWebhookSecret: "fake-telegram-webhook-secret",
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",

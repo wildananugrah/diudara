@@ -384,6 +384,61 @@ describe("grantAccessOutboxHandler", () => {
     expect(telegram.grants).toHaveLength(1);
   });
 
+  /**
+   * Task 7b. Now that `POST /webhooks/telegram` records a member's Telegram user id,
+   * a RE-grant can and must pass it back to the adapter.
+   *
+   * The Telegram rule this exists for: `banChatMember` — how `revokeAccess` removes
+   * someone — also blocks them from joining via ANY invite link. So a churned member
+   * who re-pays gets a fresh link that silently does not work until they are
+   * unbanned, and `unbanChatMember` needs their user id. Before this, no id was ever
+   * recorded, so nothing could be passed and the limitation was documented instead.
+   * With ids being recorded, NOT passing it would make the first genuinely-automated
+   * revocation a permanent lockout.
+   */
+  it("passes a previously recorded member id back to the adapter on a RE-grant", async () => {
+    await seed();
+    const memberships = new DrizzleChannelMembershipRepository(db);
+    const { telegram, useCase } = wire();
+    const subscriptionId = (await onlySubscription()).id;
+
+    // First grant, then the join that records the id, then a revoke.
+    await useCase.execute({ subscriptionId });
+    const [granted] = await db.select().from(channelMemberships);
+    await memberships.recordPlatformMemberIdByInviteLink({
+      inviteLink: granted.inviteLink!,
+      externalMemberId: "987654321",
+    });
+    await memberships.revoke(granted.id);
+
+    // The member re-pays: a new outbox row for the same subscription.
+    await useCase.execute({ subscriptionId });
+
+    expect(telegram.grants).toHaveLength(2);
+    // The first grant could not have carried one — there was nothing recorded yet.
+    expect(telegram.grants[0].previousExternalMemberId).toBeUndefined();
+    // The second must, or the fresh link it issues admits nobody.
+    expect(telegram.grants[1].previousExternalMemberId).toBe("987654321");
+  });
+
+  it("passes nothing on a re-grant when no member id was ever recorded", async () => {
+    // The ordinary Phase 4 state: the member never joined, so nothing was recorded.
+    // `previousExternalMemberId` must be ABSENT rather than null or "", because
+    // TelegramBotAdapter treats its presence as "call unbanChatMember".
+    await seed();
+    const memberships = new DrizzleChannelMembershipRepository(db);
+    const { telegram, useCase } = wire();
+    const subscriptionId = (await onlySubscription()).id;
+
+    await useCase.execute({ subscriptionId });
+    const [granted] = await db.select().from(channelMemberships);
+    await memberships.revoke(granted.id);
+    await useCase.execute({ subscriptionId });
+
+    expect(telegram.grants).toHaveLength(2);
+    expect("previousExternalMemberId" in telegram.grants[1]).toBe(false);
+  });
+
   it("rejects a payload with no usable subscriptionId, without echoing it", async () => {
     const { useCase } = wire();
     const handler = grantAccessOutboxHandler(useCase);

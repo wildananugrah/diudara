@@ -101,6 +101,15 @@ export interface Dependencies {
    */
   recordChannelJoin: RecordChannelJoin;
   /**
+   * The messaging adapters THIS process selected. Exposed for the same reason
+   * `payments` and `WorkerDependencies.messaging` are: a test must be able to prove
+   * what a given environment actually wired, and — for revocation specifically —
+   * that a `revokeAccess` really reached the provider with the member id the join
+   * webhook recorded. Reading it off a fake constructed by the test instead would
+   * prove only that the test can call the fake.
+   */
+  messaging: MessagingProviders;
+  /**
    * The static secret Telegram sends as `X-Telegram-Bot-Api-Secret-Token`, the
    * ONLY thing authenticating `POST /webhooks/telegram`. `undefined` when the box
    * is not configured for it (never outside the NODE_ENV allowlist —
@@ -828,6 +837,7 @@ export function bootstrap(): Dependencies {
     handlePaymentWebhook,
     revokeChannelAccess,
     recordChannelJoin,
+    messaging,
     telegramWebhookSecret,
     xenditCallbackToken,
     appBaseUrl,

@@ -193,14 +193,24 @@ export class GrantChannelAccess {
       // link issued; neither can produce a second one, because the row is
       // already ours.
       //
-      // No `previousExternalMemberId` is passed: Phase 4 stores no provider
-      // member id (nothing tells us a member's Telegram user id — an invite link
-      // is precisely what you issue when you do not know it), so a re-grant after
-      // a Telegram ban needs the creator to unban. Recorded as a limitation
-      // rather than guessed at.
+      // `previousExternalMemberId` carries the id from the LAST time this member
+      // had access, when there is one. Task 7b made that possible: the
+      // `chat_member` webhook records a joining member's platform user id, and
+      // neither `revoke` nor `claim`'s reactivation clears the column — only the
+      // link dies with the membership.
+      //
+      // It matters because of a Telegram rule with a silent failure mode:
+      // `banChatMember` (how `revokeAccess` removes someone) also blocks the user
+      // from joining via ANY invite link, so a churned member who re-pays gets a
+      // fresh link that does nothing until they are unbanned. The adapter owns the
+      // ordering (`unbanChatMember` with `only_if_banned` first); this use-case
+      // just hands over the id it has. ABSENT rather than null when we never
+      // learned one — the adapter treats presence as "call unbanChatMember".
+      const previousExternalMemberId = claim.membership.externalMemberId;
       const { inviteLink } = await provider.grantAccess({
         externalGroupId: channel.externalGroupId,
         memberWhatsappNumber: member.whatsappNumber,
+        ...(previousExternalMemberId === null ? {} : { previousExternalMemberId }),
       });
       await this.memberships.recordGrant(claim.membership.id, inviteLink);
       granted += 1;
