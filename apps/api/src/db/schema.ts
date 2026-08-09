@@ -260,3 +260,54 @@ export const webhookEvents = pgTable("webhook_event", {
   payload: jsonb("payload"),
   processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Transactional outbox. A payment activation writes a row here in the SAME
+ * transaction as the subscription update, so the intent to invite is atomic
+ * with the payment and can never be lost. The worker sends outside any
+ * transaction — a Telegram outage must delay an invite, never roll back a
+ * payment.
+ */
+export const outbox = pgTable(
+  "outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    eventType: varchar("event_type", { length: 64 }).notNull(),
+    payload: jsonb("payload").notNull(),
+    status: varchar("status", { length: 16 }).notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    lastError: varchar("last_error", { length: 500 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("outbox_claim_idx").on(table.status, table.nextAttemptAt)]
+);
+
+/**
+ * Who currently has access to which channel.
+ * UNIQUE (member_id, channel_id) is the grant-idempotency mechanism: a retried
+ * outbox row must not issue a second invite link, and the database arbitrates
+ * that, not a pre-check.
+ */
+export const channelMemberships = pgTable(
+  "channel_membership",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    memberId: uuid("member_id")
+      .notNull()
+      .references(() => members.id),
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id),
+    status: varchar("status", { length: 16 }).notNull().default("active"),
+    inviteLink: varchar("invite_link", { length: 512 }),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("channel_membership_member_channel_unique").on(table.memberId, table.channelId),
+    index("channel_membership_channel_idx").on(table.channelId),
+  ]
+);

@@ -7,12 +7,14 @@ import {
   activityLogs,
   transactions,
   subscriptions,
+  channelMemberships,
   channels,
   membershipTiers,
   communities,
   members,
   creators,
   webhookEvents,
+  outbox,
 } from "./schema";
 
 /**
@@ -42,6 +44,10 @@ export async function resetDatabase() {
   await db.delete(activityLogs);
   await db.delete(transactions);
   await db.delete(subscriptions);
+  // channelMemberships references members and channels, so it must be
+  // cleared before either. outbox has no FKs, so its position is free.
+  await db.delete(channelMemberships);
+  await db.delete(outbox);
   await db.delete(channels);
   await db.delete(membershipTiers);
   await db.delete(communities);
