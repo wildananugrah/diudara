@@ -7,7 +7,10 @@ import type {
 export interface RecordChannelJoinInput {
   /** `channel.platform` this update came from — `"telegram"` today. */
   platform: string;
-  /** The platform's own id for the group, for diagnostics only. */
+  /**
+   * The platform's own id for the group. Part of the LOOKUP, not only a diagnostic:
+   * the membership the id is written to must belong to this chat.
+   */
   externalGroupId: string;
   /** The member's id ON THE PLATFORM. What `banChatMember` addresses. */
   externalMemberId: string;
@@ -54,6 +57,9 @@ export class RecordChannelJoin {
   async execute(input: RecordChannelJoinInput): Promise<RecordChannelJoinResult> {
     const outcome = await this.memberships.recordPlatformMemberIdByInviteLink({
       inviteLink: input.inviteLink,
+      // Matched, not just logged — see the port docstring. A membership is only
+      // updated when it belongs to the chat this update came from.
+      externalGroupId: input.externalGroupId,
       externalMemberId: input.externalMemberId,
     });
 

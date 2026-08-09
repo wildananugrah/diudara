@@ -5,6 +5,7 @@ import type {
   MessagingProviderPort,
   NotifyInput,
   RevokeAccessInput,
+  RevokeInviteLinkInput,
 } from "../../application/ports/messaging-provider.port";
 
 type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
@@ -61,6 +62,13 @@ export class FonnteWhatsAppAdapter implements MessagingProviderPort {
 
   async grantAccess(_input: GrantAccessInput): Promise<{ inviteLink: string }> {
     throw this.gatingUnsupported("grant access");
+  }
+
+  async revokeInviteLink(_input: RevokeInviteLinkInput): Promise<void> {
+    // It cannot mint one either, so nothing can ever reach this. It throws for the
+    // same reason `grantAccess` does: a silent no-op would let a caller believe a
+    // leaked credential had been killed.
+    throw this.gatingUnsupported("revoke an invite link");
   }
 
   async revokeAccess(_input: RevokeAccessInput): Promise<void> {

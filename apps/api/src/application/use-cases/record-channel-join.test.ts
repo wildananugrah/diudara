@@ -8,12 +8,16 @@ import { RecordChannelJoin } from "./record-channel-join";
 const SECRET_LINK = "https://t.me/+this-is-a-bearer-credential";
 
 function harness(outcome: RecordPlatformMemberIdOutcome) {
-  const calls: { inviteLink: string; externalMemberId: string }[] = [];
+  const calls: { inviteLink: string; externalGroupId: string; externalMemberId: string }[] =
+    [];
   const memberships: ChannelMembershipRepositoryPort = {
     async claim() {
       throw new Error("not used");
     },
     async recordGrant() {
+      throw new Error("not used");
+    },
+    async releaseMintWindow() {
       throw new Error("not used");
     },
     async recordPlatformMemberIdByInviteLink(input) {
@@ -24,6 +28,9 @@ function harness(outcome: RecordPlatformMemberIdOutcome) {
       throw new Error("not used");
     },
     async listActiveForMemberInCommunity() {
+      throw new Error("not used");
+    },
+    async findByIdWithChannel() {
       throw new Error("not used");
     },
   };
@@ -60,7 +67,15 @@ describe("RecordChannelJoin", () => {
 
     return useCase.execute(join()).then((result) => {
       expect(result).toEqual({ outcome: "recorded", membershipId: "m1" });
-      expect(calls).toEqual([{ inviteLink: SECRET_LINK, externalMemberId: "987654321" }]);
+      // The group id goes through TOO: the membership the id lands on must belong to
+      // the chat the update came from, not merely carry the link it quotes.
+      expect(calls).toEqual([
+        {
+          inviteLink: SECRET_LINK,
+          externalGroupId: "-1001234567890",
+          externalMemberId: "987654321",
+        },
+      ]);
     });
   });
 

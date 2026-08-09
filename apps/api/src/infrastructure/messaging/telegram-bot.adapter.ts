@@ -5,6 +5,7 @@ import type {
   MessagingProviderPort,
   NotifyInput,
   RevokeAccessInput,
+  RevokeInviteLinkInput,
 } from "../../application/ports/messaging-provider.port";
 
 type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
@@ -124,6 +125,29 @@ export class TelegramBotAdapter implements MessagingProviderPort {
     });
 
     return { inviteLink: this.requireInviteLink(result) };
+  }
+
+  /**
+   * `revokeChatInviteLink` — the counterpart to `createChatInviteLink`, and what
+   * makes the credential-lifecycle invariant enforceable (see the port docstring).
+   *
+   * Telegram's method takes the link itself, which is why the caller has to still
+   * HOLD it: there is no Bot API method that enumerates the links a bot created, so
+   * a link whose value we lost cannot be revoked by any means. That asymmetry is the
+   * whole reason `GrantChannelAccess` refuses to mint a replacement once a mint has
+   * been recorded as started and not finished — a second link would be a second
+   * credential with the first still live and unrecorded.
+   *
+   * A revoked link is not deleted at Telegram; it stops admitting anyone, which is
+   * the property that matters. `member_limit: 1` and the 24h `expire_date` narrow
+   * the exposure but do not close it: an UNUSED link is live for the whole window
+   * and admits whoever it was forwarded to.
+   */
+  async revokeInviteLink(input: RevokeInviteLinkInput): Promise<void> {
+    await this.call("revokeChatInviteLink", {
+      chat_id: input.externalGroupId,
+      invite_link: input.inviteLink,
+    });
   }
 
   /**

@@ -1,4 +1,5 @@
 import { NotFoundError } from "../errors";
+import { redactLinks, safeErrorSummary } from "../log-safety";
 import type { ActivityLogRepositoryPort } from "../ports/activity-log-repository.port";
 import type { ChannelMembershipRepositoryPort } from "../ports/channel-membership-repository.port";
 import type { ChannelRepositoryPort } from "../ports/channel-repository.port";
@@ -29,6 +30,13 @@ export interface GrantChannelAccessResult {
   /** Channels whose provider cannot gate access, or that are misconfigured. */
   manual: number;
   /**
+   * Channels where a link was minted by an earlier attempt and never recorded, so
+   * this call REFUSED to mint another. Counted in `manual` too, because that is what
+   * it needs from a person; separate here so a caller can tell a WhatsApp-only
+   * community apart from a credential that has to be reissued by hand.
+   */
+  mintLost: number;
+  /**
    * Whether ANY channel was actually gated. False is the honest answer for a
    * notify-only community, and the caller must be able to tell it apart from a
    * real grant — a silent success is the worst failure mode in this phase.
@@ -45,19 +53,56 @@ export interface GrantChannelAccessResult {
  * invite is an external HTTP call, and a Telegram outage must delay an invite,
  * never roll back a payment (plan, Global Constraints).
  *
- * Three rules shape every line below:
+ * ==========================================================================
+ * THE CREDENTIAL-LIFECYCLE INVARIANT
+ *
+ *   At most one live invite link per (member, channel) may exist at the
+ *   provider at any time, and every link that exists is recorded in
+ *   `channel_membership.invite_link`.
+ *
+ * Both halves matter, and the second is the one that was missing. A link is a
+ * bearer credential; an UNRECORDED link is a credential the system cannot
+ * revoke, cannot attribute to a joiner (`recordPlatformMemberIdByInviteLink`
+ * resolves it to `unknown_invite_link`, so no `external_member_id` is ever
+ * captured) and therefore cannot ever remove from the group. It is strictly
+ * worse than a duplicate we know about.
+ *
+ * It is enforced by three things acting together, none sufficient alone:
+ *
+ *   (a) `revokeInviteLink` on the provider port, so a link that cannot be
+ *       recorded can be UNMINTED instead of dropped. Without it there is
+ *       nowhere to put a fix.
+ *   (b) `link_minted_at`, written in the SAME statement as the claim, so
+ *       "claimed, no link" stops being ambiguous. Marker set + no link means a
+ *       link was minted and lost, and no replacement is ever minted: Telegram
+ *       cannot enumerate a bot's links, so an orphan whose value we lost is
+ *       unkillable, and a replacement would only add a second live key.
+ *   (c) `mint_lease_until`, so a concurrent or reclaimed caller reports "grant
+ *       in progress" rather than minting beside the holder.
+ *
+ * Measured before these existed, with `recordGrant` failing after a successful
+ * mint: FIVE live single-use links at the provider, one membership row,
+ * `invite_link = NULL`, and the count grew with `maxAttempts`. Two concurrent
+ * `execute` calls produced two live links, both delivered. The full suite passed
+ * throughout — it counted membership ROWS, which were never what was at risk.
+ * Tests for this invariant must count links AT THE PROVIDER.
+ * ==========================================================================
+ *
+ * Three further rules shape every line below:
  *
  *  1. IDEMPOTENCY IS THE DATABASE'S JOB. `channel_membership` is unique on
  *     `(member_id, channel_id)`, so the row is CLAIMED before the provider is
- *     called and a losing claim means "someone already did this". An invite link
- *     is a bearer credential: a second one for the same member is a second key,
- *     which could be forwarded to somebody who never paid.
+ *     called and the claim's outcome — never a pre-check — decides whether this
+ *     caller may mint. It was specified as a SEQUENTIAL property (retry the same
+ *     payload twice, get one link) and had to become a CONCURRENT one.
  *  2. NOTHING MAY SILENTLY LOOK LIKE SUCCESS. A provider that cannot gate access
  *     is reported as `manual`, told to the member, and written to `activity_log`.
- *     A platform with no adapter at all THROWS.
+ *     A platform with no adapter at all THROWS. So does a lost mint, as `manual`
+ *     plus an `activity_log` reason, so a person reissues deliberately.
  *  3. THE LINK GOES TO THE MEMBER AND NOWHERE ELSE. It is never put in an
  *     `activity_log` entry, an error message, or a log line — only in the
- *     WhatsApp message to the member who bought it.
+ *     WhatsApp message to the member who bought it. That includes the "leaked
+ *     link" error: it names the membership, never the link.
  */
 export class GrantChannelAccess {
   constructor(
@@ -112,6 +157,7 @@ export class GrantChannelAccess {
         granted: 0,
         alreadyGranted: 0,
         manual: 0,
+        mintLost: 0,
         automated: false,
         skippedReason: "subscription_not_active",
       };
@@ -132,8 +178,14 @@ export class GrantChannelAccess {
     const links: { platform: string; inviteLink: string }[] = [];
     const manualPlatforms: string[] = [];
     const failures: string[] = [];
+    /**
+     * Channels a concurrent caller is mid-grant on. RETRYABLE, unlike `failures`:
+     * the retry finds a recorded link and succeeds.
+     */
+    const inProgress: string[] = [];
     let granted = 0;
     let alreadyGranted = 0;
+    let mintLost = 0;
 
     for (const channel of channelList) {
       const provider = this.providers.get(channel.platform);
@@ -177,7 +229,7 @@ export class GrantChannelAccess {
         channelId: channel.id,
       });
 
-      if (!claim.won && claim.membership.inviteLink !== null) {
+      if (claim.outcome === "already_granted" && claim.membership.inviteLink !== null) {
         // Already granted. No second provider call, so no second credential —
         // this is the idempotency the unique index buys. The member is still
         // told below, with the link they already have: this path is only reached
@@ -188,10 +240,55 @@ export class GrantChannelAccess {
         continue;
       }
 
-      // Either we won the claim, or a previous attempt claimed the row and died
-      // before the provider answered (`won: false` with no link). Both need a
-      // link issued; neither can produce a second one, because the row is
-      // already ours.
+      if (claim.outcome === "mint_in_progress") {
+        // Another caller holds the mint window RIGHT NOW. Reported and retried,
+        // never minted alongside: two callers minting for one (member, channel)
+        // was measured at two live links, and this is the reachable path — one
+        // member buying two tiers of the same community enqueues two grants that
+        // resolve the same channel list.
+        //
+        // Collected rather than thrown on the spot, exactly like `failures`: the
+        // community's other channels must still be granted. The throw at the end
+        // sends the outbox row back for a bounded retry, and by then the winner
+        // has recorded its link, so the retry takes the `already_granted` branch
+        // and the member is told with the link that actually works.
+        inProgress.push(
+          `channel ${channel.id}: another grant for this member is already in progress ` +
+            "(a concurrent worker holds the mint lease), so no second invite link was issued"
+        );
+        continue;
+      }
+
+      if (claim.outcome === "mint_lost") {
+        // A link was minted and never recorded, and the lease has lapsed. There
+        // may be a LIVE credential at the provider whose value nobody holds:
+        // Telegram's revokeChatInviteLink needs the link itself and no Bot API
+        // method enumerates a bot's links, so it can never be killed.
+        //
+        // FAIL CLOSED. Minting a replacement is what turned one lost link into
+        // five, and every one of them was a key to a paid group with no record
+        // and no way to revoke it. Reported to the creator and told to the member
+        // as manual addition, so a person reissues deliberately. NOT thrown: no
+        // retry can fix it, and an unbounded retry would just re-report it.
+        console.warn(
+          `[gating] refusing to mint a replacement invite link: membership=` +
+            `${claim.membership.id} channel=${channel.id} was left with a minted-but-` +
+            "unrecorded link. A second link would be a second live credential with no " +
+            "record of the first. Reissue deliberately after checking the group."
+        );
+        mintLost += 1;
+        manualPlatforms.push(channel.platform);
+        await this.recordManual(member.id, communityId, subscription.id, {
+          reason: "invite_link_minted_but_not_recorded",
+          platform: channel.platform,
+          channelId: channel.id,
+        });
+        continue;
+      }
+
+      // `claim.outcome === "mint"`: this caller, and only this caller, holds the
+      // mint window — `link_minted_at` and `mint_lease_until` were written in the
+      // same statement that decided it. See ChannelMembershipClaim.
       //
       // `previousExternalMemberId` carries the id from the LAST time this member
       // had access, when there is one. Task 7b made that possible: the
@@ -212,7 +309,29 @@ export class GrantChannelAccess {
         memberWhatsappNumber: member.whatsappNumber,
         ...(previousExternalMemberId === null ? {} : { previousExternalMemberId }),
       });
-      await this.memberships.recordGrant(claim.membership.id, inviteLink);
+
+      // FROM HERE UNTIL recordGrant RETURNS TRUE, a live credential exists that the
+      // database does not know about. Every exit from this stretch has to either
+      // record the link or kill it — see `discardMintedLink`.
+      const recorded = await this.recordMintedLink({
+        provider,
+        membershipId: claim.membership.id,
+        externalGroupId: channel.externalGroupId,
+        inviteLink,
+        channelId: channel.id,
+      });
+      if (!recorded) {
+        // `recordGrant` refused because the row already carries a link — a
+        // concurrent caller won. Ours has been revoked at the provider by
+        // `recordMintedLink`, so there is still exactly one live link, and it is
+        // the recorded one. Retry to pick it up.
+        inProgress.push(
+          `channel ${channel.id}: a concurrent grant recorded its invite link first, so ` +
+            "the link minted here was revoked at the provider rather than replacing it"
+        );
+        continue;
+      }
+
       granted += 1;
       links.push({ platform: channel.platform, inviteLink });
 
@@ -256,12 +375,16 @@ export class GrantChannelAccess {
       });
     }
 
-    if (failures.length > 0) {
+    if (failures.length > 0 || inProgress.length > 0) {
       // The outbox row retries and then fails permanently with this text, which
       // is where an operator finds out. It names ids and platforms only.
+      //
+      // `inProgress` is in here so the row COMES BACK: reporting a concurrent grant
+      // as success would leave that channel's outbox row marked sent while the
+      // member has been told nothing about it.
       throw new Error(
         `grant_access for subscription ${subscription.id} could not be completed: ` +
-          failures.join("; ")
+          [...failures, ...inProgress].join("; ")
       );
     }
 
@@ -269,8 +392,96 @@ export class GrantChannelAccess {
       granted,
       alreadyGranted,
       manual: manualPlatforms.length,
+      mintLost,
       automated: granted + alreadyGranted > 0,
     };
+  }
+
+  /**
+   * Records a link that has ALREADY been minted, and guarantees that a link which
+   * cannot be recorded is killed at the provider instead of leaked.
+   *
+   * THE INVARIANT IS ENFORCED HERE: at most one live invite link per (member,
+   * channel) may exist at the provider at any time, and every link that exists is
+   * recorded in `channel_membership.invite_link`.
+   *
+   * Between `grantAccess` returning and `recordGrant` committing, a live bearer
+   * credential exists that the database has no record of. If that write fails there
+   * are exactly two honest options, and dropping the link is neither of them:
+   *
+   *  1. KILL IT. Best-effort `revokeInviteLink`. On success the credential is gone,
+   *     so `releaseMintWindow` reopens the window and a retry may mint cleanly. This
+   *     is what turns the measured five-live-links leak into zero.
+   *  2. If the kill ALSO fails, KEEP THE MARKER SET. An orphan is live and
+   *     unkillable; the marker is what makes every later attempt report `mint_lost`
+   *     instead of stacking a second key on top of it. One leaked link is bad. Five
+   *     is what the unfixed code produced, and the number grew with `maxAttempts`.
+   *
+   * Returns whether the link is now recorded. Never swallows the original failure:
+   * it rethrows, so the outbox row retries and an operator sees why.
+   */
+  private async recordMintedLink(input: {
+    provider: MessagingProviderPort;
+    membershipId: string;
+    externalGroupId: string;
+    inviteLink: string;
+    channelId: string;
+  }): Promise<boolean> {
+    let recorded: boolean;
+    try {
+      recorded = await this.memberships.recordGrant(input.membershipId, input.inviteLink);
+    } catch (err) {
+      await this.discardMintedLink(input);
+      throw err;
+    }
+
+    if (!recorded) {
+      // The row already carries a link, so ours is an orphan the moment it exists.
+      await this.discardMintedLink(input);
+    }
+    return recorded;
+  }
+
+  /**
+   * Kills a minted link we could not record, and reopens the mint window ONLY if the
+   * kill succeeded. See `recordMintedLink` for why both halves matter.
+   *
+   * Deliberately swallows its own failure: it always runs while another failure is
+   * being handled, and replacing that one would hide the reason the grant failed.
+   */
+  private async discardMintedLink(input: {
+    provider: MessagingProviderPort;
+    membershipId: string;
+    externalGroupId: string;
+    inviteLink: string;
+    channelId: string;
+  }): Promise<void> {
+    try {
+      await input.provider.revokeInviteLink({
+        externalGroupId: input.externalGroupId,
+        inviteLink: input.inviteLink,
+      });
+    } catch (err) {
+      // The orphan is live and cannot be killed. `link_minted_at` stays set, which
+      // is what stops any retry minting a second one — so this is loud but not
+      // escalating. The link is NOT named: it is still a working credential.
+      console.error(
+        `[gating] LEAKED INVITE LINK: membership=${input.membershipId} channel=` +
+          `${input.channelId} — a link was minted, could not be recorded, and could not be ` +
+          "revoked at the provider. It stays live until it expires. No replacement will be " +
+          "minted (the mint marker is left set), and the member is told a human will add " +
+          `them: ${redactLinks(safeErrorSummary(err))}`
+      );
+      return;
+    }
+
+    // The credential is gone, so nothing is leaked and a retry may mint cleanly.
+    await this.memberships.releaseMintWindow(input.membershipId);
+    console.warn(
+      `[gating] a minted invite link could not be recorded, so it was REVOKED at the ` +
+        `provider: membership=${input.membershipId} channel=${input.channelId}. The mint ` +
+        "window is reopened; the retry will issue a fresh link."
+    );
   }
 
   private async recordManual(

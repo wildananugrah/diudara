@@ -222,6 +222,9 @@ const fakeChannelMembershipRepository: ChannelMembershipRepositoryPort = {
     throw new Error("not used");
   },
   async recordGrant() {
+    return true;
+  },
+  async releaseMintWindow() {
     // not used
   },
   async recordPlatformMemberIdByInviteLink() {
@@ -233,6 +236,9 @@ const fakeChannelMembershipRepository: ChannelMembershipRepositoryPort = {
   async listActiveForMemberInCommunity() {
     return [];
   },
+  async findByIdWithChannel() {
+    return null;
+  },
 };
 
 const fakeMessagingProvider: MessagingProviderPort = {
@@ -242,6 +248,9 @@ const fakeMessagingProvider: MessagingProviderPort = {
   },
   async grantAccess() {
     throw new Error("not used");
+  },
+  async revokeInviteLink() {
+    // not used
   },
   async revokeAccess() {
     // not used

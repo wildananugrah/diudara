@@ -5,6 +5,7 @@ import type {
   MessagingProviderPort,
   NotifyInput,
   RevokeAccessInput,
+  RevokeInviteLinkInput,
 } from "../../application/ports/messaging-provider.port";
 
 /** In-memory messaging provider for tests and local development. */
@@ -18,10 +19,23 @@ export class FakeMessagingAdapter implements MessagingProviderPort {
    * links minted is the other half.
    */
   readonly issuedLinks: string[] = [];
+  /**
+   * Links this adapter was asked to REVOKE, in order. Together with `issuedLinks`
+   * it makes `liveInviteLinks` below computable, and that getter is the only honest
+   * way to test the credential-lifecycle invariant.
+   */
+  readonly revokedInviteLinks: RevokeInviteLinkInput[] = [];
   readonly revocations: RevokeAccessInput[] = [];
   readonly notifications: NotifyInput[] = [];
   failNextGrant = false;
   failNextRevoke = false;
+  /**
+   * Makes `revokeInviteLink` fail once, so a test can cover the case where the
+   * best-effort cleanup ITSELF fails — the one path that legitimately leaves a live
+   * orphan, and which must therefore leave the mint marker set so no replacement is
+   * ever minted on top of it.
+   */
+  failNextInviteLinkRevoke = false;
 
   private readonly canGate: boolean;
   private counter = 0;
@@ -70,6 +84,31 @@ export class FakeMessagingAdapter implements MessagingProviderPort {
   /** The most recent link, or `undefined` if nothing has been granted. */
   get lastInviteLink(): string | undefined {
     return this.issuedLinks[this.issuedLinks.length - 1];
+  }
+
+  /**
+   * Links that have been minted and NOT revoked — i.e. credentials that would still
+   * admit somebody if they were forwarded.
+   *
+   * THIS, not `channelMemberships.length` and not `issuedLinks.length`, is what a
+   * test of grant idempotency has to assert on. The whole-branch review found four
+   * live links behind one membership row with `invite_link = NULL`: every database
+   * assertion passed, because the database was never the thing at risk. The invariant
+   * is about the PROVIDER's state — at most one live link per (member, channel) — so
+   * the count has to come from the provider's side of the boundary.
+   */
+  get liveInviteLinks(): string[] {
+    const revoked = new Set(this.revokedInviteLinks.map((entry) => entry.inviteLink));
+    return this.issuedLinks.filter((link) => !revoked.has(link));
+  }
+
+  async revokeInviteLink(input: RevokeInviteLinkInput): Promise<void> {
+    this.assertCanGate("revoke an invite link");
+    if (this.failNextInviteLinkRevoke) {
+      this.failNextInviteLinkRevoke = false;
+      throw new Error("fake messaging provider: revokeInviteLink failed");
+    }
+    this.revokedInviteLinks.push(input);
   }
 
   async revokeAccess(input: RevokeAccessInput): Promise<void> {

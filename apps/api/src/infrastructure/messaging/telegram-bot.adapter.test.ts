@@ -216,6 +216,59 @@ describe("TelegramBotAdapter.grantAccess", () => {
   });
 });
 
+/**
+ * The method that makes the credential-lifecycle invariant enforceable: without a
+ * way to UNMINT a link, a `recordGrant` that fails after a successful mint can only
+ * leak a live credential nobody holds. See GrantChannelAccess.
+ */
+describe("TelegramBotAdapter.revokeInviteLink", () => {
+  it("calls revokeChatInviteLink with the link, so a lost credential can be killed", async () => {
+    const { calls, fetchFn } = captureFetch({ ok: true, result: { invite_link: "x" } });
+
+    await adapter(fetchFn).revokeInviteLink({
+      externalGroupId: "-1001234567890",
+      inviteLink: "https://t.me/+lost-credential",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain(`/bot${BOT_TOKEN}/revokeChatInviteLink`);
+    // Telegram's method takes the link ITSELF — there is no Bot API call that
+    // enumerates a bot's links, which is exactly why a link whose value we lost is
+    // unkillable and why GrantChannelAccess refuses to mint a replacement.
+    expect(bodyOf(calls[0])).toMatchObject({
+      chat_id: "-1001234567890",
+      invite_link: "https://t.me/+lost-credential",
+    });
+  });
+
+  it("throws when Telegram refuses, so the caller keeps the mint marker set", async () => {
+    // The caller treats a throw here as "an orphan is live and unkillable", which is
+    // what stops it minting a replacement. A silent success would clear the marker.
+    const { fetchFn } = captureFetch({ ok: false, description: "invite link not found" });
+
+    const error = (await adapter(fetchFn)
+      .revokeInviteLink({ externalGroupId: "-100", inviteLink: "https://t.me/+x" })
+      .catch((e) => e)) as Error;
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain("revokeChatInviteLink");
+    expect(error.message).not.toContain(BOT_TOKEN);
+    // Not even the link it was asked about: it may still be a working credential.
+    expect(error.message).not.toContain("t.me/+x");
+  });
+
+  it("carries an abort signal", async () => {
+    const { calls, fetchFn } = captureFetch({ ok: true, result: true });
+
+    await adapter(fetchFn).revokeInviteLink({
+      externalGroupId: "-100",
+      inviteLink: "https://t.me/+x",
+    });
+
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
 describe("TelegramBotAdapter.revokeAccess", () => {
   it("bans the member, which also stops them rejoining by any old link", async () => {
     const { calls, fetchFn } = captureFetch({ ok: true, result: true });

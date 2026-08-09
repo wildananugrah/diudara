@@ -50,11 +50,18 @@ describe("DrizzleChannelMembershipRepository.claim", () => {
 
     const claimed = await repository().claim({ memberId: member.id, channelId: channel.id });
 
-    expect(claimed.won).toBe(true);
+    expect(claimed.outcome).toBe("mint");
     expect(claimed.membership.status).toBe("active");
     // The link is attached AFTER the provider issues it, so the claim leaves it
     // empty — an unfinished grant is distinguishable from a finished one.
     expect(claimed.membership.inviteLink).toBeNull();
+    // The mint window is taken IN THIS STATEMENT. `outcome: "mint"` is permission
+    // to call the provider, and it is only safe if the marker and the lease are
+    // already written — otherwise a second caller reads "no mint in progress" and
+    // mints alongside. See the credential-lifecycle invariant in the use-case.
+    expect(claimed.membership.linkMintedAt).not.toBeNull();
+    expect(claimed.membership.mintLeaseUntil).not.toBeNull();
+    expect(claimed.membership.mintLeaseUntil!.getTime()).toBeGreaterThan(Date.now());
     expect(await db.select().from(channelMemberships)).toHaveLength(1);
   });
 
@@ -65,9 +72,9 @@ describe("DrizzleChannelMembershipRepository.claim", () => {
 
     const second = await repository().claim({ memberId: member.id, channelId: channel.id });
 
-    // The unique index arbitrates, not a pre-check: `won: false` is how the
+    // The unique index arbitrates, not a pre-check: `already_granted` is how the
     // caller learns not to issue a second invite link.
-    expect(second.won).toBe(false);
+    expect(second.outcome).toBe("already_granted");
     expect(second.membership.id).toBe(first.membership.id);
     expect(second.membership.inviteLink).toBe("https://t.me/+first");
     expect(await db.select().from(channelMemberships)).toHaveLength(1);
@@ -98,15 +105,15 @@ describe("DrizzleChannelMembershipRepository.claim", () => {
       .values({ whatsappNumber: `+62999${Date.now()}`.slice(0, 15) })
       .returning();
 
-    expect((await repository().claim({ memberId: member.id, channelId: channel.id })).won).toBe(
-      true
-    );
     expect(
-      (await repository().claim({ memberId: member.id, channelId: otherChannel.id })).won
-    ).toBe(true);
+      (await repository().claim({ memberId: member.id, channelId: channel.id })).outcome
+    ).toBe("mint");
     expect(
-      (await repository().claim({ memberId: otherMember.id, channelId: channel.id })).won
-    ).toBe(true);
+      (await repository().claim({ memberId: member.id, channelId: otherChannel.id })).outcome
+    ).toBe("mint");
+    expect(
+      (await repository().claim({ memberId: otherMember.id, channelId: channel.id })).outcome
+    ).toBe("mint");
     expect(await db.select().from(channelMemberships)).toHaveLength(3);
   });
 
@@ -120,8 +127,8 @@ describe("DrizzleChannelMembershipRepository.claim", () => {
 
     // A churned member who re-pays must be grantable again. The unique index
     // makes a second row impossible, so the existing one is reactivated — and
-    // `won: true` is what tells the caller to issue a fresh link.
-    expect(again.won).toBe(true);
+    // `outcome: "mint"` is what tells the caller to issue a fresh link.
+    expect(again.outcome).toBe("mint");
     expect(again.membership.status).toBe("active");
     expect(again.membership.revokedAt).toBeNull();
     // The old link is cleared: it is revoked, and leaving it there would make a
@@ -154,9 +161,9 @@ describe("DrizzleChannelMembershipRepository.claim — the mechanism, pinned", (
         drizzle(debugClient, { schema })
       );
 
-      expect((await debugRepo.claim({ memberId: member.id, channelId: channel.id })).won).toBe(
-        true
-      );
+      expect(
+        (await debugRepo.claim({ memberId: member.id, channelId: channel.id })).outcome
+      ).toBe("mint");
 
       const touchingTheTable = statements.filter((query) => /channel_membership/i.test(query));
       // ONE statement on the winning path. A pre-check emits a SELECT first.
@@ -185,7 +192,10 @@ describe("DrizzleChannelMembershipRepository.claim — the mechanism, pinned", (
       [0, 1, 2, 3].map(() => repository().claim({ memberId: member.id, channelId: channel.id }))
     );
 
-    expect(claims.filter((claim) => claim.won)).toHaveLength(1);
+    // Exactly one may mint. The other three must NOT: two callers minting for one
+    // (member, channel) was measured at two live invite links, both delivered.
+    expect(claims.filter((claim) => claim.outcome === "mint")).toHaveLength(1);
+    expect(claims.filter((claim) => claim.outcome === "mint_in_progress")).toHaveLength(3);
     expect(await db.select().from(channelMemberships)).toHaveLength(1);
   });
 });
@@ -310,7 +320,10 @@ describe("DrizzleChannelMembershipRepository.recordPlatformMemberIdByInviteLink"
       channelId: channel.id,
     });
     await repository().recordGrant(membership.id, inviteLink);
-    return { membership, member, channel, community };
+    // The chat the link belongs to. It is part of the LOOKUP now, not just a
+    // diagnostic: the id is only written to a membership in the chat the update
+    // came from, because this is the write that decides who banChatMember targets.
+    return { membership, member, channel, community, chatId: channel.externalGroupId! };
   }
 
   async function row(id: string) {
@@ -320,10 +333,11 @@ describe("DrizzleChannelMembershipRepository.recordPlatformMemberIdByInviteLink"
 
   it("records the id against the membership the link belongs to", async () => {
     const link = `https://t.me/+rec-${Date.now()}`;
-    const { membership } = await granted(link);
+    const { membership, chatId } = await granted(link);
 
     const outcome = await repository().recordPlatformMemberIdByInviteLink({
       inviteLink: link,
+      externalGroupId: chatId,
       externalMemberId: "987654321",
     });
 
@@ -333,11 +347,12 @@ describe("DrizzleChannelMembershipRepository.recordPlatformMemberIdByInviteLink"
 
   it("bumps updated_at, which has no trigger behind it", async () => {
     const link = `https://t.me/+upd-${Date.now()}`;
-    const { membership } = await granted(link);
+    const { membership, chatId } = await granted(link);
     await Bun.sleep(25);
 
     await repository().recordPlatformMemberIdByInviteLink({
       inviteLink: link,
+      externalGroupId: chatId,
       externalMemberId: "987654321",
     });
 
@@ -347,8 +362,8 @@ describe("DrizzleChannelMembershipRepository.recordPlatformMemberIdByInviteLink"
 
   it("is idempotent: the same id twice is already_recorded, not an error", async () => {
     const link = `https://t.me/+idem-${Date.now()}`;
-    const { membership } = await granted(link);
-    const input = { inviteLink: link, externalMemberId: "987654321" };
+    const { membership, chatId } = await granted(link);
+    const input = { inviteLink: link, externalGroupId: chatId, externalMemberId: "987654321" };
 
     expect((await repository().recordPlatformMemberIdByInviteLink(input)).outcome).toBe("recorded");
     const after = await row(membership.id);
@@ -365,15 +380,17 @@ describe("DrizzleChannelMembershipRepository.recordPlatformMemberIdByInviteLink"
     // The link is single-use, so this means our record and Telegram's disagree.
     // Overwriting would aim a later banChatMember at whichever account reported last.
     const link = `https://t.me/+conflict-${Date.now()}`;
-    const { membership } = await granted(link);
+    const { membership, chatId } = await granted(link);
     await repository().recordPlatformMemberIdByInviteLink({
       inviteLink: link,
+      externalGroupId: chatId,
       externalMemberId: "111",
     });
 
     expect(
       await repository().recordPlatformMemberIdByInviteLink({
         inviteLink: link,
+        externalGroupId: chatId,
         externalMemberId: "222",
       })
     ).toEqual({ outcome: "conflicting_member_id", membershipId: membership.id });
@@ -381,11 +398,12 @@ describe("DrizzleChannelMembershipRepository.recordPlatformMemberIdByInviteLink"
   });
 
   it("reports an unknown link as a miss, and touches nothing", async () => {
-    const { membership } = await granted(`https://t.me/+known-${Date.now()}`);
+    const { membership, chatId } = await granted(`https://t.me/+known-${Date.now()}`);
 
     expect(
       await repository().recordPlatformMemberIdByInviteLink({
         inviteLink: "https://t.me/+never-issued",
+        externalGroupId: chatId,
         externalMemberId: "987654321",
       })
     ).toEqual({ outcome: "unknown_invite_link" });
@@ -396,17 +414,19 @@ describe("DrizzleChannelMembershipRepository.recordPlatformMemberIdByInviteLink"
     // `invite_link` is nullable so `= ''` matches nothing today — but an empty member
     // id would satisfy the `is null` predicate while being useless to banChatMember,
     // and an empty link must never be able to match a row that somehow holds one.
-    const { membership } = await granted(`https://t.me/+empty-${Date.now()}`);
+    const { membership, chatId } = await granted(`https://t.me/+empty-${Date.now()}`);
 
     expect(
       await repository().recordPlatformMemberIdByInviteLink({
         inviteLink: "",
+        externalGroupId: chatId,
         externalMemberId: "1",
       })
     ).toEqual({ outcome: "unknown_invite_link" });
     expect(
       await repository().recordPlatformMemberIdByInviteLink({
         inviteLink: `https://t.me/+empty-${Date.now()}`,
+        externalGroupId: chatId,
         externalMemberId: "",
       })
     ).toEqual({ outcome: "unknown_invite_link" });
@@ -417,12 +437,13 @@ describe("DrizzleChannelMembershipRepository.recordPlatformMemberIdByInviteLink"
     // Telegram can redeliver an update before the first delivery has finished, so
     // the conditional UPDATE — not a preceding read — has to arbitrate.
     const link = `https://t.me/+race-${Date.now()}`;
-    const { membership } = await granted(link);
+    const { membership, chatId } = await granted(link);
 
     const outcomes = await Promise.all(
       Array.from({ length: 5 }, (_, i) =>
         repository().recordPlatformMemberIdByInviteLink({
           inviteLink: link,
+          externalGroupId: chatId,
           externalMemberId: String(100 + i),
         })
       )
@@ -437,12 +458,13 @@ describe("DrizzleChannelMembershipRepository.recordPlatformMemberIdByInviteLink"
     // `revoke` nulls the link — it is a bearer credential and a revoked row must not
     // keep one — so a late join update for it is simply unknown.
     const link = `https://t.me/+revoked-${Date.now()}`;
-    const { membership } = await granted(link);
+    const { membership, chatId } = await granted(link);
     await repository().revoke(membership.id);
 
     expect(
       await repository().recordPlatformMemberIdByInviteLink({
         inviteLink: link,
+        externalGroupId: chatId,
         externalMemberId: "987654321",
       })
     ).toEqual({ outcome: "unknown_invite_link" });
@@ -453,16 +475,17 @@ describe("DrizzleChannelMembershipRepository.recordPlatformMemberIdByInviteLink"
     // `external_member_id`: TelegramBotAdapter needs it to `unbanChatMember` before
     // a churned member who re-pays can use a new link at all.
     const link = `https://t.me/+regrant-${Date.now()}`;
-    const { membership, member, channel } = await granted(link);
+    const { membership, member, channel, chatId } = await granted(link);
     await repository().recordPlatformMemberIdByInviteLink({
       inviteLink: link,
+      externalGroupId: chatId,
       externalMemberId: "987654321",
     });
     await repository().revoke(membership.id);
 
     const reclaimed = await repository().claim({ memberId: member.id, channelId: channel.id });
 
-    expect(reclaimed.won).toBe(true);
+    expect(reclaimed.outcome).toBe("mint");
     expect(reclaimed.membership.inviteLink).toBeNull();
     expect(reclaimed.membership.externalMemberId).toBe("987654321");
   });

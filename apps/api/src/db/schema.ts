@@ -351,6 +351,54 @@ export const channelMemberships = pgTable(
      * a reactivated row and passes it as `previousExternalMemberId`.
      */
     externalMemberId: varchar("external_member_id", { length: 64 }),
+    /**
+     * Set when a caller ENTERS the mint window, cleared when it leaves — the marker
+     * that makes "claimed, no link" an unambiguous state instead of a guess.
+     *
+     * THE CREDENTIAL-LIFECYCLE INVARIANT this column exists to enforce: at most one
+     * live invite link per (member, channel) may exist at the provider at any time,
+     * and every link that exists is recorded in `invite_link`.
+     *
+     * Without it, `invite_link IS NULL` on a claimed row conflates three different
+     * situations: nobody has minted yet, somebody minted and could not record it, and
+     * somebody is minting right now. `GrantChannelAccess` read all three as "finish
+     * the grant" and minted a fresh link for each, so a `recordGrant` that failed on
+     * every bounded retry left FIVE live single-use links at Telegram behind one row
+     * whose `invite_link` was NULL — five credentials the system had no record of and
+     * therefore no way to revoke. Measured, before this column existed.
+     *
+     * So: link is null + this is NOT null means A LINK WAS MINTED AND LOST. Minting
+     * another would stack a second credential on an orphan we cannot kill (Telegram's
+     * `revokeChatInviteLink` needs the link's value, and no Bot API method enumerates
+     * a bot's links), so the grant FAILS CLOSED — reported to the member as manual
+     * addition and to the creator in `activity_log`, for a deliberate reissue.
+     *
+     * Cleared by `recordGrant` on success, and by `releaseMintWindow` when a lost
+     * link was successfully revoked at the provider — at which point no live
+     * credential exists and a retry may safely mint again.
+     */
+    linkMintedAt: timestamp("link_minted_at", { withTimezone: true }),
+    /**
+     * How long the caller inside the mint window holds it. Set with
+     * `link_minted_at`, in the SAME statement as the claim.
+     *
+     * This is the serialization half of the invariant, and it is needed even with the
+     * marker: two callers arriving together — a member who bought two tiers of one
+     * community, or a reclaimed outbox row racing the worker still holding it — both
+     * found `link_minted_at IS NULL`, both passed the marker check, and both minted.
+     * Measured at two live links for one (member, channel).
+     *
+     * A LEASE rather than `pg_advisory_xact_lock` because the window spans an
+     * external HTTP call: an advisory lock would have to be held in an open
+     * transaction across the provider round-trip, pinning a pooled connection to a
+     * hung Telegram. A lease needs no transaction and is visible to an operator in
+     * the row.
+     *
+     * Its expiry FAILS CLOSED: a second caller arriving after it lapses sees the
+     * marker still set and reports "minted and lost" rather than minting. So a lease
+     * that is too short costs a spurious manual report, never a second credential.
+     */
+    mintLeaseUntil: timestamp("mint_lease_until", { withTimezone: true }),
     grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
