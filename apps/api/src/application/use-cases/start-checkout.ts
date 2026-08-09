@@ -1,12 +1,22 @@
 import { ConflictError, NotFoundError } from "../errors";
 import { isConnectedPaymentAccount } from "../../domain/payment-account";
+import { isInsideRenewalWindow } from "../../domain/renewal-schedule";
+import type { ClockPort } from "../ports/clock.port";
 import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "../ports/membership-tier-repository.port";
 import type { MemberRepositoryPort } from "../ports/member-repository.port";
-import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
+import type {
+  SubscriptionRecord,
+  SubscriptionRepositoryPort,
+} from "../ports/subscription-repository.port";
 import type { PaymentProviderPort } from "../ports/payment-provider.port";
 import type { CreatorRepositoryPort } from "../ports/creator-repository.port";
 import { VISIBLE_STATUSES } from "./get-public-community";
+
+/**
+ * The `subscription.status` a late member sits in. Always renewable — see `isRenewable`.
+ */
+const PAST_DUE = "past_due";
 
 export class StartCheckout {
   constructor(
@@ -16,6 +26,14 @@ export class StartCheckout {
     private readonly subscriptions: SubscriptionRepositoryPort,
     private readonly creators: CreatorRepositoryPort,
     private readonly payments: PaymentProviderPort,
+    /**
+     * Phase 5. Injected rather than read from `Date.now()` because this use-case now
+     * makes a TIME-DEPENDENT decision: whether a member who already holds this tier is
+     * renewing (inside the reminder window) or double-buying. A `Date.now()` here would
+     * make the window's boundary — an Asia/Jakarta day, three days out — untestable, and
+     * that boundary decides whether a member can act on their own reminder.
+     */
+    private readonly clock: ClockPort,
     /**
      * `appBaseUrl` is the public origin of `apps/web`, with no trailing slash —
      * see `resolveAppBaseUrl` in bootstrap.ts. It exists so this use-case can
@@ -77,28 +95,48 @@ export class StartCheckout {
       name: input.payerName,
     });
 
-    // BEFORE the invoice exists, which is the only place this can be refused for
-    // free. A member who already holds this tier and pays again used to be charged
-    // for nothing: `markPaid` returned `superseded`, the new subscription was
-    // `cancelled`, no `grant_access` outbox row was enqueued — so no WhatsApp message
-    // was sent AT ALL — and the status page they were redirected to read
-    // `cancelled`. Money in, nothing out, and the member never told why.
+    // RENEWAL OR DOUBLE-BUY? Decided BEFORE the invoice exists, which is the only
+    // place a purchase can be refused for free.
     //
-    // And it is the likely case, not an edge one: re-paying is exactly what someone
-    // does when the invite did not arrive. The `superseded` path stays as the
-    // backstop for the genuine race (two submits inside the same instant, which this
-    // read cannot see); this closes the ordinary one.
-    if (await this.subscriptions.hasActiveSubscriptionForTier(member.id, tier.id)) {
+    // A member who already holds this tier and pays again for nothing used to be
+    // charged: `markPaid` returned `superseded`, the new subscription was `cancelled`,
+    // no `grant_access` outbox row was enqueued — so no WhatsApp message was sent AT
+    // ALL — and the status page they were redirected to read `cancelled`. Money in,
+    // nothing out, and the member never told why. That refusal stays.
+    //
+    // But Phase 3's version refused EVERY member who held an active subscription,
+    // including the one who had just been sent a `pre_3d` reminder asking them to
+    // renew. The reminder whose entire purpose is "renew without ever losing access"
+    // pointed at a checkout that answered 409. A member inside their renewal window is
+    // not double-buying; they are doing exactly what we asked.
+    //
+    // So the rule is `isInsideRenewalWindow`, read from the same domain module the
+    // reminder schedule uses, and the window is therefore the same one by construction:
+    // if we asked you to renew, the link works. A member with weeks to go still gets
+    // the 409, because paying then really does buy them nothing.
+    //
+    // The `superseded` path stays as the backstop for the genuine race (two submits
+    // inside the same instant, which this read cannot see).
+    const current = await this.subscriptions.findCurrentSubscriptionForTier(member.id, tier.id);
+    if (current !== null && !this.isRenewable(current)) {
       throw new ConflictError(
         "you already have an active membership for this tier. If you have not received " +
           "your group invite, contact the community owner — paying again would not send it."
       );
     }
 
-    const subscription = await this.subscriptions.createPending({
-      memberId: member.id,
-      tierId: tier.id,
-    });
+    // THE SAME ROW when this is a renewal. A renewal updates the subscription it
+    // renews — `markPaid` advances `next_billing_date`, clears the grace deadline and
+    // releases the period's reminder claims — and creating a second row instead would
+    // activate it alongside the first, which stays `past_due` for the churn pass to
+    // revoke. So the member would pay and then lose access anyway. See the
+    // `subscription_member_tier_active_unique` comment in db/schema.ts.
+    const subscription =
+      current ??
+      (await this.subscriptions.createPending({
+        memberId: member.id,
+        tierId: tier.id,
+      }));
     const transaction = await this.subscriptions.createTransaction({
       subscriptionId: subscription.id,
       amount: tier.priceAmount,
@@ -149,6 +187,26 @@ export class StartCheckout {
       subscriptionId: subscription.id,
       transactionId: transaction.id,
     };
+  }
+
+  /**
+   * Whether an existing subscription may be RENEWED by this checkout, rather than
+   * refused as a purchase of something the member already has.
+   *
+   * `past_due` always may: the member is late, and taking their money is the entire
+   * point of the reminders they have been receiving.
+   *
+   * `active` may only inside the reminder window. `next_billing_date` is nullable, and
+   * "no due date" must never read as "due now" — nothing writes that state today
+   * (activation always sets one), but the column allows it and a null would otherwise
+   * fall through to a renewal of a period with no end.
+   */
+  private isRenewable(current: SubscriptionRecord): boolean {
+    if (current.status === PAST_DUE) return true;
+    if (current.nextBillingDate === null) return false;
+    // UTC midnight of the day the column names, i.e. 07:00 WIB — safely inside the
+    // intended Asia/Jakarta day, which is the frame `isInsideRenewalWindow` compares in.
+    return isInsideRenewalWindow(new Date(current.nextBillingDate), this.clock.now());
   }
 
   /**

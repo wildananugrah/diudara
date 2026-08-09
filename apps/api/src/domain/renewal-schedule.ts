@@ -132,6 +132,24 @@ export function latestDueDateInReminderWindow(now: Date): string {
 }
 
 /**
+ * Whether a subscription due on `nextBillingDate` is close enough to renewal that paying
+ * again is a RENEWAL rather than buying something the member already has.
+ *
+ * It is `dueStageFor(...) !== null` and deliberately nothing else, so the window in which
+ * a member may renew is exactly the window in which we ask them to. `StartCheckout`
+ * reads it to widen Phase 3's "already active for this tier → 409": that rule exists to
+ * stop somebody paying twice for the same period, and it was also refusing the member who
+ * clicked the link in their own `pre_3d` reminder — the reminder whose entire purpose is
+ * "renew without ever losing access". A separate threshold here (a hardcoded three days,
+ * say) would be a second definition of the same window, free to drift from the schedule
+ * the reminders actually follow; a member outside it who paid anyway would get nothing
+ * for their money, which is what the 409 protects them from.
+ */
+export function isInsideRenewalWindow(nextBillingDate: Date, now: Date): boolean {
+  return dueStageFor(nextBillingDate, now) !== null;
+}
+
+/**
  * Whether a stage means the due date has arrived or gone past — i.e. whether the
  * member is now LATE rather than being warned in advance.
  *

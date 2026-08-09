@@ -44,6 +44,7 @@ import type {
   CreatorRecord,
   CreatorRepositoryPort,
 } from "./application/ports/creator-repository.port";
+import type { ClockPort } from "./application/ports/clock.port";
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "./application/ports/membership-tier-repository.port";
 import type { ChannelRepositoryPort } from "./application/ports/channel-repository.port";
@@ -144,12 +145,21 @@ const fakeMemberRepository: MemberRepositoryPort = {
   },
 };
 
+/**
+ * Phase 5 gave `StartCheckout` and `HandlePaymentWebhook` a clock. A fixed one here, like
+ * every other fake in this file: nothing in these tests depends on the instant, and a
+ * `SystemClock` would make the composition-root fakes depend on the wall clock.
+ */
+const fakeClock: ClockPort = {
+  now: () => new Date("2026-08-09T11:00:00.000Z"),
+};
+
 const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   async createPending() {
     throw new Error("not used");
   },
-  async hasActiveSubscriptionForTier() {
-    return false;
+  async findCurrentSubscriptionForTier() {
+    return null;
   },
   async createTransaction() {
     throw new Error("not used");
@@ -381,12 +391,14 @@ describe("Dependencies (composition root contract)", () => {
         fakeSubscriptionRepository,
         fakeCreatorRepository,
         fakePaymentProvider,
+        fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
-        fakePaymentActivationUnitOfWork
+        fakePaymentActivationUnitOfWork,
+        fakeClock
       ),
       revokeChannelAccess: new RevokeChannelAccess(
         fakeCommunityRepository,
@@ -482,12 +494,14 @@ describe("Dependencies (composition root contract)", () => {
         fakeSubscriptionRepository,
         fakeCreatorRepository,
         fakePaymentProvider,
+        fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
-        fakePaymentActivationUnitOfWork
+        fakePaymentActivationUnitOfWork,
+        fakeClock
       ),
       revokeChannelAccess: new RevokeChannelAccess(
         fakeCommunityRepository,

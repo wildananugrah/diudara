@@ -1,10 +1,17 @@
 import { ConflictError, NotFoundError, ValidationError } from "../errors";
+import type { ClockPort } from "../ports/clock.port";
 import { OUTBOX_GRANT_ACCESS } from "../ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "../ports/payment-activation-unit-of-work.port";
 import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
 
 /** The one provider status that turns money into access. Compared exactly. */
 const PAID = "PAID";
+
+/**
+ * `activity_log.event_type` for a payment that EXTENDED an existing membership rather
+ * than starting one. Exported so a test — and Phase 6's analytics — name the same string.
+ */
+export const RENEWED = "renewed";
 
 /**
  * Renders an attacker-chosen string safe to put in a log line.
@@ -92,7 +99,18 @@ export interface HandlePaymentWebhookResult {
 export class HandlePaymentWebhook {
   constructor(
     private readonly subscriptions: SubscriptionRepositoryPort,
-    private readonly unitOfWork: PaymentActivationUnitOfWorkPort
+    private readonly unitOfWork: PaymentActivationUnitOfWorkPort,
+    /**
+     * Where `paidAt` comes from. Injected in Phase 5, and not for tidiness: `paidAt` is
+     * what `computeNextBillingDate` anchors the next period on, so with a `new Date()`
+     * here the renewal arithmetic — the thing this phase turns on — could only ever be
+     * asserted against whatever day the suite happened to run on.
+     *
+     * It is the instant WE settled the payment, deliberately, not a timestamp from the
+     * callback body. Nothing in that body is authoritative (see the class docstring), and
+     * a forged `paid_at` would move a member's next billing date.
+     */
+    private readonly clock: ClockPort
   ) {}
 
   async execute(input: HandlePaymentWebhookInput): Promise<HandlePaymentWebhookResult> {
@@ -182,7 +200,7 @@ export class HandlePaymentWebhook {
       const paid = await repositories.subscriptions.markPaid({
         transactionId: transaction.id,
         gatewayReferenceId: input.invoiceId,
-        paidAt: new Date(),
+        paidAt: this.clock.now(),
         paymentMethod: input.paymentMethod,
       });
 
@@ -267,7 +285,12 @@ export class HandlePaymentWebhook {
       await repositories.activityLog.record({
         memberId: subscription.memberId,
         communityId,
-        eventType: "joined",
+        // A RENEWAL IS NOT A JOIN. Phase 6's analytics count `joined` rows as new
+        // members, and a renewal is the same member paying again — recording it as a
+        // join would inflate acquisition for ever and hide retention completely. The
+        // distinction comes from `markPaid`, which is the only thing that saw the
+        // status the row was in before it was activated.
+        eventType: paid.renewed ? RENEWED : "joined",
         // Ids and integers only: `webhook_event.payload` is where the raw body
         // lives, and this table is read by creator-facing dashboards.
         metadata: {
@@ -275,6 +298,11 @@ export class HandlePaymentWebhook {
           transactionId: transaction.id,
           subscriptionId: subscription.id,
           amount: transaction.amount,
+          // The period the member just bought, so a dashboard can show "paid until"
+          // without recomputing it from a billing cycle it would have to look up.
+          ...(subscription.nextBillingDate === null
+            ? {}
+            : { nextBillingDate: subscription.nextBillingDate }),
         },
       });
 

@@ -72,45 +72,69 @@ async function seedPendingCheckout(
 }
 
 /**
- * I1, final whole-branch review. What `StartCheckout` reads to refuse a purchase it
- * could never deliver, BEFORE an invoice exists. See the port docstring for the
- * money-in-nothing-out sequence this closes.
+ * I1, final whole-branch review, widened by Phase 5. What `StartCheckout` reads to decide
+ * between a first purchase, a RENEWAL and a purchase it could never deliver — see the
+ * port docstring for the money-in-nothing-out sequence the refusal closes, and for why a
+ * boolean could not express the middle case.
  */
-describe("DrizzleSubscriptionRepository.hasActiveSubscriptionForTier", () => {
-  it("is false while the subscription is only pending", async () => {
+describe("DrizzleSubscriptionRepository.findCurrentSubscriptionForTier", () => {
+  it("is null while the subscription is only pending", async () => {
     // The state StartCheckout itself leaves behind. If a pending row counted, a
     // member whose first payment never completed could never retry.
     const { member, tier } = await seedPendingCheckout();
 
-    expect(await repo.hasActiveSubscriptionForTier(member.id, tier.id)).toBe(false);
+    expect(await repo.findCurrentSubscriptionForTier(member.id, tier.id)).toBeNull();
   });
 
-  it("is true once the subscription is active", async () => {
-    const { member, tier, transaction } = await seedPendingCheckout();
+  it("returns the subscription once it is active", async () => {
+    const { member, tier, subscription, transaction } = await seedPendingCheckout();
     await settle({
       transactionId: transaction.id,
       gatewayReferenceId: "inv-active",
       paidAt: new Date(),
     });
 
-    expect(await repo.hasActiveSubscriptionForTier(member.id, tier.id)).toBe(true);
+    const current = await repo.findCurrentSubscriptionForTier(member.id, tier.id);
+    expect(current?.id).toBe(subscription.id);
+    expect(current?.status).toBe("active");
+    // The whole row, because the caller needs `next_billing_date` to decide whether the
+    // renewal window has opened — the reason this replaced a boolean.
+    expect(current?.nextBillingDate).not.toBeNull();
   });
 
-  it("is false again after the subscription is cancelled, so a churned member can re-pay", async () => {
-    // The scope is `active` ONLY. Treating any prior subscription as a block would
-    // lock a member out of a community they left and want to rejoin.
+  it("returns a PAST_DUE subscription, because that is the renewable case", async () => {
+    const { member, tier, subscription, transaction } = await seedPendingCheckout();
+    await settle({
+      transactionId: transaction.id,
+      gatewayReferenceId: "inv-past-due",
+      paidAt: new Date(),
+    });
+    await db
+      .update(subscriptions)
+      .set({ status: "past_due", updatedAt: new Date() })
+      .where(eq(subscriptions.id, subscription.id));
+
+    const current = await repo.findCurrentSubscriptionForTier(member.id, tier.id);
+    expect(current?.id).toBe(subscription.id);
+    expect(current?.status).toBe("past_due");
+  });
+
+  it("is null again after the subscription is cancelled, so a churned member can re-pay", async () => {
+    // `cancelled` and `churned` are NOT renewable: a member whose access was taken away
+    // buys a new subscription, which is what makes their re-grant an honest new grant.
     const { member, tier, subscription, transaction } = await seedPendingCheckout();
     await settle({
       transactionId: transaction.id,
       gatewayReferenceId: "inv-churn",
       paidAt: new Date(),
     });
-    await db
-      .update(subscriptions)
-      .set({ status: "cancelled", updatedAt: new Date() })
-      .where(eq(subscriptions.id, subscription.id));
-
-    expect(await repo.hasActiveSubscriptionForTier(member.id, tier.id)).toBe(false);
+    for (const status of ["cancelled", "churned"]) {
+      await db
+        .update(subscriptions)
+        .set({ status, updatedAt: new Date() })
+        .where(eq(subscriptions.id, subscription.id));
+      expect(await repo.findCurrentSubscriptionForTier(member.id, tier.id)).toBeNull();
+    }
   });
 
   it("does not confuse a different member or a different tier", async () => {
@@ -122,15 +146,40 @@ describe("DrizzleSubscriptionRepository.hasActiveSubscriptionForTier", () => {
     });
     const other = await seedPendingCheckout();
 
-    expect(await repo.hasActiveSubscriptionForTier(other.member.id, tier.id)).toBe(false);
-    expect(await repo.hasActiveSubscriptionForTier(member.id, other.tier.id)).toBe(false);
+    expect(await repo.findCurrentSubscriptionForTier(other.member.id, tier.id)).toBeNull();
+    expect(await repo.findCurrentSubscriptionForTier(member.id, other.tier.id)).toBeNull();
+  });
+
+  it("prefers the ACTIVE row when a member somehow has an active and a past_due one", async () => {
+    // The partial unique index only covers `active`, so history can contain the pair.
+    // The active row is the one granting access, so it is the one being renewed.
+    const { member, tier, subscription, transaction } = await seedPendingCheckout();
+    await settle({
+      transactionId: transaction.id,
+      gatewayReferenceId: "inv-both",
+      paidAt: new Date(),
+    });
+    const [stale] = await db
+      .insert(subscriptions)
+      .values({
+        memberId: member.id,
+        tierId: tier.id,
+        status: "past_due",
+        nextBillingDate: "2030-01-01",
+      })
+      .returning();
+
+    const current = await repo.findCurrentSubscriptionForTier(member.id, tier.id);
+    // Even though the stale row's due date sorts first.
+    expect(current?.id).toBe(subscription.id);
+    expect(current?.id).not.toBe(stale.id);
   });
 
   it("reports a malformed id as a miss rather than raising a driver error", async () => {
     // `tierId` arrives from a request body, and `uuid = 'nope'` is SQLSTATE 22P02 —
     // which on the checkout path would be a 500 instead of the 404 the unknown tier
     // gets a moment later.
-    expect(await repo.hasActiveSubscriptionForTier("nope", "also-nope")).toBe(false);
+    expect(await repo.findCurrentSubscriptionForTier("nope", "also-nope")).toBeNull();
   });
 });
 

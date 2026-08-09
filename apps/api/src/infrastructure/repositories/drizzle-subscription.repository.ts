@@ -1,6 +1,12 @@
-import { and, asc, eq, gt, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { communities, membershipTiers, subscriptions, transactions } from "../../db/schema";
+import {
+  communities,
+  membershipTiers,
+  renewalReminders,
+  subscriptions,
+  transactions,
+} from "../../db/schema";
 import type {
   DueRenewalRecord,
   MarkPaidOutcome,
@@ -39,6 +45,13 @@ const SUCCESS = "success";
 const ACTIVE_SUBSCRIPTION = "active";
 
 /**
+ * `subscription.status` as created by `createPending` (the column's own default). What
+ * tells a FIRST activation from a renewal: `StartCheckout` reuses the row when a member
+ * renews, so the row `markPaid` activates is already `active` or `past_due` in that case.
+ */
+const PENDING_SUBSCRIPTION = "pending";
+
+/**
  * `subscription.status` for the LOSER of a double-submit: the member already had
  * an active subscription to this tier, so this one was never granted. `cancelled`
  * rather than a new status because Phase 5's churn logic already knows it, and an
@@ -58,8 +71,13 @@ const PAST_DUE_SUBSCRIPTION = "past_due";
 const CHURNED_SUBSCRIPTION = "churned";
 
 /**
- * The only statuses the renewal pass may look at — see `findDueForRenewal`'s port
- * docstring for why this filter is load-bearing rather than tidy.
+ * The statuses of a subscription that is still LIVE: one whose member is expected to pay
+ * again. Read by `findDueForRenewal` (whom do we remind) and by
+ * `findCurrentSubscriptionForTier` (what is this member renewing) — the same question
+ * asked from two directions, which is why they share the constant.
+ *
+ * See `findDueForRenewal`'s port docstring for why this filter is load-bearing rather
+ * than tidy.
  *
  * An ALLOWLIST, in the same spirit as `VISIBLE_STATUSES`: `subscription.status` is a
  * free varchar, so a status added later must be excluded until somebody decides it
@@ -67,32 +85,71 @@ const CHURNED_SUBSCRIPTION = "churned";
  */
 const RENEWABLE_STATUSES = [ACTIVE_SUBSCRIPTION, PAST_DUE_SUBSCRIPTION];
 
+/**
+ * The instant a renewed period is measured FROM: the later of the payment and the due
+ * date it was paying for.
+ *
+ * For everything except an early renewal the two are the same choice — a first purchase
+ * has no due date, and a `past_due` member's due date is in the past — so this only ever
+ * changes the answer for a member who pays INSIDE the reminder window, before their
+ * period has run out. There it matters twice over:
+ *
+ *  1. Anchoring on `paidAt` alone would silently shorten the membership by however many
+ *     days early they acted. The `pre_3d` reminder's whole purpose is "renew without
+ *     losing access", so it must not cost the member three days for using it — and the
+ *     loss compounds: renewing three days early every month walks the billing date back
+ *     a month over a year.
+ *  2. It is what makes a genuine double-payment inside the window buy a SECOND period
+ *     instead of vanishing. Two payments anchored on `paidAt` both land on nearly the
+ *     same date, so the member pays twice and gets one period.
+ *
+ * `next_billing_date` is a `date`, so `new Date("2026-03-10")` is UTC midnight — inside
+ * the WIB day the column names, which is the frame the rest of this phase reads it in.
+ */
+function renewalAnchor(paidAt: Date, currentNextBillingDate: string | null): Date {
+  if (currentNextBillingDate === null) return paidAt;
+  const dueAt = new Date(currentNextBillingDate);
+  return dueAt.getTime() > paidAt.getTime() ? dueAt : paidAt;
+}
+
 export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
 
   /**
-   * See the port docstring. Scoped to `active` only: a `cancelled` or `past_due`
-   * subscription must not block a member from buying again, which is the whole point
-   * of letting a churned member re-pay.
+   * See the port docstring. `active` OR `past_due`, because both are renewable and the
+   * caller has to be able to tell them apart from each other and from nothing at all.
+   * `cancelled` and `churned` are excluded: a member whose access was taken away buys a
+   * NEW subscription, which is what makes their re-grant an honest new grant.
+   *
+   * Ordered so `active` wins when a (member, tier) somehow has both — the partial unique
+   * index only covers `active`, so history can contain the pair — and then by the latest
+   * due date, so the answer is deterministic rather than whatever the planner returned.
    */
-  async hasActiveSubscriptionForTier(memberId: string, tierId: string): Promise<boolean> {
+  async findCurrentSubscriptionForTier(
+    memberId: string,
+    tierId: string
+  ): Promise<SubscriptionRecord | null> {
     if (!UUID_PATTERN.test(memberId) || !UUID_PATTERN.test(tierId)) {
       // A MISS, not a driver error — same rule as `findById`. `tierId` arrives from
       // the request body.
-      return false;
+      return null;
     }
     const [existing] = await this.db
-      .select({ id: subscriptions.id })
+      .select()
       .from(subscriptions)
       .where(
         and(
           eq(subscriptions.memberId, memberId),
           eq(subscriptions.tierId, tierId),
-          eq(subscriptions.status, ACTIVE_SUBSCRIPTION)
+          inArray(subscriptions.status, RENEWABLE_STATUSES)
         )
       )
+      .orderBy(
+        sql`case when ${subscriptions.status} = ${ACTIVE_SUBSCRIPTION} then 0 else 1 end`,
+        desc(subscriptions.nextBillingDate)
+      )
       .limit(1);
-    return existing !== undefined;
+    return existing ?? null;
   }
 
   async createPending(input: { memberId: string; tierId: string }): Promise<SubscriptionRecord> {
@@ -463,7 +520,9 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         .select({
           memberId: subscriptions.memberId,
           tierId: subscriptions.tierId,
+          status: subscriptions.status,
           startedAt: subscriptions.startedAt,
+          nextBillingDate: subscriptions.nextBillingDate,
           billingCycle: membershipTiers.billingCycle,
           communityId: membershipTiers.communityId,
         })
@@ -498,7 +557,15 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         .set({
           status: ACTIVE_SUBSCRIPTION,
           startedAt: context.startedAt ?? input.paidAt,
-          nextBillingDate: computeNextBillingDate(input.paidAt, context.billingCycle),
+          nextBillingDate: computeNextBillingDate(
+            renewalAnchor(input.paidAt, context.nextBillingDate),
+            context.billingCycle
+          ),
+          // CLEARED, because a renewed subscription has no grace deadline. It is the one
+          // thing that makes the stored deadline safe to leave alone everywhere else: the
+          // churn query reads `past_due` rows, so a stale deadline on an `active` row is
+          // inert — but leaving it would make every later reader guess which it was.
+          graceEndsAt: null,
           updatedAt: now,
         })
         .where(
@@ -538,8 +605,37 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         };
       }
 
+      // THE COMPLETED PERIOD'S REMINDER CLAIMS, RELEASED — inside this transaction, so a
+      // failure cannot leave them half-cleared.
+      //
+      // `renewal_reminder` is unique on `(subscription_id, stage)` and that index is
+      // TOTAL, not partial (Task 2's deliberate choice). The stage strings repeat every
+      // period, so a row that survives a renewal makes the NEXT period's reminder for
+      // that stage conflict and be read as "already claimed" — the member is never
+      // reminded again, and the bug is invisible for a full billing cycle before it
+      // surfaces as a member churning with no warning.
+      //
+      // CLEARING THE ROWS is the chosen fix, rather than scoping the key to a period.
+      // A period-scoped key would mean inventing a period identifier that survives a
+      // `next_billing_date` change and then widening the unique index that IS the
+      // reminder-once lock — the one mechanism this phase's idempotency rests on. The
+      // claims are spent when the period they belong to ends; deleting them says exactly
+      // that, and leaves the lock alone.
+      //
+      // Unconditional on the activated path: a first activation has no rows and the
+      // DELETE is a no-op, so there is no "is this a renewal" branch for a future change
+      // to get wrong.
+      await tx
+        .delete(renewalReminders)
+        .where(eq(renewalReminders.subscriptionId, transaction.subscriptionId));
+
       return {
         outcome: "activated",
+        // A RENEWAL rather than a first payment, decided by the status this row was in
+        // BEFORE the update — read inside the same transaction, so it cannot race. The
+        // caller audits the two differently: Phase 6 counts new members, and a renewal
+        // recorded as a join would inflate that for ever.
+        renewed: context.status !== PENDING_SUBSCRIPTION,
         transaction,
         subscription,
         communityId: context.communityId,

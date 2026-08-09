@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { FixedClock } from "../../infrastructure/clock/fixed.clock";
 import { ConflictError, NotFoundError, ValidationError } from "../errors";
 import type { ActivityLogRepositoryPort } from "../ports/activity-log-repository.port";
 import type { OutboxRepositoryPort } from "../ports/outbox-repository.port";
@@ -12,6 +13,13 @@ import type { WebhookEventRepositoryPort } from "../ports/webhook-event-reposito
 import { HandlePaymentWebhook } from "./handle-payment-webhook";
 
 const TRANSACTION_ID = "3f1c9e0a-1111-4222-8333-444455556666";
+
+/**
+ * The instant the harness's clock reads, i.e. the `paidAt` the handler settles with.
+ * Phase 5 injected the clock: `paidAt` is what the next billing period is measured from,
+ * so a `new Date()` inside the handler made that arithmetic unassertable.
+ */
+const SETTLED_AT = new Date("2026-08-09T11:00:00.000Z");
 
 function transactionRecord(overrides: Partial<TransactionRecord> = {}): TransactionRecord {
   return {
@@ -88,6 +96,14 @@ function harness(
      * tier, so this one was cancelled instead of activated.
      */
     superseded?: boolean;
+    /**
+     * `markPaid` reports the activation EXTENDED an existing membership. Phase 5: the
+     * audit entry is `renewed` rather than `joined`, because Phase 6 counts `joined` rows
+     * as new members.
+     */
+    renewed?: boolean;
+    /** What the injected clock reads, i.e. the `paidAt` the handler settles with. */
+    now?: Date;
   } = {}
 ) {
   const calls: Calls = {
@@ -105,8 +121,8 @@ function harness(
     async createPending() {
       throw new Error("not used");
     },
-    async hasActiveSubscriptionForTier() {
-      return false;
+    async findCurrentSubscriptionForTier() {
+      return null;
     },
     async createTransaction() {
       throw new Error("not used");
@@ -163,7 +179,11 @@ function harness(
       if (options.alreadySettled === true) {
         return { outcome: "already_settled", status: "success" };
       }
-      return { ...activationResult(input.paidAt), outcome: "activated" };
+      return {
+        ...activationResult(input.paidAt),
+        outcome: "activated",
+        renewed: options.renewed === true,
+      };
     },
   };
 
@@ -238,7 +258,11 @@ function harness(
   return {
     calls,
     order,
-    useCase: new HandlePaymentWebhook(subscriptions, unitOfWork),
+    useCase: new HandlePaymentWebhook(
+      subscriptions,
+      unitOfWork,
+      new FixedClock(options.now ?? SETTLED_AT)
+    ),
   };
 }
 

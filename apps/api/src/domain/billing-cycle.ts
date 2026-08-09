@@ -53,6 +53,14 @@ function pad2(value: number): string {
  * one-day skew described above is still possible, and is still accepted for the same
  * reason. What is no longer true is that the two sides must share a frame: the DATE is
  * written in UTC and READ as the WIB day it names, which is what the `date` type means.
+ *
+ * WHAT `paidAt` IS ON A RENEWAL. The parameter is named for the ordinary case, and the
+ * renewal path does not always pass the payment instant: it passes the LATER of the
+ * payment and the due date being paid for, so a member who acts on their `pre_3d`
+ * reminder three days early does not lose three days (see `renewalAnchor` in
+ * infrastructure/repositories/drizzle-subscription.repository.ts). This function still
+ * only adds months to whatever instant it is handed; the CHOICE of instant is the
+ * caller's, and saying so here is what stops a future reader assuming it is always `now`.
  */
 export function computeNextBillingDate(paidAt: Date, billingCycle: string): string {
   if (!isBillingCycle(billingCycle)) {

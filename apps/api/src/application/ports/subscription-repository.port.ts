@@ -110,8 +110,16 @@ export interface MarkPaidResult {
  * transaction" from "not pending any more" — so carrying it out costs nothing.
  */
 export type MarkPaidOutcome =
-  /** Was `pending`, now `success`; the subscription is active. */
-  | ({ outcome: "activated" } & MarkPaidResult)
+  /**
+   * The transaction is now `success` and the subscription is `active`.
+   *
+   * `renewed` distinguishes a first activation from a RENEWAL, which is a distinction
+   * only this method can make: `StartCheckout` reuses the subscription row when a member
+   * renews, so the caller cannot tell afterwards what status the row was in before. The
+   * two are audited differently — Phase 6 counts new members, and a renewal recorded as
+   * a join would inflate that for ever.
+   */
+  | ({ outcome: "activated"; renewed: boolean } & MarkPaidResult)
   /** Already `success`. An idempotent no-op, and the caller must answer 2xx. */
   | { outcome: "already_settled"; status: string }
   /**
@@ -148,22 +156,42 @@ export type MarkPaidOutcome =
 export interface SubscriptionRepositoryPort {
   createPending(input: { memberId: string; tierId: string }): Promise<SubscriptionRecord>;
   /**
-   * Whether this member ALREADY holds an active subscription to this tier.
+   * The member's CURRENT subscription to this tier — `active` or `past_due` — or null.
    *
-   * Read by `StartCheckout` to refuse a purchase before an invoice exists, and it is
-   * not a nicety: re-paying is exactly what a member does when an invite did not
-   * arrive. Without this the member was charged, `markPaid` returned `superseded`,
-   * the subscription was `cancelled`, NO outbox row was enqueued so no WhatsApp
-   * message was sent at all, and the status page read `cancelled`. Money in, nothing
-   * out, member never told.
+   * Read by `StartCheckout`, which has to tell three cases apart and cannot do it with a
+   * boolean:
+   *
+   *   - nothing         → an ordinary first purchase.
+   *   - `past_due`, or `active` inside the reminder window → a RENEWAL. The row is
+   *     reused; see `isInsideRenewalWindow` for the predicate and why it is that one.
+   *   - `active` and nowhere near renewal → 409, which is Phase 3's rule unchanged.
+   *     Without it the member was charged, `markPaid` returned `superseded`, the
+   *     subscription was `cancelled`, no outbox row was enqueued so no WhatsApp message
+   *     was sent at all, and the status page read `cancelled`. Money in, nothing out,
+   *     member never told.
+   *
+   * This REPLACED a `hasActiveSubscriptionForTier(): boolean`, which could not express
+   * the middle case and therefore refused every renewal by an `active` member — including
+   * the one who clicked the link in their own `pre_3d` reminder.
+   *
+   * `past_due` is included precisely because it is renewable; `churned` and `cancelled`
+   * are NOT, so a member who was revoked buys a fresh subscription (and a fresh grant,
+   * with the unban that needs) rather than resurrecting a dead one.
    *
    * A READ, so it is inherently racy — two checkouts a millisecond apart both see
-   * "no". That is fine and deliberate: `subscription_member_tier_active_unique` plus
-   * the `superseded` outcome remain the backstop for the race. This closes the
-   * ORDINARY case, which is a person tapping pay again a minute later, and it closes
-   * it at the only point where refusing costs nobody any money.
+   * "nothing". That is fine and deliberate: `subscription_member_tier_active_unique` plus
+   * the `superseded` outcome remain the backstop for the race. This closes the ORDINARY
+   * case, which is a person tapping pay again a minute later, and it closes it at the
+   * only point where refusing costs nobody any money.
+   *
+   * When both an `active` and a `past_due` row somehow exist for one (member, tier) — the
+   * partial unique index only covers `active`, so history can contain it — the `active`
+   * one is authoritative, because it is the one that grants access.
    */
-  hasActiveSubscriptionForTier(memberId: string, tierId: string): Promise<boolean>;
+  findCurrentSubscriptionForTier(
+    memberId: string,
+    tierId: string
+  ): Promise<SubscriptionRecord | null>;
   /**
    * Backs the public, unauthenticated status endpoint
    * (`GET /c/subscription/:subscriptionId/status`) — the id travels in a
@@ -213,6 +241,21 @@ export interface SubscriptionRepositoryPort {
    * Marks a transaction `success` and activates its subscription: `active`,
    * `started_at` (first activation only), and `next_billing_date` derived from
    * the tier's `billing_cycle`.
+   *
+   * IT IS ALSO THE RENEWAL PATH, because `StartCheckout` reuses the subscription row
+   * when a member renews (see `findCurrentSubscriptionForTier`). Three things therefore
+   * happen here that only matter for a renewal, and all three are in the SAME
+   * transaction as the status change:
+   *
+   *  1. `grace_ends_at` is CLEARED. A renewed subscription has no deadline.
+   *  2. The subscription's `renewal_reminder` rows are DELETED. That table's unique
+   *     `(subscription_id, stage)` is total, not partial, so a row that survives a
+   *     renewal makes the next period's reminder for that stage read as already
+   *     claimed — the member is never reminded again, invisibly, for a whole cycle.
+   *     Same transaction, so a failure cannot leave them half-cleared.
+   *  3. `next_billing_date` advances from the LATER of `paidAt` and the due date being
+   *     paid for, so renewing early does not shorten the membership. See
+   *     `renewalAnchor` in the implementation.
    *
    * Both rows are updates, so both must carry `updatedAt: new Date()`. The two
    * writes must be atomic with each other — a transaction recorded as collected

@@ -32,6 +32,7 @@ import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositorie
 import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
+import { SystemClock } from "./infrastructure/clock/system.clock";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
 import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
@@ -788,6 +789,10 @@ export function bootstrap(): Dependencies {
     appBaseUrl: process.env.APP_BASE_URL,
     nodeEnv: process.env.NODE_ENV,
   });
+  // ONE clock for the process. Phase 5's use-cases read time through it rather than
+  // calling `Date.now()`, so the renewal window and the settlement date a member's next
+  // period is measured from are both observable in a test.
+  const clock = new SystemClock();
   const startCheckout = new StartCheckout(
     communityRepository,
     tierRepository,
@@ -795,6 +800,7 @@ export function bootstrap(): Dependencies {
     subscriptionRepository,
     creatorRepository,
     payments,
+    clock,
     { appBaseUrl }
   );
   const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository);
@@ -805,7 +811,8 @@ export function bootstrap(): Dependencies {
   const paymentActivationUnitOfWork = new DrizzlePaymentActivationUnitOfWork(db);
   const handlePaymentWebhook = new HandlePaymentWebhook(
     subscriptionRepository,
-    paymentActivationUnitOfWork
+    paymentActivationUnitOfWork,
+    clock
   );
 
   // Revocation is the ONE messaging call the API process makes; granting happens
