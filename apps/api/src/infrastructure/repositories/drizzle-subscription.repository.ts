@@ -2,7 +2,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { membershipTiers, subscriptions, transactions } from "../../db/schema";
 import type {
-  MarkPaidResult,
+  MarkPaidOutcome,
   SubscriptionRecord,
   SubscriptionRepositoryPort,
   TransactionRecord,
@@ -25,6 +25,13 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  * default). The only status `markPaid` will settle — see its docstring.
  */
 const PENDING = "pending";
+
+/**
+ * The settled status `markPaid` writes, and the ONE non-`pending` status that
+ * makes a second delivery an idempotent no-op rather than something a person has
+ * to look at. See `MarkPaidOutcome`.
+ */
+const SUCCESS = "success";
 
 export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
@@ -158,14 +165,14 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
     gatewayReferenceId: string;
     paidAt: Date;
     paymentMethod?: string | undefined;
-  }): Promise<MarkPaidResult | null> {
+  }): Promise<MarkPaidOutcome> {
     return this.db.transaction(async (tx) => {
       const now = new Date();
 
       const [transaction] = await tx
         .update(transactions)
         .set({
-          status: "success",
+          status: SUCCESS,
           gatewayReferenceId: input.gatewayReferenceId,
           paidAt: input.paidAt,
           updatedAt: now,
@@ -180,10 +187,8 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         .returning();
       if (!transaction) {
         // Zero rows means either "no such transaction" or "not pending any
-        // more". Only the first is a programming error; the second is the
-        // duplicate-activation case this predicate exists to absorb, so it is
-        // worth one extra read inside the already-open transaction to tell an
-        // operator which happened.
+        // more". Only the first is a programming error, so one extra read inside
+        // the already-open transaction resolves which.
         const [existing] = await tx
           .select({ status: transactions.status })
           .from(transactions)
@@ -192,7 +197,13 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         if (!existing) {
           throw new Error(`markPaid: transaction ${input.transactionId} not found`);
         }
-        return null;
+        // And the status this read already has decides which of the two
+        // NOT-pending cases it is. Returning a bare "settled" for both meant a
+        // real payment for a `failed` transaction was answered with a 200 and
+        // thrown away — see MarkPaidOutcome.
+        return existing.status === SUCCESS
+          ? { outcome: "already_settled", status: existing.status }
+          : { outcome: "conflicting_status", status: existing.status };
       }
 
       // The tier carries the billing cycle, and the community the audit entry
@@ -227,7 +238,12 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         throw new Error(`markPaid: subscription for transaction ${input.transactionId} not found`);
       }
 
-      return { transaction, subscription, communityId: context.communityId };
+      return {
+        outcome: "activated",
+        transaction,
+        subscription,
+        communityId: context.communityId,
+      };
     });
   }
 }

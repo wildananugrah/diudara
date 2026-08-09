@@ -443,6 +443,83 @@ describe("POST /webhooks/xendit", () => {
     expect(await db.select().from(activityLogs)).toHaveLength(1);
   });
 
+  /**
+   * Task 7 item 2. `markPaid`'s zero-row path treated EVERY non-`pending` status
+   * as "already settled", including `failed` — so a genuine payment arriving for a
+   * failed transaction returned HTTP 200 and was swallowed as a duplicate. Xendit
+   * does not retry a 200, and the delivery is not replayable afterwards either
+   * (the event id is spent), so the money was taken and the access silently never
+   * granted, with a `[payments] already-settled` line as the only trace.
+   *
+   * `failed` and `success` are genuinely different: one is an idempotent no-op,
+   * the other is an operator's problem that must not be reported as normal.
+   */
+  describe("a payment for a transaction that is not pending", () => {
+    /** What a later phase's retry/expiry handling will leave behind. */
+    async function markTransactionFailed(externalId: string) {
+      await db
+        .update(transactions)
+        .set({ status: "failed" })
+        .where(eq(transactions.id, externalId));
+    }
+
+    it("does NOT swallow a genuine PAID for a FAILED transaction as a duplicate", async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
+      await markTransactionFailed(externalId);
+
+      const res = await post(a, verifiedEvent(externalId, invoiceId));
+
+      // Not 200. A 2xx here is Xendit's signal to stop, and it will not retry.
+      expect(res.status).toBe(409);
+      expect((await subscriptionRow(subscriptionId)).status).toBe("pending");
+      // And nothing was recorded, so the SAME delivery can be replayed by hand
+      // once an operator has repaired the row — a burnt event id would make even
+      // that impossible.
+      expect(await db.select().from(webhookEvents)).toHaveLength(0);
+      expect(await db.select().from(outbox)).toHaveLength(0);
+      expect(await db.select().from(activityLogs)).toHaveLength(0);
+    });
+
+    it("says which transaction and which status, with no payer details", async () => {
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+      await markTransactionFailed(externalId);
+
+      const warnings: string[] = [];
+      const original = console.warn;
+      console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+      try {
+        await post(a, verifiedEvent(externalId, invoiceId, { payer_email: "siti@example.com" }));
+      } finally {
+        console.warn = original;
+      }
+
+      const text = warnings.join("\n");
+      expect(text).toContain(externalId);
+      expect(text).toContain("failed");
+      // `checkout()` pays as "Siti" on +6281234567890. Ids and enum values only.
+      expect(text).not.toContain("siti@example.com");
+      expect(text).not.toContain("Siti");
+      expect(text).not.toContain("6281234567890");
+    });
+
+    it("still treats an already-SUCCESS transaction as an idempotent 200 no-op", async () => {
+      // The other half. This one really IS a duplicate, and it must stay a 200 —
+      // otherwise Xendit retries a delivery there is nothing to do about.
+      const a = app();
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
+      await post(a, verifiedEvent(externalId, invoiceId));
+
+      const replay = await post(a, verifiedEvent(externalId, invoiceId, { status: "SETTLED" }));
+
+      expect(replay.status).toBe(200);
+      expect((await subscriptionRow(subscriptionId)).status).toBe("active");
+      expect(await db.select().from(outbox)).toHaveLength(1);
+      expect(await db.select().from(activityLogs)).toHaveLength(1);
+    });
+  });
+
   it("400s a delivery whose invoice id is not the one checkout recorded", async () => {
     const a = app();
     const { subscriptionId, externalId } = await checkout(a);

@@ -39,6 +39,37 @@ export interface MarkPaidResult {
 }
 
 /**
+ * What `markPaid` did, or why it did nothing.
+ *
+ * This used to be `MarkPaidResult | null`, and the `null` conflated two states
+ * that must be handled differently. The UPDATE is predicated on
+ * `status = 'pending'`, so it affects zero rows for `success` AND for `failed` —
+ * and the caller reported both as "already settled, no second activation", HTTP
+ * 200. For `success` that is exactly right: it is a replay, and a 2xx is what
+ * stops the provider retrying.
+ *
+ * For `failed` it silently threw a real payment away. Xendit does not retry a
+ * 200, and the delivery cannot be replayed afterwards either, because the event id
+ * is spent — so money was taken, access was never granted, and the only trace was
+ * a log line that called it a duplicate. `failed` is not a status a payment
+ * *arrives* into by accident; it means our record and the provider's disagree,
+ * which is a person's problem rather than a no-op.
+ *
+ * The status is already in hand — the implementation reads it to tell "no such
+ * transaction" from "not pending any more" — so carrying it out costs nothing.
+ */
+export type MarkPaidOutcome =
+  /** Was `pending`, now `success`; the subscription is active. */
+  | ({ outcome: "activated" } & MarkPaidResult)
+  /** Already `success`. An idempotent no-op, and the caller must answer 2xx. */
+  | { outcome: "already_settled"; status: string }
+  /**
+   * Some other non-`pending` status — today only `failed`. A genuine payment for
+   * one of these must be surfaced, never absorbed.
+   */
+  | { outcome: "conflicting_status"; status: string };
+
+/**
  * `subscription` and `transaction` both have an `updated_at` column with no
  * `BEFORE UPDATE` trigger (drizzle-kit does not generate triggers, and the
  * migration constraint forbids hand-written SQL). Every method here that
@@ -101,13 +132,13 @@ export interface SubscriptionRepositoryPort {
    * writes must be atomic with each other — a transaction recorded as collected
    * against a subscription that never activated is unrecoverable money.
    *
-   * Returns **null** when the transaction was not `pending` — it has already
-   * been settled, so this call is a no-op and the caller must not treat it as an
-   * activation. The implementation MUST decide that with the status IN the UPDATE
-   * predicate, not with a preceding read: `webhook_event.provider_event_id` is
-   * the first line of replay defence, and this is the second, so it has to hold
-   * even when two deliveries with different event ids reach the same transaction.
-   * Throws only when the transaction does not exist at all.
+   * Reports what happened as a `MarkPaidOutcome` — see that type for why a bare
+   * `null` was not enough. The implementation MUST decide "was it pending?" with
+   * the status IN the UPDATE predicate, not with a preceding read:
+   * `webhook_event.provider_event_id` is the first line of replay defence and
+   * this is the second, so it has to hold even when two deliveries with different
+   * event ids reach the same transaction. Throws only when the transaction does
+   * not exist at all.
    */
   markPaid(input: {
     transactionId: string;
@@ -119,5 +150,5 @@ export interface SubscriptionRepositoryPort {
      * `createTransaction` recorded with the placeholder it is being replaced by.
      */
     paymentMethod?: string | undefined;
-  }): Promise<MarkPaidResult | null>;
+  }): Promise<MarkPaidOutcome>;
 }

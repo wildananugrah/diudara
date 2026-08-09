@@ -18,10 +18,10 @@ beforeEach(resetDatabase);
 const repo = new DrizzleSubscriptionRepository(db);
 
 /**
- * `markPaid`, asserting it actually settled. It returns null for a transaction
- * that is no longer `pending` (see the port's contract), so the tests that are
- * about a SUCCESSFUL activation go through here and the ones that are about the
- * no-op call `repo.markPaid` directly.
+ * `markPaid`, asserting it actually settled. It reports a non-`activated` outcome
+ * for a transaction that is no longer `pending` (see `MarkPaidOutcome`), so the
+ * tests that are about a SUCCESSFUL activation go through here and the ones about
+ * the no-op call `repo.markPaid` directly and inspect the outcome.
  */
 async function settle(input: {
   transactionId: string;
@@ -29,8 +29,10 @@ async function settle(input: {
   paidAt: Date;
 }): Promise<MarkPaidResult> {
   const result = await repo.markPaid(input);
-  if (result === null) {
-    throw new Error(`settle: markPaid returned null for transaction ${input.transactionId}`);
+  if (result.outcome !== "activated") {
+    throw new Error(
+      `settle: markPaid reported "${result.outcome}" for transaction ${input.transactionId}`
+    );
   }
   return result;
 }
@@ -238,7 +240,7 @@ describe("DrizzleSubscriptionRepository.markPaid", () => {
    * invites in Phase 4.
    */
   describe("settling a transaction that is no longer pending", () => {
-    it("is a no-op that returns null, not a second activation", async () => {
+    it("reports already_settled, not a second activation", async () => {
       const { transaction } = await seedPendingCheckout();
       const firstPaidAt = new Date("2026-08-09T10:00:00Z");
 
@@ -254,7 +256,73 @@ describe("DrizzleSubscriptionRepository.markPaid", () => {
           gatewayReferenceId: "inv_xendit_ATTACKER",
           paidAt: new Date("2026-09-09T10:00:00Z"),
         })
-      ).toBeNull();
+      ).toEqual({ outcome: "already_settled", status: "success" });
+    });
+
+    /**
+     * Task 7 item 2. Both of these affect zero rows, so both used to come back as
+     * a bare `null` and the caller called both "already settled". For `success`
+     * that is a replay; for `failed` it is a real payment being thrown away, and
+     * the caller cannot tell them apart from the outside.
+     *
+     * This is the DETERMINISTIC pin for the distinction — the webhook route test
+     * pins what the API does with it.
+     */
+    it("reports conflicting_status, with the status, for a FAILED transaction", async () => {
+      const { transaction } = await seedPendingCheckout();
+      await db
+        .update(transactions)
+        .set({ status: "failed" })
+        .where(eq(transactions.id, transaction.id));
+
+      const outcome = await repo.markPaid({
+        transactionId: transaction.id,
+        gatewayReferenceId: "inv_xendit_1",
+        paidAt: new Date("2026-08-09T10:00:00Z"),
+      });
+
+      expect(outcome).toEqual({ outcome: "conflicting_status", status: "failed" });
+    });
+
+    it("leaves a FAILED transaction and its subscription completely untouched", async () => {
+      const { subscription, transaction } = await seedPendingCheckout();
+      await db
+        .update(transactions)
+        .set({ status: "failed" })
+        .where(eq(transactions.id, transaction.id));
+
+      await repo.markPaid({
+        transactionId: transaction.id,
+        gatewayReferenceId: "inv_xendit_1",
+        paidAt: new Date("2026-08-09T10:00:00Z"),
+      });
+
+      const [tx] = await db.select().from(transactions).where(eq(transactions.id, transaction.id));
+      expect(tx.status).toBe("failed");
+      expect(tx.paidAt).toBeNull();
+      expect(tx.gatewayReferenceId).toBeNull();
+      const [sub] = await db
+        .select()
+        .from(subscriptions)
+        .where(eq(subscriptions.id, subscription.id));
+      expect(sub.status).toBe("pending");
+    });
+
+    it("reports conflicting_status for any status that is neither pending nor success", async () => {
+      // `transaction.status` is a varchar, not an enum, so a status a later phase
+      // introduces must fail closed rather than be absorbed as a duplicate.
+      for (const status of ["refunded", "expired", "chargeback"]) {
+        const { transaction } = await seedPendingCheckout();
+        await db.update(transactions).set({ status }).where(eq(transactions.id, transaction.id));
+
+        expect(
+          await repo.markPaid({
+            transactionId: transaction.id,
+            gatewayReferenceId: "inv_xendit_1",
+            paidAt: new Date("2026-08-09T10:00:00Z"),
+          })
+        ).toEqual({ outcome: "conflicting_status", status });
+      }
     });
 
     it("leaves paid_at and the gateway reference exactly as the first settlement left them", async () => {
@@ -298,7 +366,11 @@ describe("DrizzleSubscriptionRepository.markPaid", () => {
         )
       );
 
-      expect(results.filter((r) => r !== null)).toHaveLength(1);
+      expect(results.filter((r) => r.outcome === "activated")).toHaveLength(1);
+      // And every loser is a plain replay, not something a person has to look at.
+      expect(
+        results.filter((r) => r.outcome === "already_settled")
+      ).toHaveLength(4);
     });
   });
 

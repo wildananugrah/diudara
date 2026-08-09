@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { NotFoundError, ValidationError } from "../errors";
+import { ConflictError, NotFoundError, ValidationError } from "../errors";
 import type { ActivityLogRepositoryPort } from "../ports/activity-log-repository.port";
 import type { OutboxRepositoryPort } from "../ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "../ports/payment-activation-unit-of-work.port";
 import type {
-  MarkPaidResult,
+  MarkPaidOutcome,
   SubscriptionRepositoryPort,
   TransactionRecord,
 } from "../ports/subscription-repository.port";
@@ -49,6 +49,12 @@ function harness(
     failMarkPaid?: boolean;
     /** `markPaid` returns null: the transaction was no longer `pending`. */
     alreadySettled?: boolean;
+    /**
+     * The status `markPaid` reports for a transaction it could not settle. Any
+     * non-`pending`, non-`success` value takes the `conflicting_status` branch —
+     * today that means `failed`.
+     */
+    conflictingStatus?: string;
   } = {}
 ) {
   const calls: Calls = {
@@ -83,16 +89,20 @@ function harness(
     async attachGatewayReference() {
       throw new Error("not used");
     },
-    async markPaid(input): Promise<MarkPaidResult | null> {
+    async markPaid(input): Promise<MarkPaidOutcome> {
       calls.markPaid.push(input.transactionId);
       order.push("markPaid");
       if (options.failMarkPaid === true) {
         throw new Error("activation blew up");
       }
+      if (options.conflictingStatus !== undefined) {
+        return { outcome: "conflicting_status", status: options.conflictingStatus };
+      }
       if (options.alreadySettled === true) {
-        return null;
+        return { outcome: "already_settled", status: "success" };
       }
       return {
+        outcome: "activated",
         transaction: transactionRecord({ status: "success", paidAt: input.paidAt }),
         subscription: {
           id: "sub-1",
@@ -393,6 +403,68 @@ describe("HandlePaymentWebhook", () => {
     const warnings = await captureWarnings(() => useCase.execute(paidEvent()));
     expect(warnings.some((line) => /already-settled transaction/.test(line))).toBe(true);
     expect(warnings.some((line) => line.includes(TRANSACTION_ID))).toBe(true);
+  });
+
+  /**
+   * Task 7 item 2. `failed` used to be indistinguishable from `success` here —
+   * both produced `{ activated: false, duplicate: true }` and an HTTP 200 — so a
+   * genuine payment for a failed transaction was thrown away with a log line
+   * calling it a duplicate. Xendit does not retry a 200.
+   */
+  describe("a payment for a transaction in a status that cannot be settled", () => {
+    it("throws a 409 rather than reporting a duplicate", async () => {
+      const { useCase } = harness({ conflictingStatus: "failed" });
+
+      let thrown: unknown;
+      await captureWarnings(async () => {
+        thrown = await useCase.execute(paidEvent()).catch((err: unknown) => err);
+      });
+
+      expect(thrown).toBeInstanceOf(ConflictError);
+      expect((thrown as ConflictError).status).toBe(409);
+    });
+
+    it("does not activate, audit or enqueue anything", async () => {
+      const { useCase, calls, order } = harness({ conflictingStatus: "failed" });
+
+      await captureWarnings(() => useCase.execute(paidEvent()).catch(() => undefined));
+
+      expect(calls.activity).toEqual([]);
+      // The whole point: no invite is queued for a payment we refused to settle.
+      expect(calls.enqueued).toEqual([]);
+      // And the throw reaches the unit of work, which rolls `recordIfNew` back —
+      // so the event id is not spent and the delivery can be replayed by hand.
+      expect(order).toEqual(["find", "uow:begin", "recordIfNew", "markPaid", "uow:rollback"]);
+    });
+
+    it("names the transaction and the status, and nothing else", async () => {
+      const { useCase } = harness({ conflictingStatus: "failed" });
+
+      const warnings = await captureWarnings(() =>
+        useCase.execute(paidEvent()).catch(() => undefined)
+      );
+
+      const text = warnings.join("\n");
+      expect(text).toContain("ALERT");
+      expect(text).toContain(TRANSACTION_ID);
+      expect(text).toContain("failed");
+      // NOT called a duplicate — that wording is what made this invisible.
+      expect(text).not.toMatch(/already-settled/);
+    });
+
+    it("treats any unrecognised status the same way, not just failed", async () => {
+      // `transaction.status` is a varchar, not an enum. A status a later phase
+      // adds must fail closed rather than be absorbed as a duplicate.
+      for (const status of ["refunded", "expired", "chargeback", "PENDING"]) {
+        const { useCase, calls } = harness({ conflictingStatus: status });
+        let thrown: unknown;
+        await captureWarnings(async () => {
+          thrown = await useCase.execute(paidEvent()).catch((err: unknown) => err);
+        });
+        expect(thrown).toBeInstanceOf(ConflictError);
+        expect(calls.enqueued).toEqual([]);
+      }
+    });
   });
 
   describe("order of operations", () => {
