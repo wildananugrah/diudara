@@ -49,4 +49,19 @@ export interface OutboxRepositoryPort {
   markFailed(id: string, error: string, nextAttemptAt: Date): Promise<void>;
   /** Terminal failure. The row is never claimed again, and keeps `error`. */
   markPermanentlyFailed(id: string, error: string): Promise<void>;
+  /**
+   * Returns rows that have been `processing` since before `stuckBefore` to
+   * `pending`, and answers how many.
+   *
+   * Without this, a worker killed mid-send (SIGKILL, OOM, a dead box) strands
+   * its row in `processing` FOREVER: `claimBatch` only looks at `pending`, so
+   * nothing retries it and a member who paid never receives an invite. That is
+   * the same class of failure as losing the outbox row, arriving by a different
+   * route.
+   *
+   * It must NOT reset `attempts`. A row that kills its worker on every attempt
+   * would otherwise be reclaimed forever, which is exactly the unbounded retry
+   * the phase forbids; keeping the count means the retry bound still ends it.
+   */
+  reclaimStaleProcessing(stuckBefore: Date): Promise<number>;
 }

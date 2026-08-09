@@ -26,6 +26,10 @@ import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.a
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
+import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
+import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
+import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
+import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -262,6 +266,115 @@ export function selectPaymentProvider(env: {
       "set both to switch to the real Xendit adapter)"
   );
   return new FakePaymentAdapter();
+}
+
+/**
+ * The messaging providers a process needs to turn a payment into access.
+ *
+ * Two fields rather than one map, because notifying and gating are different
+ * capabilities and conflating them is a real bug: `TelegramBotAdapter.notify`
+ * THROWS (it addresses a WhatsApp number it cannot reach), so a member who paid
+ * would never be told anything.
+ */
+export interface MessagingProviders {
+  /**
+   * Gating providers keyed by `channel.platform`.
+   *
+   * WhatsApp is in here too, even though it cannot gate: a `whatsapp` channel must
+   * resolve to a provider that reports `canGateAccess: false` — which
+   * `GrantChannelAccess` turns into "a human will add you", recorded in
+   * `activity_log` — rather than to nothing, which it treats as an unwired
+   * platform and an error.
+   */
+  gating: ReadonlyMap<string, MessagingProviderPort>;
+  /** How the MEMBER is reached. WhatsApp, always. */
+  notifier: MessagingProviderPort;
+}
+
+/**
+ * Chooses the messaging adapters, refusing to start rather than pretending to
+ * invite anyone.
+ *
+ * Deliberately the same shape, thresholds and reasoning as
+ * `selectPaymentProvider` above:
+ *
+ *   1. Both tokens set -> the real adapters, in every environment.
+ *   2. PARTIAL configuration throws EVERYWHERE. A Telegram token with no Fonnte
+ *      token mints a single-use invite link and has no way to deliver it: the
+ *      member pays, a credential is created, and nobody is told. A Fonnte token
+ *      with no Telegram token notifies members that they have access to a group
+ *      nothing ever added them to.
+ *   3. ABSENT configuration selects `FakeMessagingAdapter` ONLY when `NODE_ENV`
+ *      is in `RELAXED_NODE_ENVS` — so `undefined`, `"staging"`, `"prod"` and
+ *      `"production"` all throw. The fake records sends into an array instead of
+ *      making them, so a box running it looks exactly like a working one from the
+ *      outside while every paying member waits for a message that will never
+ *      arrive. That is this phase's worst failure mode (plan, Global
+ *      Constraints), and it is worth refusing to boot over.
+ *
+ * Both tokens are bearer credentials — the Telegram one is part of every Bot API
+ * request PATH — so the startup line names the adapters and never the values.
+ */
+export function selectMessagingProviders(env: {
+  telegramBotToken: string | undefined;
+  fonnteApiToken: string | undefined;
+  nodeEnv: string | undefined;
+}): MessagingProviders {
+  const telegramBotToken = presentOrUndefined(env.telegramBotToken);
+  const fonnteApiToken = presentOrUndefined(env.fonnteApiToken);
+
+  if (telegramBotToken && fonnteApiToken) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] messaging providers: TelegramBotAdapter (gating) + FonnteWhatsAppAdapter " +
+        "(notification) — TELEGRAM_BOT_TOKEN and FONNTE_API_TOKEN are set, so real invites " +
+        "will be issued and real messages sent"
+    );
+    const notifier = new FonnteWhatsAppAdapter({ apiToken: fonnteApiToken });
+    return {
+      gating: new Map<string, MessagingProviderPort>([
+        ["telegram", new TelegramBotAdapter({ botToken: telegramBotToken })],
+        ["whatsapp", notifier],
+      ]),
+      notifier,
+    };
+  }
+
+  if (telegramBotToken || fonnteApiToken) {
+    const missing = telegramBotToken ? "FONNTE_API_TOKEN" : "TELEGRAM_BOT_TOKEN";
+    const present = telegramBotToken ? "TELEGRAM_BOT_TOKEN" : "FONNTE_API_TOKEN";
+    throw new Error(
+      `Messaging is half-configured: ${present} is set but ${missing} is not. Set both or ` +
+        "neither — see apps/api/.env.example. Refusing to start rather than issuing invite " +
+        "links nobody can be told about, or telling members about access nobody granted."
+    );
+  }
+
+  if (!isRelaxedNodeEnv(env.nodeEnv)) {
+    throw new Error(
+      "TELEGRAM_BOT_TOKEN and FONNTE_API_TOKEN are not set, and NODE_ENV is " +
+        `${describeNodeEnv(env.nodeEnv)}. FakeMessagingAdapter is permitted ONLY when ` +
+        `NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}: it appends sends to an array, so a ` +
+        "box running it looks like it is inviting paying members while nobody receives " +
+        "anything. Add the tokens to apps/api/.env — see .env.example — or set " +
+        "NODE_ENV=development."
+    );
+  }
+
+  logProviderChoice(
+    env.nodeEnv,
+    "[bootstrap] messaging providers: FakeMessagingAdapter for both gating and notification " +
+      "(TELEGRAM_BOT_TOKEN/FONNTE_API_TOKEN not set — no invite is issued and no message is " +
+      "sent; set both to switch to the real adapters)"
+  );
+  const fakeNotifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+  return {
+    gating: new Map<string, MessagingProviderPort>([
+      ["telegram", new FakeMessagingAdapter({ platform: "telegram", canGateAccess: true })],
+      ["whatsapp", fakeNotifier],
+    ]),
+    notifier: fakeNotifier,
+  };
 }
 
 /**

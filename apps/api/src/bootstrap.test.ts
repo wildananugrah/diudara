@@ -7,10 +7,14 @@ import {
   RELAXED_NODE_ENVS,
   resolveAppBaseUrl,
   resolveCallbackToken,
+  selectMessagingProviders,
   selectPaymentProvider,
   TEST_CALLBACK_TOKEN,
   type Dependencies,
 } from "./bootstrap";
+import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
+import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
+import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
 import { createApp } from "./app";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
@@ -127,6 +131,9 @@ const fakeMemberRepository: MemberRepositoryPort = {
   async findOrCreateByWhatsappNumber() {
     throw new Error("not used");
   },
+  async findById() {
+    return null;
+  },
 };
 
 const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
@@ -138,6 +145,9 @@ const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   },
   async findById() {
     throw new Error("not used");
+  },
+  async findByIdWithCommunity() {
+    return null;
   },
   async findTransactionByExternalId() {
     return null;
@@ -177,6 +187,9 @@ const fakeOutboxRepository: OutboxRepositoryPort = {
   },
   async markPermanentlyFailed() {
     // not used
+  },
+  async reclaimStaleProcessing() {
+    return 0;
   },
 };
 
@@ -1094,3 +1107,108 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
     });
   });
 });
+
+describe("selectMessagingProviders", () => {
+  it("selects the real adapters when both tokens are set", () => {
+    const providers = captureConsoleLogValue(() =>
+      selectMessagingProviders({
+        telegramBotToken: "123456:real-bot-token",
+        fonnteApiToken: "real-fonnte-token",
+        nodeEnv: "production",
+      })
+    );
+
+    expect(providers.gating.get("telegram")).toBeInstanceOf(TelegramBotAdapter);
+    // WhatsApp is in the GATING map on purpose: a whatsapp channel must resolve
+    // to a provider that reports `canGateAccess: false` — which the grant
+    // use-case turns into "a human will add you" — rather than to nothing, which
+    // it treats as an unwired platform and an error.
+    expect(providers.gating.get("whatsapp")).toBeInstanceOf(FonnteWhatsAppAdapter);
+    expect(providers.notifier).toBeInstanceOf(FonnteWhatsAppAdapter);
+  });
+
+  it("selects the fake adapters when neither token is set, in development or test", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [...RELAXED_NODE_ENVS]) {
+        const providers = selectMessagingProviders({
+          telegramBotToken: undefined,
+          fonnteApiToken: undefined,
+          nodeEnv,
+        });
+        expect(providers.gating.get("telegram")).toBeInstanceOf(FakeMessagingAdapter);
+        expect(providers.notifier).toBeInstanceOf(FakeMessagingAdapter);
+      }
+    });
+  });
+
+  /**
+   * Same allowlist, same reason as the payment adapter: a box that looks like it
+   * is inviting paying members while only appending to an array is this phase's
+   * worst failure mode — the member appears granted and is not.
+   */
+  it("refuses to start for ANY nodeEnv outside the allowlist, including unset", () => {
+    for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "dev", "", "production"]) {
+      expect(() =>
+        selectMessagingProviders({
+          telegramBotToken: undefined,
+          fonnteApiToken: undefined,
+          nodeEnv,
+        })
+      ).toThrow(/permitted ONLY/);
+    }
+  });
+
+  it("refuses HALF configuration in every environment", () => {
+    // A set Telegram token with no Fonnte token means invites are created and
+    // never delivered: the member pays, a link is minted, and nobody is told.
+    expect(() =>
+      selectMessagingProviders({
+        telegramBotToken: "123456:real",
+        fonnteApiToken: undefined,
+        nodeEnv: "test",
+      })
+    ).toThrow(/FONNTE_API_TOKEN/);
+
+    expect(() =>
+      selectMessagingProviders({
+        telegramBotToken: undefined,
+        fonnteApiToken: "real",
+        nodeEnv: "test",
+      })
+    ).toThrow(/TELEGRAM_BOT_TOKEN/);
+  });
+
+  it("treats a blank token as unset rather than as configuration", () => {
+    captureConsoleLog(() => {
+      const providers = selectMessagingProviders({
+        telegramBotToken: "   ",
+        fonnteApiToken: "",
+        nodeEnv: "test",
+      });
+      expect(providers.gating.get("telegram")).toBeInstanceOf(FakeMessagingAdapter);
+    });
+  });
+
+  it("keeps the tokens out of the startup log line", () => {
+    const lines = captureConsoleLog(() => {
+      selectMessagingProviders({
+        telegramBotToken: "123456:AA-secret-bot-token",
+        fonnteApiToken: "secret-fonnte-token",
+        nodeEnv: "production",
+      });
+    });
+
+    const printed = lines.join("\n");
+    expect(printed).not.toContain("AA-secret-bot-token");
+    expect(printed).not.toContain("secret-fonnte-token");
+  });
+});
+
+/** `captureConsoleLog`, for a call whose RETURN value the test also needs. */
+function captureConsoleLogValue<T>(fn: () => T): T {
+  let value!: T;
+  captureConsoleLog(() => {
+    value = fn();
+  });
+  return value;
+}

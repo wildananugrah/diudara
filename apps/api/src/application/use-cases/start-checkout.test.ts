@@ -98,6 +98,9 @@ describe("StartCheckout — funds routing", () => {
           joinedAt: new Date(0),
         };
       },
+      async findById() {
+        throw new Error("not used");
+      },
     };
 
     const subscriptions: SubscriptionRepositoryPort = {
@@ -129,6 +132,9 @@ describe("StartCheckout — funds routing", () => {
         };
       },
       async findById() {
+        throw new Error("not used");
+      },
+      async findByIdWithCommunity() {
         throw new Error("not used");
       },
       async findTransactionByExternalId() {
@@ -305,6 +311,9 @@ function harness(options: { appBaseUrl?: string; canonicalSlug?: string } = {}) 
     async findOrCreateByWhatsappNumber(input) {
       return { id: "member-1", whatsappNumber: input.whatsappNumber, name: input.name, joinedAt: new Date(0) };
     },
+    async findById() {
+      throw new Error("not used");
+    },
   };
 
   const subscriptions: SubscriptionRepositoryPort = {
@@ -336,6 +345,9 @@ function harness(options: { appBaseUrl?: string; canonicalSlug?: string } = {}) 
       };
     },
     async findById() {
+      throw new Error("not used");
+    },
+    async findByIdWithCommunity() {
       throw new Error("not used");
     },
     async findTransactionByExternalId() {

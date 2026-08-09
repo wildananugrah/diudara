@@ -57,6 +57,18 @@ export interface SubscriptionRepositoryPort {
    * `findTransactionByExternalId` below, for the same reason.
    */
   findById(id: string): Promise<SubscriptionRecord | null>;
+  /**
+   * The subscription plus the community it belongs to, resolved through
+   * `subscription → membership_tier → community`.
+   *
+   * Exists because the outbox worker starts from a subscription id and needs the
+   * community to find the channels to grant — and there is no unscoped
+   * tier-by-id port method to reach it with, for the same reason `MarkPaidResult`
+   * carries `communityId`. Same MISS-not-error rule as `findById`.
+   */
+  findByIdWithCommunity(
+    id: string
+  ): Promise<{ subscription: SubscriptionRecord; communityId: string } | null>;
   createTransaction(input: {
     subscriptionId: string;
     amount: number;

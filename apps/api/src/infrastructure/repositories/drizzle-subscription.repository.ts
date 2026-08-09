@@ -92,6 +92,25 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
   }
 
   /**
+   * One join instead of a second port method the community-scoped tier
+   * repository could not provide — see the port docstring.
+   */
+  async findByIdWithCommunity(
+    id: string
+  ): Promise<{ subscription: SubscriptionRecord; communityId: string } | null> {
+    if (!UUID_PATTERN.test(id)) {
+      return null;
+    }
+    const [row] = await this.db
+      .select({ subscription: subscriptions, communityId: membershipTiers.communityId })
+      .from(subscriptions)
+      .innerJoin(membershipTiers, eq(subscriptions.tierId, membershipTiers.id))
+      .where(eq(subscriptions.id, id))
+      .limit(1);
+    return row ?? null;
+  }
+
+  /**
    * `id` arrives straight off an untrusted webhook body, so it is shape-checked
    * before it reaches the driver — see UUID_PATTERN above for why a malformed
    * value must be a miss and not an error.

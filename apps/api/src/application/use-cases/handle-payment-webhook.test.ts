@@ -72,6 +72,9 @@ function harness(
     async findById() {
       throw new Error("not used");
     },
+    async findByIdWithCommunity() {
+      throw new Error("not used");
+    },
     async findTransactionByExternalId(id) {
       calls.findTransactionByExternalId.push(id);
       order.push("find");
@@ -143,6 +146,9 @@ function harness(
       throw new Error("not used");
     },
     async markPermanentlyFailed() {
+      throw new Error("not used");
+    },
+    async reclaimStaleProcessing() {
       throw new Error("not used");
     },
   };

@@ -1,0 +1,82 @@
+/** A row of `channel_membership`: who currently has access to which channel. */
+export interface ChannelMembershipRecord {
+  id: string;
+  memberId: string;
+  channelId: string;
+  status: string;
+  /**
+   * The invite link issued to this member for this channel, or `null` when no
+   * grant has completed yet.
+   *
+   * A BEARER CREDENTIAL (plan, Global Constraints). It may reach the member who
+   * bought it and nothing else: never a log line, never an error message, never
+   * an API response. It lives here so a retried outbox row can tell "already
+   * granted" from "claimed but never finished" without asking the provider.
+   */
+  inviteLink: string | null;
+  grantedAt: Date;
+  revokedAt: Date | null;
+  updatedAt: Date;
+}
+
+/** A membership together with the channel it is for — one query, not two. */
+export interface ChannelMembershipWithChannel extends ChannelMembershipRecord {
+  channel: {
+    id: string;
+    communityId: string;
+    platform: string;
+    externalGroupId: string | null;
+  };
+}
+
+export interface ChannelMembershipClaim {
+  /**
+   * True when THIS caller is the one that must issue an invite link: either the
+   * row did not exist, or it existed as `revoked` and has been reactivated.
+   * False when another caller already holds an active membership — which is how
+   * a retried outbox row learns not to mint a second credential.
+   *
+   * `won: false` with `membership.inviteLink === null` is a THIRD case, and a
+   * real one: a previous attempt claimed the row and then died before the
+   * provider returned. The caller must finish that grant, or the member never
+   * gets a link.
+   */
+  won: boolean;
+  membership: ChannelMembershipRecord;
+}
+
+/**
+ * `channel_membership` is UNIQUE on `(member_id, channel_id)`, and that index is
+ * this phase's ENTIRE grant-idempotency mechanism (plan, Global Constraints).
+ *
+ * `claim` must therefore be a single conditional write whose outcome the database
+ * decides — never a read followed by a write. The stake is specific: an invite
+ * link is a bearer credential, so a second "successful" grant for the same pair
+ * hands out a second link that could be forwarded to someone who never paid.
+ * Phase 2 and Phase 3 each shipped a TOCTOU from a pre-check; this must not be
+ * the fourth.
+ */
+export interface ChannelMembershipRepositoryPort {
+  /** See `ChannelMembershipClaim`. Never throws on a losing claim. */
+  claim(input: { memberId: string; channelId: string }): Promise<ChannelMembershipClaim>;
+  /** Records the link the provider issued against an already-claimed row. */
+  recordGrant(membershipId: string, inviteLink: string): Promise<void>;
+  /**
+   * Marks an ACTIVE membership `revoked` with `revoked_at` set, and reports
+   * whether this call is the one that did it. Conditional on the current status,
+   * so two concurrent revocations produce one state change and one audit entry.
+   */
+  revoke(membershipId: string): Promise<boolean>;
+  /**
+   * The member's active memberships within ONE community, each with its channel.
+   * Community-scoped because every authenticated caller is: a creator may only
+   * act on their own community's channels.
+   *
+   * Ids that cannot be uuids are a MISS (`[]`), not a driver error — they arrive
+   * from a URL, and SQLSTATE 22P02 would become a 500 instead of a 404.
+   */
+  listActiveForMemberInCommunity(
+    memberId: string,
+    communityId: string
+  ): Promise<ChannelMembershipWithChannel[]>;
+}

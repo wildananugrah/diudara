@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, lt, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { outbox } from "../../db/schema";
 import type {
@@ -60,10 +60,15 @@ export class DrizzleOutboxRepository implements OutboxRepositoryPort {
    * dies mid-send never gets to report anything, and a counter that only advanced
    * on a clean failure would let such a row be retried forever.
    *
-   * Task 5 still owes the deterministic proof of this mechanism (a racing test
-   * alone is a probabilistic detector — a select-then-update mutant survived
-   * Phase 3's whole suite) plus the backoff and bounded-retry policy that reads
-   * `attempts`.
+   * PINNED DETERMINISTICALLY, and not by the racing test. Two tests in
+   * drizzle-outbox.repository.test.ts guard this shape without depending on the
+   * scheduler: one asserts the SQL that reaches the driver (one statement, `as
+   * materialized`, `for update skip locked`, no bare SELECT of the table), the
+   * other forces the interleaving by holding a claimed row's lock in an open
+   * transaction and requiring the next claim to step over it rather than block.
+   * Measured against a select-then-update rewrite: both fail 6/6 runs, while the
+   * racing test PASSED 3/3 — which is exactly why the racing test is a smoke
+   * check and these two are the guard.
    */
   async claimBatch(limit: number): Promise<ClaimedOutboxRow[]> {
     const claimed = await this.db.execute<{
@@ -123,7 +128,40 @@ export class DrizzleOutboxRepository implements OutboxRepositoryPort {
       .set({ status: "failed", lastError: truncate(error), updatedAt: new Date() })
       .where(eq(outbox.id, id));
   }
+
+  /**
+   * The counterpart to claiming at all: see the port docstring for why a row can
+   * be stranded in `processing` with nothing to move it.
+   *
+   * `updated_at` is the staleness clock, and `claimBatch` sets it to `now()` on
+   * every claim, so "processing and not touched for N minutes" means "the worker
+   * that took this is gone". One conditional UPDATE, so two workers reclaiming at
+   * the same moment cannot both take a row: the second re-checks
+   * `status = 'processing'` and finds nothing.
+   *
+   * `attempts` is deliberately untouched (port docstring), and `next_attempt_at`
+   * is left alone too — it was already due when the row was claimed, so the row
+   * becomes claimable the instant it is `pending` again.
+   */
+  async reclaimStaleProcessing(stuckBefore: Date): Promise<number> {
+    const reclaimed = await this.db
+      .update(outbox)
+      .set({ status: "pending", lastError: RECLAIM_NOTE, updatedAt: new Date() })
+      .where(and(eq(outbox.status, "processing"), lt(outbox.updatedAt, stuckBefore)))
+      .returning({ id: outbox.id });
+    return reclaimed.length;
+  }
 }
+
+/**
+ * Written to `last_error` by a reclaim. It replaces whatever diagnostic was
+ * there because the row's CURRENT state is what an operator needs: a row back in
+ * `pending` after its worker vanished is a different situation from one that
+ * failed cleanly, and a crash leaves no error message of its own.
+ */
+const RECLAIM_NOTE =
+  "reclaimed: this row was left in 'processing' by a worker that never reported back " +
+  "(crash, OOM or a lost box), and has been returned to 'pending' for another attempt";
 
 /**
  * Provider errors and stack-carrying messages routinely exceed 500 characters.

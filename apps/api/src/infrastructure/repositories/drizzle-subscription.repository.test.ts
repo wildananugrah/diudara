@@ -68,6 +68,29 @@ async function seedPendingCheckout(
   return { creator, community, tier, member, subscription, transaction };
 }
 
+describe("DrizzleSubscriptionRepository.findByIdWithCommunity", () => {
+  it("resolves the subscription and its community through the tier", async () => {
+    const { community, subscription } = await seedPendingCheckout();
+
+    const found = await repo.findByIdWithCommunity(subscription.id);
+
+    // This is how the outbox worker gets from a subscription id to the channels
+    // it must grant: `MembershipTierRepositoryPort` is community-scoped, so
+    // there is no unscoped tier-by-id lookup to walk instead.
+    expect(found?.communityId).toBe(community.id);
+    expect(found?.subscription.id).toBe(subscription.id);
+    expect(found?.subscription.memberId).toBe(subscription.memberId);
+  });
+
+  it("reports an unknown or malformed id as a miss, not an error", async () => {
+    expect(await repo.findByIdWithCommunity("3f1c9e0a-1111-4222-8333-444455556666")).toBeNull();
+    // `uuid = 'not-a-uuid'` is SQLSTATE 22P02, and the worker would record a
+    // driver error (which carries the statement's bound parameters) as the row's
+    // last_error instead of a plain "not found".
+    expect(await repo.findByIdWithCommunity("not-a-uuid")).toBeNull();
+  });
+});
+
 describe("DrizzleSubscriptionRepository.findTransactionByExternalId", () => {
   it("returns the transaction we recorded, with OUR amount", async () => {
     const { transaction } = await seedPendingCheckout("monthly", 50000);

@@ -1,9 +1,21 @@
+import { eq } from "drizzle-orm";
 import type { db as DbClient } from "../../db/client";
 import { members } from "../../db/schema";
 import type { MemberRecord, MemberRepositoryPort } from "../../application/ports/member-repository.port";
 
+/** Same guard, and the same reason, as `DrizzleSubscriptionRepository`. */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export class DrizzleMemberRepository implements MemberRepositoryPort {
   constructor(private readonly db: typeof DbClient) {}
+
+  async findById(id: string): Promise<MemberRecord | null> {
+    if (!UUID_PATTERN.test(id)) {
+      return null;
+    }
+    const [row] = await this.db.select().from(members).where(eq(members.id, id)).limit(1);
+    return row ?? null;
+  }
 
   /**
    * `member.whatsapp_number` is UNIQUE, so a second checkout from the same

@@ -11,6 +11,13 @@ import type {
 export class FakeMessagingAdapter implements MessagingProviderPort {
   readonly platform: string;
   readonly grants: GrantAccessInput[] = [];
+  /**
+   * Every link this adapter has handed out, in order. Tests assert on it to prove
+   * that a retried grant issues NO second link: an invite link is a bearer
+   * credential, so "one membership" is only half the property — the count of
+   * links minted is the other half.
+   */
+  readonly issuedLinks: string[] = [];
   readonly revocations: RevokeAccessInput[] = [];
   readonly notifications: NotifyInput[] = [];
   failNextGrant = false;
@@ -43,7 +50,14 @@ export class FakeMessagingAdapter implements MessagingProviderPort {
     }
     this.grants.push(input);
     this.counter += 1;
-    return { inviteLink: `https://fake-invite.local/${this.platform}/${this.counter}` };
+    const inviteLink = `https://fake-invite.local/${this.platform}/${this.counter}`;
+    this.issuedLinks.push(inviteLink);
+    return { inviteLink };
+  }
+
+  /** The most recent link, or `undefined` if nothing has been granted. */
+  get lastInviteLink(): string | undefined {
+    return this.issuedLinks[this.issuedLinks.length - 1];
   }
 
   async revokeAccess(input: RevokeAccessInput): Promise<void> {
