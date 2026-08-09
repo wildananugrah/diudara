@@ -110,8 +110,31 @@ export const subscriptions = pgTable(
     tierId: uuid("tier_id")
       .notNull()
       .references(() => membershipTiers.id),
+    /**
+     * `pending` | `active` | `cancelled` | `superseded`, plus `past_due` and
+     * `churned` added in Phase 5. Deliberately a varchar rather than a Postgres
+     * enum, so the two new values need no migration of their own — see
+     * `schema-phase5.test.ts`, which asserts they physically fit and round-trip.
+     */
     status: varchar("status", { length: 16 }).notNull().default("pending"),
     nextBillingDate: date("next_billing_date"),
+    /**
+     * When this subscription's grace period runs out — set once, when it ENTERS
+     * `past_due`, and null at every other time.
+     *
+     * Stored rather than recomputed on each pass, which is the point. If the job
+     * derived the deadline from `next_billing_date` every time it ran, then changing
+     * the grace length or the timezone reasoning later would retroactively move the
+     * deadline of everybody currently inside their grace period — including members
+     * who would be moved into the past and evicted by a config change they never saw.
+     * Written down, a deadline is a promise; computed, it is whatever today's code
+     * says.
+     *
+     * Nullable with no default, because a subscription that is not past due has no
+     * deadline. A `defaultNow()` here would put every new subscriber a fixed time
+     * from eviction.
+     */
+    graceEndsAt: timestamp("grace_ends_at", { withTimezone: true }),
     startedAt: timestamp("started_at", { withTimezone: true }),
     retryCount: integer("retry_count").notNull().default(0),
     lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
@@ -152,6 +175,58 @@ export const subscriptions = pgTable(
       .on(table.memberId, table.tierId)
       .where(sql`${table.status} = 'active'`),
   ],
+);
+
+/**
+ * One row per renewal reminder actually sent, keyed by the stage it was sent for.
+ *
+ * THIS TABLE IS A LOCK, NOT A LOG. Its reason to exist is the unique
+ * `(subscription_id, stage)` below: the reminder pass INSERTS here as the act of
+ * claiming the right to send, and the database decides whether that claim is the
+ * first one. A pass that runs twice — two workers, a restart mid-pass, a catch-up
+ * after downtime — then messages the member exactly once per stage.
+ *
+ * Doing it the other way round (select, decide, send, insert) is a TOCTOU under
+ * READ COMMITTED, in the same shape as the two invite links Phase 4 measured: two
+ * passes both read "no reminder yet" and both send. The member gets two WhatsApp
+ * messages about the same overdue payment, which reads as either a bug or a dunning
+ * campaign, and neither is what we meant.
+ */
+export const renewalReminders = pgTable(
+  "renewal_reminder",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subscriptionId: uuid("subscription_id")
+      .notNull()
+      .references(() => subscriptions.id),
+    /**
+     * One of `REMINDER_STAGES` in `domain/renewal-schedule.ts` — `pre_3d`, `due`,
+     * `overdue_1d`, `overdue_3d`, `overdue_7d`. A varchar rather than an enum, for
+     * the same reason `subscription.status` is: adding a stage should not need a
+     * migration. `dueStageFor` is what constrains the values in practice.
+     */
+    stage: varchar("stage", { length: 16 }).notNull(),
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    /**
+     * The reminder-once mechanism. It must be IN THE DATABASE, not merely in this
+     * file: Drizzle enforces nothing at runtime, so a definition that never reached
+     * Postgres would let a duplicate through in silence while the schema still
+     * looked correct. `schema-phase5.test.ts` asserts on this constraint's NAME in
+     * the raised Postgres error, so a version that exists only here fails the suite.
+     *
+     * Total, not partial: every stage of every subscription is claimed at most once,
+     * and there is no legitimate second send. A subscription that renews and later
+     * lapses again is a matter for whoever clears these rows on renewal (Task 6) —
+     * an explicit delete, so that re-lapsing sends reminders again by an act rather
+     * than by a gap in a predicate.
+     */
+    uniqueIndex("renewal_reminder_subscription_stage_unique").on(
+      table.subscriptionId,
+      table.stage
+    ),
+  ]
 );
 
 export const transactions = pgTable(

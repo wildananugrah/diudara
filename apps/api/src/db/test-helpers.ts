@@ -6,6 +6,7 @@ import {
   courses,
   activityLogs,
   transactions,
+  renewalReminders,
   subscriptions,
   channelMemberships,
   channels,
@@ -43,6 +44,10 @@ export async function resetDatabase() {
   await db.delete(courses);
   await db.delete(activityLogs);
   await db.delete(transactions);
+  // renewalReminders references subscriptions, so it must be cleared first — a
+  // single leftover reminder would otherwise make every later test file fail on an
+  // FK violation here rather than on anything it asserts.
+  await db.delete(renewalReminders);
   await db.delete(subscriptions);
   // channelMemberships references members and channels, so it must be
   // cleared before either. outbox has no FKs, so its position is free.
