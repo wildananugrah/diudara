@@ -182,6 +182,31 @@ export const subscriptions = pgTable(
     uniqueIndex("subscription_member_tier_active_unique")
       .on(table.memberId, table.tierId)
       .where(sql`${table.status} = 'active'`),
+    // ===================================================================
+    // THE TWO INDEXES PHASE 5'S HOURLY PASSES READ THROUGH.
+    //
+    // Neither existed when the passes shipped, and a comment in
+    // `apps/worker/src/scheduled-passes.ts` claimed both queries were indexed. Live
+    // `pg_indexes` on `subscription` held the primary key, `member_id`, `tier_id` and
+    // the partial active-unique above and nothing else, so both passes SEQ-SCANNED and
+    // SORTED the whole table every hour — and `findDueForRenewal`'s keyset pagination
+    // re-scanned it once per page, which is worse the bigger the backlog gets.
+    //
+    // Column order is (status, date) in both, and that is the useful way round: every
+    // status filter here is an equality against a small set and the date is a range, so
+    // the leading equality lets the index be scanned rather than merely filtered — and
+    // it delivers the rows in the order both queries sort by, which is what removes the
+    // sort as well as the scan.
+    index("subscription_status_next_billing_date_idx").on(
+      table.status,
+      table.nextBillingDate
+    ),
+    // `findPastGraceDeadline`: `status = 'past_due' and grace_ends_at < now`, ordered by
+    // the deadline. A far smaller slice of the table than the one above — only members
+    // inside their grace period are in it — which is exactly why the seq scan was easy
+    // to miss.
+    index("subscription_status_grace_ends_at_idx").on(table.status, table.graceEndsAt),
+    // ===================================================================
   ],
 );
 

@@ -36,9 +36,17 @@ import { PollLoop, resolveIntervalMs } from "./poll-loop";
  *
  * ONE HOUR makes the phase irrelevant. Whenever the worker happens to boot, a member
  * crosses into `past_due` — and a churned member loses access — within an hour of the
- * WIB midnight that decided it, and the cost is 24 passes a day against two indexed
- * queries, against the outbox pass's 17,280. The **effect** is still daily, because the
+ * WIB midnight that decided it, and the cost is 24 passes a day against two queries,
+ * against the outbox pass's 17,280. The **effect** is still daily, because the
  * schedule's unit is a day; only the latency changes.
+ *
+ * THOSE TWO QUERIES ARE INDEXED, and this comment used to say so before they were.
+ * `subscription_status_next_billing_date_idx` and `subscription_status_grace_ends_at_idx`
+ * (migration 0012) cover `findDueForRenewal` and `findPastGraceDeadline` respectively;
+ * without them both passes seq-scanned and SORTED the whole `subscription` table every
+ * hour, and the renewal pass's keyset pagination re-scanned it once per page. The claim
+ * is now pinned by `schema-phase5.test.ts`, which reads `pg_indexes` and the query plans
+ * rather than trusting a sentence in a docstring.
  *
  * Raise it (`WORKER_RENEWAL_INTERVAL_MS`) if the backlog ever makes a pass expensive;
  * lowering it below a minute buys nothing at all, because no second pass inside the
