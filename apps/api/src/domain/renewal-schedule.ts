@@ -22,6 +22,10 @@ export type ReminderStage = (typeof REMINDER_STAGES)[number];
 /**
  * How many whole Asia/Jakarta days after the due date each stage fires. Negative
  * is before. Must stay in the same order as `REMINDER_STAGES`, ascending.
+ *
+ * The day-1/3/7 cadence is the PRD's and is deliberately left alone. See `GRACE_DAYS`
+ * below for the constraint it puts on the grace period, and for why that constraint is
+ * satisfied by moving the deadline rather than by shortening these.
  */
 const STAGE_DAY_OFFSET: Record<ReminderStage, number> = {
   pre_3d: -3,
@@ -31,8 +35,48 @@ const STAGE_DAY_OFFSET: Record<ReminderStage, number> = {
   overdue_7d: 7,
 };
 
-/** How many days after the due date a past_due subscription stops being tolerated. */
-const GRACE_DAYS = 7;
+/**
+ * How many days after the due date a past_due subscription stops being tolerated.
+ *
+ * ==========================================================================
+ * THE INVARIANT: THE GRACE PERIOD MUST EXCEED THE LAST REMINDER OFFSET BY ENOUGH THAT
+ * THE FINAL WARNING IS ALWAYS CLAIMABLE WELL BEFORE CHURN.
+ *
+ * This was 7 — the same number as `overdue_7d`'s offset — and that made the "final
+ * warning" not a warning at all. The two boundaries are computed in different frames:
+ *
+ *   - `overdue_7d` becomes claimable at **00:00 WIB on day 7** (`dueStageFor` compares
+ *     Asia/Jakarta calendar days);
+ *   - the deadline is `next_billing_date + GRACE_DAYS`, and `next_billing_date` is a
+ *     Postgres `date` that parses as UTC midnight, so it landed at **07:00 WIB on day 7**.
+ *
+ * A seven-hour window — and `ProcessRenewals` and `ProcessChurn` run on two INDEPENDENT
+ * `PollLoop`s, so which of them reached the member first inside it was a race. Measured
+ * in Phase 5 Task 9 by walking the whole lifecycle in a running worker: churn won BOTH
+ * times, and the member was revoked having received `overdue_3d` as their last word. A
+ * member who had been down for four days became eligible for both at the same instant,
+ * which is the case that loses every time.
+ *
+ * Spec 6 says the pre-warning exists because the charge is now a MANUAL action the
+ * member must take, and Spec 8's table says nobody is removed without warning. Ten days
+ * leaves three whole days between the final warning and losing access: the smallest gap
+ * that is unambiguously not a race, and enough for a member to actually act on it.
+ *
+ * The reminder cadence is NOT the thing to shorten here. Day 1/3/7 comes from the PRD,
+ * where it described CHARGE RETRIES — something the system does. We reinterpreted it as
+ * reminders, which the member must act on; moving the deadline keeps the PRD's cadence
+ * and fixes the part we changed the meaning of.
+ *
+ * `renewal-schedule.test.ts` asserts this as a RELATIONSHIP (the last stage's offset
+ * against the deadline this produces, with a stated minimum gap), not as two literals,
+ * so editing one number alone fails.
+ *
+ * Changing it does not move any deadline already stored: `grace_ends_at` is written once,
+ * when a subscription enters `past_due`, precisely so a later config change cannot
+ * retroactively evict somebody (see the column comment in db/schema.ts).
+ * ==========================================================================
+ */
+const GRACE_DAYS = 10;
 
 /**
  * The single place an instant is turned into an Asia/Jakarta calendar day.

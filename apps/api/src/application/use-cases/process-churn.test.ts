@@ -28,11 +28,11 @@ const DUE_DATE = "2026-03-10";
 
 /**
  * The deadline `ProcessRenewals` stores for a subscription due on `DUE_DATE`:
- * `new Date("2026-03-10")` plus seven days. A LITERAL, like the one in
+ * `new Date("2026-03-10")` plus ten days. A LITERAL, like the one in
  * process-renewals.test.ts, so a change to `computeGraceEndsAt` cannot silently move a
  * deadline this file claims to pin.
  */
-const GRACE_ENDS_AT = new Date("2026-03-17T00:00:00.000Z");
+const GRACE_ENDS_AT = new Date("2026-03-20T00:00:00.000Z");
 
 /** `n` whole days after the grace deadline. Negative is before it. */
 function at(daysAfterGrace: number, hoursIntoDay = 9): Date {

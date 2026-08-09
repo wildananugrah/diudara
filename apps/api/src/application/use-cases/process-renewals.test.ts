@@ -48,11 +48,11 @@ function at(daysAfterDue: number, hoursIntoWibDay = 9): Date {
 
 /**
  * The grace deadline the pass must store for a subscription due on `DUE_DATE`:
- * `new Date("2026-03-10")` (UTC midnight, 07:00 WIB) plus seven days. Written out as a
+ * `new Date("2026-03-10")` (UTC midnight, 07:00 WIB) plus ten days. Written out as a
  * literal rather than recomputed with `computeGraceEndsAt`, so a change to the domain
  * helper cannot silently move a deadline this test claims to pin.
  */
-const EXPECTED_GRACE_ENDS_AT = "2026-03-17T00:00:00.000Z";
+const EXPECTED_GRACE_ENDS_AT = "2026-03-20T00:00:00.000Z";
 
 let seedCounter = 0;
 

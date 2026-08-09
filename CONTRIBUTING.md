@@ -88,7 +88,18 @@ The worker also runs Phase 5's two clock-driven passes:
 - **renewals** — the reminder schedule (`pre_3d`, `due`, `overdue_1d`, `overdue_3d`,
   `overdue_7d`) and the `active` → `past_due` transition;
 - **churn** — `past_due` past its stored `grace_ends_at` → `churned`, with a queued
-  revocation.
+  revocation. The grace period is **10 days** after the due date, deliberately not 7.
+
+That last number is load-bearing and easy to "tidy" back into a bug. `overdue_7d` is the
+final warning, and the grace period must exceed the last reminder offset by enough that
+the warning is always claimable well before churn. When both were 7 the warning opened at
+00:00 WIB on day 7 and the deadline fell at 07:00 WIB the same day — a seven-hour window
+in which the two passes, which run on independent loops, raced. Measured: churn won both
+times a lifecycle was walked in a real worker, so the member was revoked having received
+`overdue_3d` as their last word. `GRACE_DAYS` in `apps/api/src/domain/renewal-schedule.ts`
+has the full account, and `renewal-schedule.test.ts` asserts the *relationship* — the last
+stage's offset against the deadline, with a minimum gap — so changing one number alone
+fails rather than silently reintroducing the race.
 
 They run hourly by default, not every 5 seconds like the outbox, and not daily. See
 `DEFAULT_RENEWAL_INTERVAL_MS` in `apps/worker/src/scheduled-passes.ts` for the reasoning,

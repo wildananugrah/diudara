@@ -118,16 +118,43 @@ enqueues one reminder outbox row per applicable stage:
 | Stage | When | Effect |
 |---|---|---|
 | `pre_3d` | 3 days before due | Reminder; member can renew without ever losing access |
-| `due` | on the due date | `active` → `past_due`, `grace_ends_at` set |
+| `due` | on the due date | `active` → `past_due`, `grace_ends_at` set (= due date **+10 days**) |
 | `overdue_1d` | +1 day | Escalating reminder |
 | `overdue_3d` | +3 days | Escalating reminder |
-| `overdue_7d` | +7 days | Final warning |
+| `overdue_7d` | +7 days | **Final warning** — three whole days before access is revoked |
+| — | **+10 days** | Grace expires: `ProcessChurn` marks `churned` and revokes access |
 
 `ProcessChurn` (scheduled): finds `past_due` subscriptions past `grace_ends_at`, marks them
 `churned`, and enqueues a `revoke_access` outbox row → Telegram access removed.
 
 The pre-due reminder exists because the "charge" is now a **manual action the member must
 take**. A member who simply forgot should never be removed without warning.
+
+### Why the grace period is 10 days and not 7
+
+The grace period **must exceed the last reminder offset by enough that the final warning is
+always claimable well before churn.** It was originally 7 — the same number as `overdue_7d` —
+and that made the final warning not a warning:
+
+- `overdue_7d` becomes claimable at **00:00 WIB** on day 7 (stages compare Asia/Jakarta
+  calendar days);
+- the deadline is `next_billing_date + GRACE_DAYS`, and `next_billing_date` is a Postgres
+  `date` that parses as UTC midnight, so it landed at **07:00 WIB on the same day**.
+
+A seven-hour window — and `ProcessRenewals` and `ProcessChurn` run on two independent loops, so
+which reached the member first inside it was a race. Phase 5 Task 9 walked the lifecycle twice
+in a running worker and **churn won both times**: the member was revoked having received
+`overdue_3d` as their last word, which this section and §8 both forbid.
+
+The day-1/3/7 cadence is left exactly as it is — it comes from the PRD, where it described
+**charge retries**, something the system does. Reinterpreting it as reminders made it something
+the **member** must act on, and a member who must act needs time to act. Three days between the
+final warning and losing access is the smallest gap that is unambiguously not a race.
+`renewal-schedule.test.ts` pins this as a relationship between the last stage and the deadline,
+with a stated minimum gap, so editing either number alone fails.
+
+Changing the grace length never moves a deadline already stored: `grace_ends_at` is written
+once, on entering `past_due` (§4.4).
 
 ## 7. Renewal payment
 

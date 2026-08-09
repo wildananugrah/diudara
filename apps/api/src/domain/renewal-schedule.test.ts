@@ -62,8 +62,76 @@ describe("REMINDER_STAGES", () => {
 });
 
 describe("computeGraceEndsAt", () => {
-  it("is seven days after the due date", () => {
-    expect(computeGraceEndsAt(DUE).toISOString()).toBe(day(7).toISOString());
+  it("is ten days after the due date", () => {
+    expect(computeGraceEndsAt(DUE).toISOString()).toBe(day(10).toISOString());
+  });
+});
+
+/**
+ * THE INVARIANT THAT MAKES THE FINAL WARNING A WARNING, asserted as a RELATIONSHIP
+ * between the schedule and the grace period rather than as two literals.
+ *
+ * Both numbers used to be 7. That is not a rounding detail: `overdue_7d` becomes
+ * claimable at 00:00 WIB on day 7, while the deadline computed from the `date` column
+ * lands at 07:00 WIB the same day — a seven-hour window in which the reminder pass and
+ * the churn pass, two independent loops, race for the same member. Measured in Phase 5
+ * Task 9 by walking the lifecycle in a running worker: churn won BOTH times, and the
+ * member was removed having received `overdue_3d` as their last word.
+ *
+ * Spec 6 says the pre-warning exists because the charge is now a MANUAL action the
+ * member must take, and Spec 8 says nobody is removed without warning. A member who
+ * must act needs time to act, so the gap below is a real number of days and not merely
+ * "greater than zero".
+ *
+ * Written against the public API — the last entry of `REMINDER_STAGES`, and the
+ * deadline `computeGraceEndsAt` actually produces — so editing either constant alone
+ * fails here. A pair of literal assertions would let someone reintroduce the race by
+ * changing one number and updating the test that named it.
+ */
+describe("the grace period against the last reminder stage", () => {
+  /** Whole days between the due date and the deadline `computeGraceEndsAt` produces. */
+  function graceDays(): number {
+    return (computeGraceEndsAt(DUE).getTime() - DUE.getTime()) / 86_400_000;
+  }
+
+  /** The first whole day after the due date on which the LAST stage is claimable. */
+  function firstDayOfFinalStage(): number {
+    const finalStage = REMINDER_STAGES[REMINDER_STAGES.length - 1];
+    for (let offset = 0; offset <= 400; offset += 1) {
+      if (dueStageFor(DUE, day(offset)) === finalStage) return offset;
+    }
+    throw new Error(`no day within a year reaches the final stage ${finalStage}`);
+  }
+
+  /**
+   * How many whole days the member must still have after the final warning. Three,
+   * because that is the smallest gap that is unambiguously not a race: the passes run
+   * hourly, so a one-day gap survives a normal day but not a worker that was down, and
+   * a member told "your access is about to be revoked" needs a weekend to act.
+   */
+  const MINIMUM_DAYS_BETWEEN_FINAL_WARNING_AND_CHURN = 3;
+
+  it("leaves at least three whole days between the final warning and the deadline", () => {
+    expect(graceDays() - firstDayOfFinalStage()).toBeGreaterThanOrEqual(
+      MINIMUM_DAYS_BETWEEN_FINAL_WARNING_AND_CHURN
+    );
+  });
+
+  it("puts the deadline strictly after the final stage, never on the same day", () => {
+    // The 7/7 shape satisfied `>=` on the day number while still being a race, so the
+    // comparison that matters is against the WHOLE day the final stage opens on.
+    expect(graceDays()).toBeGreaterThan(firstDayOfFinalStage());
+  });
+
+  it("still has the member inside grace on the day the final warning is claimable", () => {
+    const grace = computeGraceEndsAt(DUE);
+    // Every hour of that WIB day, not just one: the reminder pass may run at any of
+    // them, and at none of them may the member already be revocable.
+    for (let hour = 0; hour < 24; hour += 1) {
+      const instant = new Date(day(firstDayOfFinalStage()).getTime() + hour * 3_600_000);
+      expect(dueStageFor(DUE, instant)).toBe(REMINDER_STAGES[REMINDER_STAGES.length - 1]);
+      expect(isPastGrace(grace, instant)).toBe(false);
+    }
   });
 });
 

@@ -86,7 +86,7 @@ describe("subscription.grace_ends_at", () => {
     // recomputed, so that a later timezone or config change cannot retroactively
     // move somebody's deadline. Until then there is no deadline, and null is how
     // the column says so — a default of now() would put every new subscriber
-    // one week from eviction.
+    // a fixed time from eviction.
     expect(subscription.graceEndsAt).toBeNull();
   });
 

@@ -574,6 +574,76 @@ async function waitUntilTwoBackendsBlockedOnSubscription(timeoutMs = 5000): Prom
   );
 }
 
+describe("the final warning lands BEFORE the grace deadline", () => {
+  it("delivers overdue_7d on day 7, leaves the member in the group, and churns after day 10", async () => {
+    // Task 9 walked this lifecycle in a running worker twice and `overdue_7d` fired
+    // NEITHER time: it becomes claimable at 00:00 WIB on day 7 and the deadline used to
+    // land at 07:00 WIB the same day, so the reminder pass and the churn pass — two
+    // independent PollLoops — raced for seven hours, and churn won both times. The
+    // member was removed having received `overdue_3d` as their last word, which Spec 6
+    // and Spec 8 both forbid. `GRACE_DAYS` is now 10.
+    const { community, tier } = await seedCommunity();
+    const h = harness();
+    const { subscriptionId, membership } = await firstPurchase(h, community.slug, tier.id);
+
+    // The whole schedule, one pass per stage, as a real member experiences it.
+    for (const dayOffset of [-3, 0, 1, 3, 7]) {
+      h.clock.set(at(dayOffset));
+      await h.renewals.execute();
+      // The churn pass runs on its own loop at the same cadence, so it gets a turn at
+      // every one of these instants. It must take nobody until the deadline.
+      await h.churn.execute();
+    }
+
+    // ALL FIVE stages, including the final warning.
+    expect(await reminderStages()).toEqual([
+      "pre_3d",
+      "due",
+      "overdue_1d",
+      "overdue_3d",
+      "overdue_7d",
+    ]);
+    // And each one was actually queued for delivery, not merely claimed.
+    const queued = await db
+      .select()
+      .from(outbox)
+      .where(eq(outbox.eventType, OUTBOX_SEND_RENEWAL_REMINDER));
+    expect(queued).toHaveLength(5);
+
+    // Day 7: warned, still past_due, still in the group.
+    const warned = await reloadSubscription(subscriptionId);
+    expect(warned.status).toBe("past_due");
+    expect(warned.graceEndsAt?.toISOString()).toBe("2026-03-20T00:00:00.000Z");
+    expect(await db.select().from(activityLogs).where(eq(activityLogs.eventType, "churned")))
+      .toHaveLength(0);
+
+    // Late on day 9 — two whole days after the final warning — still inside grace.
+    h.clock.set(at(9, 23));
+    expect((await h.churn.execute()).churned).toBe(0);
+    expect((await reloadSubscription(subscriptionId)).status).toBe("past_due");
+    const [stillIn] = await db
+      .select()
+      .from(channelMemberships)
+      .where(eq(channelMemberships.id, membership.id));
+    expect(stillIn.status).toBe("active");
+
+    // Past the stored deadline (07:00 WIB on day 10) — now they churn.
+    h.clock.set(at(10));
+    expect((await h.churn.execute()).churned).toBe(1);
+    expect((await reloadSubscription(subscriptionId)).status).toBe("churned");
+
+    // No extra reminder was invented in the three days the change added: the schedule
+    // stays at its final stage rather than growing a stage to fill the gap.
+    expect(await reminderStages()).toEqual([
+      "pre_3d",
+      "due",
+      "overdue_1d",
+      "overdue_3d",
+      "overdue_7d",
+    ]);
+  });
+});
+
 describe("payment AFTER revocation — a genuinely new grant", () => {
   it("unbans BEFORE issuing the invite, at the provider boundary", async () => {
     // Phase 4 built this path and nothing had used it: `banChatMember` also blocks the
@@ -596,10 +666,12 @@ describe("payment AFTER revocation — a genuinely new grant", () => {
     });
     expect(recorded.outcome).toBe("recorded");
 
-    // Phase two: they never renew, and the churn pass evicts them.
+    // Phase two: they never renew, and the churn pass evicts them. Day 11 — past the
+    // day-10 grace deadline, which sits three days beyond the `overdue_7d` warning so
+    // that the warning is never racing the eviction (see GRACE_DAYS).
     first.clock.set(at(0));
     await first.renewals.execute();
-    first.clock.set(at(8));
+    first.clock.set(at(11));
     const churned = await first.churn.execute();
     expect(churned.churned).toBe(1);
     await first.systemRevoke.execute({ subscriptionId });
@@ -623,7 +695,7 @@ describe("payment AFTER revocation — a genuinely new grant", () => {
         );
       },
     });
-    const second = harness({ gating: realTelegram, now: at(8) });
+    const second = harness({ gating: realTelegram, now: at(11) });
 
     const repay = await second.startCheckout.execute({
       slug: community.slug,
