@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { membershipTiers, subscriptions, transactions } from "../../db/schema";
 import type {
@@ -32,6 +32,17 @@ const PENDING = "pending";
  * to look at. See `MarkPaidOutcome`.
  */
 const SUCCESS = "success";
+
+/** `subscription.status` for a member who currently has access. */
+const ACTIVE_SUBSCRIPTION = "active";
+
+/**
+ * `subscription.status` for the LOSER of a double-submit: the member already had
+ * an active subscription to this tier, so this one was never granted. `cancelled`
+ * rather than a new status because Phase 5's churn logic already knows it, and an
+ * unrecognised status would make a superseded row look like a live membership.
+ */
+const SUPERSEDED_SUBSCRIPTION = "cancelled";
 
 export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
@@ -212,6 +223,8 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
       // inside the transaction that is already open.
       const [context] = await tx
         .select({
+          memberId: subscriptions.memberId,
+          tierId: subscriptions.tierId,
           startedAt: subscriptions.startedAt,
           billingCycle: membershipTiers.billingCycle,
           communityId: membershipTiers.communityId,
@@ -224,18 +237,67 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         throw new Error(`markPaid: subscription for transaction ${input.transactionId} not found`);
       }
 
+      // `not exists` is IN the predicate, so a subscription that is being
+      // superseded never briefly reads as active — and the exclusion of the row
+      // itself is what keeps a RENEWAL working, since a renewal settles a new
+      // transaction against a subscription that is already active.
+      //
+      // This predicate is the graceful path, not the guarantee. Under READ
+      // COMMITTED two concurrent activations cannot see each other's uncommitted
+      // row, so both would pass it; `subscription_member_tier_active_unique` is
+      // what actually arbitrates that, and the loser's transaction rolls back with
+      // the webhook event id unspent so the provider's retry takes this path.
+      //
+      // Written as a raw fragment because the subquery needs a self-ALIAS and
+      // neither drizzle's `alias()` (it renders the alias name with no FROM entry)
+      // nor `notExists()` with a sub-builder survives being embedded in an UPDATE's
+      // WHERE on drizzle 0.45. The column names are therefore literal — if
+      // `subscription.member_id`, `tier_id`, `status` or `id` is ever renamed in
+      // db/schema.ts, this fragment must be renamed with it, and the tests in
+      // drizzle-subscription.repository.test.ts fail loudly if it is not.
       const [subscription] = await tx
         .update(subscriptions)
         .set({
-          status: "active",
+          status: ACTIVE_SUBSCRIPTION,
           startedAt: context.startedAt ?? input.paidAt,
           nextBillingDate: computeNextBillingDate(input.paidAt, context.billingCycle),
           updatedAt: now,
         })
-        .where(eq(subscriptions.id, transaction.subscriptionId))
+        .where(
+          and(
+            eq(subscriptions.id, transaction.subscriptionId),
+            sql`not exists (
+              select 1 from ${subscriptions} sibling
+              where sibling.member_id = ${context.memberId}
+                and sibling.tier_id = ${context.tierId}
+                and sibling.status = ${ACTIVE_SUBSCRIPTION}
+                and sibling.id <> ${transaction.subscriptionId}
+            )`
+          )
+        )
         .returning();
+
       if (!subscription) {
-        throw new Error(`markPaid: subscription for transaction ${input.transactionId} not found`);
+        // The row exists — `context` came from it — so zero rows here means only
+        // one thing: the member already holds an active subscription to this tier.
+        // A double-submit at checkout. Supersede rather than grant twice; see
+        // MarkPaidOutcome for why the transaction still settles as `success`.
+        const [cancelled] = await tx
+          .update(subscriptions)
+          .set({ status: SUPERSEDED_SUBSCRIPTION, updatedAt: now })
+          .where(eq(subscriptions.id, transaction.subscriptionId))
+          .returning();
+        if (!cancelled) {
+          throw new Error(
+            `markPaid: subscription for transaction ${input.transactionId} not found`
+          );
+        }
+        return {
+          outcome: "superseded",
+          transaction,
+          subscription: cancelled,
+          communityId: context.communityId,
+        };
       }
 
       return {

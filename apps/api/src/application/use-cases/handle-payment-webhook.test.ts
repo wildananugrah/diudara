@@ -33,6 +33,31 @@ function transactionRecord(overrides: Partial<TransactionRecord> = {}): Transact
   };
 }
 
+/**
+ * The settled-transaction-plus-subscription payload `markPaid` returns. Shared by
+ * the `activated` and `superseded` outcomes because they carry the SAME shape and
+ * differ only in the discriminant and in the subscription's status — which is
+ * exactly the thing the caller has to branch on.
+ */
+function activationResult(paidAt: Date) {
+  return {
+    transaction: transactionRecord({ status: "success", paidAt }),
+    subscription: {
+      id: "sub-1",
+      memberId: "member-1",
+      tierId: "tier-1",
+      status: "active",
+      nextBillingDate: "2026-09-09",
+      startedAt: paidAt,
+      retryCount: 0,
+      lastAttemptAt: null,
+      createdAt: new Date("2026-08-09T09:00:00Z"),
+      updatedAt: new Date("2026-08-09T10:00:00Z"),
+    },
+    communityId: "community-1",
+  };
+}
+
 interface Calls {
   findTransactionByExternalId: string[];
   recordIfNew: string[];
@@ -55,6 +80,11 @@ function harness(
      * today that means `failed`.
      */
     conflictingStatus?: string;
+    /**
+     * `markPaid` reports the member already holds an active subscription to this
+     * tier, so this one was cancelled instead of activated.
+     */
+    superseded?: boolean;
   } = {}
 ) {
   const calls: Calls = {
@@ -95,29 +125,24 @@ function harness(
       if (options.failMarkPaid === true) {
         throw new Error("activation blew up");
       }
+      if (options.superseded === true) {
+        // The real repository returns the CANCELLED row here, and the transaction
+        // is still `success` — the money arrived. Mirrored so a test cannot pass
+        // against a fake that is rosier than the thing it stands for.
+        const settled = activationResult(input.paidAt);
+        return {
+          ...settled,
+          outcome: "superseded",
+          subscription: { ...settled.subscription, status: "cancelled", startedAt: null },
+        };
+      }
       if (options.conflictingStatus !== undefined) {
         return { outcome: "conflicting_status", status: options.conflictingStatus };
       }
       if (options.alreadySettled === true) {
         return { outcome: "already_settled", status: "success" };
       }
-      return {
-        outcome: "activated",
-        transaction: transactionRecord({ status: "success", paidAt: input.paidAt }),
-        subscription: {
-          id: "sub-1",
-          memberId: "member-1",
-          tierId: "tier-1",
-          status: "active",
-          nextBillingDate: "2026-09-09",
-          startedAt: input.paidAt,
-          retryCount: 0,
-          lastAttemptAt: null,
-          createdAt: new Date("2026-08-09T09:00:00Z"),
-          updatedAt: new Date("2026-08-09T10:00:00Z"),
-        },
-        communityId: "community-1",
-      };
+      return { ...activationResult(input.paidAt), outcome: "activated" };
     },
   };
 
@@ -453,6 +478,8 @@ describe("HandlePaymentWebhook", () => {
     });
 
     it("treats any unrecognised status the same way, not just failed", async () => {
+      // NOTE: kept adjacent to the superseded block below on purpose — both are
+      // non-activating outcomes and both must leave `calls.enqueued` empty.
       // `transaction.status` is a varchar, not an enum. A status a later phase
       // adds must fail closed rather than be absorbed as a duplicate.
       for (const status of ["refunded", "expired", "chargeback", "PENDING"]) {
@@ -464,6 +491,56 @@ describe("HandlePaymentWebhook", () => {
         expect(thrown).toBeInstanceOf(ConflictError);
         expect(calls.enqueued).toEqual([]);
       }
+    });
+  });
+
+  /**
+   * Task 7 item 3. `markPaid` reports `superseded` when the member already holds an
+   * active subscription to this tier, and the ONE thing that must not happen then
+   * is a second `grant_access` row: that is a second single-use invite link for the
+   * same member, which they can forward to somebody who never paid.
+   */
+  describe("a payment superseded by an existing active subscription", () => {
+    it("does NOT enqueue a grant_access row", async () => {
+      const { useCase, calls } = harness({ superseded: true });
+
+      await captureWarnings(() => useCase.execute(paidEvent()));
+
+      expect(calls.enqueued).toEqual([]);
+    });
+
+    it("answers 2xx-shaped: not activated, and not a duplicate either", async () => {
+      // `duplicate: true` would be wrong — this is a distinct, handled state, and
+      // a caller branching on it must be able to tell them apart.
+      const { useCase } = harness({ superseded: true });
+
+      let result: unknown;
+      await captureWarnings(async () => {
+        result = await useCase.execute(paidEvent());
+      });
+
+      expect(result).toEqual({ activated: false, duplicate: false });
+    });
+
+    it("audits it as access_not_granted with the reason and the amount", async () => {
+      const { useCase, calls } = harness({ superseded: true });
+
+      await captureWarnings(() => useCase.execute(paidEvent()));
+
+      expect(calls.activity).toEqual([
+        { memberId: "member-1", communityId: "community-1", eventType: "access_not_granted" },
+      ]);
+    });
+
+    it("says out loud that a refund is likely owed", async () => {
+      const { useCase } = harness({ superseded: true });
+
+      const warnings = await captureWarnings(() => useCase.execute(paidEvent()));
+
+      const text = warnings.join("\n");
+      expect(text).toContain("superseded");
+      expect(text).toContain("refund");
+      expect(text).toContain(TRANSACTION_ID);
     });
   });
 

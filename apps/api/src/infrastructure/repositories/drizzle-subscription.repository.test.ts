@@ -374,6 +374,240 @@ describe("DrizzleSubscriptionRepository.markPaid", () => {
     });
   });
 
+  /**
+   * Task 7 item 3, at the level the decision is made. The route test proves the
+   * API behaviour; this proves the mechanism, including the one thing an HTTP test
+   * cannot reach — that the DATABASE, not the predicate, is the arbiter.
+   */
+  describe("a second subscription to a tier the member already holds", () => {
+    /** A second PENDING subscription for the same member and tier, plus its transaction. */
+    async function duplicatePendingSubscription(seed: {
+      member: { id: string };
+      tier: { id: string };
+    }) {
+      const subscription = await repo.createPending({
+        memberId: seed.member.id,
+        tierId: seed.tier.id,
+      });
+      const transaction = await repo.createTransaction({
+        subscriptionId: subscription.id,
+        amount: 50000,
+        paymentMethod: "invoice",
+      });
+      return { subscription, transaction };
+    }
+
+    it("reports superseded and cancels the duplicate rather than activating it", async () => {
+      const seed = await seedPendingCheckout();
+      await settle({
+        transactionId: seed.transaction.id,
+        gatewayReferenceId: "inv_xendit_1",
+        paidAt: new Date("2026-08-09T10:00:00Z"),
+      });
+      const duplicate = await duplicatePendingSubscription(seed);
+
+      const outcome = await repo.markPaid({
+        transactionId: duplicate.transaction.id,
+        gatewayReferenceId: "inv_xendit_2",
+        paidAt: new Date("2026-08-09T10:00:05Z"),
+      });
+
+      expect(outcome.outcome).toBe("superseded");
+      const [row] = await db
+        .select()
+        .from(subscriptions)
+        .where(eq(subscriptions.id, duplicate.subscription.id));
+      expect(row.status).toBe("cancelled");
+      // Never activated, so it never gets a billing date either — a cancelled row
+      // with next_billing_date set would look like a live membership to Phase 5.
+      expect(row.nextBillingDate).toBeNull();
+      expect(row.startedAt).toBeNull();
+    });
+
+    it("leaves the FIRST subscription exactly as it was", async () => {
+      const seed = await seedPendingCheckout();
+      const first = await settle({
+        transactionId: seed.transaction.id,
+        gatewayReferenceId: "inv_xendit_1",
+        paidAt: new Date("2026-08-09T10:00:00Z"),
+      });
+      const duplicate = await duplicatePendingSubscription(seed);
+
+      await repo.markPaid({
+        transactionId: duplicate.transaction.id,
+        gatewayReferenceId: "inv_xendit_2",
+        paidAt: new Date("2026-09-09T10:00:00Z"),
+      });
+
+      const [row] = await db
+        .select()
+        .from(subscriptions)
+        .where(eq(subscriptions.id, seed.subscription.id));
+      expect(row.status).toBe("active");
+      // The duplicate must not buy a free extra month on the real membership.
+      expect(row.nextBillingDate).toBe(first.subscription.nextBillingDate);
+    });
+
+    it("still settles the money, so the refund owed is on the record", async () => {
+      const seed = await seedPendingCheckout();
+      await settle({
+        transactionId: seed.transaction.id,
+        gatewayReferenceId: "inv_xendit_1",
+        paidAt: new Date("2026-08-09T10:00:00Z"),
+      });
+      const duplicate = await duplicatePendingSubscription(seed);
+      const paidAt = new Date("2026-08-09T10:00:05Z");
+
+      await repo.markPaid({
+        transactionId: duplicate.transaction.id,
+        gatewayReferenceId: "inv_xendit_2",
+        paidAt,
+      });
+
+      const [tx] = await db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, duplicate.transaction.id));
+      expect(tx.status).toBe("success");
+      expect(tx.paidAt?.toISOString()).toBe(paidAt.toISOString());
+      expect(tx.gatewayReferenceId).toBe("inv_xendit_2");
+    });
+
+    it("does not supersede a duplicate for a DIFFERENT tier", async () => {
+      // Two tiers in the same community is a normal configuration, and a member may
+      // hold both. The rule is per (member, tier), not per member.
+      const seed = await seedPendingCheckout();
+      await settle({
+        transactionId: seed.transaction.id,
+        gatewayReferenceId: "inv_xendit_1",
+        paidAt: new Date("2026-08-09T10:00:00Z"),
+      });
+      const [otherTier] = await db
+        .insert(membershipTiers)
+        .values({
+          communityId: seed.community.id,
+          name: "Premium",
+          priceAmount: 150000,
+          billingCycle: "monthly",
+        })
+        .returning();
+      const second = await duplicatePendingSubscription({
+        member: seed.member,
+        tier: otherTier,
+      });
+
+      const outcome = await repo.markPaid({
+        transactionId: second.transaction.id,
+        gatewayReferenceId: "inv_xendit_2",
+        paidAt: new Date("2026-08-09T10:00:05Z"),
+      });
+
+      expect(outcome.outcome).toBe("activated");
+    });
+
+    it("does not supersede a duplicate for a DIFFERENT member", async () => {
+      const seed = await seedPendingCheckout();
+      await settle({
+        transactionId: seed.transaction.id,
+        gatewayReferenceId: "inv_xendit_1",
+        paidAt: new Date("2026-08-09T10:00:00Z"),
+      });
+      const [otherMember] = await db
+        .insert(members)
+        .values({ whatsappNumber: `+628999${Date.now()}`.slice(0, 15), name: "Agus" })
+        .returning();
+      const second = await duplicatePendingSubscription({
+        member: otherMember,
+        tier: seed.tier,
+      });
+
+      const outcome = await repo.markPaid({
+        transactionId: second.transaction.id,
+        gatewayReferenceId: "inv_xendit_2",
+        paidAt: new Date("2026-08-09T10:00:05Z"),
+      });
+
+      expect(outcome.outcome).toBe("activated");
+    });
+
+    /**
+     * The predicate is not the guarantee — under READ COMMITTED two concurrent
+     * activations cannot see each other's uncommitted row, so both would pass it.
+     * `subscription_member_tier_active_unique` is what actually arbitrates, and
+     * this asserts it exists IN THE DATABASE rather than only in schema.ts.
+     */
+    it("is arbitrated by the database: two active rows for one (member, tier) are refused", async () => {
+      const seed = await seedPendingCheckout();
+      await settle({
+        transactionId: seed.transaction.id,
+        gatewayReferenceId: "inv_xendit_1",
+        paidAt: new Date("2026-08-09T10:00:00Z"),
+      });
+      const duplicate = await duplicatePendingSubscription(seed);
+
+      // Straight past markPaid, the way a lost race would land. The constraint name
+      // is on the driver error drizzle wraps, not on the wrapper's message, so this
+      // reads `cause` — asserting the name and not merely "something failed" is what
+      // makes this test about THIS index.
+      let violation: { constraint_name?: string } | undefined;
+      try {
+        await db
+          .update(subscriptions)
+          .set({ status: "active" })
+          .where(eq(subscriptions.id, duplicate.subscription.id));
+      } catch (err) {
+        violation = (err as { cause?: { constraint_name?: string } }).cause;
+      }
+      expect(violation?.constraint_name).toBe("subscription_member_tier_active_unique");
+    });
+
+    it("permits many CANCELLED and PENDING duplicates — only `active` is unique", async () => {
+      // The index is partial on purpose: duplicate history is legitimate, and a
+      // total unique index would break re-subscribing after a churn.
+      const seed = await seedPendingCheckout();
+      const first = await duplicatePendingSubscription(seed);
+      const second = await duplicatePendingSubscription(seed);
+      await db
+        .update(subscriptions)
+        .set({ status: "cancelled" })
+        .where(eq(subscriptions.id, first.subscription.id));
+      await db
+        .update(subscriptions)
+        .set({ status: "cancelled" })
+        .where(eq(subscriptions.id, second.subscription.id));
+
+      const rows = await db
+        .select()
+        .from(subscriptions)
+        .where(eq(subscriptions.memberId, seed.member.id));
+      expect(rows).toHaveLength(3);
+    });
+
+    it("still activates a RENEWAL against the same subscription", async () => {
+      // A renewal settles a NEW transaction against a subscription that is already
+      // active, which is why the predicate excludes the row itself.
+      const seed = await seedPendingCheckout();
+      await settle({
+        transactionId: seed.transaction.id,
+        gatewayReferenceId: "inv_xendit_1",
+        paidAt: new Date("2026-08-09T10:00:00Z"),
+      });
+      const renewal = await repo.createTransaction({
+        subscriptionId: seed.subscription.id,
+        amount: 50000,
+        paymentMethod: "invoice",
+      });
+
+      const outcome = await repo.markPaid({
+        transactionId: renewal.id,
+        gatewayReferenceId: "inv_xendit_2",
+        paidAt: new Date("2026-09-09T10:00:00Z"),
+      });
+
+      expect(outcome.outcome).toBe("activated");
+    });
+  });
+
   describe("attachGatewayReference", () => {
     it("records the provider's invoice id and bumps updated_at", async () => {
       const { transaction } = await seedPendingCheckout();

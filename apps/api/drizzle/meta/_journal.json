@@ -57,6 +57,13 @@
       "when": 1786246516029,
       "tag": "0007_hesitant_toro",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786249022572,
+      "tag": "0008_wealthy_komodo",
+      "breakpoints": true
     }
   ]
 }

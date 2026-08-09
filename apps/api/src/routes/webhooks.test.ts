@@ -48,12 +48,26 @@ async function checkout(
       }),
     })
   ).json();
+  return {
+    communityId: community.id,
+    slug: community.slug as string,
+    tierId: created.id as string,
+    ...(await buy(a, community.slug, created.id)),
+  };
+}
+
+/**
+ * One trip through `POST /c/:slug/checkout`, for the same payer every time — so
+ * calling it twice against the same tier is exactly the double-submit that
+ * produces two pending subscriptions for one (member, tier).
+ */
+async function buy(a: ReturnType<typeof app>, slug: string, tierId: string) {
   const result = await (
-    await a.request(`/c/${community.slug}/checkout`, {
+    await a.request(`/c/${slug}/checkout`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        tierId: created.id,
+        tierId,
         payerName: "Siti",
         payerWhatsappNumber: "+6281234567890",
       }),
@@ -70,9 +84,8 @@ async function checkout(
     .where(eq(transactions.id, result.transactionId));
 
   return {
-    communityId: community.id,
-    subscriptionId: result.subscriptionId,
-    externalId: result.transactionId,
+    subscriptionId: result.subscriptionId as string,
+    externalId: result.transactionId as string,
     invoiceId: tx.gatewayReferenceId!,
   };
 }
@@ -517,6 +530,97 @@ describe("POST /webhooks/xendit", () => {
       expect((await subscriptionRow(subscriptionId)).status).toBe("active");
       expect(await db.select().from(outbox)).toHaveLength(1);
       expect(await db.select().from(activityLogs)).toHaveLength(1);
+    });
+  });
+
+  /**
+   * Task 7 item 3. A double-submit at checkout creates TWO pending subscriptions
+   * for one (member, tier) — nothing prevented it and nothing decided which was
+   * authoritative. Phase 4 is the first phase to act on one: each activation
+   * enqueues a `grant_access` row, so the member is invited twice and holds two
+   * single-use bearer credentials for the same group, one of which they can hand
+   * to somebody who never paid.
+   *
+   * The rule: the FIRST one to activate is authoritative, and a later activation
+   * for the same (member, tier) is superseded — recorded, `cancelled`, and NOT
+   * granted. The transaction still settles as `success`, because the money really
+   * did arrive and pretending otherwise would hide a refund that is owed.
+   */
+  describe("a second pending subscription for the same member and tier", () => {
+    it("does not activate twice or queue a second invite", async () => {
+      const a = app();
+      const first = await checkout(a);
+      // The double-submit: same payer, same tier, a second pending subscription.
+      const second = await buy(a, first.slug, first.tierId);
+      expect(second.subscriptionId).not.toBe(first.subscriptionId);
+
+      expect((await post(a, verifiedEvent(first.externalId, first.invoiceId))).status).toBe(200);
+      const res = await post(a, verifiedEvent(second.externalId, second.invoiceId));
+
+      // A 2xx: there is nothing for the provider to retry, and this is a state we
+      // have handled, not an error.
+      expect(res.status).toBe(200);
+      // THE assertion, first: two rows here means two invite links for one paying
+      // member, and both subscriptions read `active` either way.
+      expect(await db.select().from(outbox)).toHaveLength(1);
+      expect((await subscriptionRow(first.subscriptionId)).status).toBe("active");
+      expect((await subscriptionRow(second.subscriptionId)).status).toBe("cancelled");
+    });
+
+    it("records the money as collected, so the refund owed is visible", async () => {
+      const a = app();
+      const first = await checkout(a);
+      const second = await buy(a, first.slug, first.tierId);
+
+      await post(a, verifiedEvent(first.externalId, first.invoiceId));
+      await post(a, verifiedEvent(second.externalId, second.invoiceId));
+
+      const [tx] = await db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, second.externalId));
+      expect(tx.status).toBe("success");
+      expect(tx.paidAt).not.toBeNull();
+    });
+
+    it("audits WHY the second one was not granted", async () => {
+      const a = app();
+      const first = await checkout(a);
+      const second = await buy(a, first.slug, first.tierId);
+
+      await post(a, verifiedEvent(first.externalId, first.invoiceId));
+      await post(a, verifiedEvent(second.externalId, second.invoiceId));
+
+      const logs = await db.select().from(activityLogs);
+      // One "joined" for the authoritative activation, one explaining the other.
+      expect(logs.map((l) => l.eventType).sort()).toEqual(["access_not_granted", "joined"]);
+      const notGranted = logs.find((l) => l.eventType === "access_not_granted")!;
+      expect(JSON.stringify(notGranted.metadata)).toContain("duplicate_active_subscription");
+      expect(JSON.stringify(notGranted.metadata)).toContain(second.subscriptionId);
+    });
+
+    it("still activates a RENEWAL of the same subscription", async () => {
+      // The rule must not break the ordinary case it resembles: a renewal is a new
+      // transaction against the SAME subscription, which is already active.
+      const a = app();
+      const first = await checkout(a);
+      await post(a, verifiedEvent(first.externalId, first.invoiceId));
+
+      const [renewal] = await db
+        .insert(transactions)
+        .values({
+          subscriptionId: first.subscriptionId,
+          amount: 50000,
+          paymentMethod: "invoice",
+          gatewayReferenceId: "inv_renewal_1",
+        })
+        .returning();
+
+      const res = await post(a, verifiedEvent(renewal.id, "inv_renewal_1"));
+
+      expect(res.status).toBe(200);
+      expect((await subscriptionRow(first.subscriptionId)).status).toBe("active");
+      expect(await db.select().from(outbox)).toHaveLength(2);
     });
   });
 

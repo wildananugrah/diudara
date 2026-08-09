@@ -227,6 +227,41 @@ export class HandlePaymentWebhook {
         );
       }
 
+      if (paid.outcome === "superseded") {
+        // A double-submit at checkout produced two pending subscriptions for one
+        // (member, tier), and the member already holds an active one. The payment
+        // settled — the money arrived — but this subscription was `cancelled`
+        // rather than activated, so NOTHING BELOW RUNS: the outbox enqueue is what
+        // Phase 4 turns into an invite link, and a second link for the same member
+        // is a second bearer credential they could forward to someone who never
+        // paid. That omission is the point of this branch.
+        //
+        // Still audited, so a creator can see the duplicate and refund it. A 2xx,
+        // because there is nothing for the provider to retry.
+        console.warn(
+          `[payments] payment superseded by an existing active subscription: provider=xendit ` +
+            `transaction=${transaction.id} subscription=${paid.subscription.id} ` +
+            `member=${paid.subscription.memberId} tier=${paid.subscription.tierId} ` +
+            `amount=${transaction.amount} event=${safeLabel(input.eventType)} — the ` +
+            "subscription was cancelled, no access was granted, and a refund is likely owed"
+        );
+        await repositories.activityLog.record({
+          memberId: paid.subscription.memberId,
+          communityId: paid.communityId,
+          // The same event type GrantChannelAccess uses for "we did not grant, and
+          // here is why", so a dashboard needs no new vocabulary.
+          eventType: "access_not_granted",
+          metadata: {
+            reason: "duplicate_active_subscription",
+            source: "xendit_webhook",
+            subscriptionId: paid.subscription.id,
+            transactionId: transaction.id,
+            amount: transaction.amount,
+          },
+        });
+        return { activated: false, duplicate: false };
+      }
+
       const { subscription, communityId } = paid;
 
       await repositories.activityLog.record({

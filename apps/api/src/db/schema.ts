@@ -128,6 +128,29 @@ export const subscriptions = pgTable(
   (table) => [
     index("subscription_member_id_idx").on(table.memberId),
     index("subscription_tier_id_idx").on(table.tierId),
+    // A double-submit at checkout creates two PENDING subscriptions for one
+    // (member, tier) and nothing decided which was authoritative. Phase 4 is the
+    // first phase to act on one — activation enqueues a `grant_access` row — so
+    // two activations mean two single-use invite links for the same member, one of
+    // which can be handed to somebody who never paid.
+    //
+    // A member can only hold ONE active membership of a given tier: a renewal
+    // updates the same subscription row (`markPaid` moves next_billing_date), it
+    // does not create another. This index is what ARBITRATES that, rather than the
+    // `not exists` predicate in markPaid — under READ COMMITTED two concurrent
+    // activations cannot see each other's uncommitted row, so the predicate alone
+    // is a TOCTOU. The predicate handles the ordinary already-committed case
+    // gracefully; a true race violates this index, the transaction rolls back with
+    // the webhook event id unspent, and the provider's retry then takes the
+    // graceful path.
+    //
+    // PARTIAL, on `active` only: `pending`, `cancelled` and `expired` duplicates
+    // are all legitimate history. Added while every subscription row in existence
+    // is a test row — retrofitting it over real duplicates needs a cleanup
+    // migration first.
+    uniqueIndex("subscription_member_tier_active_unique")
+      .on(table.memberId, table.tierId)
+      .where(sql`${table.status} = 'active'`),
   ],
 );
 

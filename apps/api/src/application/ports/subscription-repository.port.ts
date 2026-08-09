@@ -67,7 +67,25 @@ export type MarkPaidOutcome =
    * Some other non-`pending` status — today only `failed`. A genuine payment for
    * one of these must be surfaced, never absorbed.
    */
-  | { outcome: "conflicting_status"; status: string };
+  | { outcome: "conflicting_status"; status: string }
+  /**
+   * The transaction settled, but the member ALREADY holds an active subscription
+   * to this tier, so this one was `cancelled` instead of activated.
+   *
+   * A double-submit at checkout creates two pending subscriptions for one
+   * (member, tier), and Phase 4 is the first phase to act on one — each
+   * activation enqueues a `grant_access` row, so two activations mean two
+   * single-use invite links for the same member, one of which can be forwarded to
+   * somebody who never paid. The rule is first-to-activate wins; the second is
+   * superseded.
+   *
+   * The transaction is still `success`, because the money really did arrive.
+   * Recording it as anything else would hide a refund that is owed, and would let
+   * a later delivery activate it. The caller must audit this and must NOT enqueue
+   * a grant. `subscription` is the cancelled row, so the audit entry has the
+   * member and the id.
+   */
+  | ({ outcome: "superseded" } & MarkPaidResult);
 
 /**
  * `subscription` and `transaction` both have an `updated_at` column with no
