@@ -4,12 +4,17 @@ import {
   selectMessagingProviders,
   type MessagingProviders,
 } from "./bootstrap";
+import type { ClockPort } from "./application/ports/clock.port";
+import { SystemClock } from "./infrastructure/clock/system.clock";
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
 import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
+import { DrizzleRenewalReminderRepository } from "./infrastructure/repositories/drizzle-renewal-reminder.repository";
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
+import { ProcessChurn } from "./application/use-cases/process-churn";
+import { ProcessRenewals } from "./application/use-cases/process-renewals";
 import {
   GrantChannelAccess,
   grantAccessOutboxHandler,
@@ -39,6 +44,24 @@ import {
  */
 export interface WorkerDependencies {
   processOutbox: ProcessOutbox;
+  /**
+   * Phase 5's two SCHEDULED passes — the reason this process now has a cadence and not
+   * just a queue.
+   *
+   * Everything else here is a handler: something reacts to a row somebody else wrote.
+   * These two are the only things in the codebase that act because time has passed, and
+   * until Task 7 nothing constructed them at all. `apps/worker/src/main.ts` runs each on
+   * its own `PollLoop`.
+   */
+  processRenewals: ProcessRenewals;
+  processChurn: ProcessChurn;
+  /**
+   * The ONE clock both passes read, exposed so a test can prove this root injected the
+   * real one. `FixedClock` lives in the same workspace, and a root that wired it by
+   * accident would leave every member's reminder stage frozen on the day the worker
+   * booted — silently, and for a whole billing cycle.
+   */
+  clock: ClockPort;
   grantChannelAccess: GrantChannelAccess;
   /**
    * Exposed for the same reason as `grantChannelAccess`: a test must be able to prove
@@ -154,6 +177,34 @@ export function bootstrapWorker(): WorkerDependencies {
     new DrizzleOutboxRepository(db)
   );
 
+  // ONE clock for the process, exactly as `bootstrap()` keeps one for the API. Two
+  // clocks would be two answers to "what WIB day is it" inside the same worker, and the
+  // renewal pass writes the grace deadline the churn pass then measures against.
+  const clock = new SystemClock();
+
+  // Phase 5's SCHEDULED passes. Nothing constructed these before Task 7: their outbox
+  // handlers were registered above and their use-cases were tested, but no process ever
+  // called `execute()` — the reminders and the churn were reachable only from a test.
+  // This is the line that makes the phase run.
+  //
+  // Each takes the pooled `db`, like every other reader here: neither opens a
+  // transaction, because both deliberately do their writing one row at a time so a
+  // failure on the hundredth member cannot undo the ninety-nine reminders already
+  // claimed.
+  const processRenewals = new ProcessRenewals(
+    new DrizzleSubscriptionRepository(db),
+    new DrizzleRenewalReminderRepository(db),
+    new DrizzleOutboxRepository(db),
+    new DrizzleActivityLogRepository(db),
+    clock
+  );
+  const processChurn = new ProcessChurn(
+    new DrizzleSubscriptionRepository(db),
+    new DrizzleOutboxRepository(db),
+    new DrizzleActivityLogRepository(db),
+    clock
+  );
+
   const handlers = new Map<string, OutboxHandler>([
     [OUTBOX_GRANT_ACCESS, grantAccessOutboxHandler(grantChannelAccess)],
     [OUTBOX_REVOKE_ACCESS, revokeAccessOutboxHandler(retryChannelAccessRevocation)],
@@ -166,6 +217,9 @@ export function bootstrapWorker(): WorkerDependencies {
 
   return {
     processOutbox: new ProcessOutbox(new DrizzleOutboxRepository(db), handlers),
+    processRenewals,
+    processChurn,
+    clock,
     grantChannelAccess,
     retryChannelAccessRevocation,
     sendRenewalReminder,

@@ -22,9 +22,24 @@ import {
   OUTBOX_SEND_RENEWAL_REMINDER,
 } from "./application/ports/outbox-repository.port";
 import { resolveAppBaseUrl } from "./bootstrap";
+import { jakartaDayNumber } from "./domain/renewal-schedule";
+import { SystemClock } from "./infrastructure/clock/system.clock";
 import { bootstrapWorker } from "./worker-bootstrap";
 
 beforeEach(resetDatabase);
+
+/**
+ * A `YYYY-MM-DD` string `days` after TODAY as Asia/Jakarta reckons it — i.e. derived
+ * from the real clock, on purpose.
+ *
+ * These dates are what make the two pass tests below prove the composition root wired a
+ * `SystemClock`: a root that had injected a fixed instant, or a clock stuck at some
+ * literal date, would compute a different stage for the same row (or none at all) and
+ * the assertions would fail. A hardcoded 2026-03-10 could not tell the difference.
+ */
+function jakartaDateStringOffsetFromToday(days: number): string {
+  return new Date((jakartaDayNumber(new Date()) + days) * 86_400_000).toISOString().slice(0, 10);
+}
 
 async function rowById(id: string) {
   const [row] = await db.select().from(outbox).where(eq(outbox.id, id));
@@ -118,6 +133,79 @@ async function seedChurnedMemberWithAccess() {
     })
     .returning();
   return { community, member, channel, subscription };
+}
+
+/**
+ * A member whose next billing date is `daysOverdue` WIB days in the past and whose
+ * subscription is still `active` — i.e. exactly what `ProcessRenewals` is supposed to
+ * find, remind and move to `past_due`.
+ */
+async function seedMemberDueDaysAgo(daysOverdue: number) {
+  const [creator] = await db.insert(creators).values({ name: "Rina" }).returning();
+  const [community] = await db
+    .insert(communities)
+    .values({ creatorId: creator.id, name: "Kelas Rina", slug: `kelas-due-${Date.now()}` })
+    .returning();
+  const [tier] = await db
+    .insert(membershipTiers)
+    .values({
+      communityId: community.id,
+      name: "Basic",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    })
+    .returning();
+  const [member] = await db
+    .insert(members)
+    .values({ whatsappNumber: `+6281392${Date.now() % 100000}`, name: "Siti" })
+    .returning();
+  const [subscription] = await db
+    .insert(subscriptions)
+    .values({
+      memberId: member.id,
+      tierId: tier.id,
+      status: "active",
+      nextBillingDate: jakartaDateStringOffsetFromToday(-daysOverdue),
+    })
+    .returning();
+  return { community, member, tier, subscription };
+}
+
+/**
+ * A `past_due` member whose stored grace deadline has already passed relative to the
+ * REAL clock — i.e. exactly what `ProcessChurn` is supposed to find and end.
+ */
+async function seedMemberPastGrace() {
+  const [creator] = await db.insert(creators).values({ name: "Rina" }).returning();
+  const [community] = await db
+    .insert(communities)
+    .values({ creatorId: creator.id, name: "Kelas Rina", slug: `kelas-grace-${Date.now()}` })
+    .returning();
+  const [tier] = await db
+    .insert(membershipTiers)
+    .values({
+      communityId: community.id,
+      name: "Basic",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    })
+    .returning();
+  const [member] = await db
+    .insert(members)
+    .values({ whatsappNumber: `+6281393${Date.now() % 100000}`, name: "Siti" })
+    .returning();
+  const [subscription] = await db
+    .insert(subscriptions)
+    .values({
+      memberId: member.id,
+      tierId: tier.id,
+      status: "past_due",
+      nextBillingDate: jakartaDateStringOffsetFromToday(-8),
+      // A minute ago, by the real clock.
+      graceEndsAt: new Date(Date.now() - 60_000),
+    })
+    .returning();
+  return { community, member, subscription };
 }
 
 /**
@@ -312,6 +400,75 @@ describe("bootstrapWorker", () => {
     await bootstrapWorker().processOutbox.execute();
 
     expect((await rowById(id)).lastError).toContain("no handler is registered");
+  });
+
+  /**
+   * Phase 5, Task 7. Until this task nothing constructed `ProcessRenewals` at all: its
+   * outbox handler was registered, its use-case was tested, and no process would ever
+   * have called it — the whole phase was dead code reachable only from a test. These
+   * two tests are what make "the pass exists" mean "the pass runs".
+   */
+  it("constructs a renewal pass that actually reminds a real due subscription", async () => {
+    const { member, subscription } = await seedMemberDueDaysAgo(1);
+
+    const result = await bootstrapWorker().processRenewals.execute();
+
+    expect(result.considered).toBe(1);
+    expect(result.reminded).toBe(1);
+    expect(result.transitionedToPastDue).toBe(1);
+    // The stage is derived from the REAL clock against a date seeded one WIB day ago,
+    // so this also proves the root injected a `SystemClock` and not a fixed instant.
+    const reminders = await db.select().from(renewalReminders);
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0].stage).toBe("overdue_1d");
+    expect(reminders[0].subscriptionId).toBe(subscription.id);
+    // And a row for the OTHER half of the wiring to pick up.
+    const [row] = await db.select().from(outbox);
+    expect(row.eventType).toBe(OUTBOX_SEND_RENEWAL_REMINDER);
+    const [updated] = await db.select().from(subscriptions).where(eq(subscriptions.id, subscription.id));
+    expect(updated.status).toBe("past_due");
+    expect(updated.graceEndsAt).not.toBeNull();
+    expect(member.whatsappNumber).toBeTruthy();
+  });
+
+  it("runs the renewal pass and the outbox in ONE process, so the member is really messaged", async () => {
+    // The end-to-end seam this task closes: clock → pass → outbox row → WhatsApp. Every
+    // link is a different module and none of them was connected before.
+    const { member } = await seedMemberDueDaysAgo(3);
+    const worker = bootstrapWorker();
+    const notifier = fakeNotifierOf(worker);
+
+    await worker.processRenewals.execute();
+    const delivered = await worker.processOutbox.execute();
+
+    expect(delivered.sent).toBe(1);
+    expect(notifier.notifications).toHaveLength(1);
+    expect(notifier.notifications[0].toWhatsappNumber).toBe(member.whatsappNumber);
+  });
+
+  it("constructs a churn pass that actually ends a subscription past its grace deadline", async () => {
+    const { subscription } = await seedMemberPastGrace();
+
+    const result = await bootstrapWorker().processChurn.execute();
+
+    expect(result.considered).toBe(1);
+    expect(result.churned).toBe(1);
+    expect(result.revocationsQueued).toBe(1);
+    const [updated] = await db.select().from(subscriptions).where(eq(subscriptions.id, subscription.id));
+    expect(updated.status).toBe("churned");
+    const [row] = await db.select().from(outbox);
+    expect(row.eventType).toBe(OUTBOX_REVOKE_SUBSCRIPTION_ACCESS);
+  });
+
+  it("injects the REAL clock into the passes, not a fixture", () => {
+    // The passes are the first things in this codebase whose behaviour depends entirely
+    // on the current instant, and `FixedClock` exists in this workspace. A root that
+    // wired that by accident would leave every member's stage frozen on the day the
+    // process booted, and the two tests above are the only other thing that would
+    // notice.
+    const { clock } = bootstrapWorker();
+    expect(clock).toBeInstanceOf(SystemClock);
+    expect(Math.abs(clock.now().getTime() - Date.now())).toBeLessThan(60_000);
   });
 
   it("selects the fake messaging adapters under NODE_ENV=test", () => {

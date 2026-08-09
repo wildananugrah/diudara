@@ -83,16 +83,22 @@ export class PollLoop {
 }
 
 /**
- * Stops `loop` on SIGTERM (what an orchestrator sends) and SIGINT (Ctrl-C).
+ * Stops every given loop on SIGTERM (what an orchestrator sends) and SIGINT (Ctrl-C).
+ *
+ * VARIADIC since Phase 5: this process now runs three loops — the outbox, renewals
+ * and churn — and a signal must stop all of them. Installing it once per loop would
+ * work but would print the shutdown line once per loop and add three listeners where
+ * one will do; more to the point, ONE handler means there is no ordering in which
+ * some loops are stopped and others are not.
  *
  * Returns an uninstaller, which is not ceremony: without it the listeners
  * outlive the loop, and a test that installed them would leave a handler
  * attached to the whole test process.
  */
-export function installShutdownSignals(loop: PollLoop): () => void {
+export function installShutdownSignals(...loops: PollLoop[]): () => void {
   const handle = (signal: string) => () => {
     console.log(`[worker] ${signal} received — finishing the current pass, then exiting`);
-    loop.stop();
+    for (const loop of loops) loop.stop();
   };
   const onTerm = handle("SIGTERM");
   const onInt = handle("SIGINT");
@@ -107,26 +113,41 @@ export function installShutdownSignals(loop: PollLoop): () => void {
 }
 
 /**
- * Reads `WORKER_POLL_INTERVAL_MS`, refusing anything that is not a usable
- * interval.
+ * Reads one interval variable, refusing anything that is not a usable interval.
  *
  * Fails CLOSED, like every other configuration guard in this codebase: `Number()`
  * turns a typo into `NaN`, `setTimeout` treats `NaN` as `0`, and the result is a
  * worker hammering the database as fast as it can answer rather than polling it.
  * A blank value counts as unset (`WORKER_POLL_INTERVAL_MS=` in a .env file
  * arrives as `""`).
+ *
+ * Shared rather than copied because Phase 5 added a SECOND interval — the renewal
+ * and churn cadence — and the `NaN`-becomes-a-busy-loop trap is identical for it.
+ * The variable's name is a parameter so the error still names the one the operator
+ * actually set.
  */
-export function resolvePollIntervalMs(raw: string | undefined): number {
+export function resolveIntervalMs(
+  raw: string | undefined,
+  options: { variableName: string; defaultMs: number }
+): number {
   if (raw === undefined || raw.trim() === "") {
-    return DEFAULT_POLL_INTERVAL_MS;
+    return options.defaultMs;
   }
 
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(
-      `WORKER_POLL_INTERVAL_MS must be a positive whole number of milliseconds (got "${raw}"). ` +
-        `Leave it unset for the default of ${DEFAULT_POLL_INTERVAL_MS}ms.`
+      `${options.variableName} must be a positive whole number of milliseconds ` +
+        `(got "${raw}"). Leave it unset for the default of ${options.defaultMs}ms.`
     );
   }
   return parsed;
+}
+
+/** Reads `WORKER_POLL_INTERVAL_MS` — how often the OUTBOX is polled. */
+export function resolvePollIntervalMs(raw: string | undefined): number {
+  return resolveIntervalMs(raw, {
+    variableName: "WORKER_POLL_INTERVAL_MS",
+    defaultMs: DEFAULT_POLL_INTERVAL_MS,
+  });
 }

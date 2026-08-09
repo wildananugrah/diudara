@@ -152,6 +152,40 @@ describe("installShutdownSignals", () => {
     }
   });
 
+  it("stops EVERY loop it was given, with one handler", async () => {
+    // Phase 5: the process runs three loops — outbox, renewals and churn. A SIGTERM
+    // that stopped only the first would leave the others polling, the pool open, and
+    // the process alive until it was SIGKILLed.
+    const loops = [0, 1, 2].map(() => {
+      const state = { polls: 0 };
+      const loop = new PollLoop({
+        intervalMs: 60_000,
+        poll: async () => void (state.polls += 1),
+      });
+      return { loop, state };
+    });
+    const before = process.listenerCount("SIGTERM");
+    const uninstall = installShutdownSignals(...loops.map(({ loop }) => loop));
+
+    try {
+      // One handler for all three, not one per loop.
+      expect(process.listenerCount("SIGTERM")).toBe(before + 1);
+
+      const running = Promise.all(loops.map(({ loop }) => loop.run()));
+      while (loops.some(({ state }) => state.polls === 0)) await Bun.sleep(1);
+
+      process.emit("SIGTERM");
+
+      const finished = await Promise.race([
+        running.then(() => "all stopped"),
+        Bun.sleep(2_000).then(() => "at least one still running"),
+      ]);
+      expect(finished).toBe("all stopped");
+    } finally {
+      uninstall();
+    }
+  });
+
   it("removes its listeners when uninstalled, leaving no handler behind", () => {
     const loop = new PollLoop({ intervalMs: 1, poll: async () => undefined });
     const before = process.listenerCount("SIGTERM");
