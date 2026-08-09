@@ -1,8 +1,8 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { membershipTiers, subscriptions, transactions } from "../../db/schema";
 import type {
-  MarkPaidResult,
+  MarkPaidOutcome,
   SubscriptionRecord,
   SubscriptionRepositoryPort,
   TransactionRecord,
@@ -26,8 +26,51 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  */
 const PENDING = "pending";
 
+/**
+ * The settled status `markPaid` writes, and the ONE non-`pending` status that
+ * makes a second delivery an idempotent no-op rather than something a person has
+ * to look at. See `MarkPaidOutcome`.
+ */
+const SUCCESS = "success";
+
+/** `subscription.status` for a member who currently has access. */
+const ACTIVE_SUBSCRIPTION = "active";
+
+/**
+ * `subscription.status` for the LOSER of a double-submit: the member already had
+ * an active subscription to this tier, so this one was never granted. `cancelled`
+ * rather than a new status because Phase 5's churn logic already knows it, and an
+ * unrecognised status would make a superseded row look like a live membership.
+ */
+const SUPERSEDED_SUBSCRIPTION = "cancelled";
+
 export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
+
+  /**
+   * See the port docstring. Scoped to `active` only: a `cancelled` or `past_due`
+   * subscription must not block a member from buying again, which is the whole point
+   * of letting a churned member re-pay.
+   */
+  async hasActiveSubscriptionForTier(memberId: string, tierId: string): Promise<boolean> {
+    if (!UUID_PATTERN.test(memberId) || !UUID_PATTERN.test(tierId)) {
+      // A MISS, not a driver error — same rule as `findById`. `tierId` arrives from
+      // the request body.
+      return false;
+    }
+    const [existing] = await this.db
+      .select({ id: subscriptions.id })
+      .from(subscriptions)
+      .where(
+        and(
+          eq(subscriptions.memberId, memberId),
+          eq(subscriptions.tierId, tierId),
+          eq(subscriptions.status, ACTIVE_SUBSCRIPTION)
+        )
+      )
+      .limit(1);
+    return existing !== undefined;
+  }
 
   async createPending(input: { memberId: string; tierId: string }): Promise<SubscriptionRecord> {
     const [row] = await this.db
@@ -92,6 +135,25 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
   }
 
   /**
+   * One join instead of a second port method the community-scoped tier
+   * repository could not provide — see the port docstring.
+   */
+  async findByIdWithCommunity(
+    id: string
+  ): Promise<{ subscription: SubscriptionRecord; communityId: string } | null> {
+    if (!UUID_PATTERN.test(id)) {
+      return null;
+    }
+    const [row] = await this.db
+      .select({ subscription: subscriptions, communityId: membershipTiers.communityId })
+      .from(subscriptions)
+      .innerJoin(membershipTiers, eq(subscriptions.tierId, membershipTiers.id))
+      .where(eq(subscriptions.id, id))
+      .limit(1);
+    return row ?? null;
+  }
+
+  /**
    * `id` arrives straight off an untrusted webhook body, so it is shape-checked
    * before it reaches the driver — see UUID_PATTERN above for why a malformed
    * value must be a miss and not an error.
@@ -131,22 +193,34 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
    * field. Probed before it was: 12 concurrent PAID deliveries with 12 DIFFERENT
    * `body.id` values produced 12 `activity_log` "joined" rows — 12 WhatsApp
    * invites in Phase 4 — because `provider_event_id` derives from `body.id` and
-   * every one of them was distinct. Zero affected rows is now a no-op (`null`),
-   * not an error and never a second activation.
+   * every one of them was distinct. Zero affected rows is reported, never an error
+   * and never a second activation.
+   *
+   * WHAT IT REPORTS is a `MarkPaidOutcome` rather than a nullable result, and the
+   * distinctions cost nothing because the reads that make them are already here:
+   *
+   *   already_settled    — the transaction is `success`. A replay; a 2xx no-op.
+   *   conflicting_status — any other non-`pending` status (today `failed`). A real
+   *                        payment nobody can settle without looking at it, and
+   *                        answering "duplicate" used to throw it away.
+   *   superseded         — the member already holds an active subscription to this
+   *                        tier, so this one is `cancelled` rather than granted a
+   *                        second time. The transaction still settles: the money
+   *                        arrived, and hiding that hides a refund that is owed.
    */
   async markPaid(input: {
     transactionId: string;
     gatewayReferenceId: string;
     paidAt: Date;
     paymentMethod?: string | undefined;
-  }): Promise<MarkPaidResult | null> {
+  }): Promise<MarkPaidOutcome> {
     return this.db.transaction(async (tx) => {
       const now = new Date();
 
       const [transaction] = await tx
         .update(transactions)
         .set({
-          status: "success",
+          status: SUCCESS,
           gatewayReferenceId: input.gatewayReferenceId,
           paidAt: input.paidAt,
           updatedAt: now,
@@ -161,10 +235,8 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         .returning();
       if (!transaction) {
         // Zero rows means either "no such transaction" or "not pending any
-        // more". Only the first is a programming error; the second is the
-        // duplicate-activation case this predicate exists to absorb, so it is
-        // worth one extra read inside the already-open transaction to tell an
-        // operator which happened.
+        // more". Only the first is a programming error, so one extra read inside
+        // the already-open transaction resolves which.
         const [existing] = await tx
           .select({ status: transactions.status })
           .from(transactions)
@@ -173,7 +245,13 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         if (!existing) {
           throw new Error(`markPaid: transaction ${input.transactionId} not found`);
         }
-        return null;
+        // And the status this read already has decides which of the two
+        // NOT-pending cases it is. Returning a bare "settled" for both meant a
+        // real payment for a `failed` transaction was answered with a 200 and
+        // thrown away — see MarkPaidOutcome.
+        return existing.status === SUCCESS
+          ? { outcome: "already_settled", status: existing.status }
+          : { outcome: "conflicting_status", status: existing.status };
       }
 
       // The tier carries the billing cycle, and the community the audit entry
@@ -182,6 +260,8 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
       // inside the transaction that is already open.
       const [context] = await tx
         .select({
+          memberId: subscriptions.memberId,
+          tierId: subscriptions.tierId,
           startedAt: subscriptions.startedAt,
           billingCycle: membershipTiers.billingCycle,
           communityId: membershipTiers.communityId,
@@ -194,21 +274,75 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         throw new Error(`markPaid: subscription for transaction ${input.transactionId} not found`);
       }
 
+      // `not exists` is IN the predicate, so a subscription that is being
+      // superseded never briefly reads as active — and the exclusion of the row
+      // itself is what keeps a RENEWAL working, since a renewal settles a new
+      // transaction against a subscription that is already active.
+      //
+      // This predicate is the graceful path, not the guarantee. Under READ
+      // COMMITTED two concurrent activations cannot see each other's uncommitted
+      // row, so both would pass it; `subscription_member_tier_active_unique` is
+      // what actually arbitrates that, and the loser's transaction rolls back with
+      // the webhook event id unspent so the provider's retry takes this path.
+      //
+      // Written as a raw fragment because the subquery needs a self-ALIAS and
+      // neither drizzle's `alias()` (it renders the alias name with no FROM entry)
+      // nor `notExists()` with a sub-builder survives being embedded in an UPDATE's
+      // WHERE on drizzle 0.45. The column names are therefore literal — if
+      // `subscription.member_id`, `tier_id`, `status` or `id` is ever renamed in
+      // db/schema.ts, this fragment must be renamed with it, and the tests in
+      // drizzle-subscription.repository.test.ts fail loudly if it is not.
       const [subscription] = await tx
         .update(subscriptions)
         .set({
-          status: "active",
+          status: ACTIVE_SUBSCRIPTION,
           startedAt: context.startedAt ?? input.paidAt,
           nextBillingDate: computeNextBillingDate(input.paidAt, context.billingCycle),
           updatedAt: now,
         })
-        .where(eq(subscriptions.id, transaction.subscriptionId))
+        .where(
+          and(
+            eq(subscriptions.id, transaction.subscriptionId),
+            sql`not exists (
+              select 1 from ${subscriptions} sibling
+              where sibling.member_id = ${context.memberId}
+                and sibling.tier_id = ${context.tierId}
+                and sibling.status = ${ACTIVE_SUBSCRIPTION}
+                and sibling.id <> ${transaction.subscriptionId}
+            )`
+          )
+        )
         .returning();
+
       if (!subscription) {
-        throw new Error(`markPaid: subscription for transaction ${input.transactionId} not found`);
+        // The row exists — `context` came from it — so zero rows here means only
+        // one thing: the member already holds an active subscription to this tier.
+        // A double-submit at checkout. Supersede rather than grant twice; see
+        // MarkPaidOutcome for why the transaction still settles as `success`.
+        const [cancelled] = await tx
+          .update(subscriptions)
+          .set({ status: SUPERSEDED_SUBSCRIPTION, updatedAt: now })
+          .where(eq(subscriptions.id, transaction.subscriptionId))
+          .returning();
+        if (!cancelled) {
+          throw new Error(
+            `markPaid: subscription for transaction ${input.transactionId} not found`
+          );
+        }
+        return {
+          outcome: "superseded",
+          transaction,
+          subscription: cancelled,
+          communityId: context.communityId,
+        };
       }
 
-      return { transaction, subscription, communityId: context.communityId };
+      return {
+        outcome: "activated",
+        transaction,
+        subscription,
+        communityId: context.communityId,
+      };
     });
   }
 }

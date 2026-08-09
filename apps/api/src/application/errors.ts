@@ -31,6 +31,77 @@ export class ConflictError extends AppError {
   }
 }
 
+export class UnsupportedOperationError extends AppError {
+  constructor(message = "operation not supported by this provider") {
+    super(message, 409);
+  }
+}
+
+/**
+ * How far a gating-provider call got before it failed.
+ *
+ *  - `"rejected"`      — the provider ANSWERED and the answer was a failure (a non-2xx
+ *    status, or a 2xx body that explicitly says the method failed), or the call was
+ *    refused locally and never left this process. Either way the provider created
+ *    NOTHING: no invite link exists that we do not hold.
+ *  - `"indeterminate"` — the request never completed, or completed unreadably: an
+ *    abort, a timeout, a reset connection, or a success body whose shape we cannot
+ *    parse. A credential may exist at the provider that nobody holds.
+ *
+ * The distinction is load-bearing rather than cosmetic. `GrantChannelAccess` writes
+ * the mint marker (`link_minted_at` / `mint_lease_until`) in the same statement as the
+ * claim, BEFORE `grantAccess` is called, and once set it permanently forbids minting
+ * for that (member, channel) — see THE CREDENTIAL-LIFECYCLE INVARIANT. Whether the
+ * marker may be released after a failure turns on exactly one question: can we prove
+ * the provider created nothing? A `"rejected"` failure proves it; an
+ * `"indeterminate"` one cannot, and must fail closed.
+ *
+ * Measured with no distinction at all — every `grantAccess` failure keeping the marker
+ * — one transient Telegram 5xx followed by a healthy provider left a PAYING MEMBER
+ * PERMANENTLY UNGRANTABLE: 5 retries minted nothing, the outbox row failed, and three
+ * later `execute` calls all reported `mint_lost`. Nothing but a `revoke` could clear
+ * it, and there is no reissue tool.
+ */
+export type ProviderCallOutcome = "rejected" | "indeterminate";
+
+/**
+ * A messaging-provider call failed, carrying WHETHER A RESPONSE WAS RECEIVED.
+ *
+ * The adapter that made the request is the only thing that knows, so the adapter has
+ * to say — and it has to say it in a typed field. Sniffing an error MESSAGE for
+ * "timeout" or "abort" would be guesswork about a string that varies by runtime and by
+ * proxy, deciding whether a paying member can ever be granted access again.
+ *
+ * Extends `Error` and NOT `AppError`, deliberately: a provider failure is not an HTTP
+ * status this API returns. `AppError` would map it to a chosen response code in
+ * `errorHandler`, and these errors travel the outbox worker's path where the correct
+ * behaviour is a retry, not a status. The message never carries a request, a response
+ * body, or a URL — the bot token is part of every Bot API request path.
+ */
+export class ProviderCallError extends Error {
+  constructor(
+    message: string,
+    readonly outcome: ProviderCallOutcome,
+    options?: { cause?: unknown }
+  ) {
+    super(message, options);
+    this.name = new.target.name;
+  }
+}
+
+/**
+ * Reads a caught error's provider outcome, defaulting to `"indeterminate"`.
+ *
+ * The default is the whole point: FAIL CLOSED IS REACHED BY NOT KNOWING. Anything
+ * that is not a `ProviderCallError` — a bug in an adapter, a third-party throw, a
+ * provider we have not taught to classify — is ambiguous by definition, so it keeps
+ * the mint marker set. Only an adapter that positively asserts "the provider answered
+ * me and said no" gets the window reopened.
+ */
+export function providerCallOutcome(err: unknown): ProviderCallOutcome {
+  return err instanceof ProviderCallError ? err.outcome : "indeterminate";
+}
+
 /**
  * Storage-agnostic names for the uniqueness rules the application reasons about.
  * Repository adapters translate their backing store's constraint names into

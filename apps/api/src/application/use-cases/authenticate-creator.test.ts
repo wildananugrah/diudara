@@ -32,7 +32,13 @@ function fakeRepository(seed: CreatorCredentials[]) {
     async findCredentialsByEmail(email) {
       return seed.find((r) => r.email === email) ?? null;
     },
-    async setXenditAccountId() {
+    async beginXenditAccountProvisioning() {
+      throw new Error("not used in these tests");
+    },
+    async finishXenditAccountProvisioning() {
+      throw new Error("not used in these tests");
+    },
+    async abandonXenditAccountProvisioning() {
       throw new Error("not used in these tests");
     },
   };

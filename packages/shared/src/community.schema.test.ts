@@ -328,4 +328,77 @@ describe("connectChannelSchema", () => {
     });
     expect(parsed.externalGroupId).toBe("123-456-789");
   });
+
+  /**
+   * A TELEGRAM CHANNEL MUST CARRY THE NUMERIC CHAT ID, and this is a deliberate
+   * tightening of an endpoint that used to accept any 1–255 string.
+   *
+   * `@username` works for granting — Telegram accepts it as a `chat_id` — so nothing
+   * fails visibly. But the inbound `chat_member` update carries `chat.id` as a NUMBER,
+   * and the membership lookup that records a joiner's Telegram user id requires the
+   * membership to belong to the chat the update came from. `@kelasbudi` never equals
+   * `-1001234567890`, so the update is dropped as `unknown_invite_link`,
+   * `external_member_id` stays null, and every later revocation for that community
+   * reports `no_provider_member_id_recorded` forever — a log line documented as
+   * ordinary noise. Members could be granted access and never removed, silently.
+   */
+  describe("telegram requires a numeric chat id", () => {
+    it("rejects an @username, which grants fine but can never match an inbound update", () => {
+      const result = connectChannelSchema.safeParse({
+        platform: "telegram",
+        externalGroupId: "@kelasbudi",
+      });
+
+      expect(result.success).toBe(false);
+      // The creator has to be told what to do instead: @username is the form they see
+      // in the Telegram client, so this is the natural mistake, not an exotic one.
+      const issue = result.error!.issues[0];
+      expect(issue.path).toEqual(["externalGroupId"]);
+      expect(issue.message).toContain("NUMERIC");
+      expect(issue.message).toContain("-1001234567890");
+    });
+
+    it("rejects the other shapes Telegram or a creator might offer", () => {
+      for (const externalGroupId of [
+        "@kelasbudi",
+        "kelasbudi",
+        "https://t.me/kelasbudi",
+        "t.me/+AbCdEf",
+        "-100 1234567890",
+        "-1001234567890x",
+        "1.5e9",
+      ]) {
+        const result = connectChannelSchema.safeParse({
+          platform: "telegram",
+          externalGroupId,
+        });
+        expect(result.success).toBe(false);
+      }
+    });
+
+    it("accepts the numeric ids Telegram actually reports", () => {
+      // Supergroups and channels are negative; a plain group or a private chat is not.
+      // The sign is not the constraint — matching an inbound `chat.id` is.
+      for (const externalGroupId of ["-1001234567890", "-987654321", "123456789"]) {
+        const parsed = connectChannelSchema.parse({ platform: "telegram", externalGroupId });
+        expect(parsed.externalGroupId).toBe(externalGroupId);
+      }
+    });
+
+    it("trims before checking, so a pasted id with whitespace is accepted", () => {
+      const parsed = connectChannelSchema.parse({
+        platform: "telegram",
+        externalGroupId: "  -1001234567890\n",
+      });
+      expect(parsed.externalGroupId).toBe("-1001234567890");
+    });
+
+    it("leaves WhatsApp group ids alone — nothing inbound depends on their format", () => {
+      const parsed = connectChannelSchema.parse({
+        platform: "whatsapp",
+        externalGroupId: "120363123456789@g.us",
+      });
+      expect(parsed.externalGroupId).toBe("120363123456789@g.us");
+    });
+  });
 });

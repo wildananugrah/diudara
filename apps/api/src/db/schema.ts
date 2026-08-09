@@ -128,6 +128,29 @@ export const subscriptions = pgTable(
   (table) => [
     index("subscription_member_id_idx").on(table.memberId),
     index("subscription_tier_id_idx").on(table.tierId),
+    // A double-submit at checkout creates two PENDING subscriptions for one
+    // (member, tier) and nothing decided which was authoritative. Phase 4 is the
+    // first phase to act on one — activation enqueues a `grant_access` row — so
+    // two activations mean two single-use invite links for the same member, one of
+    // which can be handed to somebody who never paid.
+    //
+    // A member can only hold ONE active membership of a given tier: a renewal
+    // updates the same subscription row (`markPaid` moves next_billing_date), it
+    // does not create another. This index is what ARBITRATES that, rather than the
+    // `not exists` predicate in markPaid — under READ COMMITTED two concurrent
+    // activations cannot see each other's uncommitted row, so the predicate alone
+    // is a TOCTOU. The predicate handles the ordinary already-committed case
+    // gracefully; a true race violates this index, the transaction rolls back with
+    // the webhook event id unspent, and the provider's retry then takes the
+    // graceful path.
+    //
+    // PARTIAL, on `active` only: `pending`, `cancelled` and `expired` duplicates
+    // are all legitimate history. Added while every subscription row in existence
+    // is a test row — retrofitting it over real duplicates needs a cleanup
+    // migration first.
+    uniqueIndex("subscription_member_tier_active_unique")
+      .on(table.memberId, table.tierId)
+      .where(sql`${table.status} = 'active'`),
   ],
 );
 
@@ -260,3 +283,165 @@ export const webhookEvents = pgTable("webhook_event", {
   payload: jsonb("payload"),
   processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Transactional outbox. A payment activation writes a row here in the SAME
+ * transaction as the subscription update, so the intent to invite is atomic
+ * with the payment and can never be lost. The worker sends outside any
+ * transaction — a Telegram outage must delay an invite, never roll back a
+ * payment.
+ */
+export const outbox = pgTable(
+  "outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    eventType: varchar("event_type", { length: 64 }).notNull(),
+    payload: jsonb("payload").notNull(),
+    status: varchar("status", { length: 16 }).notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    lastError: varchar("last_error", { length: 500 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("outbox_claim_idx").on(table.status, table.nextAttemptAt)]
+);
+
+/**
+ * Who currently has access to which channel.
+ * UNIQUE (member_id, channel_id) is the grant-idempotency mechanism: a retried
+ * outbox row must not issue a second invite link, and the database arbitrates
+ * that, not a pre-check.
+ */
+export const channelMemberships = pgTable(
+  "channel_membership",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    memberId: uuid("member_id")
+      .notNull()
+      .references(() => members.id),
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id),
+    status: varchar("status", { length: 16 }).notNull().default("active"),
+    inviteLink: varchar("invite_link", { length: 512 }),
+    /**
+     * The member's id ON THE PLATFORM (a Telegram integer user id), once we learn
+     * it.
+     *
+     * NULL at grant time, always, and that is not an oversight: access is granted
+     * with an INVITE LINK precisely because we do not know who the member is on
+     * Telegram — a WhatsApp number is all checkout gives us. The id only becomes
+     * knowable when the member actually JOINS.
+     *
+     * Filled by `POST /webhooks/telegram` (Task 7b), which receives Telegram's
+     * `chat_member` update and matches it to this row by the `invite_link` it
+     * reports — single-use per member, so it identifies exactly one row (see
+     * `channel_membership_invite_link_unique`).
+     *
+     * It exists because revocation NEEDS it: `banChatMember` addresses a user id.
+     * A row that still has none cannot be revoked automatically, and
+     * `RevokeChannelAccess` reports `no_provider_member_id_recorded` rather than
+     * claiming success — which is what EVERY revocation did before that endpoint.
+     *
+     * DELIBERATELY SURVIVES A REVOKE. Neither `revoke` nor `claim`'s reactivation
+     * clears it, only the link. `banChatMember` also blocks the user from joining
+     * via any invite link, so a churned member who re-pays must be UNBANNED first,
+     * and `unbanChatMember` needs this id — `GrantChannelAccess` reads it back off
+     * a reactivated row and passes it as `previousExternalMemberId`.
+     */
+    externalMemberId: varchar("external_member_id", { length: 64 }),
+    /**
+     * Set when a caller ENTERS the mint window, cleared when it leaves — the marker
+     * that makes "claimed, no link" an unambiguous state instead of a guess.
+     *
+     * THE CREDENTIAL-LIFECYCLE INVARIANT this column exists to enforce: at most one
+     * live invite link per (member, channel) may exist at the provider at any time,
+     * and every link that exists is recorded in `invite_link`.
+     *
+     * Without it, `invite_link IS NULL` on a claimed row conflates three different
+     * situations: nobody has minted yet, somebody minted and could not record it, and
+     * somebody is minting right now. `GrantChannelAccess` read all three as "finish
+     * the grant" and minted a fresh link for each, so a `recordGrant` that failed on
+     * every bounded retry left FIVE live single-use links at Telegram behind one row
+     * whose `invite_link` was NULL — five credentials the system had no record of and
+     * therefore no way to revoke. Measured, before this column existed.
+     *
+     * So: link is null + this is NOT null means A LINK MAY BE LIVE AND UNRECORDED.
+     * Minting another would stack a second credential on an orphan we cannot kill
+     * (Telegram's `revokeChatInviteLink` needs the link's value, and no Bot API method
+     * enumerates a bot's links), so the grant FAILS CLOSED — reported to the member as
+     * manual addition and to the creator in `activity_log`, for a deliberate reissue.
+     *
+     * "MAY BE" IS EXACT, AND THE COLUMN HAS TO BE CLEARED WHENEVER IT CANNOT BE. It is
+     * cleared by `recordGrant` on success, and by `releaseMintWindow` in the two states
+     * where no credential can exist: a lost link that WAS revoked at the provider, and
+     * a `grantAccess` that failed with an HTTP response received, which mints nothing.
+     * Leaving it set in that second case cost a paying member their access
+     * PERMANENTLY — one transient Telegram failure, then a healthy provider, and every
+     * later attempt reported `mint_lost` with no reissue tool to clear it. Measured.
+     */
+    linkMintedAt: timestamp("link_minted_at", { withTimezone: true }),
+    /**
+     * How long the caller inside the mint window holds it. Set with
+     * `link_minted_at`, in the SAME statement as the claim.
+     *
+     * IT DOES NOT PROVIDE SERIALIZATION, and an earlier version of this comment
+     * claiming it did was wrong in a way worth correcting: a misleading invariant
+     * comment is how the next person removes the wrong thing.
+     *
+     * MUTUAL EXCLUSION COMES FROM `link_minted_at` BEING WRITTEN IN THE CLAIM ITSELF.
+     * The second of two callers arriving together has its `DO UPDATE` predicate
+     * re-evaluated against the locked, already-updated tuple, finds `link_minted_at`
+     * non-null, and is excluded — no lease consulted, no read, nothing to race. (The
+     * measured two-live-links case was the version that checked the marker in a
+     * SEPARATE statement from the claim; both callers read NULL and both minted.)
+     *
+     * WHAT THIS COLUMN DOES IS CLASSIFY THE EXCLUDED CALLER, which is the difference
+     * between a retry and a manual reissue and therefore between a member who gets
+     * their link a second later and one who waits for a person:
+     *
+     *   marker + live lease   -> `mint_in_progress`  the holder is mid-flight; RETRY
+     *   marker + lapsed lease -> `mint_lost`         a link may be live and unrecorded;
+     *                                                FAIL CLOSED, report for reissue
+     *
+     * A LEASE rather than `pg_advisory_xact_lock` because the window spans an
+     * external HTTP call: an advisory lock would have to be held in an open
+     * transaction across the provider round-trip, pinning a pooled connection to a
+     * hung Telegram. A lease needs no transaction and is visible to an operator in
+     * the row.
+     *
+     * Its expiry FAILS CLOSED: a second caller arriving after it lapses sees the
+     * marker still set and reports "minted and lost" rather than minting. So a lease
+     * that is too short costs a spurious manual report, never a second credential —
+     * which follows from exclusion living in the marker, not here.
+     *
+     * Cleared alongside `link_minted_at`: by `recordGrant` on success, and by
+     * `releaseMintWindow` whenever no credential can exist — a lost link that WAS
+     * revoked at the provider, or a `grantAccess` that failed with a response received
+     * (nothing was minted). Left SET only where a link may be live and unheld.
+     */
+    mintLeaseUntil: timestamp("mint_lease_until", { withTimezone: true }),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("channel_membership_member_channel_unique").on(table.memberId, table.channelId),
+    index("channel_membership_channel_idx").on(table.channelId),
+    // `POST /webhooks/telegram` resolves an inbound invite link back to exactly one
+    // membership, so it can record the joining member's platform user id. That
+    // lookup is how revocation becomes automatable at all, and ambiguity in it
+    // would attach a Telegram user id to an arbitrary one of two rows — aiming a
+    // later `banChatMember` at the wrong member of the wrong group.
+    //
+    // Same reasoning as `event_stream_key_unique`: a lookup keyed on a CREDENTIAL
+    // must resolve to one row. Links are single-use per member and the column is
+    // nulled on revoke and on reactivation, so this holds by construction — the
+    // index is what makes it hold by GUARANTEE. Partial, because the column is null
+    // until a grant completes and null again after a revoke.
+    uniqueIndex("channel_membership_invite_link_unique")
+      .on(table.inviteLink)
+      .where(sql`${table.inviteLink} is not null`),
+  ]
+);

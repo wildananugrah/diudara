@@ -4,6 +4,7 @@ import type {
   PaymentActivationUnitOfWorkPort,
 } from "../../application/ports/payment-activation-unit-of-work.port";
 import { DrizzleActivityLogRepository } from "./drizzle-activity-log.repository";
+import { DrizzleOutboxRepository } from "./drizzle-outbox.repository";
 import { DrizzleSubscriptionRepository } from "./drizzle-subscription.repository";
 import { DrizzleWebhookEventRepository } from "./drizzle-webhook-event.repository";
 
@@ -30,6 +31,11 @@ export class DrizzlePaymentActivationUnitOfWork implements PaymentActivationUnit
         subscriptions: new DrizzleSubscriptionRepository(tx),
         webhookEvents: new DrizzleWebhookEventRepository(tx),
         activityLog: new DrizzleActivityLogRepository(tx),
+        // Constructed against `tx` like the rest, which is the entire mechanism
+        // behind "the intent to invite is atomic with the payment": the INSERT it
+        // issues is inside this transaction, so a failure anywhere in `work`
+        // discards it along with everything else.
+        outbox: new DrizzleOutboxRepository(tx),
       })
     );
   }

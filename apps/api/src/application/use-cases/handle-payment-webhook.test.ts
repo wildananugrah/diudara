@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { NotFoundError, ValidationError } from "../errors";
+import { ConflictError, NotFoundError, ValidationError } from "../errors";
 import type { ActivityLogRepositoryPort } from "../ports/activity-log-repository.port";
+import type { OutboxRepositoryPort } from "../ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "../ports/payment-activation-unit-of-work.port";
 import type {
-  MarkPaidResult,
+  MarkPaidOutcome,
   SubscriptionRepositoryPort,
   TransactionRecord,
 } from "../ports/subscription-repository.port";
@@ -32,11 +33,37 @@ function transactionRecord(overrides: Partial<TransactionRecord> = {}): Transact
   };
 }
 
+/**
+ * The settled-transaction-plus-subscription payload `markPaid` returns. Shared by
+ * the `activated` and `superseded` outcomes because they carry the SAME shape and
+ * differ only in the discriminant and in the subscription's status — which is
+ * exactly the thing the caller has to branch on.
+ */
+function activationResult(paidAt: Date) {
+  return {
+    transaction: transactionRecord({ status: "success", paidAt }),
+    subscription: {
+      id: "sub-1",
+      memberId: "member-1",
+      tierId: "tier-1",
+      status: "active",
+      nextBillingDate: "2026-09-09",
+      startedAt: paidAt,
+      retryCount: 0,
+      lastAttemptAt: null,
+      createdAt: new Date("2026-08-09T09:00:00Z"),
+      updatedAt: new Date("2026-08-09T10:00:00Z"),
+    },
+    communityId: "community-1",
+  };
+}
+
 interface Calls {
   findTransactionByExternalId: string[];
   recordIfNew: string[];
   markPaid: string[];
   activity: { memberId: string | null; communityId: string; eventType: string }[];
+  enqueued: { eventType: string; payload: unknown }[];
 }
 
 /** A recording harness whose call log is the assertion target for ORDERING. */
@@ -47,6 +74,17 @@ function harness(
     failMarkPaid?: boolean;
     /** `markPaid` returns null: the transaction was no longer `pending`. */
     alreadySettled?: boolean;
+    /**
+     * The status `markPaid` reports for a transaction it could not settle. Any
+     * non-`pending`, non-`success` value takes the `conflicting_status` branch —
+     * today that means `failed`.
+     */
+    conflictingStatus?: string;
+    /**
+     * `markPaid` reports the member already holds an active subscription to this
+     * tier, so this one was cancelled instead of activated.
+     */
+    superseded?: boolean;
   } = {}
 ) {
   const calls: Calls = {
@@ -54,6 +92,7 @@ function harness(
     recordIfNew: [],
     markPaid: [],
     activity: [],
+    enqueued: [],
   };
   const order: string[] = [];
   const transaction =
@@ -63,10 +102,16 @@ function harness(
     async createPending() {
       throw new Error("not used");
     },
+    async hasActiveSubscriptionForTier() {
+      return false;
+    },
     async createTransaction() {
       throw new Error("not used");
     },
     async findById() {
+      throw new Error("not used");
+    },
+    async findByIdWithCommunity() {
       throw new Error("not used");
     },
     async findTransactionByExternalId(id) {
@@ -77,31 +122,30 @@ function harness(
     async attachGatewayReference() {
       throw new Error("not used");
     },
-    async markPaid(input): Promise<MarkPaidResult | null> {
+    async markPaid(input): Promise<MarkPaidOutcome> {
       calls.markPaid.push(input.transactionId);
       order.push("markPaid");
       if (options.failMarkPaid === true) {
         throw new Error("activation blew up");
       }
-      if (options.alreadySettled === true) {
-        return null;
+      if (options.superseded === true) {
+        // The real repository returns the CANCELLED row here, and the transaction
+        // is still `success` — the money arrived. Mirrored so a test cannot pass
+        // against a fake that is rosier than the thing it stands for.
+        const settled = activationResult(input.paidAt);
+        return {
+          ...settled,
+          outcome: "superseded",
+          subscription: { ...settled.subscription, status: "cancelled", startedAt: null },
+        };
       }
-      return {
-        transaction: transactionRecord({ status: "success", paidAt: input.paidAt }),
-        subscription: {
-          id: "sub-1",
-          memberId: "member-1",
-          tierId: "tier-1",
-          status: "active",
-          nextBillingDate: "2026-09-09",
-          startedAt: input.paidAt,
-          retryCount: 0,
-          lastAttemptAt: null,
-          createdAt: new Date("2026-08-09T09:00:00Z"),
-          updatedAt: new Date("2026-08-09T10:00:00Z"),
-        },
-        communityId: "community-1",
-      };
+      if (options.conflictingStatus !== undefined) {
+        return { outcome: "conflicting_status", status: options.conflictingStatus };
+      }
+      if (options.alreadySettled === true) {
+        return { outcome: "already_settled", status: "success" };
+      }
+      return { ...activationResult(input.paidAt), outcome: "activated" };
     },
   };
 
@@ -124,6 +168,35 @@ function harness(
     },
   };
 
+  const outbox: OutboxRepositoryPort = {
+    async enqueue(input) {
+      calls.enqueued.push({ eventType: input.eventType, payload: input.payload });
+      order.push("outbox");
+      return { id: `outbox-${calls.enqueued.length}` };
+    },
+    async claimBatch() {
+      throw new Error("not used");
+    },
+    async touchProcessing() {
+      // not used
+    },
+    async releaseToPending() {
+      return 0;
+    },
+    async markSent() {
+      throw new Error("not used");
+    },
+    async markFailed() {
+      throw new Error("not used");
+    },
+    async markPermanentlyFailed() {
+      throw new Error("not used");
+    },
+    async reclaimStaleProcessing() {
+      throw new Error("not used");
+    },
+  };
+
   /**
    * Stands in for the real transaction: records that a unit of work was opened,
    * and — the part that matters — records whether it COMMITTED or rolled back,
@@ -134,7 +207,7 @@ function harness(
     async run(work) {
       order.push("uow:begin");
       try {
-        const result = await work({ subscriptions, webhookEvents, activityLog });
+        const result = await work({ subscriptions, webhookEvents, activityLog, outbox });
         order.push("uow:commit");
         return result;
       } catch (error) {
@@ -182,8 +255,93 @@ describe("HandlePaymentWebhook", () => {
       "recordIfNew",
       "markPaid",
       "activity",
+      "outbox",
       "uow:commit",
     ]);
+  });
+
+  /**
+   * The atomicity requirement, at the unit level: the intent to invite is written
+   * INSIDE the same unit of work as the activation.
+   *
+   * Asserted positionally rather than by "did it happen", because the failure this
+   * guards against is not a missing call — it is a call in the wrong PLACE. An
+   * enqueue after `uow:commit` would look identical in every other assertion, and
+   * would lose the invite whenever the process died between the two writes: money
+   * taken, nothing queued, and no retry, because the webhook event id is spent.
+   */
+  it("enqueues the grant_access row INSIDE the unit of work, not after it", async () => {
+    const { useCase, order } = harness();
+
+    await useCase.execute(paidEvent());
+
+    expect(order.indexOf("outbox")).toBeGreaterThan(order.indexOf("uow:begin"));
+    expect(order.indexOf("outbox")).toBeLessThan(order.indexOf("uow:commit"));
+  });
+
+  it("enqueues exactly one grant_access row, addressed by subscription", async () => {
+    const { useCase, calls } = harness();
+
+    await useCase.execute(paidEvent());
+
+    expect(calls.enqueued).toHaveLength(1);
+    expect(calls.enqueued[0].eventType).toBe("grant_access");
+    expect(calls.enqueued[0].payload).toMatchObject({
+      subscriptionId: "sub-1",
+      memberId: "member-1",
+      communityId: "community-1",
+    });
+  });
+
+  it("keeps the payer's details out of the outbox payload", async () => {
+    // The row is read by the worker and logged around; the raw body already has
+    // exactly one home, `webhook_event.payload`. Ids and integers only.
+    const { useCase, calls } = harness();
+
+    await useCase.execute(
+      paidEvent({
+        payload: { id: "inv_1", payer_email: "siti@example.com", payer_name: "Siti" },
+      })
+    );
+
+    const serialised = JSON.stringify(calls.enqueued[0].payload);
+    expect(serialised).not.toContain("siti@example.com");
+    expect(serialised).not.toContain("Siti");
+  });
+
+  it("does not enqueue anything when the activation itself fails", async () => {
+    // The real unit of work would roll the row back anyway; not writing it at all
+    // when nothing was activated is the same rule the activity_log entry follows.
+    const { useCase, calls, order } = harness({ failMarkPaid: true });
+
+    await expect(useCase.execute(paidEvent())).rejects.toThrow("activation blew up");
+
+    expect(calls.enqueued).toEqual([]);
+    expect(order).toContain("uow:rollback");
+  });
+
+  it("does not enqueue for a replayed event", async () => {
+    const { useCase, calls } = harness({ alreadySeen: true });
+
+    await useCase.execute(paidEvent());
+
+    expect(calls.enqueued).toEqual([]);
+  });
+
+  it("does not enqueue for an already-settled transaction", async () => {
+    const { useCase, calls } = harness({ alreadySettled: true });
+
+    await useCase.execute(paidEvent());
+
+    expect(calls.enqueued).toEqual([]);
+  });
+
+  it("does not enqueue for a status that is not PAID", async () => {
+    const { useCase, calls } = harness();
+
+    await captureWarnings(() => useCase.execute(paidEvent({ status: "EXPIRED" })));
+
+    expect(calls.enqueued).toEqual([]);
   });
 
   it("passes the provider's invoice id through as the gateway reference", async () => {
@@ -279,6 +437,120 @@ describe("HandlePaymentWebhook", () => {
     const warnings = await captureWarnings(() => useCase.execute(paidEvent()));
     expect(warnings.some((line) => /already-settled transaction/.test(line))).toBe(true);
     expect(warnings.some((line) => line.includes(TRANSACTION_ID))).toBe(true);
+  });
+
+  /**
+   * Task 7 item 2. `failed` used to be indistinguishable from `success` here —
+   * both produced `{ activated: false, duplicate: true }` and an HTTP 200 — so a
+   * genuine payment for a failed transaction was thrown away with a log line
+   * calling it a duplicate. Xendit does not retry a 200.
+   */
+  describe("a payment for a transaction in a status that cannot be settled", () => {
+    it("throws a 409 rather than reporting a duplicate", async () => {
+      const { useCase } = harness({ conflictingStatus: "failed" });
+
+      let thrown: unknown;
+      await captureWarnings(async () => {
+        thrown = await useCase.execute(paidEvent()).catch((err: unknown) => err);
+      });
+
+      expect(thrown).toBeInstanceOf(ConflictError);
+      expect((thrown as ConflictError).status).toBe(409);
+    });
+
+    it("does not activate, audit or enqueue anything", async () => {
+      const { useCase, calls, order } = harness({ conflictingStatus: "failed" });
+
+      await captureWarnings(() => useCase.execute(paidEvent()).catch(() => undefined));
+
+      expect(calls.activity).toEqual([]);
+      // The whole point: no invite is queued for a payment we refused to settle.
+      expect(calls.enqueued).toEqual([]);
+      // And the throw reaches the unit of work, which rolls `recordIfNew` back —
+      // so the event id is not spent and the delivery can be replayed by hand.
+      expect(order).toEqual(["find", "uow:begin", "recordIfNew", "markPaid", "uow:rollback"]);
+    });
+
+    it("names the transaction and the status, and nothing else", async () => {
+      const { useCase } = harness({ conflictingStatus: "failed" });
+
+      const warnings = await captureWarnings(() =>
+        useCase.execute(paidEvent()).catch(() => undefined)
+      );
+
+      const text = warnings.join("\n");
+      expect(text).toContain("ALERT");
+      expect(text).toContain(TRANSACTION_ID);
+      expect(text).toContain("failed");
+      // NOT called a duplicate — that wording is what made this invisible.
+      expect(text).not.toMatch(/already-settled/);
+    });
+
+    it("treats any unrecognised status the same way, not just failed", async () => {
+      // NOTE: kept adjacent to the superseded block below on purpose — both are
+      // non-activating outcomes and both must leave `calls.enqueued` empty.
+      // `transaction.status` is a varchar, not an enum. A status a later phase
+      // adds must fail closed rather than be absorbed as a duplicate.
+      for (const status of ["refunded", "expired", "chargeback", "PENDING"]) {
+        const { useCase, calls } = harness({ conflictingStatus: status });
+        let thrown: unknown;
+        await captureWarnings(async () => {
+          thrown = await useCase.execute(paidEvent()).catch((err: unknown) => err);
+        });
+        expect(thrown).toBeInstanceOf(ConflictError);
+        expect(calls.enqueued).toEqual([]);
+      }
+    });
+  });
+
+  /**
+   * Task 7 item 3. `markPaid` reports `superseded` when the member already holds an
+   * active subscription to this tier, and the ONE thing that must not happen then
+   * is a second `grant_access` row: that is a second single-use invite link for the
+   * same member, which they can forward to somebody who never paid.
+   */
+  describe("a payment superseded by an existing active subscription", () => {
+    it("does NOT enqueue a grant_access row", async () => {
+      const { useCase, calls } = harness({ superseded: true });
+
+      await captureWarnings(() => useCase.execute(paidEvent()));
+
+      expect(calls.enqueued).toEqual([]);
+    });
+
+    it("answers 2xx-shaped: not activated, and not a duplicate either", async () => {
+      // `duplicate: true` would be wrong — this is a distinct, handled state, and
+      // a caller branching on it must be able to tell them apart.
+      const { useCase } = harness({ superseded: true });
+
+      let result: unknown;
+      await captureWarnings(async () => {
+        result = await useCase.execute(paidEvent());
+      });
+
+      expect(result).toEqual({ activated: false, duplicate: false });
+    });
+
+    it("audits it as access_not_granted with the reason and the amount", async () => {
+      const { useCase, calls } = harness({ superseded: true });
+
+      await captureWarnings(() => useCase.execute(paidEvent()));
+
+      expect(calls.activity).toEqual([
+        { memberId: "member-1", communityId: "community-1", eventType: "access_not_granted" },
+      ]);
+    });
+
+    it("says out loud that a refund is likely owed", async () => {
+      const { useCase } = harness({ superseded: true });
+
+      const warnings = await captureWarnings(() => useCase.execute(paidEvent()));
+
+      const text = warnings.join("\n");
+      expect(text).toContain("superseded");
+      expect(text).toContain("refund");
+      expect(text).toContain(TRANSACTION_ID);
+    });
   });
 
   describe("order of operations", () => {

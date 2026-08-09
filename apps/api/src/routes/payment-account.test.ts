@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { resetDatabase } from "../db/test-helpers";
+import type { FakePaymentAdapter } from "../infrastructure/payments/fake-payment.adapter";
 import { bearer, signupAndGetToken } from "./test-support";
 
 beforeEach(resetDatabase);
@@ -91,6 +92,37 @@ describe("POST /payment-account", () => {
     expect((await deps.creatorRepository.findById(creatorId))?.xenditAccountId).toBe(
       xenditAccountId
     );
+  });
+
+  /**
+   * Task 7 item 1 — the half of the concurrency probe the Phase 3 fix left open.
+   *
+   * The DB TOCTOU is closed (the test above), but the PROVIDER CALL still came
+   * first, so every losing request created a sub-account before finding out it
+   * had lost. Measured on this branch before the fix: 30 concurrent requests →
+   * 30 Xendit sub-accounts, 29 of them orphaned; sequentially → 1. Xendit MANAGED
+   * sub-accounts are KYC entities with no delete endpoint, so each orphan is
+   * permanent and reconcilable only by hand.
+   *
+   * The row-count assertion above cannot see this: the column holds one id either
+   * way. Only the count of PROVIDER calls can.
+   */
+  it("mints exactly ONE provider sub-account under 5 concurrent requests", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { token } = await signupAndGetToken(a);
+    // NODE_ENV=test, so selectPaymentProvider returned the fake — which records
+    // every account it was asked to create. That array is the whole assertion.
+    const payments = deps.payments as FakePaymentAdapter;
+
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        a.request("/payment-account", { method: "POST", headers: bearer(token) })
+      )
+    );
+
+    expect(responses.map((r) => r.status).sort()).toEqual([201, 409, 409, 409, 409]);
+    expect(payments.accounts).toHaveLength(1);
   });
 });
 

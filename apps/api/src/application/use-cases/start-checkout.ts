@@ -1,4 +1,5 @@
 import { ConflictError, NotFoundError } from "../errors";
+import { isConnectedPaymentAccount } from "../../domain/payment-account";
 import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "../ports/membership-tier-repository.port";
 import type { MemberRepositoryPort } from "../ports/member-repository.port";
@@ -55,7 +56,19 @@ export class StartCheckout {
     const creator = await this.creators.findById(community.creatorId);
     // No account means no sub-account to settle into. Charging anyway would put
     // member funds in a platform account — the PJP hazard. Refuse.
-    if (!creator?.xenditAccountId) {
+    //
+    // `isConnectedPaymentAccount`, not truthiness: since Task 7,
+    // `CreatePaymentAccount` claims this column with a sentinel BEFORE it calls
+    // Xendit, so a truthy value is not necessarily an account. Handing the
+    // sentinel to `createInvoice` as `for_account_id` would charge a member
+    // against an account that does not exist at the provider — a half-provisioned
+    // creator must read as "not ready yet", which is exactly what it is.
+    //
+    // Bound to a local rather than tested in place so the type predicate actually
+    // narrows it to `string` for the `forAccountId` below — narrowing does not
+    // follow a `creator?.x ?? null` expression back to the property.
+    const forAccountId = creator?.xenditAccountId ?? null;
+    if (!isConnectedPaymentAccount(forAccountId)) {
       throw new ConflictError("this community is not ready to accept payments yet");
     }
 
@@ -63,6 +76,24 @@ export class StartCheckout {
       whatsappNumber: input.payerWhatsappNumber,
       name: input.payerName,
     });
+
+    // BEFORE the invoice exists, which is the only place this can be refused for
+    // free. A member who already holds this tier and pays again used to be charged
+    // for nothing: `markPaid` returned `superseded`, the new subscription was
+    // `cancelled`, no `grant_access` outbox row was enqueued — so no WhatsApp message
+    // was sent AT ALL — and the status page they were redirected to read
+    // `cancelled`. Money in, nothing out, and the member never told why.
+    //
+    // And it is the likely case, not an edge one: re-paying is exactly what someone
+    // does when the invite did not arrive. The `superseded` path stays as the
+    // backstop for the genuine race (two submits inside the same instant, which this
+    // read cannot see); this closes the ordinary one.
+    if (await this.subscriptions.hasActiveSubscriptionForTier(member.id, tier.id)) {
+      throw new ConflictError(
+        "you already have an active membership for this tier. If you have not received " +
+          "your group invite, contact the community owner — paying again would not send it."
+      );
+    }
 
     const subscription = await this.subscriptions.createPending({
       memberId: member.id,
@@ -80,7 +111,7 @@ export class StartCheckout {
       description: `${community.name} — ${tier.name}`,
       payerName: input.payerName,
       payerWhatsappNumber: input.payerWhatsappNumber,
-      forAccountId: creator.xenditAccountId,
+      forAccountId,
       // Closes the loop the browser cannot: `CheckoutPage` hands the payer to
       // the provider and the provider hands them back HERE, to the confirmation
       // page Task 9 built. Built from the CANONICAL slug on the community record

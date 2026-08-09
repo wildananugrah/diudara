@@ -43,6 +43,41 @@
       "when": 1786214697649,
       "tag": "0005_same_black_bolt",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786242364122,
+      "tag": "0006_material_machine_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786246516029,
+      "tag": "0007_hesitant_toro",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786249022572,
+      "tag": "0008_wealthy_komodo",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786250137167,
+      "tag": "0009_flashy_vulcan",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786254622486,
+      "tag": "0010_spotty_harrier",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,5 @@
-import { NotFoundError, ValidationError } from "../errors";
+import { ConflictError, NotFoundError, ValidationError } from "../errors";
+import { OUTBOX_GRANT_ACCESS } from "../ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "../ports/payment-activation-unit-of-work.port";
 import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
 
@@ -77,7 +78,11 @@ export interface HandlePaymentWebhookResult {
  *     written. This also denies a forger the ability to consume the event id
  *     that a genuine delivery needs.
  *  3. `recordIfNew`. Already seen → return, touching nothing.
- *  4. Only for `status === "PAID"`: activate, then write the audit entry.
+ *  4. Only for `status === "PAID"`: activate, then write the audit entry. A
+ *     transaction that is already `success` is a 2xx no-op; one in any other
+ *     non-`pending` status is a 409 that records nothing, because a payment for a
+ *     `failed` transaction is a person's problem and a 200 would lose it (see
+ *     `MarkPaidOutcome`).
  *
  * Steps 3 and 4 run inside ONE unit of work, so claiming the event id and using
  * it commit together or not at all — see `PaymentActivationUnitOfWorkPort` for
@@ -180,20 +185,83 @@ export class HandlePaymentWebhook {
         paidAt: new Date(),
         paymentMethod: input.paymentMethod,
       });
-      if (!paid) {
-        // The transaction was not `pending` any more, so this delivery is a
+
+      if (paid.outcome === "already_settled") {
+        // A genuine duplicate: the transaction is `success`, so this delivery is a
         // second activation attempt that got past the event-id guard — which is
         // possible whenever two deliveries differ in `body.id` or `status`. The
-        // UPDATE's own predicate absorbed it; nothing else in here may run,
-        // because `activity_log` "joined" is what Phase 4 turns into a WhatsApp
-        // invite and a duplicate row is a duplicate invite.
+        // UPDATE's own predicate absorbed it, and nothing else in here may run:
+        // `activity_log` "joined" is what Phase 4 turns into an invite, and a
+        // duplicate row is a duplicate invite. A 2xx is correct — there is nothing
+        // for the provider to retry.
         console.warn(
           `[payments] webhook for an already-settled transaction: provider=xendit ` +
-            `transaction=${transaction.id} event=${safeLabel(input.eventType)} — no second ` +
-            "activation was performed"
+            `transaction=${transaction.id} status=${safeLabel(paid.status)} ` +
+            `event=${safeLabel(input.eventType)} — no second activation was performed`
         );
         return { activated: false, duplicate: true };
       }
+
+      if (paid.outcome === "conflicting_status") {
+        // NOT a duplicate, and the reason this branch exists (Task 7 item 2). The
+        // transaction is in a status that neither activates nor counts as settled —
+        // today only `failed` — and a real payment has arrived for it. Reporting a
+        // 200 here is how that payment used to disappear: Xendit does not retry a
+        // 2xx, and once the event id is recorded the delivery cannot be replayed
+        // by hand either.
+        //
+        // So this THROWS, which rolls the whole unit of work back — including
+        // `recordIfNew` — leaving the event id unspent so the same delivery can be
+        // re-sent once an operator has reconciled the row. Ids and enum values
+        // only: the payload carries the payer's name, email and phone number.
+        console.warn(
+          `[payments] ALERT: a payment arrived for a transaction that is not settleable: ` +
+            `provider=xendit transaction=${transaction.id} ` +
+            `subscription=${transaction.subscriptionId} status=${safeLabel(paid.status)} ` +
+            `event=${safeLabel(input.eventType)} amount=${transaction.amount} — the member ` +
+            "has PAID and has NOT been activated. Nothing was recorded, so this delivery " +
+            "can be replayed after the transaction row is reconciled by hand."
+        );
+        throw new ConflictError(
+          "this transaction is not in a state that can be settled; it needs manual review"
+        );
+      }
+
+      if (paid.outcome === "superseded") {
+        // A double-submit at checkout produced two pending subscriptions for one
+        // (member, tier), and the member already holds an active one. The payment
+        // settled — the money arrived — but this subscription was `cancelled`
+        // rather than activated, so NOTHING BELOW RUNS: the outbox enqueue is what
+        // Phase 4 turns into an invite link, and a second link for the same member
+        // is a second bearer credential they could forward to someone who never
+        // paid. That omission is the point of this branch.
+        //
+        // Still audited, so a creator can see the duplicate and refund it. A 2xx,
+        // because there is nothing for the provider to retry.
+        console.warn(
+          `[payments] payment superseded by an existing active subscription: provider=xendit ` +
+            `transaction=${transaction.id} subscription=${paid.subscription.id} ` +
+            `member=${paid.subscription.memberId} tier=${paid.subscription.tierId} ` +
+            `amount=${transaction.amount} event=${safeLabel(input.eventType)} — the ` +
+            "subscription was cancelled, no access was granted, and a refund is likely owed"
+        );
+        await repositories.activityLog.record({
+          memberId: paid.subscription.memberId,
+          communityId: paid.communityId,
+          // The same event type GrantChannelAccess uses for "we did not grant, and
+          // here is why", so a dashboard needs no new vocabulary.
+          eventType: "access_not_granted",
+          metadata: {
+            reason: "duplicate_active_subscription",
+            source: "xendit_webhook",
+            subscriptionId: paid.subscription.id,
+            transactionId: transaction.id,
+            amount: transaction.amount,
+          },
+        });
+        return { activated: false, duplicate: false };
+      }
+
       const { subscription, communityId } = paid;
 
       await repositories.activityLog.record({
@@ -207,6 +275,34 @@ export class HandlePaymentWebhook {
           transactionId: transaction.id,
           subscriptionId: subscription.id,
           amount: transaction.amount,
+        },
+      });
+
+      // The intent to invite, written INSIDE the unit of work — which is the only
+      // place it can go. Queued afterwards, in its own transaction, a crash
+      // between the two commits would leave a paid, activated subscription with
+      // no invite and no way to recover one: the event id is spent, so every
+      // provider retry is swallowed as a replay. Queued BEFORE the activation, a
+      // failed activation would leave the worker inviting someone whose payment
+      // we never recorded.
+      //
+      // What must never move in here is the SEND. That is an external HTTP call,
+      // and a Telegram outage inside this transaction would roll back a payment
+      // we have already taken (plan, Global Constraints).
+      //
+      // Reached only on the activated path, so the counts a replay produces are
+      // one webhook_event row, one activity_log row, and one outbox row.
+      await repositories.outbox.enqueue({
+        eventType: OUTBOX_GRANT_ACCESS,
+        // Ids only, for the same reason as the activity_log metadata above: the
+        // worker reads this outside any request context and logs around it, and a
+        // Xendit callback carries the payer's name, email and phone number. The
+        // worker resolves the member and the channels from `subscriptionId`.
+        payload: {
+          subscriptionId: subscription.id,
+          memberId: subscription.memberId,
+          communityId,
+          transactionId: transaction.id,
         },
       });
 

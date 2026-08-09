@@ -119,11 +119,79 @@ describe("errorHandler", () => {
     await resetDatabase();
   });
 
-  it("truncates a very long first line rather than logging it whole", async () => {
+  /**
+   * MINORS, final whole-branch review: this guard lacked `redactLinks`, so it was not
+   * symmetrical with `ProcessOutbox`'s. Both now do `redactLinks(safeErrorSummary(err))`.
+   * Two processes log the same errors and the rule must not drift between them — the
+   * exact drift class Task 8 found.
+   */
+  it("redacts an invite link from an error message, like the worker does", async () => {
+    // An invite link is a bearer credential for a paid community, and a provider can
+    // interpolate one into its own error text. The API's log reaches an aggregator.
+    const logged = await captureStderr(async () => {
+      await appThatThrows(
+        new Error("could not deliver https://t.me/+SuperSecretInviteToken to the member")
+      ).request("/boom");
+    });
+
+    expect(logged).not.toContain("SuperSecretInviteToken");
+    expect(logged).toContain("[link redacted]");
+    // Still diagnosable: only the URL goes.
+    expect(logged).toContain("could not deliver");
+  });
+
+  it("redacts a Bot API URL, which carries the bot token in its PATH", async () => {
+    const logged = await captureStderr(async () => {
+      await appThatThrows(
+        new Error("POST https://api.telegram.org/bot123456:AA_SECRET_TOKEN/banChatMember failed")
+      ).request("/boom");
+    });
+
+    expect(logged).not.toContain("AA_SECRET_TOKEN");
+    expect(logged).toContain("[link redacted]");
+  });
+
+  it("walks the cause chain, so a wrapped driver error keeps its real reason", async () => {
+    // `err.message` alone gave the wrapper's text — for drizzle, the SQL statement —
+    // and discarded the constraint violation on `.cause`, which is the only thing an
+    // operator needs.
+    const wrapped = new Error("Failed query: insert into creator ...", {
+      cause: new Error('duplicate key value violates unique constraint "creator_email_unique"'),
+    });
+
+    const logged = await captureStderr(async () => {
+      await appThatThrows(wrapped).request("/boom");
+    });
+
+    expect(logged).toContain("creator_email_unique");
+  });
+
+  it("truncates a very long message rather than logging it whole", async () => {
+    // Bounded, with an ellipsis marking the cut. The `…` may come from
+    // `safeErrorSummary`'s per-part clamp or from this guard's own stricter cap —
+    // which one fires depends on the shape of the error, and the property that
+    // matters is that a 5000-character message never reaches the log intact.
     const logged = await captureStderr(async () => {
       await appThatThrows(new Error("x".repeat(5000))).request("/boom");
     });
-    expect(logged).toContain("(truncated)");
+    expect(logged).toContain("…");
     expect(logged.length).toBeLessThan(400);
+  });
+
+  it("bounds a DEEP cause chain, where this guard's own cap is what fires", async () => {
+    // `safeErrorSummary` allows 120 characters per link and 400 overall, so a chain
+    // of long messages exceeds what an API log line should carry even after it has
+    // done its work. That is why the local cap stays.
+    let err = new Error("z".repeat(300));
+    for (let depth = 0; depth < 4; depth++) {
+      err = new Error("y".repeat(300), { cause: err });
+    }
+
+    const logged = await captureStderr(async () => {
+      await appThatThrows(err).request("/boom");
+    });
+
+    expect(logged).toContain("(truncated)");
+    expect(logged.length).toBeLessThan(300);
   });
 });

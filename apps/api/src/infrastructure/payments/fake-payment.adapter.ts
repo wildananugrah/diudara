@@ -13,12 +13,23 @@ export class FakePaymentAdapter implements PaymentProviderPort {
   readonly invoices: CreateInvoiceInput[] = [];
   readonly accounts: { creatorId: string; accountId: string }[] = [];
   failNextInvoice = false;
+  /**
+   * Makes the next `createPaymentAccount` throw. Exists so a test can exercise
+   * `CreatePaymentAccount`'s release-the-claim path: since Task 7 the creator's
+   * row is claimed with a sentinel BEFORE this call, so a provider failure that
+   * did not release the claim would wedge the creator permanently.
+   */
+  failNextPaymentAccount = false;
 
   async createPaymentAccount(input: {
     creatorId: string;
     email: string;
     name: string;
   }): Promise<{ accountId: string }> {
+    if (this.failNextPaymentAccount) {
+      this.failNextPaymentAccount = false;
+      throw new Error("fake payment provider: createPaymentAccount failed");
+    }
     const accountId = `fake-acct-${this.accounts.length + 1}-${input.creatorId}`;
     this.accounts.push({ creatorId: input.creatorId, accountId });
     return { accountId };

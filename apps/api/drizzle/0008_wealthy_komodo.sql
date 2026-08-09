@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "subscription_member_tier_active_unique" ON "subscription" USING btree ("member_id","tier_id") WHERE "subscription"."status" = 'active';

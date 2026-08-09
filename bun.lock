@@ -40,6 +40,13 @@
         "vite": "^5.4.21",
       },
     },
+    "apps/worker": {
+      "name": "@diudara/worker",
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.6.0",
+      },
+    },
     "packages/shared": {
       "name": "@diudara/shared",
       "dependencies": {
@@ -97,6 +104,8 @@
     "@diudara/shared": ["@diudara/shared@workspace:packages/shared"],
 
     "@diudara/web": ["@diudara/web@workspace:apps/web"],
+
+    "@diudara/worker": ["@diudara/worker@workspace:apps/worker"],
 
     "@drizzle-team/brocli": ["@drizzle-team/brocli@0.10.2", "", {}, "sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w=="],
 

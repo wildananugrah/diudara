@@ -6,6 +6,7 @@ import { db } from "../db/client";
 import {
   activityLogs,
   membershipTiers,
+  outbox,
   subscriptions,
   transactions,
   webhookEvents,
@@ -47,12 +48,26 @@ async function checkout(
       }),
     })
   ).json();
+  return {
+    communityId: community.id,
+    slug: community.slug as string,
+    tierId: created.id as string,
+    ...(await buy(a, community.slug, created.id)),
+  };
+}
+
+/**
+ * One trip through `POST /c/:slug/checkout`, for the same payer every time — so
+ * calling it twice against the same tier is exactly the double-submit that
+ * produces two pending subscriptions for one (member, tier).
+ */
+async function buy(a: ReturnType<typeof app>, slug: string, tierId: string) {
   const result = await (
-    await a.request(`/c/${community.slug}/checkout`, {
+    await a.request(`/c/${slug}/checkout`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        tierId: created.id,
+        tierId,
         payerName: "Siti",
         payerWhatsappNumber: "+6281234567890",
       }),
@@ -69,9 +84,8 @@ async function checkout(
     .where(eq(transactions.id, result.transactionId));
 
   return {
-    communityId: community.id,
-    subscriptionId: result.subscriptionId,
-    externalId: result.transactionId,
+    subscriptionId: result.subscriptionId as string,
+    externalId: result.transactionId as string,
     invoiceId: tx.gatewayReferenceId!,
   };
 }
@@ -159,6 +173,101 @@ describe("POST /webhooks/xendit", () => {
     expect(logs[0].eventType).toBe("joined");
     expect(logs[0].communityId).toBe(communityId);
     expect(logs[0].memberId).toBe((await subscriptionRow(subscriptionId)).memberId);
+  });
+
+  /**
+   * The outbox row is the intent to invite, and it is written in the SAME
+   * transaction as the activation — see PaymentActivationUnitOfWorkPort. Every
+   * assertion in this block is a COUNT, not a final state: Phase 3's own
+   * idempotency test asserted only that activation happened, which is true whether
+   * or not replay protection works, and a reviewer caught that it would have
+   * stayed green against a broken implementation.
+   */
+  describe("the grant_access outbox row", () => {
+    it("leaves exactly one pending outbox row after an activation", async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
+
+      await post(a, verifiedEvent(externalId, invoiceId));
+
+      const rows = await db.select().from(outbox);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].eventType).toBe("grant_access");
+      expect(rows[0].status).toBe("pending");
+      expect(rows[0].attempts).toBe(0);
+      expect(rows[0].payload).toMatchObject({ subscriptionId });
+    });
+
+    it("carries ids only — no payer name or phone number", async () => {
+      // The row is read by the worker outside any request context. `checkout()`
+      // pays as "Siti" on +6281234567890.
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+
+      await post(a, verifiedEvent(externalId, invoiceId));
+
+      const [row] = await db.select().from(outbox);
+      const serialised = JSON.stringify(row.payload);
+      expect(serialised).not.toContain("Siti");
+      expect(serialised).not.toContain("6281234567890");
+    });
+
+    it("writes ONE row for a REPLAYED webhook, not two", async () => {
+      // The trap. Two rows means two invite links for one paying member, and the
+      // subscription is `active` either way — so only the count detects it.
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+
+      expect((await post(a, verifiedEvent(externalId, invoiceId))).status).toBe(200);
+      expect((await post(a, verifiedEvent(externalId, invoiceId))).status).toBe(200);
+
+      expect(await db.select().from(outbox)).toHaveLength(1);
+    });
+
+    it("writes ONE row under three CONCURRENT deliveries of the same event", async () => {
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+
+      await Promise.all([
+        post(a, verifiedEvent(externalId, invoiceId)),
+        post(a, verifiedEvent(externalId, invoiceId)),
+        post(a, verifiedEvent(externalId, invoiceId)),
+      ]);
+
+      expect(await db.select().from(outbox)).toHaveLength(1);
+    });
+
+    it("writes ONE row when PAID is followed by SETTLED for the same invoice", async () => {
+      // Both bodies are verifiable and their provider_event_ids DIFFER, so the
+      // UNIQUE constraint cannot stop the second from being recorded — markPaid's
+      // `status = 'pending'` predicate is what stops the second grant.
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+
+      await post(a, verifiedEvent(externalId, invoiceId));
+      await post(a, verifiedEvent(externalId, invoiceId, { status: "SETTLED" }));
+
+      expect(await db.select().from(webhookEvents)).toHaveLength(2);
+      expect(await db.select().from(outbox)).toHaveLength(1);
+    });
+
+    it("writes NO row for a non-PAID delivery", async () => {
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+
+      await post(a, verifiedEvent(externalId, invoiceId, { status: "EXPIRED" }));
+
+      expect(await db.select().from(outbox)).toHaveLength(0);
+    });
+
+    it("writes NO row for a rejected delivery", async () => {
+      const a = app();
+      const { externalId } = await checkout(a);
+
+      await post(a, paidEvent(externalId, { id: "inv_forged" }));
+
+      expect(await db.select().from(outbox)).toHaveLength(0);
+    });
   });
 
   it("computes next_billing_date from the tier's billing cycle", async () => {
@@ -347,6 +456,174 @@ describe("POST /webhooks/xendit", () => {
     expect(await db.select().from(activityLogs)).toHaveLength(1);
   });
 
+  /**
+   * Task 7 item 2. `markPaid`'s zero-row path treated EVERY non-`pending` status
+   * as "already settled", including `failed` — so a genuine payment arriving for a
+   * failed transaction returned HTTP 200 and was swallowed as a duplicate. Xendit
+   * does not retry a 200, and the delivery is not replayable afterwards either
+   * (the event id is spent), so the money was taken and the access silently never
+   * granted, with a `[payments] already-settled` line as the only trace.
+   *
+   * `failed` and `success` are genuinely different: one is an idempotent no-op,
+   * the other is an operator's problem that must not be reported as normal.
+   */
+  describe("a payment for a transaction that is not pending", () => {
+    /** What a later phase's retry/expiry handling will leave behind. */
+    async function markTransactionFailed(externalId: string) {
+      await db
+        .update(transactions)
+        .set({ status: "failed" })
+        .where(eq(transactions.id, externalId));
+    }
+
+    it("does NOT swallow a genuine PAID for a FAILED transaction as a duplicate", async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
+      await markTransactionFailed(externalId);
+
+      const res = await post(a, verifiedEvent(externalId, invoiceId));
+
+      // Not 200. A 2xx here is Xendit's signal to stop, and it will not retry.
+      expect(res.status).toBe(409);
+      expect((await subscriptionRow(subscriptionId)).status).toBe("pending");
+      // And nothing was recorded, so the SAME delivery can be replayed by hand
+      // once an operator has repaired the row — a burnt event id would make even
+      // that impossible.
+      expect(await db.select().from(webhookEvents)).toHaveLength(0);
+      expect(await db.select().from(outbox)).toHaveLength(0);
+      expect(await db.select().from(activityLogs)).toHaveLength(0);
+    });
+
+    it("says which transaction and which status, with no payer details", async () => {
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+      await markTransactionFailed(externalId);
+
+      const warnings: string[] = [];
+      const original = console.warn;
+      console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+      try {
+        await post(a, verifiedEvent(externalId, invoiceId, { payer_email: "siti@example.com" }));
+      } finally {
+        console.warn = original;
+      }
+
+      const text = warnings.join("\n");
+      expect(text).toContain(externalId);
+      expect(text).toContain("failed");
+      // `checkout()` pays as "Siti" on +6281234567890. Ids and enum values only.
+      expect(text).not.toContain("siti@example.com");
+      expect(text).not.toContain("Siti");
+      expect(text).not.toContain("6281234567890");
+    });
+
+    it("still treats an already-SUCCESS transaction as an idempotent 200 no-op", async () => {
+      // The other half. This one really IS a duplicate, and it must stay a 200 —
+      // otherwise Xendit retries a delivery there is nothing to do about.
+      const a = app();
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
+      await post(a, verifiedEvent(externalId, invoiceId));
+
+      const replay = await post(a, verifiedEvent(externalId, invoiceId, { status: "SETTLED" }));
+
+      expect(replay.status).toBe(200);
+      expect((await subscriptionRow(subscriptionId)).status).toBe("active");
+      expect(await db.select().from(outbox)).toHaveLength(1);
+      expect(await db.select().from(activityLogs)).toHaveLength(1);
+    });
+  });
+
+  /**
+   * Task 7 item 3. A double-submit at checkout creates TWO pending subscriptions
+   * for one (member, tier) — nothing prevented it and nothing decided which was
+   * authoritative. Phase 4 is the first phase to act on one: each activation
+   * enqueues a `grant_access` row, so the member is invited twice and holds two
+   * single-use bearer credentials for the same group, one of which they can hand
+   * to somebody who never paid.
+   *
+   * The rule: the FIRST one to activate is authoritative, and a later activation
+   * for the same (member, tier) is superseded — recorded, `cancelled`, and NOT
+   * granted. The transaction still settles as `success`, because the money really
+   * did arrive and pretending otherwise would hide a refund that is owed.
+   */
+  describe("a second pending subscription for the same member and tier", () => {
+    it("does not activate twice or queue a second invite", async () => {
+      const a = app();
+      const first = await checkout(a);
+      // The double-submit: same payer, same tier, a second pending subscription.
+      const second = await buy(a, first.slug, first.tierId);
+      expect(second.subscriptionId).not.toBe(first.subscriptionId);
+
+      expect((await post(a, verifiedEvent(first.externalId, first.invoiceId))).status).toBe(200);
+      const res = await post(a, verifiedEvent(second.externalId, second.invoiceId));
+
+      // A 2xx: there is nothing for the provider to retry, and this is a state we
+      // have handled, not an error.
+      expect(res.status).toBe(200);
+      // THE assertion, first: two rows here means two invite links for one paying
+      // member, and both subscriptions read `active` either way.
+      expect(await db.select().from(outbox)).toHaveLength(1);
+      expect((await subscriptionRow(first.subscriptionId)).status).toBe("active");
+      expect((await subscriptionRow(second.subscriptionId)).status).toBe("cancelled");
+    });
+
+    it("records the money as collected, so the refund owed is visible", async () => {
+      const a = app();
+      const first = await checkout(a);
+      const second = await buy(a, first.slug, first.tierId);
+
+      await post(a, verifiedEvent(first.externalId, first.invoiceId));
+      await post(a, verifiedEvent(second.externalId, second.invoiceId));
+
+      const [tx] = await db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, second.externalId));
+      expect(tx.status).toBe("success");
+      expect(tx.paidAt).not.toBeNull();
+    });
+
+    it("audits WHY the second one was not granted", async () => {
+      const a = app();
+      const first = await checkout(a);
+      const second = await buy(a, first.slug, first.tierId);
+
+      await post(a, verifiedEvent(first.externalId, first.invoiceId));
+      await post(a, verifiedEvent(second.externalId, second.invoiceId));
+
+      const logs = await db.select().from(activityLogs);
+      // One "joined" for the authoritative activation, one explaining the other.
+      expect(logs.map((l) => l.eventType).sort()).toEqual(["access_not_granted", "joined"]);
+      const notGranted = logs.find((l) => l.eventType === "access_not_granted")!;
+      expect(JSON.stringify(notGranted.metadata)).toContain("duplicate_active_subscription");
+      expect(JSON.stringify(notGranted.metadata)).toContain(second.subscriptionId);
+    });
+
+    it("still activates a RENEWAL of the same subscription", async () => {
+      // The rule must not break the ordinary case it resembles: a renewal is a new
+      // transaction against the SAME subscription, which is already active.
+      const a = app();
+      const first = await checkout(a);
+      await post(a, verifiedEvent(first.externalId, first.invoiceId));
+
+      const [renewal] = await db
+        .insert(transactions)
+        .values({
+          subscriptionId: first.subscriptionId,
+          amount: 50000,
+          paymentMethod: "invoice",
+          gatewayReferenceId: "inv_renewal_1",
+        })
+        .returning();
+
+      const res = await post(a, verifiedEvent(renewal.id, "inv_renewal_1"));
+
+      expect(res.status).toBe(200);
+      expect((await subscriptionRow(first.subscriptionId)).status).toBe("active");
+      expect(await db.select().from(outbox)).toHaveLength(2);
+    });
+  });
+
   it("400s a delivery whose invoice id is not the one checkout recorded", async () => {
     const a = app();
     const { subscriptionId, externalId } = await checkout(a);
@@ -459,6 +736,46 @@ describe("POST /webhooks/xendit", () => {
       // Xendit makes is a no-op: money taken, access never granted.
       expect(await db.select().from(webhookEvents)).toHaveLength(0);
       expect((await subscriptionRow(subscriptionId)).status).toBe("pending");
+    });
+
+    /**
+     * The other direction of the atomicity requirement. A `grant_access` row that
+     * survived a rolled-back activation is an invite for a subscription that is
+     * still `pending`: the worker would issue a link to someone whose payment we
+     * did not record, and — because the retry then activates and enqueues again —
+     * a second link after that.
+     *
+     * This is the assertion that goes red if the enqueue is moved OUTSIDE the
+     * unit of work.
+     */
+    it("rolls the outbox row back too, so no invite is queued for a failed activation", async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
+
+      const res = await withBrokenActivation(subscriptionId, () =>
+        post(a, verifiedEvent(externalId, invoiceId))
+      );
+
+      expect(res.status).toBe(500);
+      expect(await db.select().from(outbox)).toHaveLength(0);
+    });
+
+    it("queues exactly one invite once the RETRY of that event succeeds", async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
+
+      await withBrokenActivation(subscriptionId, () =>
+        post(a, verifiedEvent(externalId, invoiceId))
+      );
+      expect(await db.select().from(outbox)).toHaveLength(0);
+
+      const retry = await post(a, verifiedEvent(externalId, invoiceId));
+
+      expect(retry.status).toBe(200);
+      const rows = await db.select().from(outbox);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].status).toBe("pending");
+      expect(rows[0].payload).toMatchObject({ subscriptionId });
     });
 
     it("lets the RETRY of that same event succeed — the actual point", async () => {
