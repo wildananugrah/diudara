@@ -1,3 +1,4 @@
+import { redactLinks, safeLabel } from "../log-safety";
 import type { OutboxRepositoryPort } from "../ports/outbox-repository.port";
 
 /**
@@ -148,23 +149,6 @@ export class ProcessOutbox {
 }
 
 /**
- * Removes anything URL-shaped from a diagnostic.
- *
- * An invite link is a bearer credential and belongs only in the WhatsApp message
- * to the member who bought it (plan, Global Constraints) — never in
- * `outbox.last_error`, which an operator reads out of the database, and never in
- * a log line, which ends up in a log aggregator. Phase 2 leaked argon2id hashes
- * exactly this way.
- *
- * URLs in general, not just `t.me` links: the Telegram bot token is part of every
- * Bot API request PATH, so a URL from that adapter is a second credential. The
- * text around the URL is kept, so the error stays diagnosable.
- */
-export function redactLinks(message: string): string {
-  return message.replace(/\b(?:https?|tg|wa):\/\/\S+/gi, "[link redacted]");
-}
-
-/**
  * The message of whatever was thrown, with no stack and no object dump: a driver
  * error carries the failed statement's bound parameters, and an adapter error can
  * carry a response body.
@@ -174,14 +158,4 @@ function describeError(err: unknown): string {
     return err.message;
   }
   return `non-Error thrown: ${typeof err}`;
-}
-
-/**
- * Renders a value safe to put in a log line. Same rule, and the same reason, as
- * `safeLabel` in handle-payment-webhook.ts: a newline inside an event type would
- * forge a second log line, and these lines are what an operator reads when
- * invites are not arriving.
- */
-function safeLabel(value: string): string {
-  return value.slice(0, 64).replace(/[^A-Za-z0-9_.:-]/g, "?");
 }

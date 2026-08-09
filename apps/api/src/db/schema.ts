@@ -302,6 +302,21 @@ export const channelMemberships = pgTable(
       .references(() => channels.id),
     status: varchar("status", { length: 16 }).notNull().default("active"),
     inviteLink: varchar("invite_link", { length: 512 }),
+    /**
+     * The member's id ON THE PLATFORM (a Telegram integer user id), once we learn
+     * it.
+     *
+     * NULL for every row Phase 4 writes, and that is not an oversight: access is
+     * granted with an INVITE LINK precisely because we do not know who the member
+     * is on Telegram — a WhatsApp number is all checkout gives us. The id only
+     * becomes knowable when the member actually joins, from Telegram's
+     * `chat_member` update, which no handler exists for yet.
+     *
+     * It is here because revocation NEEDS it: `banChatMember` addresses a user id,
+     * so a revocation with no id recorded cannot be automated, and
+     * `RevokeChannelAccess` reports exactly that rather than claiming success.
+     */
+    externalMemberId: varchar("external_member_id", { length: 64 }),
     grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

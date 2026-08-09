@@ -21,11 +21,14 @@ import { GetPublicCommunity } from "./application/use-cases/get-public-community
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
+import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
+import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
+import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
 import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
@@ -78,6 +81,14 @@ export interface Dependencies {
   startCheckout: StartCheckout;
   getSubscriptionStatus: GetSubscriptionStatus;
   handlePaymentWebhook: HandlePaymentWebhook;
+  /**
+   * The creator's manual "remove this member" action. It lives in the API rather
+   * than the worker because revocation is SYNCHRONOUS: a creator removing someone
+   * expects to be told whether it worked (see the use-case docstring). That is
+   * also why the API selects messaging providers at all — the grant path never
+   * calls one from this process.
+   */
+  revokeChannelAccess: RevokeChannelAccess;
   /**
    * The static token Xendit sends as `X-CALLBACK-TOKEN`, the ONLY thing
    * authenticating the webhook route. `undefined` when the box is not
@@ -623,6 +634,22 @@ export function bootstrap(): Dependencies {
     paymentActivationUnitOfWork
   );
 
+  // Revocation is the ONE messaging call the API process makes; granting happens
+  // in apps/worker. Same allowlist as the payment adapter: on a box with no
+  // tokens and a NODE_ENV outside the allowlist this throws rather than booting a
+  // fake that would report a removal it never performed.
+  const messaging = selectMessagingProviders({
+    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
+    fonnteApiToken: process.env.FONNTE_API_TOKEN,
+    nodeEnv: process.env.NODE_ENV,
+  });
+  const revokeChannelAccess = new RevokeChannelAccess(
+    communityRepository,
+    new DrizzleChannelMembershipRepository(db),
+    new DrizzleActivityLogRepository(db),
+    messaging.gating
+  );
+
   return {
     creatorRepository,
     tokenIssuer,
@@ -642,6 +669,7 @@ export function bootstrap(): Dependencies {
     startCheckout,
     getSubscriptionStatus,
     handlePaymentWebhook,
+    revokeChannelAccess,
     xenditCallbackToken,
     appBaseUrl,
     sql,

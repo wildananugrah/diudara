@@ -34,6 +34,7 @@ import { GetPublicCommunity } from "./application/use-cases/get-public-community
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
+import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
 import type {
   CreatorRecord,
   CreatorRepositoryPort,
@@ -45,6 +46,8 @@ import type { MemberRepositoryPort } from "./application/ports/member-repository
 import type { SubscriptionRepositoryPort } from "./application/ports/subscription-repository.port";
 import type { WebhookEventRepositoryPort } from "./application/ports/webhook-event-repository.port";
 import type { ActivityLogRepositoryPort } from "./application/ports/activity-log-repository.port";
+import type { ChannelMembershipRepositoryPort } from "./application/ports/channel-membership-repository.port";
+import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
@@ -205,6 +208,42 @@ const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
   },
 };
 
+/**
+ * `RevokeChannelAccess` is a concrete class with private members, so — like the
+ * other use-cases above — the fake is a REAL instance wrapping hand-written fake
+ * ports. Nothing here reaches a database or a provider.
+ */
+const fakeChannelMembershipRepository: ChannelMembershipRepositoryPort = {
+  async claim() {
+    throw new Error("not used");
+  },
+  async recordGrant() {
+    // not used
+  },
+  async revoke() {
+    return false;
+  },
+  async listActiveForMemberInCommunity() {
+    return [];
+  },
+};
+
+const fakeMessagingProvider: MessagingProviderPort = {
+  platform: "telegram",
+  capabilities() {
+    return { canGateAccess: true };
+  },
+  async grantAccess() {
+    throw new Error("not used");
+  },
+  async revokeAccess() {
+    // not used
+  },
+  async notify() {
+    throw new Error("not used");
+  },
+};
+
 const fakePaymentProvider: PaymentProviderPort = {
   async createPaymentAccount() {
     return { accountId: "fake-acct" };
@@ -292,6 +331,12 @@ describe("Dependencies (composition root contract)", () => {
         fakeSubscriptionRepository,
         fakePaymentActivationUnitOfWork
       ),
+      revokeChannelAccess: new RevokeChannelAccess(
+        fakeCommunityRepository,
+        fakeChannelMembershipRepository,
+        fakeActivityLogRepository,
+        new Map([["telegram", fakeMessagingProvider]])
+      ),
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
@@ -366,6 +411,12 @@ describe("Dependencies (composition root contract)", () => {
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
         fakePaymentActivationUnitOfWork
+      ),
+      revokeChannelAccess: new RevokeChannelAccess(
+        fakeCommunityRepository,
+        fakeChannelMembershipRepository,
+        fakeActivityLogRepository,
+        new Map([["telegram", fakeMessagingProvider]])
       ),
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
@@ -1082,6 +1133,11 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
+          // Phase 4: the API now selects messaging providers too (revocation is
+          // synchronous), under the same allowlist. A production box must
+          // configure them, so "fully configured" means all five variables.
+          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+          FONNTE_API_TOKEN: "real-fonnte-token",
         },
         () => {
           captureConsoleLog(() => {
@@ -1105,6 +1161,38 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
         }
       );
     });
+  });
+});
+
+describe("bootstrap() messaging provider selection", () => {
+  it("refuses to boot a production process with no messaging tokens", () => {
+    // Reached through bootstrap(), not just the selector in isolation: the API
+    // process performs REVOCATION, and a fake adapter there would report a
+    // removal it never performed.
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "production",
+          XENDIT_SECRET_KEY: "sk_live_x",
+          XENDIT_SPLIT_RULE_ID: "splitrule_1",
+          XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
+          TELEGRAM_BOT_TOKEN: undefined,
+          FONNTE_API_TOKEN: undefined,
+        },
+        () => {
+          captureConsoleLog(() => {
+            expect(() => bootstrap()).toThrow(/TELEGRAM_BOT_TOKEN and FONNTE_API_TOKEN/);
+          });
+        }
+      );
+    });
+  });
+
+  it("wires the revocation use-case, so the route is not calling nothing", () => {
+    const deps = bootstrap();
+    // A wiring assertion, like the appBaseUrl one: Phase 3 shipped a whole phase
+    // with an unreachable confirmation page because nothing checked the root.
+    expect(deps.revokeChannelAccess).toBeInstanceOf(RevokeChannelAccess);
   });
 });
 

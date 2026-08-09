@@ -14,6 +14,15 @@ export interface ChannelMembershipRecord {
    * granted" from "claimed but never finished" without asking the provider.
    */
   inviteLink: string | null;
+  /**
+   * The member's id ON THE PLATFORM (a Telegram integer user id), or `null` when
+   * we never learned it — which is the ordinary case in Phase 4, because access
+   * is granted with an invite link and checkout only ever knows a WhatsApp
+   * number. Revocation needs it (`banChatMember` addresses a user id), so
+   * `RevokeChannelAccess` reports "not automated" rather than claiming a removal
+   * it could not perform. See the column comment in db/schema.ts.
+   */
+  externalMemberId: string | null;
   grantedAt: Date;
   revokedAt: Date | null;
   updatedAt: Date;

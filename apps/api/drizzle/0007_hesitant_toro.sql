@@ -1,0 +1,1 @@
+ALTER TABLE "channel_membership" ADD COLUMN "external_member_id" varchar(64);

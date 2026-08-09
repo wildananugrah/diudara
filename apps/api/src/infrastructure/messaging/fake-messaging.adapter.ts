@@ -21,6 +21,7 @@ export class FakeMessagingAdapter implements MessagingProviderPort {
   readonly revocations: RevokeAccessInput[] = [];
   readonly notifications: NotifyInput[] = [];
   failNextGrant = false;
+  failNextRevoke = false;
 
   private readonly canGate: boolean;
   private counter = 0;
@@ -62,6 +63,10 @@ export class FakeMessagingAdapter implements MessagingProviderPort {
 
   async revokeAccess(input: RevokeAccessInput): Promise<void> {
     this.assertCanGate("revoke access");
+    if (this.failNextRevoke) {
+      this.failNextRevoke = false;
+      throw new Error("fake messaging provider: revokeAccess failed");
+    }
     this.revocations.push(input);
   }
 

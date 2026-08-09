@@ -50,6 +50,13 @@
       "when": 1786242364122,
       "tag": "0006_material_machine_man",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786246516029,
+      "tag": "0007_hesitant_toro",
+      "breakpoints": true
     }
   ]
 }

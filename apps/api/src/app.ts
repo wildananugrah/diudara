@@ -4,6 +4,7 @@ import { authRoutes } from "./routes/auth";
 import { communityRoutes } from "./routes/communities";
 import { tierRoutes } from "./routes/tiers";
 import { channelRoutes } from "./routes/channels";
+import { membershipRoutes } from "./routes/memberships";
 import { paymentAccountRoutes } from "./routes/payment-account";
 import { publicCommunityRoutes } from "./routes/public-community";
 import { publicSubscriptionRoutes } from "./routes/public-subscription";
@@ -33,6 +34,7 @@ export function createApp(deps: Dependencies) {
   // matches first — keep this route the last one mounted under /communities.
   app.route("/communities/:communityId/tiers", tierRoutes(deps));
   app.route("/communities/:communityId/channels", channelRoutes(deps));
+  app.route("/communities/:communityId/members", membershipRoutes(deps));
   app.route("/communities", communityRoutes(deps));
   return app;
 }
