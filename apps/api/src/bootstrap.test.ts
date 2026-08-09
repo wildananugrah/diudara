@@ -41,6 +41,7 @@ import type { MemberRepositoryPort } from "./application/ports/member-repository
 import type { SubscriptionRepositoryPort } from "./application/ports/subscription-repository.port";
 import type { WebhookEventRepositoryPort } from "./application/ports/webhook-event-repository.port";
 import type { ActivityLogRepositoryPort } from "./application/ports/activity-log-repository.port";
+import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
@@ -161,6 +162,24 @@ const fakeActivityLogRepository: ActivityLogRepositoryPort = {
   },
 };
 
+const fakeOutboxRepository: OutboxRepositoryPort = {
+  async enqueue() {
+    return { id: "fake-outbox-1" };
+  },
+  async claimBatch() {
+    return [];
+  },
+  async markSent() {
+    // not used
+  },
+  async markFailed() {
+    // not used
+  },
+  async markPermanentlyFailed() {
+    // not used
+  },
+};
+
 /** Runs the work inline — no real transaction is needed to satisfy the type. */
 const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
   async run(work) {
@@ -168,6 +187,7 @@ const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
       subscriptions: fakeSubscriptionRepository,
       webhookEvents: fakeWebhookEventRepository,
       activityLog: fakeActivityLogRepository,
+      outbox: fakeOutboxRepository,
     });
   },
 };

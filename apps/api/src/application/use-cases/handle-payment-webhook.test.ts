@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { NotFoundError, ValidationError } from "../errors";
 import type { ActivityLogRepositoryPort } from "../ports/activity-log-repository.port";
+import type { OutboxRepositoryPort } from "../ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "../ports/payment-activation-unit-of-work.port";
 import type {
   MarkPaidResult,
@@ -37,6 +38,7 @@ interface Calls {
   recordIfNew: string[];
   markPaid: string[];
   activity: { memberId: string | null; communityId: string; eventType: string }[];
+  enqueued: { eventType: string; payload: unknown }[];
 }
 
 /** A recording harness whose call log is the assertion target for ORDERING. */
@@ -54,6 +56,7 @@ function harness(
     recordIfNew: [],
     markPaid: [],
     activity: [],
+    enqueued: [],
   };
   const order: string[] = [];
   const transaction =
@@ -124,6 +127,26 @@ function harness(
     },
   };
 
+  const outbox: OutboxRepositoryPort = {
+    async enqueue(input) {
+      calls.enqueued.push({ eventType: input.eventType, payload: input.payload });
+      order.push("outbox");
+      return { id: `outbox-${calls.enqueued.length}` };
+    },
+    async claimBatch() {
+      throw new Error("not used");
+    },
+    async markSent() {
+      throw new Error("not used");
+    },
+    async markFailed() {
+      throw new Error("not used");
+    },
+    async markPermanentlyFailed() {
+      throw new Error("not used");
+    },
+  };
+
   /**
    * Stands in for the real transaction: records that a unit of work was opened,
    * and — the part that matters — records whether it COMMITTED or rolled back,
@@ -134,7 +157,7 @@ function harness(
     async run(work) {
       order.push("uow:begin");
       try {
-        const result = await work({ subscriptions, webhookEvents, activityLog });
+        const result = await work({ subscriptions, webhookEvents, activityLog, outbox });
         order.push("uow:commit");
         return result;
       } catch (error) {
@@ -182,8 +205,93 @@ describe("HandlePaymentWebhook", () => {
       "recordIfNew",
       "markPaid",
       "activity",
+      "outbox",
       "uow:commit",
     ]);
+  });
+
+  /**
+   * The atomicity requirement, at the unit level: the intent to invite is written
+   * INSIDE the same unit of work as the activation.
+   *
+   * Asserted positionally rather than by "did it happen", because the failure this
+   * guards against is not a missing call — it is a call in the wrong PLACE. An
+   * enqueue after `uow:commit` would look identical in every other assertion, and
+   * would lose the invite whenever the process died between the two writes: money
+   * taken, nothing queued, and no retry, because the webhook event id is spent.
+   */
+  it("enqueues the grant_access row INSIDE the unit of work, not after it", async () => {
+    const { useCase, order } = harness();
+
+    await useCase.execute(paidEvent());
+
+    expect(order.indexOf("outbox")).toBeGreaterThan(order.indexOf("uow:begin"));
+    expect(order.indexOf("outbox")).toBeLessThan(order.indexOf("uow:commit"));
+  });
+
+  it("enqueues exactly one grant_access row, addressed by subscription", async () => {
+    const { useCase, calls } = harness();
+
+    await useCase.execute(paidEvent());
+
+    expect(calls.enqueued).toHaveLength(1);
+    expect(calls.enqueued[0].eventType).toBe("grant_access");
+    expect(calls.enqueued[0].payload).toMatchObject({
+      subscriptionId: "sub-1",
+      memberId: "member-1",
+      communityId: "community-1",
+    });
+  });
+
+  it("keeps the payer's details out of the outbox payload", async () => {
+    // The row is read by the worker and logged around; the raw body already has
+    // exactly one home, `webhook_event.payload`. Ids and integers only.
+    const { useCase, calls } = harness();
+
+    await useCase.execute(
+      paidEvent({
+        payload: { id: "inv_1", payer_email: "siti@example.com", payer_name: "Siti" },
+      })
+    );
+
+    const serialised = JSON.stringify(calls.enqueued[0].payload);
+    expect(serialised).not.toContain("siti@example.com");
+    expect(serialised).not.toContain("Siti");
+  });
+
+  it("does not enqueue anything when the activation itself fails", async () => {
+    // The real unit of work would roll the row back anyway; not writing it at all
+    // when nothing was activated is the same rule the activity_log entry follows.
+    const { useCase, calls, order } = harness({ failMarkPaid: true });
+
+    await expect(useCase.execute(paidEvent())).rejects.toThrow("activation blew up");
+
+    expect(calls.enqueued).toEqual([]);
+    expect(order).toContain("uow:rollback");
+  });
+
+  it("does not enqueue for a replayed event", async () => {
+    const { useCase, calls } = harness({ alreadySeen: true });
+
+    await useCase.execute(paidEvent());
+
+    expect(calls.enqueued).toEqual([]);
+  });
+
+  it("does not enqueue for an already-settled transaction", async () => {
+    const { useCase, calls } = harness({ alreadySettled: true });
+
+    await useCase.execute(paidEvent());
+
+    expect(calls.enqueued).toEqual([]);
+  });
+
+  it("does not enqueue for a status that is not PAID", async () => {
+    const { useCase, calls } = harness();
+
+    await captureWarnings(() => useCase.execute(paidEvent({ status: "EXPIRED" })));
+
+    expect(calls.enqueued).toEqual([]);
   });
 
   it("passes the provider's invoice id through as the gateway reference", async () => {

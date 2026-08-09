@@ -6,6 +6,7 @@ import { db } from "../db/client";
 import {
   activityLogs,
   membershipTiers,
+  outbox,
   subscriptions,
   transactions,
   webhookEvents,
@@ -159,6 +160,101 @@ describe("POST /webhooks/xendit", () => {
     expect(logs[0].eventType).toBe("joined");
     expect(logs[0].communityId).toBe(communityId);
     expect(logs[0].memberId).toBe((await subscriptionRow(subscriptionId)).memberId);
+  });
+
+  /**
+   * The outbox row is the intent to invite, and it is written in the SAME
+   * transaction as the activation — see PaymentActivationUnitOfWorkPort. Every
+   * assertion in this block is a COUNT, not a final state: Phase 3's own
+   * idempotency test asserted only that activation happened, which is true whether
+   * or not replay protection works, and a reviewer caught that it would have
+   * stayed green against a broken implementation.
+   */
+  describe("the grant_access outbox row", () => {
+    it("leaves exactly one pending outbox row after an activation", async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
+
+      await post(a, verifiedEvent(externalId, invoiceId));
+
+      const rows = await db.select().from(outbox);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].eventType).toBe("grant_access");
+      expect(rows[0].status).toBe("pending");
+      expect(rows[0].attempts).toBe(0);
+      expect(rows[0].payload).toMatchObject({ subscriptionId });
+    });
+
+    it("carries ids only — no payer name or phone number", async () => {
+      // The row is read by the worker outside any request context. `checkout()`
+      // pays as "Siti" on +6281234567890.
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+
+      await post(a, verifiedEvent(externalId, invoiceId));
+
+      const [row] = await db.select().from(outbox);
+      const serialised = JSON.stringify(row.payload);
+      expect(serialised).not.toContain("Siti");
+      expect(serialised).not.toContain("6281234567890");
+    });
+
+    it("writes ONE row for a REPLAYED webhook, not two", async () => {
+      // The trap. Two rows means two invite links for one paying member, and the
+      // subscription is `active` either way — so only the count detects it.
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+
+      expect((await post(a, verifiedEvent(externalId, invoiceId))).status).toBe(200);
+      expect((await post(a, verifiedEvent(externalId, invoiceId))).status).toBe(200);
+
+      expect(await db.select().from(outbox)).toHaveLength(1);
+    });
+
+    it("writes ONE row under three CONCURRENT deliveries of the same event", async () => {
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+
+      await Promise.all([
+        post(a, verifiedEvent(externalId, invoiceId)),
+        post(a, verifiedEvent(externalId, invoiceId)),
+        post(a, verifiedEvent(externalId, invoiceId)),
+      ]);
+
+      expect(await db.select().from(outbox)).toHaveLength(1);
+    });
+
+    it("writes ONE row when PAID is followed by SETTLED for the same invoice", async () => {
+      // Both bodies are verifiable and their provider_event_ids DIFFER, so the
+      // UNIQUE constraint cannot stop the second from being recorded — markPaid's
+      // `status = 'pending'` predicate is what stops the second grant.
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+
+      await post(a, verifiedEvent(externalId, invoiceId));
+      await post(a, verifiedEvent(externalId, invoiceId, { status: "SETTLED" }));
+
+      expect(await db.select().from(webhookEvents)).toHaveLength(2);
+      expect(await db.select().from(outbox)).toHaveLength(1);
+    });
+
+    it("writes NO row for a non-PAID delivery", async () => {
+      const a = app();
+      const { externalId, invoiceId } = await checkout(a);
+
+      await post(a, verifiedEvent(externalId, invoiceId, { status: "EXPIRED" }));
+
+      expect(await db.select().from(outbox)).toHaveLength(0);
+    });
+
+    it("writes NO row for a rejected delivery", async () => {
+      const a = app();
+      const { externalId } = await checkout(a);
+
+      await post(a, paidEvent(externalId, { id: "inv_forged" }));
+
+      expect(await db.select().from(outbox)).toHaveLength(0);
+    });
   });
 
   it("computes next_billing_date from the tier's billing cycle", async () => {
@@ -459,6 +555,46 @@ describe("POST /webhooks/xendit", () => {
       // Xendit makes is a no-op: money taken, access never granted.
       expect(await db.select().from(webhookEvents)).toHaveLength(0);
       expect((await subscriptionRow(subscriptionId)).status).toBe("pending");
+    });
+
+    /**
+     * The other direction of the atomicity requirement. A `grant_access` row that
+     * survived a rolled-back activation is an invite for a subscription that is
+     * still `pending`: the worker would issue a link to someone whose payment we
+     * did not record, and — because the retry then activates and enqueues again —
+     * a second link after that.
+     *
+     * This is the assertion that goes red if the enqueue is moved OUTSIDE the
+     * unit of work.
+     */
+    it("rolls the outbox row back too, so no invite is queued for a failed activation", async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
+
+      const res = await withBrokenActivation(subscriptionId, () =>
+        post(a, verifiedEvent(externalId, invoiceId))
+      );
+
+      expect(res.status).toBe(500);
+      expect(await db.select().from(outbox)).toHaveLength(0);
+    });
+
+    it("queues exactly one invite once the RETRY of that event succeeds", async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
+
+      await withBrokenActivation(subscriptionId, () =>
+        post(a, verifiedEvent(externalId, invoiceId))
+      );
+      expect(await db.select().from(outbox)).toHaveLength(0);
+
+      const retry = await post(a, verifiedEvent(externalId, invoiceId));
+
+      expect(retry.status).toBe(200);
+      const rows = await db.select().from(outbox);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].status).toBe("pending");
+      expect(rows[0].payload).toMatchObject({ subscriptionId });
     });
 
     it("lets the RETRY of that same event succeed — the actual point", async () => {

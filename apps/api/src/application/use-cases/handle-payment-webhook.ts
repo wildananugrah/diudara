@@ -1,4 +1,5 @@
 import { NotFoundError, ValidationError } from "../errors";
+import { OUTBOX_GRANT_ACCESS } from "../ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "../ports/payment-activation-unit-of-work.port";
 import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
 
@@ -207,6 +208,34 @@ export class HandlePaymentWebhook {
           transactionId: transaction.id,
           subscriptionId: subscription.id,
           amount: transaction.amount,
+        },
+      });
+
+      // The intent to invite, written INSIDE the unit of work — which is the only
+      // place it can go. Queued afterwards, in its own transaction, a crash
+      // between the two commits would leave a paid, activated subscription with
+      // no invite and no way to recover one: the event id is spent, so every
+      // provider retry is swallowed as a replay. Queued BEFORE the activation, a
+      // failed activation would leave the worker inviting someone whose payment
+      // we never recorded.
+      //
+      // What must never move in here is the SEND. That is an external HTTP call,
+      // and a Telegram outage inside this transaction would roll back a payment
+      // we have already taken (plan, Global Constraints).
+      //
+      // Reached only on the activated path, so the counts a replay produces are
+      // one webhook_event row, one activity_log row, and one outbox row.
+      await repositories.outbox.enqueue({
+        eventType: OUTBOX_GRANT_ACCESS,
+        // Ids only, for the same reason as the activity_log metadata above: the
+        // worker reads this outside any request context and logs around it, and a
+        // Xendit callback carries the payer's name, email and phone number. The
+        // worker resolves the member and the channels from `subscriptionId`.
+        payload: {
+          subscriptionId: subscription.id,
+          memberId: subscription.memberId,
+          communityId,
+          transactionId: transaction.id,
         },
       });
 
