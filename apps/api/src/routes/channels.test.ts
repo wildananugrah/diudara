@@ -71,6 +71,63 @@ describe("POST /communities/:id/channels", () => {
     expect(res.status).toBe(400);
   });
 
+  /**
+   * A TIGHTENING OF THIS ENDPOINT, and the reason is worth having at the route level
+   * rather than only in the schema test: what this refuses used to be accepted, and
+   * used to appear to work.
+   *
+   * Telegram accepts `@channelusername` as a `chat_id`, so a channel connected that way
+   * granted access perfectly — the member got a working link. But the inbound
+   * `chat_member` update carries `chat.id` as a NUMBER, and the lookup that records the
+   * joiner's Telegram user id requires the membership to belong to the chat the update
+   * came from. `@kelasbudi` never equals `-1001234567890`, so the join was dropped as
+   * `unknown_invite_link`, `external_member_id` stayed null, and every revocation for
+   * that community reported `no_provider_member_id_recorded` FOREVER — a line documented
+   * as ordinary noise. Members grantable, never removable, with nothing to notice.
+   */
+  it("rejects a telegram @username with 400 and tells the creator what to use", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+
+    const res = await a.request(`/communities/${community.id}/channels`, {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ platform: "telegram", externalGroupId: "@kelasbudi" }),
+    });
+
+    expect(res.status).toBe(400);
+    // The creator can act on this: @username is what they see in the Telegram client,
+    // so a bare "invalid request" would send them round in circles.
+    const body = await res.json();
+    expect(JSON.stringify(body)).toContain("NUMERIC");
+    expect(JSON.stringify(body)).toContain("-1001234567890");
+
+    // And nothing was recorded, so a later grant cannot find a channel it can never
+    // match an inbound update to.
+    const listing = await a.request(`/communities/${community.id}/channels`, {
+      headers: bearer(token),
+    });
+    expect(await listing.json()).toHaveLength(0);
+  });
+
+  it("still accepts a WhatsApp group id, which is not numeric and does not need to be", async () => {
+    // `canGateAccess` is false for WhatsApp, so no inbound update is ever matched
+    // against it. Constraining it would break a real, supported configuration.
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const community = await makeCommunity(a, token);
+
+    const res = await a.request(`/communities/${community.id}/channels`, {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ platform: "whatsapp", externalGroupId: "120363123456789@g.us" }),
+    });
+
+    expect(res.status).toBe(201);
+    expect((await res.json()).externalGroupId).toBe("120363123456789@g.us");
+  });
+
   it("rejects an unauthenticated request with 401", async () => {
     const a = app();
     const { token } = await signupAndGetToken(a);
