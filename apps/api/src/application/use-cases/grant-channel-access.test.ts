@@ -138,40 +138,128 @@ function wire(
 }
 
 /**
- * Releases every waiter once `expected` of them have arrived, or after
- * `timeoutMs` — whichever comes first.
+ * A latch that opens once `expected` CLAIMS have completed.
  *
- * The timeout is what makes it usable on BOTH sides of the fix. Before the fix two
- * callers reach the mint window and the barrier releases immediately, which is the
- * interleaving the bug needs. After the fix only ONE ever gets there (the other is
- * told the grant is in progress), so a barrier that waited forever would hang the
- * suite instead of passing it.
+ * IT COUNTS CLAIMS, NOT ARRIVALS IN THE MINT WINDOW, and that difference is the
+ * point. The previous version released every waiter after 250 ms whichever way the
+ * race went, so it was a TEMPORAL barrier, not a causal one: on a pathologically slow
+ * database — a loaded CI box, a cold connection pool — caller 1 could be released
+ * before caller 2 had claimed at all, and the test would pass VACUOUSLY without ever
+ * constructing the interleaving it is named for. A concurrency test that can pass
+ * without the concurrency happening is not evidence.
+ *
+ * Counting claims makes the release CAUSED by the state the bug needs: caller 1 is
+ * held inside `grantAccess` until caller 2's `claim` has actually returned, so both
+ * callers have demonstrably contended for the same (member, channel) before either
+ * mints. It works on both sides of the fix — before it, both claims return `mint`;
+ * after it, the second returns `mint_in_progress` — because a claim is counted
+ * whatever its outcome.
+ *
+ * `wait` REJECTS on the safety timeout instead of resolving. A hang would stall the
+ * suite with no diagnosis, and resolving would be exactly the vacuous pass this class
+ * exists to remove; a rejection fails the test with the count it actually saw.
  */
-class Barrier {
+class ClaimLatch {
+  private claims = 0;
   private waiters: (() => void)[] = [];
 
   constructor(
     private readonly expected: number,
-    private readonly timeoutMs = 250
+    /** Generous: it is a deadlock detector, never part of the timing being tested. */
+    private readonly timeoutMs = 5_000
   ) {}
 
-  arrive(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      this.waiters.push(resolve);
-      if (this.waiters.length >= this.expected) {
-        this.release();
-        return;
-      }
-      setTimeout(() => this.release(), this.timeoutMs);
-    });
+  /** Called after every `claim`, whatever it returned. */
+  recordClaim(): void {
+    this.claims += 1;
+    if (this.claims >= this.expected) {
+      const waiting = this.waiters;
+      this.waiters = [];
+      for (const resolve of waiting) resolve();
+    }
   }
 
-  private release(): void {
-    const waiting = this.waiters;
-    this.waiters = [];
-    for (const resolve of waiting) resolve();
+  wait(): Promise<void> {
+    if (this.claims >= this.expected) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(
+          new Error(
+            `ClaimLatch: only ${this.claims} of ${this.expected} claims arrived within ` +
+              `${this.timeoutMs}ms — the interleaving under test never happened, so a pass ` +
+              "would have been vacuous"
+          )
+        );
+      }, this.timeoutMs);
+      this.waiters.push(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 }
+
+/**
+ * The real repository, with every completed `claim` counted on a latch. Nothing else
+ * changes, so the claim under test is the production one.
+ */
+function countingClaims(
+  real: ChannelMembershipRepositoryPort,
+  latch: ClaimLatch
+): ChannelMembershipRepositoryPort {
+  return {
+    claim: async (input) => {
+      const claim = await real.claim(input);
+      latch.recordClaim();
+      return claim;
+    },
+    recordGrant: (id, link) => real.recordGrant(id, link),
+    releaseMintWindow: (id) => real.releaseMintWindow(id),
+    recordPlatformMemberIdByInviteLink: (input) => real.recordPlatformMemberIdByInviteLink(input),
+    revoke: (id) => real.revoke(id),
+    findByIdWithChannel: (id) => real.findByIdWithChannel(id),
+    listActiveForMemberInCommunity: (memberId, communityId) =>
+      real.listActiveForMemberInCommunity(memberId, communityId),
+  };
+}
+
+/**
+ * The concurrency test's release condition is itself worth pinning, because the
+ * previous version of it could pass VACUOUSLY.
+ *
+ * `Barrier(2, 250)` released caller 1 after 250 ms whether or not caller 2 had
+ * claimed, so on a slow database the invariant test never constructed the
+ * interleaving it claims to test — and a green result meant nothing. These two tests
+ * fail against that temporal barrier and pass against the causal latch.
+ */
+describe("ClaimLatch (the concurrency test's release condition)", () => {
+  it("does NOT release on time alone — only a second claim releases it", async () => {
+    const latch = new ClaimLatch(2, 120);
+    latch.recordClaim();
+
+    // The old barrier resolved here after its 250ms timeout. This must not: nothing
+    // has contended yet, so releasing would let the test that depends on it pass
+    // without the race ever happening.
+    await expect(latch.wait()).rejects.toThrow(/only 1 of 2 claims/);
+  });
+
+  it("releases as soon as the expected claims have happened, however long that took", async () => {
+    const latch = new ClaimLatch(2, 5_000);
+    latch.recordClaim();
+    const waiting = latch.wait();
+    // Well past any fixed timeout the old barrier would have used.
+    setTimeout(() => latch.recordClaim(), 300);
+
+    await waiting;
+  });
+});
 
 describe("GrantChannelAccess", () => {
   it("grants a telegram channel, records the membership, and notifies over WhatsApp", async () => {
@@ -593,11 +681,18 @@ describe("GrantChannelAccess: at most one LIVE invite link per (member, channel)
     // happened to claim after the first had already recorded its link, so it took
     // the `already_granted` path. A test of a concurrency invariant that depends on
     // the scheduler proves nothing (the same lesson drizzle-outbox.repository.test.ts
-    // records for `claimBatch`). The barrier below holds BOTH callers inside
-    // `grantAccess` until both have claimed, which is the state the bug needs.
+    // records for `claimBatch`).
+    //
+    // The latch holds caller 1 inside `grantAccess` until caller 2's CLAIM has
+    // returned, which is the state the bug needs. Causal, not temporal: it releases
+    // because the second claim happened, never merely because time passed — see
+    // `ClaimLatch`.
     await seed();
-    const barrier = new Barrier(2);
-    const { telegram, useCase } = wire({ beforeMint: () => barrier.arrive() });
+    const latch = new ClaimLatch(2);
+    const { telegram, useCase } = wire({
+      memberships: countingClaims(new DrizzleChannelMembershipRepository(db), latch),
+      beforeMint: () => latch.wait(),
+    });
     const subscriptionId = (await onlySubscription()).id;
 
     const outcomes = await Promise.allSettled([
