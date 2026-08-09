@@ -33,6 +33,7 @@ import { DrizzleChannelMembershipRepository } from "./infrastructure/repositorie
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleAnalyticsRepository } from "./infrastructure/repositories/drizzle-analytics.repository";
 import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
+import { GetCommunityActivity } from "./application/use-cases/get-community-activity";
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import { SystemClock } from "./infrastructure/clock/system.clock";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
@@ -93,6 +94,7 @@ export interface Dependencies {
    * no unscoped variant — see the port for why that absence is the protection.
    */
   getCommunityMetrics: GetCommunityMetrics;
+  getCommunityActivity: GetCommunityActivity;
   /**
    * The creator's manual "remove this member" action. It lives in the API rather
    * than the worker because revocation is SYNCHRONOUS: a creator removing someone
@@ -827,6 +829,7 @@ export function bootstrap(): Dependencies {
   // creator-scoped at the port.
   const analyticsRepository = new DrizzleAnalyticsRepository(db);
   const getCommunityMetrics = new GetCommunityMetrics(analyticsRepository);
+  const getCommunityActivity = new GetCommunityActivity(analyticsRepository);
 
   // Revocation is the ONE messaging call the API process makes; granting happens
   // in apps/worker. Same allowlist as the payment adapter: on a box with no
@@ -892,6 +895,7 @@ export function bootstrap(): Dependencies {
     getSubscriptionStatus,
     handlePaymentWebhook,
     getCommunityMetrics,
+    getCommunityActivity,
     revokeChannelAccess,
     recordChannelJoin,
     sendRenewalReminder,

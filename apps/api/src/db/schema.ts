@@ -327,29 +327,47 @@ export const activityLogs = pgTable(
     index("activity_log_member_id_idx").on(table.memberId),
     index("activity_log_community_id_idx").on(table.communityId),
     // ===================================================================
-    // THE INDEX THE CREATOR DASHBOARD READS THROUGH.
+    // THE TWO INDEXES THE CREATOR DASHBOARD READS THROUGH, and WHICH QUERY EACH ONE
+    // IS ACTUALLY FOR — measured with EXPLAIN (ANALYZE, BUFFERS) against live
+    // PostgreSQL 16.13, 300 000 rows across six communities with 100 000 of them in
+    // the one being read.
     //
-    // Phase 6's activity feed is the most-viewed screen in the product, and every
-    // query behind it has the same shape: one community, an ALLOWLIST of
-    // creator-facing event types, newest first, keyset-paginated on `created_at`.
-    // `activity_log_community_id_idx` alone answers only the first predicate, so
-    // Postgres then filtered every one of that community's rows by event type and
-    // SORTED them — on the one table that grows with every payment, reminder,
-    // grant and revocation. It degrades exactly as a creator becomes successful,
-    // which is the worst time for it to.
+    // `activity_log` grows with every payment, reminder, grant and revocation, and
+    // the activity feed is the most-viewed screen in the product — so this table
+    // degrades exactly as a creator becomes successful, which is the worst possible
+    // time for it to.
     //
-    // Column order is (equality, IN-list, range) and that is the useful way round,
-    // for the same reason as `subscription_status_next_billing_date_idx` above:
-    // `community_id` is a single equality, `event_type` is an `in (...)` against a
-    // small set, and `created_at` is the range the keyset cursor compares and the
-    // order the feed sorts by. Leading with the two selective predicates lets the
-    // index be SCANNED rather than merely filtered, and it delivers rows already
-    // ordered by `created_at`, which removes the sort as well as the scan.
+    // 1. (community_id, event_type, created_at) — FOR A SINGLE EVENT TYPE OVER A
+    //    DATE RANGE. "How many renewal reminders went out last month" is
+    //    `community_id = ? and event_type = ? and created_at >= ?`: equality,
+    //    equality, range, which this index answers entirely as an index condition
+    //    (11.7 ms / 246 index buffers, against 15.0 ms and a bitmap scan that read
+    //    all 100 000 of the community's rows and filtered 83% of them away).
     //
-    // Not partial on the allowlist, deliberately: the visible set is a product
-    // decision that Task 3 states in `domain/activity-feed.ts` and that will change
-    // (a hidden diagnostic becoming visible is a one-line edit). A partial index
-    // would make that edit silently stop using the index, and the metrics and CSV
+    //    IT IS NOT THE INDEX THE FEED USES, and an earlier version of this comment
+    //    claimed it was. That claim was wrong in the specific way worth writing
+    //    down, because a misleading invariant comment is how the next person removes
+    //    the wrong index: the feed's predicate is `event_type in (<8 values>)`, a
+    //    ScalarArrayOp on this index's MIDDLE column, and a btree scan with one of
+    //    those cannot deliver rows ordered by the TRAILING column. So it can satisfy
+    //    neither the ORDER BY nor anything `community_id` alone does not already do,
+    //    and the planner ignores it — measured at 15.9 ms / 1277 buffers with it
+    //    present and 12.5 ms / 1277 buffers with it DROPPED. The same plan both
+    //    times.
+    //
+    // 2. (community_id, created_at) — FOR THE FEED. One equality then the range the
+    //    keyset cursor compares and the order the feed sorts by, so Postgres walks
+    //    the index BACKWARDS for that community and stops after one page:
+    //    0.12 ms and 5 buffers, an Index Scan Backward with no full sort. Two orders
+    //    of magnitude, and the gap widens with the history, because this is the only
+    //    one of the three that lets the scan stop instead of reading everything the
+    //    community has ever produced. The 8-value `event_type` filter is applied to
+    //    the ~26 rows a page actually touches, which costs nothing.
+    //
+    // Neither is partial on the creator-visible allowlist, deliberately: the visible
+    // set is a product decision stated in `domain/activity-feed.ts` and it will
+    // change (making a hidden diagnostic visible is a one-line edit). A partial
+    // index would silently stop being used by that edit, and the metrics and CSV
     // paths read other event types through the same prefix.
     // ===================================================================
     index("activity_log_community_event_created_idx").on(
@@ -357,6 +375,7 @@ export const activityLogs = pgTable(
       table.eventType,
       table.createdAt
     ),
+    index("activity_log_community_created_idx").on(table.communityId, table.createdAt),
   ],
 );
 

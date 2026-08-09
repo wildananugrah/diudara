@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach } from "bun:test";
 import { db } from "../../db/client";
 import {
+  activityLogs,
   communities,
   creators,
   members,
@@ -299,5 +300,263 @@ describe("DrizzleAnalyticsRepository.getMetricsForCreator — tier distribution"
 
     const metrics = await repo.getMetricsForCreator(community.id, creator.id);
     expect(Number.isInteger(metrics!.tierDistribution[0]!.activeMembers)).toBe(true);
+  });
+});
+
+// ===========================================================================
+// Task 3: the activity feed
+// ===========================================================================
+
+/**
+ * One `activity_log` row with an EXPLICIT `created_at`, which is what makes the
+ * keyset tests possible: `defaultNow()` is the TRANSACTION timestamp, so rows
+ * written by one statement all share it — and sharing it is precisely the case a
+ * naive `created_at < cursor` loses.
+ */
+async function seedActivity(
+  communityId: string,
+  eventType: string,
+  options: { createdAt?: Date; memberId?: string | null; metadata?: unknown } = {}
+) {
+  const [row] = await db
+    .insert(activityLogs)
+    .values({
+      communityId,
+      eventType,
+      memberId: options.memberId ?? null,
+      metadata: options.metadata ?? null,
+      ...(options.createdAt === undefined ? {} : { createdAt: options.createdAt }),
+    })
+    .returning();
+  return row;
+}
+
+/** `2026-08-10T00:00:00Z` plus `seconds`, so every seeded row has a known order. */
+function at(seconds: number): Date {
+  return new Date(Date.UTC(2026, 7, 10, 0, 0, seconds));
+}
+
+describe("DrizzleAnalyticsRepository.listActivityForCreator — scoping", () => {
+  it("returns null for a community another creator owns", async () => {
+    const owner = await seedCreatorWithCommunity("Rina");
+    const stranger = await seedCreatorWithCommunity("Budi");
+    await seedActivity(owner.community.id, "joined", { createdAt: at(1) });
+
+    expect(
+      await repo.listActivityForCreator(owner.community.id, stranger.creator.id, { limit: 10 })
+    ).toBeNull();
+  });
+
+  it("returns null for a community that does not exist", async () => {
+    const { creator } = await seedCreatorWithCommunity();
+    expect(
+      await repo.listActivityForCreator("00000000-0000-4000-8000-000000000000", creator.id, {
+        limit: 10,
+      })
+    ).toBeNull();
+  });
+
+  it("never returns another community's rows", async () => {
+    const mine = await seedCreatorWithCommunity("Rina");
+    const theirs = await seedCreatorWithCommunity("Budi");
+    const mineRow = await seedActivity(mine.community.id, "joined", { createdAt: at(1) });
+    await seedActivity(theirs.community.id, "joined", { createdAt: at(2) });
+
+    const rows = await repo.listActivityForCreator(mine.community.id, mine.creator.id, {
+      limit: 10,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows![0]!.id).toBe(mineRow.id);
+  });
+});
+
+describe("DrizzleAnalyticsRepository.listActivityForCreator — the allowlist", () => {
+  it("produces exactly ONE row for one reminder, not two", async () => {
+    // THE TRAP. `ProcessRenewals` writes `renewal_reminder_queued` when it claims the
+    // stage and `SendRenewalReminder` writes `renewal_reminder_sent` when the message
+    // reaches the provider. One reminder, two rows, and only the second means the
+    // member was told. A feed that shows both doubles every reminder figure, and
+    // nobody notices until a creator counts by hand.
+    const { creator, community } = await seedCreatorWithCommunity();
+    const member = await seedMember();
+    await seedActivity(community.id, "renewal_reminder_queued", {
+      createdAt: at(1),
+      memberId: member.id,
+      metadata: { stage: "pre_3d" },
+    });
+    await seedActivity(community.id, "renewal_reminder_sent", {
+      createdAt: at(2),
+      memberId: member.id,
+      metadata: { stage: "pre_3d" },
+    });
+
+    const rows = await repo.listActivityForCreator(community.id, creator.id, { limit: 10 });
+    expect(rows).toHaveLength(1);
+    expect(rows![0]!.eventType).toBe("renewal_reminder_sent");
+  });
+
+  it("returns no internal diagnostics at all", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    for (const [index, hidden] of [
+      "renewal_reminder_queued",
+      "renewal_reminder_skipped",
+      "renewal_reminder_not_sent",
+      "access_not_granted",
+      "access_not_revoked",
+      "churn_revoke_skipped",
+    ].entries()) {
+      await seedActivity(community.id, hidden, { createdAt: at(index + 1) });
+    }
+
+    const rows = await repo.listActivityForCreator(community.id, creator.id, { limit: 50 });
+    expect(rows).toEqual([]);
+  });
+
+  it("returns the six ordinary events and the two warnings", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const visible = [
+      "joined",
+      "renewed",
+      "churned",
+      "renewal_reminder_sent",
+      "channel_access_granted",
+      "channel_access_revoked",
+      "access_manual_required",
+      "revocation_manual_required",
+    ];
+    for (const [index, eventType] of visible.entries()) {
+      await seedActivity(community.id, eventType, { createdAt: at(index + 1) });
+    }
+
+    const rows = await repo.listActivityForCreator(community.id, creator.id, { limit: 50 });
+    expect([...rows!].map((row) => row.eventType).sort()).toEqual([...visible].sort());
+  });
+
+  it("keeps `renewed` distinct from `joined`", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    await seedActivity(community.id, "renewed", { createdAt: at(1) });
+
+    const rows = await repo.listActivityForCreator(community.id, creator.id, { limit: 10 });
+    expect(rows).toHaveLength(1);
+    expect(rows![0]!.eventType).toBe("renewed");
+    expect(rows![0]!.eventType).not.toBe("joined");
+  });
+});
+
+describe("DrizzleAnalyticsRepository.listActivityForCreator — ordering and the member join", () => {
+  it("returns newest first", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const oldest = await seedActivity(community.id, "joined", { createdAt: at(1) });
+    const middle = await seedActivity(community.id, "renewed", { createdAt: at(2) });
+    const newest = await seedActivity(community.id, "churned", { createdAt: at(3) });
+
+    const rows = await repo.listActivityForCreator(community.id, creator.id, { limit: 10 });
+    expect(rows!.map((row) => row.id)).toEqual([newest.id, middle.id, oldest.id]);
+  });
+
+  it("carries the member's name but never their WhatsApp number", async () => {
+    // The feed is creator-facing and authenticated, so a name is useful. A WhatsApp
+    // number is personal data with one legitimate destination (the CSV export, which
+    // the creator asks for deliberately) and no business being in a screen that is
+    // open all day.
+    const { creator, community } = await seedCreatorWithCommunity();
+    const member = await seedMember("Siti Aminah");
+    await seedActivity(community.id, "joined", { createdAt: at(1), memberId: member.id });
+
+    const rows = await repo.listActivityForCreator(community.id, creator.id, { limit: 10 });
+    expect(rows![0]!.memberId).toBe(member.id);
+    expect(rows![0]!.memberName).toBe("Siti Aminah");
+    expect(JSON.stringify(rows![0])).not.toContain(member.whatsappNumber);
+  });
+
+  it("handles a community-scoped row with no member attached", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    await seedActivity(community.id, "joined", { createdAt: at(1), memberId: null });
+
+    const rows = await repo.listActivityForCreator(community.id, creator.id, { limit: 10 });
+    expect(rows![0]!.memberId).toBeNull();
+    expect(rows![0]!.memberName).toBeNull();
+  });
+});
+
+describe("DrizzleAnalyticsRepository.listActivityForCreator — keyset pagination", () => {
+  it("honours the limit", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    for (let i = 1; i <= 5; i++) {
+      await seedActivity(community.id, "joined", { createdAt: at(i) });
+    }
+
+    const rows = await repo.listActivityForCreator(community.id, creator.id, { limit: 2 });
+    expect(rows).toHaveLength(2);
+  });
+
+  it("skips and duplicates nothing when a row is inserted between page 1 and page 2", async () => {
+    // WHY KEYSET AND NOT OFFSET. The feed is append-heavy: a payment, a reminder or a
+    // revocation can land between two "load more" clicks. With `offset 2` the newly
+    // prepended row pushes everything down one, so page 2 REPEATS the last row of
+    // page 1 and the reader never sees one of the originals. A cursor anchored on the
+    // row itself cannot drift.
+    const { creator, community } = await seedCreatorWithCommunity();
+    const seeded = [];
+    for (let i = 1; i <= 5; i++) {
+      seeded.push(await seedActivity(community.id, "joined", { createdAt: at(i) }));
+    }
+    const newestFirst = [...seeded].reverse().map((row) => row.id);
+
+    const page1 = await repo.listActivityForCreator(community.id, creator.id, { limit: 2 });
+    expect(page1!.map((row) => row.id)).toEqual(newestFirst.slice(0, 2));
+
+    // A payment settles while the creator is reading.
+    const interloper = await seedActivity(community.id, "joined", { createdAt: at(99) });
+
+    const last = page1![page1!.length - 1]!;
+    const page2 = await repo.listActivityForCreator(community.id, creator.id, {
+      limit: 2,
+      before: { createdAt: last.createdAt, id: last.id },
+    });
+
+    expect(page2!.map((row) => row.id)).toEqual(newestFirst.slice(2, 4));
+
+    const seen = [...page1!, ...page2!].map((row) => row.id);
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).not.toContain(interloper.id);
+  });
+
+  it("loses nothing when several rows share one created_at", async () => {
+    // `created_at` defaults to `now()`, which is the TRANSACTION timestamp — so every
+    // row a single transaction writes has the SAME value. `created_at < cursor` alone
+    // silently drops the boundary row's ties; `(created_at, id) < (cursor, cursorId)`
+    // does not. Four rows, one timestamp, two pages of two.
+    const { creator, community } = await seedCreatorWithCommunity();
+    const shared = at(7);
+    const ids = [];
+    for (let i = 0; i < 4; i++) {
+      ids.push((await seedActivity(community.id, "joined", { createdAt: shared })).id);
+    }
+
+    const page1 = await repo.listActivityForCreator(community.id, creator.id, { limit: 2 });
+    const last = page1![1]!;
+    const page2 = await repo.listActivityForCreator(community.id, creator.id, {
+      limit: 2,
+      before: { createdAt: last.createdAt, id: last.id },
+    });
+
+    const seen = [...page1!, ...page2!].map((row) => row.id);
+    expect(seen).toHaveLength(4);
+    expect(new Set(seen).size).toBe(4);
+    expect([...seen].sort()).toEqual([...ids].sort());
+  });
+
+  it("returns an empty page rather than null once the feed is exhausted", async () => {
+    // `null` means "not your community". An exhausted feed is a different answer and
+    // must not become a 404 on the last "load more" click.
+    const { creator, community } = await seedCreatorWithCommunity();
+    const only = await seedActivity(community.id, "joined", { createdAt: at(1) });
+
+    const page2 = await repo.listActivityForCreator(community.id, creator.id, {
+      limit: 10,
+      before: { createdAt: only.createdAt, id: only.id },
+    });
+    expect(page2).toEqual([]);
   });
 });

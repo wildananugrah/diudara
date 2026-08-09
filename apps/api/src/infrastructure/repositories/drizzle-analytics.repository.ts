@@ -1,7 +1,17 @@
-import { and, asc, count, eq, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { communities, membershipTiers, subscriptions, transactions } from "../../db/schema";
+import {
+  activityLogs,
+  communities,
+  members,
+  membershipTiers,
+  subscriptions,
+  transactions,
+} from "../../db/schema";
+import { CREATOR_VISIBLE_EVENTS } from "../../domain/activity-feed";
 import type {
+  ActivityLogRow,
+  ActivityPageRequest,
   AnalyticsRepositoryPort,
   CommunityMemberCounts,
   CommunityMetrics,
@@ -168,5 +178,73 @@ export class DrizzleAnalyticsRepository implements AnalyticsRepositoryPort {
       .where(eq(membershipTiers.communityId, communityId))
       .groupBy(membershipTiers.id, membershipTiers.name, membershipTiers.priceAmount)
       .orderBy(asc(membershipTiers.priceAmount), asc(membershipTiers.name), asc(membershipTiers.id));
+  }
+
+  /**
+   * One page of the activity feed: this community's creator-facing events, newest
+   * first, windowed by a `(created_at, id)` keyset cursor.
+   *
+   * READS THROUGH `activity_log_community_event_created_idx` — the composite index
+   * Task 1 added for exactly this query. The predicate is
+   * `community_id = ? and event_type = any(?)` with `created_at` as the range, in
+   * that column order, and the ORDER BY matches the index (backwards, which a btree
+   * scans as cheaply as forwards). Without it every page seq-scanned the community's
+   * whole history and sorted it.
+   *
+   * THE ALLOWLIST IS IN THE SQL, not applied afterwards, and that matters for more
+   * than tidiness: filtering in JS would make `limit` count HIDDEN rows, so a
+   * community whose recent history is all diagnostics would return a page of two
+   * entries — or none — and the reader would conclude the feed had ended.
+   *
+   * THE TIE-BREAKING PREDICATE is the reason this is a keyset and not a
+   * `created_at < cursor`. `created_at` defaults to `now()`, the TRANSACTION
+   * timestamp, so rows written together share it exactly; `<` alone drops the
+   * boundary row's ties and `<=` repeats them. `(created_at, id) < (cursor, id)`
+   * expanded into `or(lt(created_at), and(eq(created_at), lt(id)))` is strictly
+   * ordered, so a page boundary may fall anywhere — including in the middle of a
+   * group of rows sharing one timestamp.
+   */
+  async listActivityForCreator(
+    communityId: string,
+    creatorId: string,
+    page: ActivityPageRequest
+  ): Promise<ActivityLogRow[] | null> {
+    const community = await this.findOwnedCommunity(communityId, creatorId);
+    if (!community) return null;
+
+    const before = page.before;
+    const keyset =
+      before === undefined
+        ? undefined
+        : or(
+            lt(activityLogs.createdAt, before.createdAt),
+            and(eq(activityLogs.createdAt, before.createdAt), lt(activityLogs.id, before.id))
+          );
+
+    return this.db
+      .select({
+        id: activityLogs.id,
+        eventType: activityLogs.eventType,
+        metadata: activityLogs.metadata,
+        createdAt: activityLogs.createdAt,
+        memberId: activityLogs.memberId,
+        // A LEFT join: `activity_log.member_id` is nullable (community-scoped
+        // events have no member), and an inner join would silently drop those rows.
+        // Only the NAME is selected — never `member.whatsapp_number`, which has one
+        // legitimate destination in this product and it is not a screen left open
+        // all day.
+        memberName: members.name,
+      })
+      .from(activityLogs)
+      .leftJoin(members, eq(activityLogs.memberId, members.id))
+      .where(
+        and(
+          eq(activityLogs.communityId, community.id),
+          inArray(activityLogs.eventType, [...CREATOR_VISIBLE_EVENTS]),
+          ...(keyset === undefined ? [] : [keyset])
+        )
+      )
+      .orderBy(desc(activityLogs.createdAt), desc(activityLogs.id))
+      .limit(page.limit);
   }
 }

@@ -27,6 +27,8 @@
  * could live.
  */
 
+import type { ActivityCursor } from "../../domain/activity-feed";
+
 /**
  * How many members a community has, by subscription status.
  *
@@ -77,10 +79,64 @@ export interface CommunityMetrics {
   tierDistribution: TierDistributionEntry[];
 }
 
+/**
+ * One `activity_log` row, as the feed reads it.
+ *
+ * `memberName` comes from a LEFT join — the column is nullable and the row's
+ * `member_id` is itself nullable (community-scoped events have no member). The
+ * member's WHATSAPP NUMBER IS DELIBERATELY NOT HERE: the feed is a screen a creator
+ * leaves open all day, and a phone number has exactly one legitimate destination
+ * in this product (the CSV export, which a creator asks for on purpose).
+ *
+ * `metadata` stays inside this layer and never reaches the wire. It is `unknown`
+ * because it comes out of a jsonb column, and it exists so `describeActivityEvent`
+ * can turn a stage or a platform into a label — see that function for why every
+ * value is looked up rather than interpolated.
+ */
+export interface ActivityLogRow {
+  id: string;
+  eventType: string;
+  metadata: unknown;
+  createdAt: Date;
+  memberId: string | null;
+  memberName: string | null;
+}
+
+/**
+ * WHERE A PAGE STARTS, keyed on `(created_at, id)` and never on an OFFSET.
+ *
+ * The feed is append-heavy — a payment, a reminder or a revocation can land
+ * between two "load more" clicks — and an offset drifts as rows arrive: a single
+ * newly-prepended row makes page 2 repeat page 1's last entry and drop one of the
+ * originals. A cursor anchored on the row itself cannot drift. See
+ * `ActivityCursor` in `domain/activity-feed.ts` for why the id is in it.
+ */
+export interface ActivityPageRequest {
+  /** Maximum rows to return. The caller may ask for one extra to detect a next page. */
+  limit: number;
+  /** Return only rows strictly OLDER than this row. Omitted for the first page. */
+  before?: ActivityCursor;
+}
+
 export interface AnalyticsRepositoryPort {
   /**
    * Every figure the dashboard's overview screen shows, or `null` when
    * `creatorId` does not own `communityId` (including when it does not exist).
    */
   getMetricsForCreator(communityId: string, creatorId: string): Promise<CommunityMetrics | null>;
+
+  /**
+   * One page of the activity feed, newest first, filtered to
+   * `CREATOR_VISIBLE_EVENTS` — or `null` when `creatorId` does not own
+   * `communityId`.
+   *
+   * `null` and `[]` MEAN DIFFERENT THINGS and callers must keep them apart: `null`
+   * is "not your community" and becomes a 404, `[]` is "you have reached the end"
+   * and must not turn the last "load more" click into one.
+   */
+  listActivityForCreator(
+    communityId: string,
+    creatorId: string,
+    page: ActivityPageRequest
+  ): Promise<ActivityLogRow[] | null>;
 }

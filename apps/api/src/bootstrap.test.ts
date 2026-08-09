@@ -40,6 +40,7 @@ import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-acce
 import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
 import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
 import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
+import { GetCommunityActivity } from "./application/use-cases/get-community-activity";
 import { XENDIT_ACCOUNT_PROVISIONING } from "./domain/payment-account";
 import type {
   CreatorRecord,
@@ -224,6 +225,9 @@ const fakeActivityLogRepository: ActivityLogRepositoryPort = {
  */
 const fakeAnalyticsRepository: AnalyticsRepositoryPort = {
   async getMetricsForCreator() {
+    return null;
+  },
+  async listActivityForCreator() {
     return null;
   },
 };
@@ -418,6 +422,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock
       ),
       getCommunityMetrics: new GetCommunityMetrics(fakeAnalyticsRepository),
+      getCommunityActivity: new GetCommunityActivity(fakeAnalyticsRepository),
       revokeChannelAccess: new RevokeChannelAccess(
         fakeCommunityRepository,
         fakeChannelMembershipRepository,
@@ -522,6 +527,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock
       ),
       getCommunityMetrics: new GetCommunityMetrics(fakeAnalyticsRepository),
+      getCommunityActivity: new GetCommunityActivity(fakeAnalyticsRepository),
       revokeChannelAccess: new RevokeChannelAccess(
         fakeCommunityRepository,
         fakeChannelMembershipRepository,
