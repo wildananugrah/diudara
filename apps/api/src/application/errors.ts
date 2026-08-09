@@ -31,6 +31,12 @@ export class ConflictError extends AppError {
   }
 }
 
+export class UnsupportedOperationError extends AppError {
+  constructor(message = "operation not supported by this provider") {
+    super(message, 409);
+  }
+}
+
 /**
  * Storage-agnostic names for the uniqueness rules the application reasons about.
  * Repository adapters translate their backing store's constraint names into
