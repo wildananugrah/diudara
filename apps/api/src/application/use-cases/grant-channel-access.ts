@@ -20,6 +20,23 @@ export const MANUAL_ADDITION_NOTICE =
 
 export interface GrantChannelAccessInput {
   subscriptionId: string;
+  /**
+   * Whether the payment behind this grant EXTENDED an existing membership rather than
+   * starting one — `markPaid`'s `renewed`, carried through the outbox payload.
+   *
+   * It changes exactly one thing, and it is a thing the member reads. On a renewal the
+   * member already holds their invite link and has never left the group, so the
+   * already-granted path must NOT quote the link back at them: the message says "join
+   * via the following link… it can only be used once", the link has already been used,
+   * and the renewal reminder they had just received promised the opposite ("Anda tetap
+   * berada di grup"). Two messages contradicting each other on the happy path — and a
+   * bearer credential re-transmitted over WhatsApp for no reason, on EVERY renewal.
+   *
+   * Optional, defaulting to false, because a `grant_access` row written before this
+   * field existed carries no value for it — and false is the recovery-safe default: it
+   * sends the link, which is what a member whose ORIGINAL grant failed needs.
+   */
+  renewal?: boolean;
 }
 
 export interface GrantChannelAccessResult {
@@ -184,6 +201,11 @@ export class GrantChannelAccess {
     const channelList = await this.channels.listByCommunity(communityId);
 
     const links: { platform: string; inviteLink: string }[] = [];
+    /**
+     * Platforms this member is CONFIRMED to still have access to, with no link named.
+     * The renewal path's answer to `links` — see `GrantChannelAccessInput.renewal`.
+     */
+    const renewalConfirmations: string[] = [];
     const manualPlatforms: string[] = [];
     const failures: string[] = [];
     /**
@@ -239,12 +261,22 @@ export class GrantChannelAccess {
 
       if (claim.outcome === "already_granted" && claim.membership.inviteLink !== null) {
         // Already granted. No second provider call, so no second credential —
-        // this is the idempotency the unique index buys. The member is still
-        // told below, with the link they already have: this path is only reached
-        // after a failure or a reclaim, and a duplicate message beats a member
-        // who paid and was never sent anything.
+        // this is the idempotency the unique index buys.
         alreadyGranted += 1;
-        links.push({ platform: channel.platform, inviteLink: claim.membership.inviteLink });
+        if (input.renewal === true) {
+          // A RENEWAL, so this is the ORDINARY outcome rather than a recovery: the
+          // member never left the group and the link on this row is the one they
+          // already spent. Confirmed without naming it — see
+          // `GrantChannelAccessInput.renewal` for the message that used to go out here,
+          // on every renewal, telling a member already in the group to join with a
+          // single-use link that had been used.
+          renewalConfirmations.push(channel.platform);
+        } else {
+          // A first grant that is being retried, or a reclaimed row. The member is told
+          // with the link they already have: a duplicate message beats a member who paid
+          // and was never sent anything.
+          links.push({ platform: channel.platform, inviteLink: claim.membership.inviteLink });
+        }
         continue;
       }
 
@@ -378,13 +410,23 @@ export class GrantChannelAccess {
     }
 
     const needsManual = manualPlatforms.length > 0 || noChannels;
-    if (links.length > 0 || needsManual) {
+    if (links.length > 0 || needsManual || renewalConfirmations.length > 0) {
       // ONE message, whatever it took to get here. Sent BEFORE the failure check
       // below on purpose: if one platform is unwired, the member should still
       // receive the links that do exist rather than nothing at all.
+      //
+      // `renewalConfirmations` is in the condition because a renewal that needed no new
+      // link would otherwise produce NO message at all — the member paid and heard
+      // nothing back, which is the failure mode this whole use-case is shaped around.
       await this.notifier.notify({
         toWhatsappNumber: member.whatsappNumber,
-        message: buildMemberMessage({ links, manualPlatforms, noChannels }),
+        message: buildMemberMessage({
+          links,
+          renewalConfirmations,
+          manualPlatforms,
+          noChannels,
+          renewal: input.renewal === true,
+        }),
       });
     }
 
@@ -621,7 +663,13 @@ export function grantAccessOutboxHandler(useCase: GrantChannelAccess) {
           "(the payload itself is deliberately not repeated here)"
       );
     }
-    await useCase.execute({ subscriptionId: payload.subscriptionId });
+    // `renewal` is read PERMISSIVELY, unlike `subscriptionId`: it only decides the
+    // WORDING of a message, and a row written before the field existed has no value for
+    // it. Anything that is not literally `true` means "not a renewal", which sends the
+    // link — the recovery-safe direction. Refusing the row instead would strand every
+    // in-flight grant across the deploy that added the field.
+    const renewal = "renewal" in payload && payload.renewal === true;
+    await useCase.execute({ subscriptionId: payload.subscriptionId, renewal });
   };
 }
 
@@ -634,10 +682,30 @@ export function grantAccessOutboxHandler(useCase: GrantChannelAccess) {
  */
 function buildMemberMessage(input: {
   links: { platform: string; inviteLink: string }[];
+  /** Platforms the member already has access to, named WITHOUT a link. */
+  renewalConfirmations: string[];
   manualPlatforms: string[];
   noChannels: boolean;
+  renewal: boolean;
 }): string {
-  const lines = ["Pembayaran Anda sudah kami terima. Terima kasih!"];
+  const lines = [
+    input.renewal
+      ? "Pembayaran perpanjangan Anda sudah kami terima. Terima kasih!"
+      : "Pembayaran Anda sudah kami terima. Terima kasih!",
+  ];
+
+  if (input.renewalConfirmations.length > 0) {
+    lines.push("");
+    // THE SAME PROMISE `SendRenewalReminder` MAKES, kept. Its reminder says "keanggotaan
+    // diperpanjang otomatis dan Anda tetap berada di grup — tidak perlu keluar atau
+    // bergabung ulang", and this is the message that arrives once they have paid. It
+    // names no link: the member is already in the group, and the link on their row has
+    // been spent.
+    lines.push(
+      "Keanggotaan Anda sudah diperpanjang dan Anda tetap berada di grup — tidak perlu " +
+        "keluar atau bergabung ulang."
+    );
+  }
 
   if (input.links.length > 0) {
     lines.push("");

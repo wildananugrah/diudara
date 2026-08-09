@@ -1,0 +1,2 @@
+CREATE INDEX "subscription_status_next_billing_date_idx" ON "subscription" USING btree ("status","next_billing_date");--> statement-breakpoint
+CREATE INDEX "subscription_status_grace_ends_at_idx" ON "subscription" USING btree ("status","grace_ends_at");

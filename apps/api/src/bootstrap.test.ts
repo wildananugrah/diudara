@@ -38,11 +38,13 @@ import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
 import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
+import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
 import { XENDIT_ACCOUNT_PROVISIONING } from "./domain/payment-account";
 import type {
   CreatorRecord,
   CreatorRepositoryPort,
 } from "./application/ports/creator-repository.port";
+import type { ClockPort } from "./application/ports/clock.port";
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "./application/ports/membership-tier-repository.port";
 import type { ChannelRepositoryPort } from "./application/ports/channel-repository.port";
@@ -143,12 +145,21 @@ const fakeMemberRepository: MemberRepositoryPort = {
   },
 };
 
+/**
+ * Phase 5 gave `StartCheckout` and `HandlePaymentWebhook` a clock. A fixed one here, like
+ * every other fake in this file: nothing in these tests depends on the instant, and a
+ * `SystemClock` would make the composition-root fakes depend on the wall clock.
+ */
+const fakeClock: ClockPort = {
+  now: () => new Date("2026-08-09T11:00:00.000Z"),
+};
+
 const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   async createPending() {
     throw new Error("not used");
   },
-  async hasActiveSubscriptionForTier() {
-    return false;
+  async findCurrentSubscriptionForTier() {
+    return null;
   },
   async createTransaction() {
     throw new Error("not used");
@@ -164,6 +175,28 @@ const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   },
   async attachGatewayReference() {
     return true;
+  },
+  async findDueForRenewal() {
+    // Phase 5's renewal pass runs in the worker, not behind an HTTP route.
+    return [];
+  },
+  async markPastDue() {
+    return false;
+  },
+  async findPastGraceDeadline() {
+    // Phase 5's churn pass runs in the worker, not behind an HTTP route.
+    return [];
+  },
+  async markChurned() {
+    return false;
+  },
+  async findRenewalContext() {
+    // Phase 5's reminder delivery runs in the worker, not behind an HTTP route.
+    return null;
+  },
+  async hasLiveSubscriptionInCommunity() {
+    // Read only by the churn revoke, which runs in the worker.
+    return false;
   },
   async markPaid() {
     throw new Error("not used");
@@ -362,12 +395,14 @@ describe("Dependencies (composition root contract)", () => {
         fakeSubscriptionRepository,
         fakeCreatorRepository,
         fakePaymentProvider,
+        fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
-        fakePaymentActivationUnitOfWork
+        fakePaymentActivationUnitOfWork,
+        fakeClock
       ),
       revokeChannelAccess: new RevokeChannelAccess(
         fakeCommunityRepository,
@@ -377,6 +412,13 @@ describe("Dependencies (composition root contract)", () => {
         fakeOutboxRepository
       ),
       recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
+      sendRenewalReminder: new SendRenewalReminder(
+        fakeSubscriptionRepository,
+        fakeMemberRepository,
+        fakeActivityLogRepository,
+        fakeMessagingProvider,
+        { appBaseUrl: "https://app.diudara.test" }
+      ),
       messaging: {
         gating: new Map([["telegram", fakeMessagingProvider]]),
         notifier: fakeMessagingProvider,
@@ -456,12 +498,14 @@ describe("Dependencies (composition root contract)", () => {
         fakeSubscriptionRepository,
         fakeCreatorRepository,
         fakePaymentProvider,
+        fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
-        fakePaymentActivationUnitOfWork
+        fakePaymentActivationUnitOfWork,
+        fakeClock
       ),
       revokeChannelAccess: new RevokeChannelAccess(
         fakeCommunityRepository,
@@ -471,6 +515,13 @@ describe("Dependencies (composition root contract)", () => {
         fakeOutboxRepository
       ),
       recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
+      sendRenewalReminder: new SendRenewalReminder(
+        fakeSubscriptionRepository,
+        fakeMemberRepository,
+        fakeActivityLogRepository,
+        fakeMessagingProvider,
+        { appBaseUrl: "https://app.diudara.test" }
+      ),
       messaging: {
         gating: new Map([["telegram", fakeMessagingProvider]]),
         notifier: fakeMessagingProvider,
@@ -634,6 +685,28 @@ describe("bootstrap() APP_BASE_URL", () => {
         const deps = bootstrap();
         expect(deps.payments).toBeInstanceOf(FakePaymentAdapter);
         expect(deps.appBaseUrl).toBe("https://wired.example");
+      });
+    });
+  });
+
+  /**
+   * Phase 5's reminder delivery is DISPATCHED by the worker, but it is built here too,
+   * from the same resolved `appBaseUrl` `StartCheckout` gets — so the link in a reminder
+   * and the `success_redirect_url` in an invoice cannot disagree about which deployment
+   * a member is sent to. Constructing it is the assertion: it is the only thing that
+   * fails if the field is dropped from the root while the type still has it.
+   *
+   * The FUNCTIONAL proof that the origin reaches a sent message lives in
+   * worker-bootstrap.test.ts, because the worker is the process that sends.
+   */
+  it("also builds the renewal reminder sender, so the two roots cannot drift", async () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ APP_BASE_URL: "https://wired.example/" }, () => {
+        const deps = bootstrap();
+        expect(deps.sendRenewalReminder).toBeInstanceOf(SendRenewalReminder);
+        // The notifier it was handed is the WhatsApp one, not a gating provider:
+        // TelegramBotAdapter.notify throws.
+        expect(deps.messaging.notifier.capabilities().canGateAccess).toBe(false);
       });
     });
   });

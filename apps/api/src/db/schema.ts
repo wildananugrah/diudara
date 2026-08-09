@@ -110,8 +110,39 @@ export const subscriptions = pgTable(
     tierId: uuid("tier_id")
       .notNull()
       .references(() => membershipTiers.id),
+    /**
+     * `pending` | `active` | `cancelled` | `superseded`, plus `past_due` and
+     * `churned` added in Phase 5. Deliberately a varchar rather than a Postgres
+     * enum, so the two new values need no migration of their own — see
+     * `schema-phase5.test.ts`, which asserts they physically fit and round-trip.
+     */
     status: varchar("status", { length: 16 }).notNull().default("pending"),
     nextBillingDate: date("next_billing_date"),
+    /**
+     * When this subscription's grace period runs out — set once, when it ENTERS
+     * `past_due`, and null at every other time.
+     *
+     * Stored rather than recomputed on each pass, which is the point. If the job
+     * derived the deadline from `next_billing_date` every time it ran, then changing
+     * the grace length or the timezone reasoning later would retroactively move the
+     * deadline of everybody currently inside their grace period — including members
+     * who would be moved into the past and evicted by a config change they never saw.
+     * Written down, a deadline is a promise; computed, it is whatever today's code
+     * says.
+     *
+     * Nullable with no default, because a subscription that is not past due has no
+     * deadline. A `defaultNow()` here would put every new subscriber a fixed time
+     * from eviction.
+     *
+     * The value written is `max(due date + grace, transition + minimum notice)` — see
+     * `computeGraceEndsAt`. The floor exists for the subscription this system meets for
+     * the FIRST time long after its due date (every row Phase 4 left behind, on the first
+     * pass this phase runs): computed from the due date alone, its deadline would already
+     * be in the past and the churn pass would evict it in the same tick that first warned
+     * it. The floor does not make the value recomputable — it is still written exactly
+     * once, by the transition, and read as stored for ever after.
+     */
+    graceEndsAt: timestamp("grace_ends_at", { withTimezone: true }),
     startedAt: timestamp("started_at", { withTimezone: true }),
     retryCount: integer("retry_count").notNull().default(0),
     lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
@@ -151,7 +182,91 @@ export const subscriptions = pgTable(
     uniqueIndex("subscription_member_tier_active_unique")
       .on(table.memberId, table.tierId)
       .where(sql`${table.status} = 'active'`),
+    // ===================================================================
+    // THE TWO INDEXES PHASE 5'S HOURLY PASSES READ THROUGH.
+    //
+    // Neither existed when the passes shipped, and a comment in
+    // `apps/worker/src/scheduled-passes.ts` claimed both queries were indexed. Live
+    // `pg_indexes` on `subscription` held the primary key, `member_id`, `tier_id` and
+    // the partial active-unique above and nothing else, so both passes SEQ-SCANNED and
+    // SORTED the whole table every hour — and `findDueForRenewal`'s keyset pagination
+    // re-scanned it once per page, which is worse the bigger the backlog gets.
+    //
+    // Column order is (status, date) in both, and that is the useful way round: every
+    // status filter here is an equality against a small set and the date is a range, so
+    // the leading equality lets the index be scanned rather than merely filtered — and
+    // it delivers the rows in the order both queries sort by, which is what removes the
+    // sort as well as the scan.
+    index("subscription_status_next_billing_date_idx").on(
+      table.status,
+      table.nextBillingDate
+    ),
+    // `findPastGraceDeadline`: `status = 'past_due' and grace_ends_at < now`, ordered by
+    // the deadline. A far smaller slice of the table than the one above — only members
+    // inside their grace period are in it — which is exactly why the seq scan was easy
+    // to miss.
+    index("subscription_status_grace_ends_at_idx").on(table.status, table.graceEndsAt),
+    // ===================================================================
   ],
+);
+
+/**
+ * One row per reminder stage that has been CLAIMED for a subscription.
+ *
+ * "Claimed", not "sent": `ProcessRenewals` inserts here and only then enqueues the
+ * outbox row, so a row here means "this stage has been dealt with and must never be
+ * dealt with again". Usually that means a message was queued and delivered. It also
+ * covers the one case where the pass deliberately sends nothing — a community that has
+ * been archived — because the claim is what stops a daily pass writing one
+ * `renewal_reminder_skipped` audit row per subscription per day, for ever.
+ *
+ * THIS TABLE IS A LOCK, NOT A LOG. Its reason to exist is the unique
+ * `(subscription_id, stage)` below: the reminder pass INSERTS here as the act of
+ * claiming the right to send, and the database decides whether that claim is the
+ * first one. A pass that runs twice — two workers, a restart mid-pass, a catch-up
+ * after downtime — then messages the member exactly once per stage.
+ *
+ * Doing it the other way round (select, decide, send, insert) is a TOCTOU under
+ * READ COMMITTED, in the same shape as the two invite links Phase 4 measured: two
+ * passes both read "no reminder yet" and both send. The member gets two WhatsApp
+ * messages about the same overdue payment, which reads as either a bug or a dunning
+ * campaign, and neither is what we meant.
+ */
+export const renewalReminders = pgTable(
+  "renewal_reminder",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subscriptionId: uuid("subscription_id")
+      .notNull()
+      .references(() => subscriptions.id),
+    /**
+     * One of `REMINDER_STAGES` in `domain/renewal-schedule.ts` — `pre_3d`, `due`,
+     * `overdue_1d`, `overdue_3d`, `overdue_7d`. A varchar rather than an enum, for
+     * the same reason `subscription.status` is: adding a stage should not need a
+     * migration. `dueStageFor` is what constrains the values in practice.
+     */
+    stage: varchar("stage", { length: 16 }).notNull(),
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    /**
+     * The reminder-once mechanism. It must be IN THE DATABASE, not merely in this
+     * file: Drizzle enforces nothing at runtime, so a definition that never reached
+     * Postgres would let a duplicate through in silence while the schema still
+     * looked correct. `schema-phase5.test.ts` asserts on this constraint's NAME in
+     * the raised Postgres error, so a version that exists only here fails the suite.
+     *
+     * Total, not partial: every stage of every subscription is claimed at most once,
+     * and there is no legitimate second send. A subscription that renews and later
+     * lapses again is a matter for whoever clears these rows on renewal (Task 6) —
+     * an explicit delete, so that re-lapsing sends reminders again by an act rather
+     * than by a gap in a predicate.
+     */
+    uniqueIndex("renewal_reminder_subscription_stage_unique").on(
+      table.subscriptionId,
+      table.stage
+    ),
+  ]
 );
 
 export const transactions = pgTable(
@@ -178,6 +293,24 @@ export const transactions = pgTable(
   (table) => [index("transaction_subscription_id_idx").on(table.subscriptionId)],
 );
 
+/**
+ * The audit trail, and PHASE 6'S DECLARED SOURCE for analytics.
+ *
+ * `event_type` is a free varchar, so the vocabulary is a contract held by convention.
+ * Phase 5's design spec (§8b, "What this phase leaves in `activity_log`") enumerates every
+ * type this phase writes and what each one means; `activity-log-contract.test.ts` fails if
+ * the code and that table drift apart. Three things a query has to know, all of which have
+ * been got wrong at least once already:
+ *
+ *  1. ONE REMINDER PRODUCES TWO ROWS — `renewal_reminder_queued` when the stage is claimed,
+ *     then `renewal_reminder_sent` when the message actually reaches the provider. Counting
+ *     reminders without filtering by `event_type` doubles every figure, and only the second
+ *     one means the member was told.
+ *  2. `renewed` IS NOT `joined`. A renewal is the same member paying again. Only `markPaid`
+ *     can tell them apart, because only it sees the status the row was in before activation.
+ *  3. `renewal_reminder` IS A LOCK, NOT A HISTORY. Its rows are DELETED on renewal (see the
+ *     table above), so "how many reminders went out last month" must be answered from HERE.
+ */
 export const activityLogs = pgTable(
   "activity_log",
   {

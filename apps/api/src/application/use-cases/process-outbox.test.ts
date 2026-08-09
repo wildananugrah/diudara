@@ -397,19 +397,23 @@ describe("ProcessOutbox", () => {
    */
   describe("a slow pass cannot let a second worker claim rows it still holds", () => {
     it("touches each row as it is dequeued, so the clock measures the ROW not the batch", async () => {
-      const { id: first } = await repository().enqueue({
-        eventType: OUTBOX_GRANT_ACCESS,
-        payload: { n: 1 },
-      });
-      const { id: second } = await repository().enqueue({
-        eventType: OUTBOX_GRANT_ACCESS,
-        payload: { n: 2 },
-      });
+      for (const n of [1, 2]) {
+        await repository().enqueue({ eventType: OUTBOX_GRANT_ACCESS, payload: { n } });
+      }
 
-      // Both rows share a claim timestamp. The handler for the first takes long
-      // enough that, without a per-row touch, the second would already look stale by
-      // the time it is reached.
-      const stampsWhenHandled = new Map<string, Date>();
+      // Both rows share a claim timestamp. The handler for whichever comes first takes
+      // long enough that, without a per-row touch, the other would already look stale
+      // by the time it is reached.
+      //
+      // IN HANDLING ORDER, and deliberately NOT keyed by which row was enqueued first.
+      // `claimBatch`'s inner CTE is ordered, but the `update … returning` around it is
+      // not, and Postgres defines no order for RETURNING — so which of the two rows a
+      // pass handles first is genuinely undefined. Naming them made this test fail on
+      // ~40% of runs against a freshly created database (measured, Task 8: the fresh
+      // database has no statistics on `outbox`, so the planner is free to choose a
+      // different shape and did). The property the test exists for — the stamp is
+      // restarted per ROW, not stamped once per batch — says nothing about order.
+      const stampsInHandlingOrder: Date[] = [];
       await processor(
         {
           [OUTBOX_GRANT_ACCESS]: async (payload) => {
@@ -417,7 +421,7 @@ describe("ProcessOutbox", () => {
             const rows = await db.select().from(outbox);
             for (const row of rows) {
               if (row.status === "processing" && (row.payload as { n: number }).n === n) {
-                stampsWhenHandled.set(row.id, row.updatedAt);
+                stampsInHandlingOrder.push(row.updatedAt);
               }
             }
             await Bun.sleep(60);
@@ -428,8 +432,9 @@ describe("ProcessOutbox", () => {
 
       // The second row's clock was restarted when its turn came, so it is strictly
       // later than the first's — proof the stamp is per row and not per batch.
-      expect(stampsWhenHandled.get(second)!.getTime()).toBeGreaterThan(
-        stampsWhenHandled.get(first)!.getTime()
+      expect(stampsInHandlingOrder).toHaveLength(2);
+      expect(stampsInHandlingOrder[1].getTime()).toBeGreaterThan(
+        stampsInHandlingOrder[0].getTime()
       );
     });
 

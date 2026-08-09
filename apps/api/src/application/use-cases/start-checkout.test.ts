@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { FixedClock } from "../../infrastructure/clock/fixed.clock";
 import { FakePaymentAdapter } from "../../infrastructure/payments/fake-payment.adapter";
 import { ConflictError } from "../errors";
 import { StartCheckout } from "./start-checkout";
@@ -9,6 +10,19 @@ import type { SubscriptionRepositoryPort } from "../ports/subscription-repositor
 import type { CreatorRepositoryPort } from "../ports/creator-repository.port";
 
 const APP_BASE_URL = "https://app.diudara.test";
+
+/** The id the harness's existing subscription has, when the member holds one. */
+const EXISTING_SUBSCRIPTION_ID = "existing-subscription-1";
+
+/** 09:00 WIB on 2026-03-07, i.e. three WIB days before a 2026-03-10 due date. */
+const THREE_DAYS_BEFORE_DUE = new Date("2026-03-07T02:00:00.000Z");
+
+/**
+ * An `active` subscription nowhere near its renewal: due on 2026-03-10, and every test
+ * that uses this runs with the clock at 2026-02-10. This is the case Phase 3's 409
+ * exists for, and it must keep 409ing.
+ */
+const FAR_FROM_RENEWAL = { status: "active", nextBillingDate: "2026-03-10" };
 
 describe("StartCheckout — funds routing", () => {
   it("charges the creator's account, never a platform account", async () => {
@@ -112,6 +126,8 @@ describe("StartCheckout — funds routing", () => {
           tierId: input.tierId,
           status: "pending",
           nextBillingDate: null,
+          // No grace deadline: only entering `past_due` (Phase 5) writes one.
+          graceEndsAt: null,
           startedAt: null,
           retryCount: 0,
           lastAttemptAt: null,
@@ -141,12 +157,30 @@ describe("StartCheckout — funds routing", () => {
       async findTransactionByExternalId() {
         return null;
       },
-      async hasActiveSubscriptionForTier() {
-        return false;
+      async findCurrentSubscriptionForTier() {
+        return null;
       },
       async attachGatewayReference(transactionId, gatewayReferenceId) {
         attached.push({ transactionId, gatewayReferenceId });
         return true;
+      },
+      async findDueForRenewal() {
+        throw new Error("not used");
+      },
+      async markPastDue() {
+        throw new Error("not used");
+      },
+      async findPastGraceDeadline() {
+        throw new Error("not used");
+      },
+      async markChurned() {
+        throw new Error("not used");
+      },
+      async findRenewalContext() {
+        throw new Error("not used");
+      },
+      async hasLiveSubscriptionInCommunity() {
+        throw new Error("not used");
       },
       async markPaid() {
         throw new Error("not used");
@@ -194,6 +228,7 @@ describe("StartCheckout — funds routing", () => {
       subscriptions,
       creators,
       payments,
+      new FixedClock(new Date("2026-02-10T02:00:00.000Z")),
       { appBaseUrl: APP_BASE_URL }
     );
 
@@ -323,7 +358,7 @@ describe("StartCheckout — a half-provisioned payment account is not payable", 
  */
 describe("StartCheckout — a member who already holds the tier is not charged again", () => {
   it("409s BEFORE the invoice is created", async () => {
-    const { startCheckout, payments } = harness({ hasActiveSubscriptionForTier: true });
+    const { startCheckout, payments } = harness({ currentSubscription: FAR_FROM_RENEWAL });
 
     await expect(
       startCheckout.execute({
@@ -342,7 +377,7 @@ describe("StartCheckout — a member who already holds the tier is not charged a
   it("tells the member what to do instead of paying again", async () => {
     // The refusal is read by a person who is trying to fix a missing invite, so it
     // has to say that paying again will not produce one.
-    const { startCheckout } = harness({ hasActiveSubscriptionForTier: true });
+    const { startCheckout } = harness({ currentSubscription: FAR_FROM_RENEWAL });
 
     const error = (await startCheckout
       .execute({
@@ -375,7 +410,7 @@ describe("StartCheckout — a member who already holds the tier is not charged a
   });
 
   it("still charges a member who does NOT hold the tier", async () => {
-    const { startCheckout, payments } = harness({ hasActiveSubscriptionForTier: false });
+    const { startCheckout, payments } = harness();
 
     await startCheckout.execute({
       slug: "kelas-budi",
@@ -398,11 +433,20 @@ function harness(
     appBaseUrl?: string;
     canonicalSlug?: string;
     creatorXenditAccountId?: string;
-    /** Whether the member already holds this tier — see the I1 tests below. */
-    hasActiveSubscriptionForTier?: boolean;
+    /**
+     * The member's CURRENT subscription to this tier — `active` or `past_due` — or
+     * nothing. Phase 5 replaced the boolean this used to be: "do they already hold it"
+     * cannot express "are they inside their renewal window", which is now what decides
+     * between a 409 and a renewal.
+     */
+    currentSubscription?: { status: string; nextBillingDate: string | null };
+    /** What the injected clock reads. Only the renewal-window tests care. */
+    now?: Date;
   } = {}
 ) {
   const activeSubscriptionChecks: { memberId: string; tierId: string }[] = [];
+  const createPendingCalls: { memberId: string; tierId: string }[] = [];
+  const transactionSubscriptionIds: string[] = [];
   const communities: CommunityRepositoryPort = {
     async create() {
       throw new Error("not used");
@@ -464,12 +508,14 @@ function harness(
 
   const subscriptions: SubscriptionRepositoryPort = {
     async createPending(input) {
+      createPendingCalls.push(input);
       return {
         id: "subscription-1",
         memberId: input.memberId,
         tierId: input.tierId,
         status: "pending",
         nextBillingDate: null,
+        graceEndsAt: null,
         startedAt: null,
         retryCount: 0,
         lastAttemptAt: null,
@@ -478,6 +524,7 @@ function harness(
       };
     },
     async createTransaction(input) {
+      transactionSubscriptionIds.push(input.subscriptionId);
       return {
         id: "transaction-1",
         subscriptionId: input.subscriptionId,
@@ -499,12 +546,44 @@ function harness(
     async findTransactionByExternalId() {
       return null;
     },
-    async hasActiveSubscriptionForTier(memberId, tierId) {
+    async findCurrentSubscriptionForTier(memberId, tierId) {
       activeSubscriptionChecks.push({ memberId, tierId });
-      return options.hasActiveSubscriptionForTier ?? false;
+      const current = options.currentSubscription;
+      if (current === undefined) return null;
+      return {
+        id: EXISTING_SUBSCRIPTION_ID,
+        memberId,
+        tierId,
+        status: current.status,
+        nextBillingDate: current.nextBillingDate,
+        graceEndsAt: current.status === "past_due" ? new Date("2026-03-17T00:00:00.000Z") : null,
+        startedAt: new Date("2026-02-10T02:00:00.000Z"),
+        retryCount: 0,
+        lastAttemptAt: null,
+        createdAt: new Date(0),
+        updatedAt: new Date(0),
+      };
     },
     async attachGatewayReference() {
       return true;
+    },
+    async findDueForRenewal() {
+      throw new Error("not used");
+    },
+    async markPastDue() {
+      throw new Error("not used");
+    },
+    async findPastGraceDeadline() {
+      throw new Error("not used");
+    },
+    async markChurned() {
+      throw new Error("not used");
+    },
+    async findRenewalContext() {
+      throw new Error("not used");
+    },
+    async hasLiveSubscriptionInCommunity() {
+      throw new Error("not used");
     },
     async markPaid() {
       throw new Error("not used");
@@ -544,8 +623,135 @@ function harness(
   };
 
   const payments = new FakePaymentAdapter();
-  const startCheckout = new StartCheckout(communities, tiers, members, subscriptions, creators, payments, {
-    appBaseUrl: options.appBaseUrl ?? APP_BASE_URL,
-  });
-  return { startCheckout, payments, activeSubscriptionChecks };
+  const clock = new FixedClock(options.now ?? new Date("2026-02-10T02:00:00.000Z"));
+  const startCheckout = new StartCheckout(
+    communities,
+    tiers,
+    members,
+    subscriptions,
+    creators,
+    payments,
+    clock,
+    { appBaseUrl: options.appBaseUrl ?? APP_BASE_URL }
+  );
+  return {
+    startCheckout,
+    payments,
+    clock,
+    activeSubscriptionChecks,
+    createPendingCalls,
+    transactionSubscriptionIds,
+  };
 }
+
+/**
+ * Phase 5, Task 6(a): THE `pre_3d` REMINDER'S LINK USED TO 409.
+ *
+ * The reminder whose entire purpose is "renew without ever losing access" pointed at a
+ * checkout that refused the member, because they were still `active` and Phase 3's rule
+ * looked at nothing else. Task 4 found it; the brief only mentioned `past_due`, so the
+ * brief was wrong.
+ *
+ * THE PREDICATE CHOSEN, and it is deliberately not "any active member may pay again":
+ *
+ *   a member with an existing `active` or `past_due` subscription to this tier may check
+ *   out exactly when `status === "past_due"`, OR when the subscription is `active` and
+ *   `isInsideRenewalWindow(next_billing_date, now)` — i.e. from the first reminder stage
+ *   (three days before the due date) onwards. Anything else is still a 409.
+ *
+ * It is the SAME window that makes a reminder go out, read from the same domain module,
+ * so the rule is "if we asked you to renew, the link works" rather than a second
+ * threshold that could drift from the schedule. A member with no `next_billing_date` at
+ * all, and a member with weeks to go, are not renewing — they are double-buying, which
+ * is what the 409 is for.
+ */
+describe("StartCheckout — the renewal window", () => {
+  const RENEW = {
+    slug: "kelas-budi",
+    tierId: "tier-1",
+    payerName: "Siti",
+    payerWhatsappNumber: "+6281234567890",
+  };
+
+  it("lets a PAST_DUE member renew rather than 409ing", async () => {
+    const { startCheckout, payments } = harness({
+      currentSubscription: { status: "past_due", nextBillingDate: "2026-03-10" },
+      now: new Date("2026-03-15T02:00:00.000Z"),
+    });
+
+    const result = await startCheckout.execute(RENEW);
+
+    expect(payments.invoices).toHaveLength(1);
+    expect(result.subscriptionId).toBe(EXISTING_SUBSCRIPTION_ID);
+  });
+
+  it("lets an ACTIVE member inside the pre_3d window renew — the reminder link must work", async () => {
+    const { startCheckout, payments } = harness({
+      currentSubscription: { status: "active", nextBillingDate: "2026-03-10" },
+      now: THREE_DAYS_BEFORE_DUE,
+    });
+
+    const result = await startCheckout.execute(RENEW);
+
+    expect(payments.invoices).toHaveLength(1);
+    expect(result.subscriptionId).toBe(EXISTING_SUBSCRIPTION_ID);
+  });
+
+  it("still 409s an ACTIVE member who is nowhere near renewal", async () => {
+    const { startCheckout, payments } = harness({
+      currentSubscription: FAR_FROM_RENEWAL,
+      // A month out. Phase 3's rule, unchanged: paying now buys nothing.
+      now: new Date("2026-02-10T02:00:00.000Z"),
+    });
+
+    await expect(startCheckout.execute(RENEW)).rejects.toBeInstanceOf(ConflictError);
+    expect(payments.invoices).toHaveLength(0);
+  });
+
+  it("409s an ACTIVE member the day BEFORE the window opens", async () => {
+    // The boundary, in Asia/Jakarta: four WIB days out is outside, three is inside.
+    // Asserted so the window cannot quietly widen by a day.
+    const { startCheckout } = harness({
+      currentSubscription: FAR_FROM_RENEWAL,
+      now: new Date("2026-03-06T02:00:00.000Z"),
+    });
+
+    await expect(startCheckout.execute(RENEW)).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it("409s an ACTIVE member with no next_billing_date at all", async () => {
+    // Nothing writes this today — activation always sets one — but the column is
+    // nullable, and "no due date" must not be read as "due now".
+    const { startCheckout } = harness({
+      currentSubscription: { status: "active", nextBillingDate: null },
+      now: THREE_DAYS_BEFORE_DUE,
+    });
+
+    await expect(startCheckout.execute(RENEW)).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it("REUSES the subscription row rather than creating a second one", async () => {
+    // The row is the thing being renewed. A new `pending` row would activate alongside
+    // the old one, which stays `past_due` — so the churn pass would revoke the access
+    // the member has just paid for, and `subscription_member_tier_active_unique` would
+    // be the only thing standing between them and two active subscriptions.
+    const { startCheckout, createPendingCalls, transactionSubscriptionIds } = harness({
+      currentSubscription: { status: "past_due", nextBillingDate: "2026-03-10" },
+      now: new Date("2026-03-15T02:00:00.000Z"),
+    });
+
+    await startCheckout.execute(RENEW);
+
+    expect(createPendingCalls).toEqual([]);
+    expect(transactionSubscriptionIds).toEqual([EXISTING_SUBSCRIPTION_ID]);
+  });
+
+  it("still creates a new subscription for a member who holds nothing", async () => {
+    const { startCheckout, createPendingCalls, transactionSubscriptionIds } = harness();
+
+    await startCheckout.execute(RENEW);
+
+    expect(createPendingCalls).toEqual([{ memberId: "member-1", tierId: "tier-1" }]);
+    expect(transactionSubscriptionIds).toEqual(["subscription-1"]);
+  });
+});

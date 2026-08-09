@@ -1,6 +1,9 @@
 import { describe, expect, it, beforeEach } from "bun:test";
+import { eq } from "drizzle-orm";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
+import { db } from "../db/client";
+import { subscriptions } from "../db/schema";
 import { resetDatabase } from "../db/test-helpers";
 import { FakePaymentAdapter } from "../infrastructure/payments/fake-payment.adapter";
 import { bearer, signupAndGetToken } from "./test-support";
@@ -189,6 +192,110 @@ describe("POST /c/:slug/checkout", () => {
     });
 
     expect(res.status).toBe(400);
+  });
+
+  /**
+   * Phase 5, Task 6(a), through the real route and the real composition root — which
+   * wires a `SystemClock`, so these seed `next_billing_date` relative to the actual
+   * clock rather than to a fixture. The window itself is pinned against an injected
+   * clock in start-checkout.test.ts; what this proves is that the widened rule survives
+   * the wiring, which is where Phase 3 lost a whole feature.
+   */
+  describe("renewing an existing membership", () => {
+    /** Puts the member's only subscription into a given state. */
+    async function setSubscription(patch: {
+      status: string;
+      daysUntilDue: number;
+      graceEndsAt?: Date | null;
+    }) {
+      const dueDate = new Date(Date.now() + patch.daysUntilDue * 86_400_000)
+        .toISOString()
+        .slice(0, 10);
+      const [row] = await db.select().from(subscriptions);
+      await db
+        .update(subscriptions)
+        .set({
+          status: patch.status,
+          nextBillingDate: dueDate,
+          graceEndsAt: patch.graceEndsAt ?? null,
+          updatedAt: new Date(),
+        })
+        .where(eq(subscriptions.id, row.id));
+      return row.id;
+    }
+
+    async function firstCheckoutAndActivate(a: ReturnType<typeof app>, slug: string, tierId: string) {
+      const checkout = await (
+        await a.request(`/c/${slug}/checkout`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tierId, ...PAYER }),
+        })
+      ).json();
+      // Activated by hand rather than through the webhook: this file is about the
+      // checkout route, and routes/webhooks.test.ts owns that path.
+      await db
+        .update(subscriptions)
+        .set({ status: "active", updatedAt: new Date() })
+        .where(eq(subscriptions.id, checkout.subscriptionId));
+      return checkout;
+    }
+
+    it("lets a past_due member renew, reusing the same subscription", async () => {
+      const a = app();
+      const { community, tier } = await seedPayableCommunity(a);
+      const first = await firstCheckoutAndActivate(a, community.slug, tier.id);
+      await setSubscription({
+        status: "past_due",
+        daysUntilDue: -2,
+        graceEndsAt: new Date(Date.now() + 5 * 86_400_000),
+      });
+
+      const res = await a.request(`/c/${community.slug}/checkout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tierId: tier.id, ...PAYER }),
+      });
+
+      expect(res.status).toBe(201);
+      // The SAME row: a second one would be activated alongside the first, which stays
+      // `past_due` for the churn pass to revoke.
+      expect((await res.json()).subscriptionId).toBe(first.subscriptionId);
+      expect(await db.select().from(subscriptions)).toHaveLength(1);
+    });
+
+    it("lets an ACTIVE member inside the reminder window renew: the pre_3d link must work", async () => {
+      const a = app();
+      const { community, tier } = await seedPayableCommunity(a);
+      const first = await firstCheckoutAndActivate(a, community.slug, tier.id);
+      await setSubscription({ status: "active", daysUntilDue: 2 });
+
+      const res = await a.request(`/c/${community.slug}/checkout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tierId: tier.id, ...PAYER }),
+      });
+
+      expect(res.status).toBe(201);
+      expect((await res.json()).subscriptionId).toBe(first.subscriptionId);
+    });
+
+    it("still 409s an ACTIVE member who is nowhere near renewal", async () => {
+      const a = app();
+      const { community, tier } = await seedPayableCommunity(a);
+      await firstCheckoutAndActivate(a, community.slug, tier.id);
+      await setSubscription({ status: "active", daysUntilDue: 25 });
+
+      const res = await a.request(`/c/${community.slug}/checkout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tierId: tier.id, ...PAYER }),
+      });
+
+      // Phase 3's rule, unchanged: paying now buys them nothing they do not have.
+      expect(res.status).toBe(409);
+      expect(await db.select().from(subscriptions)).toHaveLength(1);
+    });
   });
 
   it("reuses the member record when the same number checks out twice", async () => {

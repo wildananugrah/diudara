@@ -118,16 +118,43 @@ enqueues one reminder outbox row per applicable stage:
 | Stage | When | Effect |
 |---|---|---|
 | `pre_3d` | 3 days before due | Reminder; member can renew without ever losing access |
-| `due` | on the due date | `active` → `past_due`, `grace_ends_at` set |
+| `due` | on the due date | `active` → `past_due`, `grace_ends_at` set (= due date **+10 days**) |
 | `overdue_1d` | +1 day | Escalating reminder |
 | `overdue_3d` | +3 days | Escalating reminder |
-| `overdue_7d` | +7 days | Final warning |
+| `overdue_7d` | +7 days | **Final warning** — three whole days before access is revoked |
+| — | **+10 days** | Grace expires: `ProcessChurn` marks `churned` and revokes access |
 
 `ProcessChurn` (scheduled): finds `past_due` subscriptions past `grace_ends_at`, marks them
 `churned`, and enqueues a `revoke_access` outbox row → Telegram access removed.
 
 The pre-due reminder exists because the "charge" is now a **manual action the member must
 take**. A member who simply forgot should never be removed without warning.
+
+### Why the grace period is 10 days and not 7
+
+The grace period **must exceed the last reminder offset by enough that the final warning is
+always claimable well before churn.** It was originally 7 — the same number as `overdue_7d` —
+and that made the final warning not a warning:
+
+- `overdue_7d` becomes claimable at **00:00 WIB** on day 7 (stages compare Asia/Jakarta
+  calendar days);
+- the deadline is `next_billing_date + GRACE_DAYS`, and `next_billing_date` is a Postgres
+  `date` that parses as UTC midnight, so it landed at **07:00 WIB on the same day**.
+
+A seven-hour window — and `ProcessRenewals` and `ProcessChurn` run on two independent loops, so
+which reached the member first inside it was a race. Phase 5 Task 9 walked the lifecycle twice
+in a running worker and **churn won both times**: the member was revoked having received
+`overdue_3d` as their last word, which this section and §8 both forbid.
+
+The day-1/3/7 cadence is left exactly as it is — it comes from the PRD, where it described
+**charge retries**, something the system does. Reinterpreting it as reminders made it something
+the **member** must act on, and a member who must act needs time to act. Three days between the
+final warning and losing access is the smallest gap that is unambiguously not a race.
+`renewal-schedule.test.ts` pins this as a relationship between the last stage and the deadline,
+with a stated minimum gap, so editing either number alone fails.
+
+Changing the grace length never moves a deadline already stored: `grace_ends_at` is written
+once, on entering `past_due` (§4.4).
 
 ## 7. Renewal payment
 
@@ -154,6 +181,41 @@ A reminder carries a fresh checkout link to the existing public flow.
 | Revoke provider fails | Outbox retries; membership still marked revoked |
 | Community archived mid-cycle | No reminders, no revoke; recorded in `activity_log` |
 | Tier deleted or deactivated mid-cycle | Reminder still sent using the recorded amount |
+
+## 8b. What this phase leaves in `activity_log` — Phase 6's input contract
+
+`activity_log` is Phase 6's declared source for analytics, and this phase is the first to
+write to it from a clock rather than from a request. Everything below is a string Phase 6
+will have to `group by`, so it is written down here rather than only in the code that emits
+it.
+
+| `event_type` | Written by | Means |
+|---|---|---|
+| `renewal_reminder_queued` | `ProcessRenewals` | A stage was CLAIMED and an outbox row written. **Not a delivery.** |
+| `renewal_reminder_sent` | `SendRenewalReminder` | The WhatsApp message actually reached the provider. **This is the one that means "delivered".** |
+| `renewal_reminder_skipped` | `ProcessRenewals` | Deliberately not queued — the community does not accept renewals (archived). |
+| `renewal_reminder_not_sent` | `SendRenewalReminder` | Claimed, then deliberately not delivered: the subscription or the community stopped qualifying while the row waited. |
+| `churned` | `ProcessChurn` | `past_due` → `churned`. Carries the `graceEndsAt` the member was actually measured against. |
+| `churn_revoke_skipped` | `ProcessChurn` | Churned but NOT evicted — the community is archived (§8). |
+| `access_not_revoked` | `RevokeChannelAccessForSystem` | A queued revocation that no longer applied: the member is entitled again. |
+| `renewed` | `HandlePaymentWebhook` | A payment that EXTENDED a membership. |
+
+Three things a query has to know, all of which have already been got wrong once:
+
+1. **One reminder produces two rows**, `renewal_reminder_queued` then
+   `renewal_reminder_sent`. Counting "reminders" without filtering by `event_type` doubles
+   every figure. The queued row is written even when the send later fails; only the sent row
+   says a member was told.
+2. **`renewed` is not `joined`.** A renewal is the same member paying again, and this phase
+   is the first to produce one. Counting `joined` rows as new members is correct only
+   because renewals are recorded separately — collapsing them would inflate acquisition for
+   ever and make retention invisible. The distinction can only be made inside `markPaid`,
+   which is the one place that sees the status the row was in before activation.
+3. **`renewal_reminder` rows are DELETED on renewal.** That table is a LOCK — the unique
+   `(subscription_id, stage)` is what makes a reminder once-per-stage — and not a history:
+   `markPaid` clears a subscription's rows when the period they belong to ends, so the next
+   period's stages are claimable again. "How many reminders went out last month" must
+   therefore come from `activity_log`, never from `renewal_reminder`.
 
 ## 9. Testing
 
