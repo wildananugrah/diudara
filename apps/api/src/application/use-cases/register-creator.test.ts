@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { RegisterCreator } from "./register-creator";
 import { ConflictError } from "../errors";
+import { XENDIT_ACCOUNT_PROVISIONING } from "../../domain/payment-account";
 import type { CreatorRecord, CreatorRepositoryPort } from "../ports/creator-repository.port";
 import type { PasswordHasherPort } from "../ports/password-hasher.port";
 import type { TokenIssuerPort, TokenPayload } from "../ports/token-issuer.port";
@@ -43,10 +44,22 @@ function fakeRepository(seed: CreatorRecord[] = []) {
         passwordHash: hashes.get(row.id) ?? null,
       };
     },
-    async setXenditAccountId(id, accountId) {
+    async beginXenditAccountProvisioning(id) {
       const row = rows.find((r) => r.id === id);
       if (!row || row.xenditAccountId !== null) return false;
+      row.xenditAccountId = XENDIT_ACCOUNT_PROVISIONING;
+      return true;
+    },
+    async finishXenditAccountProvisioning(id, accountId) {
+      const row = rows.find((r) => r.id === id);
+      if (!row || row.xenditAccountId !== XENDIT_ACCOUNT_PROVISIONING) return false;
       row.xenditAccountId = accountId;
+      return true;
+    },
+    async abandonXenditAccountProvisioning(id) {
+      const row = rows.find((r) => r.id === id);
+      if (!row || row.xenditAccountId !== XENDIT_ACCOUNT_PROVISIONING) return false;
+      row.xenditAccountId = null;
       return true;
     },
   };

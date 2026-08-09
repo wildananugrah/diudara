@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { db } from "../../db/client";
 import { creators } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
+import { XENDIT_ACCOUNT_PROVISIONING } from "../../domain/payment-account";
 import { DrizzleCreatorRepository } from "./drizzle-creator.repository";
 
 beforeEach(resetDatabase);
@@ -61,31 +62,84 @@ describe("DrizzleCreatorRepository", () => {
     expect("passwordHash" in (byEmail as object)).toBe(false);
   });
 
-  it("persists a xendit account id via setXenditAccountId", async () => {
+  it("claims the column with the sentinel, then replaces it with the real id", async () => {
     const repository = new DrizzleCreatorRepository(db);
     const created = await repository.create({ name: "Hendra", email: "hendra@example.com" });
     expect(created.xenditAccountId).toBeNull();
 
-    expect(await repository.setXenditAccountId(created.id, "xnd-acct-123")).toBe(true);
+    expect(await repository.beginXenditAccountProvisioning(created.id)).toBe(true);
+    // The intermediate state is observable, which is the point: StartCheckout
+    // reads this column and must refuse this value.
+    expect((await repository.findById(created.id))?.xenditAccountId).toBe(
+      XENDIT_ACCOUNT_PROVISIONING
+    );
 
-    const updated = await repository.findById(created.id);
-    expect(updated?.xenditAccountId).toBe("xnd-acct-123");
+    expect(await repository.finishXenditAccountProvisioning(created.id, "xnd-acct-123")).toBe(
+      true
+    );
+    expect((await repository.findById(created.id))?.xenditAccountId).toBe("xnd-acct-123");
   });
 
   /**
    * I4, final whole-branch review. The UPDATE used to be unconditional, so a
    * second caller silently overwrote the first — and this column is what routes
    * member money to a creator, so overwriting it redirects funds. The `is null`
-   * predicate is the guard; these two tests are what detect its removal.
+   * predicate is the guard; these tests are what detect its removal.
    */
-  it("refuses to overwrite an account id that is already set, and says so", async () => {
+  it("refuses to claim a column that is already set, and says so", async () => {
     const repository = new DrizzleCreatorRepository(db);
     const created = await repository.create({ name: "Hendra", email: "hendra2@example.com" });
 
-    expect(await repository.setXenditAccountId(created.id, "xnd-acct-first")).toBe(true);
-    expect(await repository.setXenditAccountId(created.id, "xnd-acct-second")).toBe(false);
+    expect(await repository.beginXenditAccountProvisioning(created.id)).toBe(true);
+    await repository.finishXenditAccountProvisioning(created.id, "xnd-acct-first");
 
+    expect(await repository.beginXenditAccountProvisioning(created.id)).toBe(false);
     expect((await repository.findById(created.id))?.xenditAccountId).toBe("xnd-acct-first");
+  });
+
+  it("refuses to claim a column another caller is already provisioning", async () => {
+    const repository = new DrizzleCreatorRepository(db);
+    const created = await repository.create({ name: "Hendra", email: "hendra2b@example.com" });
+
+    expect(await repository.beginXenditAccountProvisioning(created.id)).toBe(true);
+    expect(await repository.beginXenditAccountProvisioning(created.id)).toBe(false);
+  });
+
+  it("refuses to finish a claim it does not hold", async () => {
+    // The predicate is `= sentinel`, so this can only ever replace OUR claim. An
+    // unconditional write here would silently redirect a connected creator's funds.
+    const repository = new DrizzleCreatorRepository(db);
+    const created = await repository.create({ name: "Hendra", email: "hendra2c@example.com" });
+
+    expect(await repository.finishXenditAccountProvisioning(created.id, "xnd-acct-x")).toBe(
+      false
+    );
+    expect((await repository.findById(created.id))?.xenditAccountId).toBeNull();
+
+    await repository.beginXenditAccountProvisioning(created.id);
+    await repository.finishXenditAccountProvisioning(created.id, "xnd-acct-real");
+    expect(await repository.finishXenditAccountProvisioning(created.id, "xnd-acct-other")).toBe(
+      false
+    );
+    expect((await repository.findById(created.id))?.xenditAccountId).toBe("xnd-acct-real");
+  });
+
+  it("releases a claim it holds, and only a claim", async () => {
+    const repository = new DrizzleCreatorRepository(db);
+    const created = await repository.create({ name: "Hendra", email: "hendra2d@example.com" });
+
+    // Nothing to release yet.
+    expect(await repository.abandonXenditAccountProvisioning(created.id)).toBe(false);
+
+    await repository.beginXenditAccountProvisioning(created.id);
+    expect(await repository.abandonXenditAccountProvisioning(created.id)).toBe(true);
+    expect((await repository.findById(created.id))?.xenditAccountId).toBeNull();
+
+    // A CONNECTED creator must never be reset to null by this.
+    await repository.beginXenditAccountProvisioning(created.id);
+    await repository.finishXenditAccountProvisioning(created.id, "xnd-acct-connected");
+    expect(await repository.abandonXenditAccountProvisioning(created.id)).toBe(false);
+    expect((await repository.findById(created.id))?.xenditAccountId).toBe("xnd-acct-connected");
   });
 
   it("lets exactly ONE of several concurrent writers claim the column", async () => {
@@ -93,13 +147,12 @@ describe("DrizzleCreatorRepository", () => {
     const created = await repository.create({ name: "Hendra", email: "hendra3@example.com" });
 
     const results = await Promise.all(
-      Array.from({ length: 5 }, (_, i) =>
-        repository.setXenditAccountId(created.id, `xnd-acct-${i}`)
-      )
+      Array.from({ length: 5 }, () => repository.beginXenditAccountProvisioning(created.id))
     );
 
     expect(results.filter(Boolean)).toHaveLength(1);
-    const winner = results.indexOf(true);
-    expect((await repository.findById(created.id))?.xenditAccountId).toBe(`xnd-acct-${winner}`);
+    expect((await repository.findById(created.id))?.xenditAccountId).toBe(
+      XENDIT_ACCOUNT_PROVISIONING
+    );
   });
 });

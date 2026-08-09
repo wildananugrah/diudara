@@ -89,7 +89,7 @@ export interface SubscriptionRepositoryPort {
    * Returns false when the transaction does not exist or already carries a
    * reference: the column is written exactly once, at checkout, and overwriting
    * it would destroy the anchor the replay guard depends on. Conditional for the
-   * same reason as `CreatorRepositoryPort.setXenditAccountId`.
+   * same reason as `CreatorRepositoryPort.beginXenditAccountProvisioning`.
    */
   attachGatewayReference(transactionId: string, gatewayReferenceId: string): Promise<boolean>;
   /**

@@ -2,6 +2,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { db as DbClient } from "../../db/client";
 import { creators } from "../../db/schema";
 import { UniqueRule } from "../../application/errors";
+import { XENDIT_ACCOUNT_PROVISIONING } from "../../domain/payment-account";
 import { rethrowUniqueViolation } from "./pg-errors";
 import type {
   CreatorCredentials,
@@ -95,16 +96,40 @@ export class DrizzleCreatorRepository implements CreatorRepositoryPort {
   /**
    * Conditional by design — see the port docstring. `is null` in the WHERE
    * clause is what makes the database, not a prior `findById`, decide who gets
-   * to fill this column, so concurrent callers cannot all believe they won.
+   * to claim this column, so concurrent callers cannot all believe they won.
    * `.returning()` is how the row count comes back: postgres.js exposes a
    * `count`, but reading a returned row is the shape the rest of this file
    * already uses.
    */
-  async setXenditAccountId(id: string, accountId: string): Promise<boolean> {
+  async beginXenditAccountProvisioning(id: string): Promise<boolean> {
+    const rows = await this.db
+      .update(creators)
+      .set({ xenditAccountId: XENDIT_ACCOUNT_PROVISIONING })
+      .where(and(eq(creators.id, id), isNull(creators.xenditAccountId)))
+      .returning({ id: creators.id });
+    return rows.length > 0;
+  }
+
+  /** Predicated on the sentinel, so it can only ever replace OUR claim. */
+  async finishXenditAccountProvisioning(id: string, accountId: string): Promise<boolean> {
     const rows = await this.db
       .update(creators)
       .set({ xenditAccountId: accountId })
-      .where(and(eq(creators.id, id), isNull(creators.xenditAccountId)))
+      .where(
+        and(eq(creators.id, id), eq(creators.xenditAccountId, XENDIT_ACCOUNT_PROVISIONING))
+      )
+      .returning({ id: creators.id });
+    return rows.length > 0;
+  }
+
+  /** Same predicate as `finish`, so it can only ever release OUR claim. */
+  async abandonXenditAccountProvisioning(id: string): Promise<boolean> {
+    const rows = await this.db
+      .update(creators)
+      .set({ xenditAccountId: null })
+      .where(
+        and(eq(creators.id, id), eq(creators.xenditAccountId, XENDIT_ACCOUNT_PROVISIONING))
+      )
       .returning({ id: creators.id });
     return rows.length > 0;
   }

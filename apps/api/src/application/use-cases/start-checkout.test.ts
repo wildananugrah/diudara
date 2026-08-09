@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { FakePaymentAdapter } from "../../infrastructure/payments/fake-payment.adapter";
+import { ConflictError } from "../errors";
 import { StartCheckout } from "./start-checkout";
 import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "../ports/membership-tier-repository.port";
@@ -170,7 +171,13 @@ describe("StartCheckout — funds routing", () => {
       async findCredentialsByEmail() {
         return null;
       },
-      async setXenditAccountId() {
+      async beginXenditAccountProvisioning() {
+        return false;
+      },
+      async finishXenditAccountProvisioning() {
+        return false;
+      },
+      async abandonXenditAccountProvisioning() {
         return false;
       },
     };
@@ -252,11 +259,62 @@ describe("StartCheckout — funds routing", () => {
 });
 
 /**
+ * Task 7 item 1, second half. `CreatePaymentAccount` now CLAIMS
+ * `creator.xendit_account_id` with a sentinel before it calls Xendit, so the
+ * column has a third state: not connected, PROVISIONING, connected. StartCheckout
+ * reads that column and used to treat any non-empty value as payable — which
+ * would hand the sentinel to `createInvoice` as `for_account_id` and charge a
+ * member against an account id that does not exist at the provider.
+ *
+ * The sentinel is written as a LITERAL here rather than imported: this asserts the
+ * behaviour for the value the other half of the feature actually writes, and a
+ * shared import would let both sides drift together silently. The
+ * `isProvisioningPlaceholder` test in domain/payment-account.test.ts pins that the
+ * two agree.
+ */
+describe("StartCheckout — a half-provisioned payment account is not payable", () => {
+  it("409s instead of charging against the provisioning sentinel", async () => {
+    const { startCheckout, payments } = harness({
+      creatorXenditAccountId: "provisioning:in-progress",
+    });
+
+    await expect(
+      startCheckout.execute({
+        slug: "kelas-budi",
+        tierId: "tier-1",
+        payerName: "Siti",
+        payerWhatsappNumber: "+6281234567890",
+      })
+    ).rejects.toBeInstanceOf(ConflictError);
+
+    // The assertion that matters: no invoice exists, so no member was ever shown
+    // a payment page for an account that cannot receive money.
+    expect(payments.invoices).toHaveLength(0);
+  });
+
+  it("still charges normally once the real account id has replaced the sentinel", async () => {
+    // The guard must be the sentinel specifically, not "looks unusual".
+    const { startCheckout, payments } = harness({ creatorXenditAccountId: "acct-real-123" });
+
+    await startCheckout.execute({
+      slug: "kelas-budi",
+      tierId: "tier-1",
+      payerName: "Siti",
+      payerWhatsappNumber: "+6281234567890",
+    });
+
+    expect(payments.invoices[0].forAccountId).toBe("acct-real-123");
+  });
+});
+
+/**
  * A minimal StartCheckout wired to fake ports. Only the knobs the redirect tests
  * need are configurable; the exhaustive-fakes version above stays as it is
  * because it asserts the full port contract with no casts.
  */
-function harness(options: { appBaseUrl?: string; canonicalSlug?: string } = {}) {
+function harness(
+  options: { appBaseUrl?: string; canonicalSlug?: string; creatorXenditAccountId?: string } = {}
+) {
   const communities: CommunityRepositoryPort = {
     async create() {
       throw new Error("not used");
@@ -372,7 +430,7 @@ function harness(options: { appBaseUrl?: string; canonicalSlug?: string } = {}) 
         whatsappNumber: null,
         email: "budi@example.com",
         tierPlan: "starter",
-        xenditAccountId: "acct-creator-1",
+        xenditAccountId: options.creatorXenditAccountId ?? "acct-creator-1",
         createdAt: new Date(0),
       };
     },
@@ -382,7 +440,13 @@ function harness(options: { appBaseUrl?: string; canonicalSlug?: string } = {}) 
     async findCredentialsByEmail() {
       return null;
     },
-    async setXenditAccountId() {
+    async beginXenditAccountProvisioning() {
+      return false;
+    },
+    async finishXenditAccountProvisioning() {
+      return false;
+    },
+    async abandonXenditAccountProvisioning() {
       return false;
     },
   };

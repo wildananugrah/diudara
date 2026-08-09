@@ -1,4 +1,5 @@
 import { ConflictError, NotFoundError } from "../errors";
+import { isConnectedPaymentAccount } from "../../domain/payment-account";
 import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "../ports/membership-tier-repository.port";
 import type { MemberRepositoryPort } from "../ports/member-repository.port";
@@ -55,7 +56,19 @@ export class StartCheckout {
     const creator = await this.creators.findById(community.creatorId);
     // No account means no sub-account to settle into. Charging anyway would put
     // member funds in a platform account — the PJP hazard. Refuse.
-    if (!creator?.xenditAccountId) {
+    //
+    // `isConnectedPaymentAccount`, not truthiness: since Task 7,
+    // `CreatePaymentAccount` claims this column with a sentinel BEFORE it calls
+    // Xendit, so a truthy value is not necessarily an account. Handing the
+    // sentinel to `createInvoice` as `for_account_id` would charge a member
+    // against an account that does not exist at the provider — a half-provisioned
+    // creator must read as "not ready yet", which is exactly what it is.
+    //
+    // Bound to a local rather than tested in place so the type predicate actually
+    // narrows it to `string` for the `forAccountId` below — narrowing does not
+    // follow a `creator?.x ?? null` expression back to the property.
+    const forAccountId = creator?.xenditAccountId ?? null;
+    if (!isConnectedPaymentAccount(forAccountId)) {
       throw new ConflictError("this community is not ready to accept payments yet");
     }
 
@@ -80,7 +93,7 @@ export class StartCheckout {
       description: `${community.name} — ${tier.name}`,
       payerName: input.payerName,
       payerWhatsappNumber: input.payerWhatsappNumber,
-      forAccountId: creator.xenditAccountId,
+      forAccountId,
       // Closes the loop the browser cannot: `CheckoutPage` hands the payer to
       // the provider and the provider hands them back HERE, to the confirmation
       // page Task 9 built. Built from the CANONICAL slug on the community record

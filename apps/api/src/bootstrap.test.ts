@@ -35,6 +35,7 @@ import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
+import { XENDIT_ACCOUNT_PROVISIONING } from "./domain/payment-account";
 import type {
   CreatorRecord,
   CreatorRepositoryPort,
@@ -280,12 +281,25 @@ describe("Dependencies (composition root contract)", () => {
       async findCredentialsByEmail() {
         return null;
       },
-      async setXenditAccountId(id, accountId) {
-        // Mirrors the real repository's conditional UPDATE: only the caller that
-        // finds the column empty claims it.
+      // Mirrors the real repository's three conditional UPDATEs: only the caller
+      // that finds the column EMPTY claims it, and only the caller holding the
+      // sentinel may replace or release it.
+      async beginXenditAccountProvisioning(id) {
         const record = stored.find((r) => r.id === id);
         if (!record || record.xenditAccountId !== null) return false;
+        record.xenditAccountId = XENDIT_ACCOUNT_PROVISIONING;
+        return true;
+      },
+      async finishXenditAccountProvisioning(id, accountId) {
+        const record = stored.find((r) => r.id === id);
+        if (!record || record.xenditAccountId !== XENDIT_ACCOUNT_PROVISIONING) return false;
         record.xenditAccountId = accountId;
+        return true;
+      },
+      async abandonXenditAccountProvisioning(id) {
+        const record = stored.find((r) => r.id === id);
+        if (!record || record.xenditAccountId !== XENDIT_ACCOUNT_PROVISIONING) return false;
+        record.xenditAccountId = null;
         return true;
       },
     };
@@ -366,7 +380,13 @@ describe("Dependencies (composition root contract)", () => {
       async findCredentialsByEmail() {
         return null;
       },
-      async setXenditAccountId() {
+      async beginXenditAccountProvisioning() {
+        return false;
+      },
+      async finishXenditAccountProvisioning() {
+        return false;
+      },
+      async abandonXenditAccountProvisioning() {
         return false;
       },
     };
