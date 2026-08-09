@@ -6,9 +6,25 @@
  * transaction, because an invite is an external HTTP call and a Telegram outage
  * must delay an invite, never roll back a payment (plan, Global Constraints).
  *
- * Run it beside the API, with the same `apps/api/.env`:
+ * Run it beside the API, with the same `apps/api/.env`, AS THIS PROCESS and not
+ * behind a package-manager wrapper:
  *
- *   bun run --filter @diudara/worker start
+ *   cd apps/worker && bun run src/main.ts
+ *
+ * !!! NOT `bun run --filter @diudara/worker start`, which is what this comment
+ * used to say. That command stays in the foreground as a PARENT process and does
+ * NOT forward SIGTERM to the child that is actually the worker (measured, Task 8):
+ * signalling it kills only the parent, the worker is reparented to init and keeps
+ * polling and CLAIMING outbox rows, and it then needs SIGKILL — so
+ * `installShutdownSignals` below never runs, and whatever the worker had claimed
+ * sits in `processing` until `reclaimStaleProcessing` picks it up five minutes
+ * later. It also pipes the child's stdout through itself, so the shutdown lines are
+ * lost to a broken pipe even when the signal is delivered by hand.
+ *
+ * Under a supervisor this is mostly hidden — a container runtime and systemd's
+ * default `KillMode=control-group` both signal the whole process group — but the
+ * graceful path is the point of having one, and it is the operator running this by
+ * hand who is misled.
  *
  * It imports the API workspace's composition root by relative path rather than by
  * package name: `apps/api` publishes no entry point, and `bootstrapWorker()` is
