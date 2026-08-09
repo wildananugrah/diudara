@@ -148,3 +148,56 @@ describe("parseXenditInvoiceCallback", () => {
     );
   });
 });
+
+/**
+ * MINOR, final whole-branch review: the callback's `payment_method` was
+ * discarded and every transaction kept the literal "invoice" StartCheckout
+ * created it with. The dashboard phase needs to know how members actually pay.
+ */
+describe("parseXenditInvoiceCallback — payment_method", () => {
+  const base = { id: "inv_1", external_id: "txn-1", status: "PAID", amount: 50000 };
+
+  it("captures the method the callback reports", () => {
+    expect(parseXenditInvoiceCallback({ ...base, payment_method: "BANK_TRANSFER" }).paymentMethod)
+      .toBe("BANK_TRANSFER");
+    expect(parseXenditInvoiceCallback({ ...base, payment_method: "  EWALLET  " }).paymentMethod)
+      .toBe("EWALLET");
+  });
+
+  it("is undefined when the callback does not report one", () => {
+    expect(parseXenditInvoiceCallback(base).paymentMethod).toBeUndefined();
+  });
+
+  /**
+   * The whole point of it being optional. A ValidationError here would 400 a
+   * GENUINE paid callback, so a member who really paid would never be activated
+   * — an absurd price for a display string. The amount and the invoice id are
+   * what authorise anything; this is decoration.
+   */
+  it("NEVER throws on an unusable value — it degrades to undefined", () => {
+    for (const unusable of [
+      "",
+      "   ",
+      42,
+      null,
+      { code: "BANK_TRANSFER" },
+      ["BANK_TRANSFER"],
+      // Longer than transaction.payment_method's varchar(16), which would
+      // otherwise be SQLSTATE 22001 from the driver — a 500 on a real payment.
+      "A_VERY_LONG_PAYMENT_METHOD_NAME",
+      "x".repeat(17),
+    ]) {
+      const event = parseXenditInvoiceCallback({ ...base, payment_method: unusable });
+      expect(event.paymentMethod).toBeUndefined();
+      // ...and the fields that DO authorise things are untouched.
+      expect(event.amount).toBe(50000);
+      expect(event.invoiceId).toBe("inv_1");
+    }
+  });
+
+  it("accepts exactly 16 characters, the column's width", () => {
+    expect(
+      parseXenditInvoiceCallback({ ...base, payment_method: "x".repeat(16) }).paymentMethod
+    ).toBe("x".repeat(16));
+  });
+});

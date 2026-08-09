@@ -1568,6 +1568,10 @@ git commit -m "feat(payments): add token-verified, idempotent Xendit webhook han
 - Produces a Vite React app on port 5173, proxying `/c` and `/webhooks` to the API on 3000.
 - `CheckoutPage` fetches `GET /c/:slug`, renders tiers, and posts to
   `POST /c/:slug/checkout`, then redirects to the returned `invoiceUrl`.
+- **The return leg is part of this task.** `StartCheckout` must send the provider a
+  `success_redirect_url` of `<APP_BASE_URL>/c/<slug>/status/<subscriptionId>` (a new
+  required field on `CreateInvoiceInput`, forwarded by `XenditPaymentAdapter`), and a test
+  must assert the created invoice carries a URL containing the subscription id.
 
 Scaffold with React 18, `react-dom`, `react-router-dom`, and `vite` +
 `@vitejs/plugin-react`. Add `@diudara/shared` as a workspace dependency so request types
@@ -1577,8 +1581,21 @@ the root command** (verified in Phase 2). If no meaningful test exists yet, stil
 script.
 
 Testing uses `@testing-library/react` + `happy-dom`. Keep it to: renders tiers from a stubbed
-fetch; posting checkout calls the right endpoint with the selected tier. Do **not** test
-Xendit redirects.
+fetch; posting checkout calls the right endpoint with the selected tier. Do **not** drive a
+real browser through Xendit's hosted invoice page — but DO assert, on the API side, that the
+`success_redirect_url` we send it is correct.
+
+**AMENDED 2026-08-09 (final review, I1).** As written, this task's interface said only
+"redirects to the returned `invoiceUrl`" and "do not test Xendit redirects", so nobody was
+asked to close the loop: `CheckoutPage` discarded `subscriptionId`, no route linked to
+`/c/:slug/status/:subscriptionId`, and no `success_redirect_url` was sent. Task 9 therefore
+built and tested a page **no member could ever reach** — the end-to-end run navigated to it by
+hand, which is exactly why the gap read as cosmetic. "Do not test X" must never be phrased so
+broadly that it also excuses not BUILDING the half of X that is ours; the browser leg is
+untestable here, the request field is not.
+
+Lesson for future plans: when a flow leaves our process and comes back, the plan must name
+**both** legs and say which is asserted where. A page with no inbound link is not a feature.
 
 Mobile-first and legible; no design system. These links are opened on phones from WhatsApp.
 

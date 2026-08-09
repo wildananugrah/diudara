@@ -93,6 +93,10 @@ export class XenditPaymentAdapter implements PaymentProviderPort {
           given_names: input.payerName,
           mobile_number: input.payerWhatsappNumber,
         },
+        // Sends the payer's browser back to OUR confirmation page after paying.
+        // Without it the member is stranded on Xendit's receipt — see
+        // CreateInvoiceInput.successRedirectUrl.
+        success_redirect_url: input.successRedirectUrl,
       }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
@@ -100,7 +104,7 @@ export class XenditPaymentAdapter implements PaymentProviderPort {
     const body = await this.readJson(response, "createInvoice");
     return {
       invoiceId: this.requireString(body, "id", "createInvoice"),
-      invoiceUrl: this.requireString(body, "invoice_url", "createInvoice"),
+      invoiceUrl: this.requireUrl(body, "invoice_url", "createInvoice"),
     };
   }
 
@@ -149,6 +153,35 @@ export class XenditPaymentAdapter implements PaymentProviderPort {
           "(expected a non-empty string). The response shape does not match what " +
           "this adapter assumes — see the UNVERIFIED warning in " +
           "xendit-payment.adapter.ts."
+      );
+    }
+    return value;
+  }
+
+  /**
+   * `requireString`, plus a scheme check, for a field that ends up in
+   * `window.location.href`.
+   *
+   * `CheckoutPage` assigns the returned `invoiceUrl` straight to
+   * `window.location.href`. The source is our own API, so the risk is low — but
+   * "low" rests entirely on this adapter, and a `javascript:` or `data:` value in
+   * an unrecognised response body would be a stored redirect straight into script
+   * execution on our own origin. Asserting the scheme here costs one comparison
+   * and means the browser-facing code does not have to trust the provider.
+   *
+   * `http://` is allowed because local development points the adapter at a stub.
+   */
+  private requireUrl(
+    body: Record<string, unknown>,
+    key: string,
+    operation: string
+  ): string {
+    const value = this.requireString(body, key, operation);
+    if (!value.startsWith("https://") && !value.startsWith("http://")) {
+      throw new Error(
+        `xendit ${operation} returned a "${key}" that is not an http(s) URL. ` +
+          "It would be assigned to window.location.href, so a javascript: or data: " +
+          "value would execute on our own origin. Refusing it."
       );
     }
     return value;

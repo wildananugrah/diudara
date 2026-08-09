@@ -20,6 +20,7 @@ const INPUT = {
   payerName: "Siti",
   payerWhatsappNumber: "+6281234567890",
   forAccountId: "acct-creator-1",
+  successRedirectUrl: "http://localhost:5173/c/kelas-budi/status/sub-1",
 };
 
 describe("XenditPaymentAdapter.createInvoice", () => {
@@ -47,6 +48,52 @@ describe("XenditPaymentAdapter.createInvoice", () => {
     await adapter.createInvoice(INPUT);
 
     expect(JSON.parse(calls[0].init.body as string).external_id).toBe("txn-1");
+  });
+
+  // I1, final whole-branch review: without this field the payer never comes back
+  // from Xendit, and the confirmation page Task 9 built is unreachable.
+  it("sends the success_redirect_url so the payer lands back on our confirmation page", async () => {
+    const { calls, fetchFn } = captureFetch({ id: "inv_1", invoice_url: "https://x/inv_1" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    await adapter.createInvoice(INPUT);
+
+    const body = JSON.parse(calls[0].init.body as string);
+    expect(body.success_redirect_url).toBe(INPUT.successRedirectUrl);
+    // The subscription id is the only thing the confirmation page can be opened
+    // with, so it has to survive into the request.
+    expect(body.success_redirect_url).toContain("sub-1");
+  });
+
+  // MINOR, final whole-branch review: CheckoutPage assigns this straight to
+  // window.location.href. The source is our own API, so the risk is low — but
+  // "low" rests entirely on this check.
+  it("refuses an invoice_url that is not http(s), which would reach window.location.href", async () => {
+    for (const hostile of [
+      "javascript:alert(document.domain)",
+      "data:text/html,<script>1</script>",
+      "//evil.example/inv",
+      "inv_1",
+    ]) {
+      const { fetchFn } = captureFetch({ id: "inv_1", invoice_url: hostile });
+      const adapter = new XenditPaymentAdapter({
+        secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+      });
+
+      const error = (await adapter.createInvoice(INPUT).catch((e) => e)) as Error;
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain("not an http(s) URL");
+    }
+  });
+
+  it("accepts http:// as well as https://, for a local stub", async () => {
+    const { fetchFn } = captureFetch({ id: "inv_1", invoice_url: "http://localhost:9999/inv_1" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+    expect((await adapter.createInvoice(INPUT)).invoiceUrl).toBe("http://localhost:9999/inv_1");
   });
 
   it("returns the invoice id and url", async () => {

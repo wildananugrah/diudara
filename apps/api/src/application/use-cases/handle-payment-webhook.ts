@@ -36,6 +36,13 @@ export interface HandlePaymentWebhookInput {
   /** What the BODY claims. Checked against our own record, never trusted. */
   amount: number;
   eventType: string;
+  /**
+   * What the callback reports the payer used, when it reports anything usable.
+   * Persisted on the transaction in place of the "invoice" placeholder
+   * `StartCheckout` created it with — the creator dashboard needs it, and the
+   * callback is the only place it exists.
+   */
+  paymentMethod: string | undefined;
   /** The raw body, stored verbatim on `webhook_event.payload` for audit. */
   payload: unknown;
 }
@@ -171,6 +178,7 @@ export class HandlePaymentWebhook {
         transactionId: transaction.id,
         gatewayReferenceId: input.invoiceId,
         paidAt: new Date(),
+        paymentMethod: input.paymentMethod,
       });
       if (!paid) {
         // The transaction was not `pending` any more, so this delivery is a

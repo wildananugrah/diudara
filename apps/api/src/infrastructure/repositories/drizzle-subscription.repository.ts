@@ -138,6 +138,7 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
     transactionId: string;
     gatewayReferenceId: string;
     paidAt: Date;
+    paymentMethod?: string | undefined;
   }): Promise<MarkPaidResult | null> {
     return this.db.transaction(async (tx) => {
       const now = new Date();
@@ -149,6 +150,12 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
           gatewayReferenceId: input.gatewayReferenceId,
           paidAt: input.paidAt,
           updatedAt: now,
+          // Spread, not `?? existing`: an omitted payment_method must leave the
+          // column alone rather than write `undefined` (which drizzle would turn
+          // into a NULL against a NOT NULL column).
+          ...(input.paymentMethod === undefined
+            ? {}
+            : { paymentMethod: input.paymentMethod }),
         })
         .where(and(eq(transactions.id, input.transactionId), eq(transactions.status, PENDING)))
         .returning();

@@ -11,6 +11,19 @@ export interface CreateInvoiceInput {
    * Required, never optional: there is no valid "charge the platform" case.
    */
   forAccountId: string;
+  /**
+   * Where the provider sends the payer's BROWSER after a successful payment —
+   * our own confirmation page, `<APP_BASE_URL>/c/<slug>/status/<subscriptionId>`.
+   *
+   * Required, not optional. Task 9 built and tested that page and nothing ever
+   * reached it: `CheckoutPage` assigns `window.location.href = invoiceUrl` and
+   * discards the `subscriptionId`, no route links to it, and no
+   * `success_redirect_url` was sent — so a member who paid was left on the
+   * provider's own receipt with no way back into the product. An optional field
+   * here would let that happen again silently; a required one makes it a compile
+   * error.
+   */
+  successRedirectUrl: string;
 }
 
 export interface CreateInvoiceResult {

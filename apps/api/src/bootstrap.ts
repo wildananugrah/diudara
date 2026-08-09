@@ -84,6 +84,13 @@ export interface Dependencies {
    * match an empty header.
    */
   xenditCallbackToken: string | undefined;
+  /**
+   * The resolved public origin of `apps/web` — see `resolveAppBaseUrl`. Exposed
+   * here rather than kept private inside `StartCheckout` so a test can prove the
+   * environment variable actually reaches the composition root: the confirmation
+   * page was unreachable for an entire phase because nothing checked the wiring.
+   */
+  appBaseUrl: string;
   sql: DatabasePing;
 }
 
@@ -370,6 +377,57 @@ export function resolveCallbackToken(env: {
 }
 
 /**
+ * The `APP_BASE_URL` a developer gets for free: Vite's default dev-server
+ * origin, which is what `apps/web` serves the confirmation page from.
+ */
+export const DEFAULT_APP_BASE_URL = "http://localhost:5173";
+
+/**
+ * Resolves the public origin of `apps/web`, used to build the
+ * `success_redirect_url` the payment provider sends the payer back to:
+ * `<base>/c/<slug>/status/<subscriptionId>`.
+ *
+ * Same allowlist rule as the two guards above (see RELAXED_NODE_ENVS): the
+ * localhost default is permitted only under `development`/`test`. Anywhere else
+ * it must be set, because a deployment silently falling back to
+ * `http://localhost:5173` sends every paying member to a page on their OWN
+ * machine — a failure that looks like the payment vanished, and one no test on a
+ * developer's laptop would ever surface.
+ *
+ * A trailing slash is stripped so callers can concatenate a rooted path without
+ * producing `//c/...`.
+ */
+export function resolveAppBaseUrl(env: {
+  appBaseUrl: string | undefined;
+  nodeEnv: string | undefined;
+}): string {
+  const configured = presentOrUndefined(env.appBaseUrl);
+
+  if (configured === undefined) {
+    if (!isRelaxedNodeEnv(env.nodeEnv)) {
+      throw new Error(
+        "APP_BASE_URL is not set, and NODE_ENV is " +
+          `${describeNodeEnv(env.nodeEnv)}. Falling back to ${DEFAULT_APP_BASE_URL} is ` +
+          `permitted ONLY when NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}: it is the ` +
+          "URL the payment provider sends a paying member back to, so a localhost " +
+          "default would strand every payer on their own machine. Add it to " +
+          "apps/api/.env — see .env.example."
+      );
+    }
+    return DEFAULT_APP_BASE_URL;
+  }
+
+  const trimmed = configured.trim().replace(/\/+$/, "");
+  if (!trimmed.startsWith("https://") && !trimmed.startsWith("http://")) {
+    throw new Error(
+      `APP_BASE_URL must start with https:// or http:// (got "${trimmed}"). It is ` +
+        "concatenated into a URL the payment provider redirects a browser to."
+    );
+  }
+  return trimmed;
+}
+
+/**
  * Silent under `NODE_ENV=test` only. `bootstrap()` is called once per test that
  * builds an app, so this line printed 100+ times in one suite run and buried a
  * genuine `unhandled error` line. Everywhere else it still prints: the guards
@@ -428,13 +486,18 @@ export function bootstrap(): Dependencies {
 
   const memberRepository = new DrizzleMemberRepository(db);
   const subscriptionRepository = new DrizzleSubscriptionRepository(db);
+  const appBaseUrl = resolveAppBaseUrl({
+    appBaseUrl: process.env.APP_BASE_URL,
+    nodeEnv: process.env.NODE_ENV,
+  });
   const startCheckout = new StartCheckout(
     communityRepository,
     tierRepository,
     memberRepository,
     subscriptionRepository,
     creatorRepository,
-    payments
+    payments,
+    { appBaseUrl }
   );
   const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository);
 
@@ -467,6 +530,7 @@ export function bootstrap(): Dependencies {
     getSubscriptionStatus,
     handlePaymentWebhook,
     xenditCallbackToken,
+    appBaseUrl,
     sql,
   };
 }

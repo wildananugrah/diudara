@@ -101,5 +101,11 @@ export interface SubscriptionRepositoryPort {
     transactionId: string;
     gatewayReferenceId: string;
     paidAt: Date;
+    /**
+     * What the callback reported the payer actually used. Left alone when
+     * `undefined`, so a callback that omits it does not overwrite the value
+     * `createTransaction` recorded with the placeholder it is being replaced by.
+     */
+    paymentMethod?: string | undefined;
   }): Promise<MarkPaidResult | null>;
 }

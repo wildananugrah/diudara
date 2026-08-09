@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { resetDatabase } from "../db/test-helpers";
+import { FakePaymentAdapter } from "../infrastructure/payments/fake-payment.adapter";
 import { bearer, signupAndGetToken } from "./test-support";
 
 beforeEach(resetDatabase);
@@ -52,6 +53,34 @@ describe("POST /c/:slug/checkout", () => {
     expect(body.invoiceUrl).toContain("http");
     expect(body.subscriptionId).toBeTruthy();
     expect(body.transactionId).toBeTruthy();
+  });
+
+  /**
+   * I1, final whole-branch review — wired end to end through the composition
+   * root. Task 9 built `/c/:slug/status/:subscriptionId` and nothing could reach
+   * it: no route linked to it and no `success_redirect_url` was sent, so a member
+   * who paid was left on the provider's receipt. The invoice the provider is
+   * asked to create must carry a URL containing the subscription id.
+   */
+  it("asks the provider to send the payer back to OUR confirmation page", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { community, tier } = await seedPayableCommunity(a);
+
+    const res = await a.request(`/c/${community.slug}/checkout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tierId: tier.id, ...PAYER }),
+    });
+    const { subscriptionId } = await res.json();
+
+    const payments = deps.payments as FakePaymentAdapter;
+    expect(payments.invoices).toHaveLength(1);
+    const redirect = payments.invoices[0].successRedirectUrl;
+    expect(redirect).toContain(subscriptionId);
+    expect(redirect).toBe(`${deps.appBaseUrl}/c/${community.slug}/status/${subscriptionId}`);
+    // And it is a URL a browser can actually be sent to.
+    expect(redirect.startsWith("http://") || redirect.startsWith("https://")).toBe(true);
   });
 
   it("rejects a creator who has not completed payment onboarding with 409", async () => {

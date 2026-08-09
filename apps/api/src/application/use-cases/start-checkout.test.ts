@@ -7,6 +7,8 @@ import type { MemberRepositoryPort } from "../ports/member-repository.port";
 import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
 import type { CreatorRepositoryPort } from "../ports/creator-repository.port";
 
+const APP_BASE_URL = "https://app.diudara.test";
+
 describe("StartCheckout — funds routing", () => {
   it("charges the creator's account, never a platform account", async () => {
     // Assembled with fakes; see the route test for the wired version.
@@ -18,6 +20,7 @@ describe("StartCheckout — funds routing", () => {
       payerName: "Siti",
       payerWhatsappNumber: "+6281234567890",
       forAccountId: "acct-creator-1",
+      successRedirectUrl: "http://localhost:5173/c/kelas-budi/status/sub-1",
     });
 
     expect(payments.invoices[0].forAccountId).toBe("acct-creator-1");
@@ -174,7 +177,8 @@ describe("StartCheckout — funds routing", () => {
       members,
       subscriptions,
       creators,
-      payments
+      payments,
+      { appBaseUrl: APP_BASE_URL }
     );
 
     const result = await startCheckout.execute({
@@ -196,5 +200,184 @@ describe("StartCheckout — funds routing", () => {
     expect(attached).toEqual([
       { transactionId: "transaction-1", gatewayReferenceId: "fake-inv-1" },
     ]);
+
+    // I1, final whole-branch review: Task 9's confirmation page was unreachable
+    // — nothing linked to /c/:slug/status/:subscriptionId and no
+    // success_redirect_url was sent, so a member who paid was left on the
+    // provider's receipt. The created invoice must carry a URL containing the
+    // SUBSCRIPTION ID, which is the only thing that page can be opened with.
+    const redirect = payments.invoices[0].successRedirectUrl;
+    expect(redirect).toContain("subscription-1");
+    expect(redirect).toBe(`${APP_BASE_URL}/c/kelas-budi/status/subscription-1`);
+  });
+
+  it("builds the redirect from the configured base url, not a hardcoded origin", async () => {
+    // APP_BASE_URL appears nowhere in start-checkout.ts, so this can only pass if
+    // the use-case genuinely reads its config.
+    const { startCheckout, payments } = harness({ appBaseUrl: "https://diudara.example" });
+
+    const result = await startCheckout.execute({
+      slug: "kelas-budi",
+      tierId: "tier-1",
+      payerName: "Siti",
+      payerWhatsappNumber: "+6281234567890",
+    });
+
+    expect(payments.invoices[0].successRedirectUrl).toBe(
+      `https://diudara.example/c/kelas-budi/status/${result.subscriptionId}`
+    );
+  });
+
+  it("uses the community's CANONICAL slug in the redirect, not the requested one", async () => {
+    // findBySlug is the only unscoped lookup in the codebase; if it ever resolves
+    // a row by an alias, the redirect must still point at a URL that loads.
+    const { startCheckout, payments } = harness({ canonicalSlug: "kelas-budi" });
+
+    await startCheckout.execute({
+      slug: "KELAS-BUDI",
+      tierId: "tier-1",
+      payerName: "Siti",
+      payerWhatsappNumber: "+6281234567890",
+    });
+
+    expect(payments.invoices[0].successRedirectUrl).toContain("/c/kelas-budi/status/");
+    expect(payments.invoices[0].successRedirectUrl).not.toContain("KELAS-BUDI");
   });
 });
+
+/**
+ * A minimal StartCheckout wired to fake ports. Only the knobs the redirect tests
+ * need are configurable; the exhaustive-fakes version above stays as it is
+ * because it asserts the full port contract with no casts.
+ */
+function harness(options: { appBaseUrl?: string; canonicalSlug?: string } = {}) {
+  const communities: CommunityRepositoryPort = {
+    async create() {
+      throw new Error("not used");
+    },
+    async findByIdForCreator() {
+      return null;
+    },
+    async listByCreator() {
+      return [];
+    },
+    async slugExists() {
+      return false;
+    },
+    async update() {
+      return null;
+    },
+    async findBySlug(slug) {
+      return {
+        id: "community-1",
+        creatorId: "creator-1",
+        name: "Kelas Budi",
+        slug: options.canonicalSlug ?? slug,
+        niche: null,
+        status: "active",
+        createdAt: new Date(0),
+      };
+    },
+  };
+
+  const tiers: MembershipTierRepositoryPort = {
+    async create() {
+      throw new Error("not used");
+    },
+    async listByCommunity() {
+      return [
+        {
+          id: "tier-1",
+          communityId: "community-1",
+          name: "Basic",
+          priceAmount: 50000,
+          billingCycle: "monthly",
+          isActive: true,
+        },
+      ];
+    },
+    async updateForCommunity() {
+      return null;
+    },
+  };
+
+  const members: MemberRepositoryPort = {
+    async findOrCreateByWhatsappNumber(input) {
+      return { id: "member-1", whatsappNumber: input.whatsappNumber, name: input.name, joinedAt: new Date(0) };
+    },
+  };
+
+  const subscriptions: SubscriptionRepositoryPort = {
+    async createPending(input) {
+      return {
+        id: "subscription-1",
+        memberId: input.memberId,
+        tierId: input.tierId,
+        status: "pending",
+        nextBillingDate: null,
+        startedAt: null,
+        retryCount: 0,
+        lastAttemptAt: null,
+        createdAt: new Date(0),
+        updatedAt: new Date(0),
+      };
+    },
+    async createTransaction(input) {
+      return {
+        id: "transaction-1",
+        subscriptionId: input.subscriptionId,
+        amount: input.amount,
+        paymentMethod: input.paymentMethod,
+        status: "pending",
+        gatewayReferenceId: null,
+        paidAt: null,
+        createdAt: new Date(0),
+        updatedAt: new Date(0),
+      };
+    },
+    async findById() {
+      throw new Error("not used");
+    },
+    async findTransactionByExternalId() {
+      return null;
+    },
+    async attachGatewayReference() {
+      return true;
+    },
+    async markPaid() {
+      throw new Error("not used");
+    },
+  };
+
+  const creators: CreatorRepositoryPort = {
+    async create() {
+      throw new Error("not used");
+    },
+    async findById(id) {
+      return {
+        id,
+        name: "Budi",
+        whatsappNumber: null,
+        email: "budi@example.com",
+        tierPlan: "starter",
+        xenditAccountId: "acct-creator-1",
+        createdAt: new Date(0),
+      };
+    },
+    async findByEmail() {
+      return null;
+    },
+    async findCredentialsByEmail() {
+      return null;
+    },
+    async setXenditAccountId() {
+      return false;
+    },
+  };
+
+  const payments = new FakePaymentAdapter();
+  const startCheckout = new StartCheckout(communities, tiers, members, subscriptions, creators, payments, {
+    appBaseUrl: options.appBaseUrl ?? APP_BASE_URL,
+  });
+  return { startCheckout, payments };
+}

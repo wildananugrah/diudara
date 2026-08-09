@@ -361,6 +361,50 @@ describe("POST /webhooks/xendit", () => {
     expect(await db.select().from(activityLogs)).toHaveLength(0);
   });
 
+  // MINOR, final whole-branch review: payment_method was hardcoded "invoice" and
+  // the callback's own value was discarded.
+  it("persists the payment_method the callback reports", async () => {
+    const a = app();
+    const { externalId, invoiceId } = await checkout(a);
+
+    const [before] = await db.select().from(transactions).where(eq(transactions.id, externalId));
+    expect(before.paymentMethod).toBe("invoice");
+
+    await post(a, verifiedEvent(externalId, invoiceId, { payment_method: "BANK_TRANSFER" }));
+
+    const [after] = await db.select().from(transactions).where(eq(transactions.id, externalId));
+    expect(after.paymentMethod).toBe("BANK_TRANSFER");
+  });
+
+  it("leaves payment_method alone when the callback does not report one", async () => {
+    // NOT NULL column: writing `undefined` through would be a NULL violation.
+    const a = app();
+    const { externalId, invoiceId } = await checkout(a);
+
+    await post(a, verifiedEvent(externalId, invoiceId));
+
+    const [tx] = await db.select().from(transactions).where(eq(transactions.id, externalId));
+    expect(tx.paymentMethod).toBe("invoice");
+    expect(tx.status).toBe("success");
+  });
+
+  it("still activates when the callback's payment_method is unusable", async () => {
+    // A 400 here would mean a member who really paid never gets access, over a
+    // display string. It degrades instead.
+    const a = app();
+    const { subscriptionId, externalId, invoiceId } = await checkout(a);
+
+    const res = await post(
+      a,
+      verifiedEvent(externalId, invoiceId, { payment_method: "A_METHOD_NAME_FAR_TOO_LONG_FOR_THE_COLUMN" })
+    );
+
+    expect(res.status).toBe(200);
+    expect((await subscriptionRow(subscriptionId)).status).toBe("active");
+    const [tx] = await db.select().from(transactions).where(eq(transactions.id, externalId));
+    expect(tx.paymentMethod).toBe("invoice");
+  });
+
   it("records the provider's invoice id on the transaction at CHECKOUT, before any webhook", async () => {
     // The anchor everything above depends on. Before this, gateway_reference_id
     // was null until a webhook arrived and then held whatever the body claimed.

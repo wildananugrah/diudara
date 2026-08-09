@@ -159,6 +159,7 @@ function paidEvent(overrides: Record<string, unknown> = {}) {
     status: "PAID",
     amount: 50000,
     eventType: "invoice.paid",
+    paymentMethod: undefined,
     payload: { id: "inv_1", status: "PAID" },
     ...overrides,
   };

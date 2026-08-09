@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   bootstrap,
+  DEFAULT_APP_BASE_URL,
   RELAXED_NODE_ENVS,
+  resolveAppBaseUrl,
   resolveCallbackToken,
   selectPaymentProvider,
   TEST_CALLBACK_TOKEN,
@@ -249,7 +251,8 @@ describe("Dependencies (composition root contract)", () => {
         fakeMemberRepository,
         fakeSubscriptionRepository,
         fakeCreatorRepository,
-        fakePaymentProvider
+        fakePaymentProvider,
+        { appBaseUrl: "https://app.diudara.test" }
       ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
@@ -257,6 +260,7 @@ describe("Dependencies (composition root contract)", () => {
         fakePaymentActivationUnitOfWork
       ),
       xenditCallbackToken: "fake-callback-token",
+      appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
     };
 
@@ -322,7 +326,8 @@ describe("Dependencies (composition root contract)", () => {
         fakeMemberRepository,
         fakeSubscriptionRepository,
         fakeCreatorRepository,
-        fakePaymentProvider
+        fakePaymentProvider,
+        { appBaseUrl: "https://app.diudara.test" }
       ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
@@ -330,6 +335,7 @@ describe("Dependencies (composition root contract)", () => {
         fakePaymentActivationUnitOfWork
       ),
       xenditCallbackToken: "fake-callback-token",
+      appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
     };
 
@@ -417,6 +423,76 @@ describe("bootstrap() JWT_SECRET guard", () => {
     expect(shipped).toBe(PLACEHOLDER);
     withJwtSecret(shipped, () => {
       expect(() => bootstrap()).toThrow();
+    });
+  });
+});
+
+/**
+ * I1, final whole-branch review. `APP_BASE_URL` is the origin the payment
+ * provider redirects a paying member back to, so a deployment that silently used
+ * the localhost default would send every payer to a page on their own machine —
+ * a failure that looks exactly like the payment vanishing. Same allowlist as the
+ * two payment guards, for the same reason.
+ */
+describe("resolveAppBaseUrl", () => {
+  it("defaults to the Vite dev origin in development and test", () => {
+    for (const nodeEnv of ["development", "test"]) {
+      expect(resolveAppBaseUrl({ appBaseUrl: undefined, nodeEnv })).toBe(DEFAULT_APP_BASE_URL);
+    }
+  });
+
+  it("refuses to default for ANY nodeEnv outside the allowlist, including unset", () => {
+    for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "production", ""]) {
+      expect(() => resolveAppBaseUrl({ appBaseUrl: undefined, nodeEnv })).toThrow(
+        /APP_BASE_URL is not set/
+      );
+    }
+  });
+
+  it("uses a configured value everywhere", () => {
+    expect(
+      resolveAppBaseUrl({ appBaseUrl: "https://diudara.example", nodeEnv: "production" })
+    ).toBe("https://diudara.example");
+  });
+
+  it("strips trailing slashes so a rooted path does not double up", () => {
+    // The caller concatenates `/c/<slug>/status/<id>`; "https://x//c/..." is a
+    // different URL and would 404.
+    expect(resolveAppBaseUrl({ appBaseUrl: "https://x/", nodeEnv: "test" })).toBe("https://x");
+    expect(resolveAppBaseUrl({ appBaseUrl: "https://x///", nodeEnv: "test" })).toBe("https://x");
+  });
+
+  it("treats empty and whitespace-only as unset", () => {
+    for (const blank of ["", "   ", "\t"]) {
+      expect(resolveAppBaseUrl({ appBaseUrl: blank, nodeEnv: "test" })).toBe(
+        DEFAULT_APP_BASE_URL
+      );
+      expect(() => resolveAppBaseUrl({ appBaseUrl: blank, nodeEnv: "production" })).toThrow(
+        /APP_BASE_URL is not set/
+      );
+    }
+  });
+
+  it("refuses a value that is not an http(s) origin", () => {
+    // It is handed to a third party who redirects a browser to it.
+    for (const bad of ["diudara.example", "javascript:alert(1)", "ftp://x", "//evil.example"]) {
+      expect(() => resolveAppBaseUrl({ appBaseUrl: bad, nodeEnv: "test" })).toThrow(
+        /must start with https:\/\/ or http:\/\//
+      );
+    }
+  });
+});
+
+describe("bootstrap() APP_BASE_URL", () => {
+  it("builds a checkout redirect from the configured origin", async () => {
+    // End-to-end through the composition root: the value in the environment has
+    // to reach the invoice, or the confirmation page is unreachable again.
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ APP_BASE_URL: "https://wired.example/" }, () => {
+        const deps = bootstrap();
+        expect(deps.payments).toBeInstanceOf(FakePaymentAdapter);
+        expect(deps.appBaseUrl).toBe("https://wired.example");
+      });
     });
   });
 });

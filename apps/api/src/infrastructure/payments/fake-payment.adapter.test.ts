@@ -8,6 +8,7 @@ const INPUT = {
   payerName: "Siti",
   payerWhatsappNumber: "+6281234567890",
   forAccountId: "acct-creator-1",
+  successRedirectUrl: "http://localhost:5173/c/kelas-budi/status/sub-1",
 };
 
 describe("FakePaymentAdapter", () => {
