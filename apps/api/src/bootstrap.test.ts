@@ -173,6 +173,13 @@ const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   async markPastDue() {
     return false;
   },
+  async findPastGraceDeadline() {
+    // Phase 5's churn pass runs in the worker, not behind an HTTP route.
+    return [];
+  },
+  async markChurned() {
+    return false;
+  },
   async findRenewalContext() {
     // Phase 5's reminder delivery runs in the worker, not behind an HTTP route.
     return null;

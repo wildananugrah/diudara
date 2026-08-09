@@ -290,6 +290,55 @@ export interface SubscriptionRepositoryPort {
    */
   markPastDue(subscriptionId: string, graceEndsAt: Date): Promise<boolean>;
   /**
+   * Subscriptions the CHURN pass has to act on: `past_due`, with a STORED
+   * `grace_ends_at` that `now` is already past.
+   *
+   * IT MUST FILTER BY STATUS, for a sharper reason than `findDueForRenewal`'s. The
+   * deadline column is not cleared when a subscription leaves `past_due` — a renewal
+   * clears it, but nothing else does, and a status is the only thing that says whether
+   * a deadline still means anything. A query on `grace_ends_at <= now` alone would read
+   * a member who PAID ON DAY 5 as overdue and revoke the access they had just renewed;
+   * it would also keep re-reading every subscription churned in the last year, since
+   * their deadlines stay in the past for ever.
+   *
+   * The deadline is READ, never recomputed from `next_billing_date` (Global
+   * Constraints): it is a promise made to a member about the day they lose access, and
+   * a `null` here means "no deadline was ever stored", which must exclude the row
+   * rather than derive one. Strictly `<`, matching `isPastGrace` — at the deadline the
+   * member still has access, because losing it is irreversible from their side.
+   *
+   * UNLIKE `findDueForRenewal` THIS NEEDS NO CURSOR, and the asymmetry is the point: a
+   * churned subscription LEAVES this result set, because the pass writes the very
+   * status the filter excludes. So `limit` bounds a query without starving the tail —
+   * successive queries see a strictly smaller backlog. `findDueForRenewal` has the
+   * opposite property (a reminded subscription stays `past_due`), which is why it
+   * carries a keyset.
+   *
+   * `communityStatus` travels with each row for the same reason it does on
+   * `DueRenewalRecord`: an archived community's member is not evicted (spec §8), and
+   * the pass has no creator to scope a community lookup by.
+   */
+  findPastGraceDeadline(input: { now: Date; limit: number }): Promise<DueRenewalRecord[]>;
+  /**
+   * Moves a `past_due` subscription to `churned`, and answers whether this call is the
+   * one that did it.
+   *
+   * `status = 'past_due'` MUST be in the UPDATE predicate, not read first. That is the
+   * entire idempotency mechanism of the churn pass: the row that flips the status is
+   * also the row that decides who enqueues the revoke, so a second pass — or a
+   * concurrent one — gets `false` and enqueues nothing. A read followed by an
+   * unconditional write looks identical in every sequential test and revokes twice the
+   * moment two passes overlap.
+   *
+   * `grace_ends_at` is deliberately LEFT AS IT IS: it records the deadline this member
+   * was actually measured against, and an audit of a disputed eviction needs it. Only a
+   * renewal clears it, because only a renewal makes it meaningless.
+   *
+   * `subscription` has no `BEFORE UPDATE` trigger, so this must set `updatedAt`
+   * explicitly like every other write here.
+   */
+  markChurned(subscriptionId: string): Promise<boolean>;
+  /**
    * One subscription with the tier and community a reminder message needs — see
    * `RenewalReminderContext`.
    *

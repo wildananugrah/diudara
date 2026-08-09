@@ -156,6 +156,12 @@ describe("StartCheckout — funds routing", () => {
       async markPastDue() {
         throw new Error("not used");
       },
+      async findPastGraceDeadline() {
+        throw new Error("not used");
+      },
+      async markChurned() {
+        throw new Error("not used");
+      },
       async findRenewalContext() {
         throw new Error("not used");
       },
@@ -522,6 +528,12 @@ function harness(
       throw new Error("not used");
     },
     async markPastDue() {
+      throw new Error("not used");
+    },
+    async findPastGraceDeadline() {
+      throw new Error("not used");
+    },
+    async markChurned() {
       throw new Error("not used");
     },
     async findRenewalContext() {

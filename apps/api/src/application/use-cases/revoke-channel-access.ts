@@ -11,6 +11,7 @@ import {
   OUTBOX_REVOKE_ACCESS,
   type OutboxRepositoryPort,
 } from "../ports/outbox-repository.port";
+import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
 
 /**
  * Why a channel's removal could not be performed for us. Exported so a caller can
@@ -101,22 +102,31 @@ const RETRYABLE_REASONS: ReadonlySet<RevokeNotAutomatedReason> = new Set([
  *     creator believes they are gone.
  */
 export class RevokeChannelAccess {
+  private readonly revoker: ChannelAccessRevoker;
+
   constructor(
     private readonly communities: CommunityRepositoryPort,
-    private readonly memberships: ChannelMembershipRepositoryPort,
-    private readonly activityLog: ActivityLogRepositoryPort,
-    private readonly providers: ReadonlyMap<string, MessagingProviderPort>,
+    memberships: ChannelMembershipRepositoryPort,
+    activityLog: ActivityLogRepositoryPort,
+    providers: ReadonlyMap<string, MessagingProviderPort>,
     /**
      * Where an OUTSTANDING removal is recorded when the provider could not perform
-     * it. See the `RETRYABLE_REASONS` enqueue below; the worker handles the row with
-     * the same bounded retries every other outbox event gets.
+     * it. See `ChannelAccessRevoker`'s `RETRYABLE_REASONS` enqueue; the worker handles
+     * the row with the same bounded retries every other outbox event gets.
      */
-    private readonly outbox: OutboxRepositoryPort
-  ) {}
+    outbox: OutboxRepositoryPort
+  ) {
+    this.revoker = new ChannelAccessRevoker(memberships, activityLog, providers, outbox);
+  }
 
   async execute(input: RevokeChannelAccessInput): Promise<RevokeChannelAccessResult> {
     // Creator-scoped, and 404 rather than 403: a stranger must not be able to
     // tell an existing community from one that never existed.
+    //
+    // THIS CHECK IS THIS CLASS'S ENTIRE REASON TO BE SEPARATE from
+    // `RevokeChannelAccessForSystem` below. Both classes share the removal logic and
+    // nothing else, precisely so that deleting these four lines breaks a test instead
+    // of quietly turning a creator-facing endpoint into an unauthenticated one.
     const community = await this.communities.findByIdForCreator(
       input.communityId,
       input.creatorId
@@ -125,21 +135,64 @@ export class RevokeChannelAccess {
       throw new NotFoundError("community not found");
     }
 
-    const active = await this.memberships.listActiveForMemberInCommunity(
-      input.memberId,
-      input.communityId
-    );
+    const active = await this.revoker.activeMembershipsFor(input.memberId, input.communityId);
     if (active.length === 0) {
       // Nothing to revoke. 404 rather than a 200 saying "revoked 0", so a
       // creator acting on a stale dashboard is told, and so a second click is
       // not reported as a second removal.
+      //
+      // The SYSTEM path answers differently — see `RevokeChannelAccessForSystem`.
       throw new NotFoundError("member has no active access to this community");
     }
 
+    return this.revoker.revokeAll({
+      memberId: input.memberId,
+      communityId: input.communityId,
+      memberships: active,
+    });
+  }
+}
+
+/**
+ * Removes a member from a channel at the provider, withdraws the entitlement, audits it
+ * and records an outstanding removal for retry — for BOTH entry points.
+ *
+ * It is the shared half of Phase 5 spec §5. What is deliberately NOT in here is any
+ * authorization, because the two callers have genuinely different trust models and there
+ * is no honest way to express both in one check: the creator-facing use-case scopes by
+ * `creatorId` and 404s, and the churn job has no untrusted caller to authorize at all.
+ * Putting a check in here would force the system path to invent an argument to satisfy
+ * it, which is the shortcut the spec rejected.
+ */
+class ChannelAccessRevoker {
+  constructor(
+    private readonly memberships: ChannelMembershipRepositoryPort,
+    private readonly activityLog: ActivityLogRepositoryPort,
+    private readonly providers: ReadonlyMap<string, MessagingProviderPort>,
+    private readonly outbox: OutboxRepositoryPort
+  ) {}
+
+  /**
+   * The memberships a revocation would act on. Exposed so each caller can decide for
+   * itself what "there are none" means — a 404 for a creator, a completed no-op for the
+   * churn job.
+   */
+  async activeMembershipsFor(
+    memberId: string,
+    communityId: string
+  ): Promise<ChannelMembershipWithChannel[]> {
+    return this.memberships.listActiveForMemberInCommunity(memberId, communityId);
+  }
+
+  async revokeAll(input: {
+    memberId: string;
+    communityId: string;
+    memberships: readonly ChannelMembershipWithChannel[];
+  }): Promise<RevokeChannelAccessResult> {
     const channels: RevokedChannel[] = [];
     let revoked = 0;
 
-    for (const membership of active) {
+    for (const membership of input.memberships) {
       // The provider first, our record second. If the provider removal fails we
       // still revoke — see the class docstring — but attempting it before the
       // status change means the `externalMemberId` we pass came from a row that
@@ -283,6 +336,110 @@ export class RevokeChannelAccess {
       return { automated: false, reason: "provider_error" };
     }
   }
+}
+
+/**
+ * Removes access from a member whose subscription the SYSTEM has ended.
+ *
+ * =====================================================================
+ * IT TAKES NO `creatorId` AND PERFORMS NO SCOPING CHECK, AND THAT IS CORRECT.
+ *
+ * There is no untrusted caller to authorize. The only thing that reaches this class is a
+ * `revoke_subscription_access` outbox row written by `ProcessChurn` — the churn job IS
+ * the system, and nothing about that decision belongs to a creator.
+ *
+ * THE REJECTED ALTERNATIVE (spec §5) was to have the worker resolve
+ * subscription → tier → community → creator and call `RevokeChannelAccess` with the
+ * creator id it had just looked up. That satisfies an authorization check with data the
+ * caller supplied itself — authorization theatre — and it is worse than having no check,
+ * because a future reader sees `findByIdForCreator` in the call path and believes
+ * something is being verified. Nothing would be: the "authorized" creator is whichever
+ * one the row points at.
+ *
+ * So there are two entry points with two honest trust models, sharing
+ * `ChannelAccessRevoker` and nothing else. The creator-facing path's 404-for-a-stranger
+ * tests are the proof they did not collapse into one while that sharing was extracted.
+ * =====================================================================
+ *
+ * Two behavioural differences from the creator-facing path, both because the caller is an
+ * outbox row rather than a person:
+ *
+ *  1. NOTHING TO REVOKE IS NOT AN ERROR. A member who never joined, or one a previous
+ *     attempt already removed, is a completed row — not a 404. Throwing would spend the
+ *     retry bound reaching the same answer five times and then park a `failed` row for
+ *     an operator to read about a member who is correctly gone.
+ *  2. AN ABSENT SUBSCRIPTION DOES throw, because that is a payload naming a row that
+ *     does not exist, which no retry can fix and somebody should see.
+ */
+export class RevokeChannelAccessForSystem {
+  private readonly revoker: ChannelAccessRevoker;
+
+  constructor(
+    /**
+     * How a subscription id becomes a member and a community. `findByIdWithCommunity`
+     * is UNSCOPED, like every read the worker makes — and unlike
+     * `CommunityRepositoryPort`, which is creator-scoped throughout and therefore
+     * unusable from here. That is not a workaround; it is the same reason
+     * `MarkPaidResult` carries `communityId`.
+     */
+    private readonly subscriptions: SubscriptionRepositoryPort,
+    memberships: ChannelMembershipRepositoryPort,
+    activityLog: ActivityLogRepositoryPort,
+    providers: ReadonlyMap<string, MessagingProviderPort>,
+    outbox: OutboxRepositoryPort
+  ) {
+    this.revoker = new ChannelAccessRevoker(memberships, activityLog, providers, outbox);
+  }
+
+  async execute(input: { subscriptionId: string }): Promise<RevokeChannelAccessResult> {
+    const context = await this.subscriptions.findByIdWithCommunity(input.subscriptionId);
+    if (!context) {
+      throw new NotFoundError(`subscription ${input.subscriptionId} not found`);
+    }
+    const { subscription, communityId } = context;
+
+    // The subscription's OWN community, not every community the member belongs to. A
+    // member who churns out of one creator's community keeps the access they are still
+    // paying another creator for.
+    const active = await this.revoker.activeMembershipsFor(subscription.memberId, communityId);
+    if (active.length === 0) {
+      console.warn(
+        `[churn] nothing to revoke for subscription=${safeLabel(input.subscriptionId)}: the ` +
+          "member holds no active membership in this community — already removed, or they " +
+          "never joined"
+      );
+      return { revoked: 0, automated: false, channels: [] };
+    }
+
+    return this.revoker.revokeAll({
+      memberId: subscription.memberId,
+      communityId,
+      memberships: active,
+    });
+  }
+}
+
+/**
+ * Adapts the system revoke to `ProcessOutbox`'s handler signature, and is the ONE place
+ * the `revoke_subscription_access` payload contract is checked — the same shape and the
+ * same reasoning as `grantAccessOutboxHandler` and `revokeAccessOutboxHandler`.
+ */
+export function revokeSubscriptionAccessOutboxHandler(useCase: RevokeChannelAccessForSystem) {
+  return async (payload: unknown): Promise<void> => {
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      !("subscriptionId" in payload) ||
+      typeof payload.subscriptionId !== "string" ||
+      payload.subscriptionId === ""
+    ) {
+      throw new Error(
+        "revoke_subscription_access outbox payload carries no usable string subscriptionId " +
+          "(the payload itself is deliberately not repeated here)"
+      );
+    }
+    await useCase.execute({ subscriptionId: payload.subscriptionId });
+  };
 }
 
 /** What one attempt at an outstanding removal concluded. */

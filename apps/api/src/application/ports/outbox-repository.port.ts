@@ -36,6 +36,28 @@ export const OUTBOX_REVOKE_ACCESS = "revoke_access";
  */
 export const OUTBOX_SEND_RENEWAL_REMINDER = "send_renewal_reminder";
 
+/**
+ * The `event_type` of the row the CHURN pass queues: "this subscription is churned —
+ * take away the access it was paying for".
+ *
+ * A SEPARATE TYPE FROM `OUTBOX_REVOKE_ACCESS`, deliberately, and the difference is the
+ * payload's starting point rather than a taxonomy. `revoke_access` carries a
+ * `membershipId` and means "a removal we already decided on failed at the provider —
+ * try that one again". This carries a `subscriptionId` and means "decide what this
+ * member's memberships are, then remove them all": at churn time no membership has been
+ * touched yet, and the pass has no reason to enumerate them itself. Handled by
+ * `RevokeChannelAccessForSystem`, which resolves subscription → member + community and
+ * then shares the removal path with the creator-facing use-case — including its
+ * `revoke_access` retry, so a provider failure here still ends up on the bounded-retry
+ * road every other event type uses.
+ *
+ * Folding both into one string would mean one handler branching on which keys a jsonb
+ * payload happened to contain, and `revokeAccessOutboxHandler`'s contract check —
+ * currently the one place the shape is verified — would have to accept either. Two
+ * strings cost nothing and keep each payload contract checked in exactly one place.
+ */
+export const OUTBOX_REVOKE_SUBSCRIPTION_ACCESS = "revoke_subscription_access";
+
 /** A row handed to a worker by `claimBatch`, already marked as being processed. */
 export interface ClaimedOutboxRow {
   id: string;

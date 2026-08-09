@@ -131,6 +131,12 @@ function harness(
     async markPastDue() {
       throw new Error("not used");
     },
+    async findPastGraceDeadline() {
+      throw new Error("not used");
+    },
+    async markChurned() {
+      throw new Error("not used");
+    },
     async findRenewalContext() {
       throw new Error("not used");
     },

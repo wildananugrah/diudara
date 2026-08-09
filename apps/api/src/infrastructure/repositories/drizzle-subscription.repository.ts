@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { communities, membershipTiers, subscriptions, transactions } from "../../db/schema";
 import type {
@@ -48,6 +48,14 @@ const SUPERSEDED_SUBSCRIPTION = "cancelled";
 
 /** `subscription.status` for a member whose renewal is late but still inside grace. */
 const PAST_DUE_SUBSCRIPTION = "past_due";
+
+/**
+ * `subscription.status` for a member whose grace period ran out unpaid. Terminal: the
+ * churn pass writes it once, and nothing moves a row out of it — a member who pays again
+ * gets a NEW subscription, which is what makes their re-grant an honest new grant
+ * (`unbanChatMember` and a fresh invite) rather than a renewal.
+ */
+const CHURNED_SUBSCRIPTION = "churned";
 
 /**
  * The only statuses the renewal pass may look at — see `findDueForRenewal`'s port
@@ -245,6 +253,69 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
       .set({ status: PAST_DUE_SUBSCRIPTION, graceEndsAt, updatedAt: new Date() })
       .where(
         and(eq(subscriptions.id, subscriptionId), eq(subscriptions.status, ACTIVE_SUBSCRIPTION))
+      )
+      .returning({ id: subscriptions.id });
+    return moved.length > 0;
+  }
+
+  /**
+   * The churn pass's batch. Same join as `findDueForRenewal`, and the same reason for
+   * it: the pass has no creator, so the community's id and status have to come down the
+   * join rather than through the creator-scoped community repository.
+   *
+   * The three predicates are all load-bearing — see the port docstring. `isNotNull` on
+   * the deadline is not redundant with the comparison the way it is in
+   * `findDueForRenewal`: it says out loud that a subscription with no STORED deadline
+   * has none, rather than one this pass could derive.
+   *
+   * No cursor, and no `after` parameter to add one with: the pass writes `churned`,
+   * which the status filter excludes, so every row it handles leaves the result set.
+   * Ordered oldest-deadline-first so the longest-overdue member is dealt with first
+   * when a backlog is bigger than one batch.
+   */
+  async findPastGraceDeadline(input: { now: Date; limit: number }): Promise<DueRenewalRecord[]> {
+    return this.db
+      .select({
+        subscription: subscriptions,
+        communityId: communities.id,
+        communityStatus: communities.status,
+      })
+      .from(subscriptions)
+      .innerJoin(membershipTiers, eq(subscriptions.tierId, membershipTiers.id))
+      .innerJoin(communities, eq(membershipTiers.communityId, communities.id))
+      .where(
+        and(
+          eq(subscriptions.status, PAST_DUE_SUBSCRIPTION),
+          isNotNull(subscriptions.graceEndsAt),
+          // Strictly less than, which is `isPastGrace`'s boundary: at the deadline the
+          // member still has access.
+          lt(subscriptions.graceEndsAt, input.now)
+        )
+      )
+      .orderBy(asc(subscriptions.graceEndsAt), asc(subscriptions.id))
+      .limit(input.limit);
+  }
+
+  /**
+   * The `past_due` → `churned` transition. See the port docstring: `status = 'past_due'`
+   * is IN the predicate, which is what makes "running the pass twice churns once and
+   * enqueues one revoke row" a property of the database rather than of the caller's
+   * bookkeeping, and `updatedAt` is set explicitly because no trigger backs the column.
+   *
+   * `grace_ends_at` is not cleared: it is the deadline this member was measured against.
+   */
+  async markChurned(subscriptionId: string): Promise<boolean> {
+    if (!UUID_PATTERN.test(subscriptionId)) {
+      return false;
+    }
+    const moved = await this.db
+      .update(subscriptions)
+      .set({ status: CHURNED_SUBSCRIPTION, updatedAt: new Date() })
+      .where(
+        and(
+          eq(subscriptions.id, subscriptionId),
+          eq(subscriptions.status, PAST_DUE_SUBSCRIPTION)
+        )
       )
       .returning({ id: subscriptions.id });
     return moved.length > 0;

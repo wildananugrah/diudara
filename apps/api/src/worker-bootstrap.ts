@@ -16,7 +16,9 @@ import {
 } from "./application/use-cases/grant-channel-access";
 import {
   RetryChannelAccessRevocation,
+  RevokeChannelAccessForSystem,
   revokeAccessOutboxHandler,
+  revokeSubscriptionAccessOutboxHandler,
 } from "./application/use-cases/revoke-channel-access";
 import {
   SendRenewalReminder,
@@ -26,6 +28,7 @@ import { ProcessOutbox, type OutboxHandler } from "./application/use-cases/proce
 import {
   OUTBOX_GRANT_ACCESS,
   OUTBOX_REVOKE_ACCESS,
+  OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
   OUTBOX_SEND_RENEWAL_REMINDER,
 } from "./application/ports/outbox-repository.port";
 
@@ -51,6 +54,15 @@ export interface WorkerDependencies {
    * unreachable for a whole phase because nothing checked that wiring.
    */
   sendRenewalReminder: SendRenewalReminder;
+  /**
+   * Phase 5's system-initiated revoke — the other end of the churn pass.
+   *
+   * Exposed for the same reason as the three above, and for one specific to it: it is
+   * the ONE use-case in the codebase with no authorization check, so a test has to be
+   * able to prove that the thing wired against `revoke_subscription_access` is this
+   * class and not the creator-facing one with an invented creator id (spec §5).
+   */
+  revokeChannelAccessForSystem: RevokeChannelAccessForSystem;
   messaging: MessagingProviders;
 }
 
@@ -126,10 +138,30 @@ export function bootstrapWorker(): WorkerDependencies {
     }
   );
 
+  // Phase 5's churn revoke. NO creator repository is passed, because it performs no
+  // creator scoping — see the class docstring for why resolving a creator id from the
+  // subscription and calling `RevokeChannelAccess` instead would be authorization
+  // theatre. The composition root is where that would have been done, so this is where
+  // saying it matters.
+  const revokeChannelAccessForSystem = new RevokeChannelAccessForSystem(
+    new DrizzleSubscriptionRepository(db),
+    new DrizzleChannelMembershipRepository(db),
+    new DrizzleActivityLogRepository(db),
+    messaging.gating,
+    // A removal the provider refuses becomes a `revoke_access` row here, exactly as it
+    // does on the creator-facing path: the shared revoker owns that, so churn inherits
+    // the bounded retry rather than growing its own.
+    new DrizzleOutboxRepository(db)
+  );
+
   const handlers = new Map<string, OutboxHandler>([
     [OUTBOX_GRANT_ACCESS, grantAccessOutboxHandler(grantChannelAccess)],
     [OUTBOX_REVOKE_ACCESS, revokeAccessOutboxHandler(retryChannelAccessRevocation)],
     [OUTBOX_SEND_RENEWAL_REMINDER, sendRenewalReminderOutboxHandler(sendRenewalReminder)],
+    [
+      OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
+      revokeSubscriptionAccessOutboxHandler(revokeChannelAccessForSystem),
+    ],
   ]);
 
   return {
@@ -137,6 +169,7 @@ export function bootstrapWorker(): WorkerDependencies {
     grantChannelAccess,
     retryChannelAccessRevocation,
     sendRenewalReminder,
+    revokeChannelAccessForSystem,
     messaging,
   };
 }

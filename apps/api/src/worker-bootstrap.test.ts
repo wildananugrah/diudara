@@ -2,6 +2,8 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { eq } from "drizzle-orm";
 import { db } from "./db/client";
 import {
+  channelMemberships,
+  channels,
   communities,
   creators,
   members,
@@ -16,6 +18,7 @@ import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-o
 import {
   OUTBOX_GRANT_ACCESS,
   OUTBOX_REVOKE_ACCESS,
+  OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
   OUTBOX_SEND_RENEWAL_REMINDER,
 } from "./application/ports/outbox-repository.port";
 import { resolveAppBaseUrl } from "./bootstrap";
@@ -62,6 +65,74 @@ async function seedPastDueMember(slug: string) {
     .returning();
   await db.insert(renewalReminders).values({ subscriptionId: subscription.id, stage: "due" });
   return { community, member, subscription };
+}
+
+/**
+ * A member whose subscription the churn pass has just ended, still holding the Telegram
+ * access it paid for — i.e. exactly what `ProcessChurn` enqueues a
+ * `revoke_subscription_access` row for.
+ */
+async function seedChurnedMemberWithAccess() {
+  const [creator] = await db.insert(creators).values({ name: "Rina" }).returning();
+  const [community] = await db
+    .insert(communities)
+    .values({ creatorId: creator.id, name: "Kelas Rina", slug: `kelas-churn-${Date.now()}` })
+    .returning();
+  const [tier] = await db
+    .insert(membershipTiers)
+    .values({
+      communityId: community.id,
+      name: "Basic",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    })
+    .returning();
+  const [member] = await db
+    .insert(members)
+    .values({ whatsappNumber: `+6281391${Date.now() % 100000}`, name: "Siti" })
+    .returning();
+  const [channel] = await db
+    .insert(channels)
+    .values({
+      communityId: community.id,
+      platform: "telegram",
+      externalGroupId: `-100${Date.now()}`,
+    })
+    .returning();
+  await db.insert(channelMemberships).values({
+    memberId: member.id,
+    channelId: channel.id,
+    inviteLink: `https://t.me/+churn-${Date.now()}`,
+    // What POST /webhooks/telegram records when the member joins, and the only thing
+    // `banChatMember` can be aimed at.
+    externalMemberId: "987654321",
+  });
+  const [subscription] = await db
+    .insert(subscriptions)
+    .values({
+      memberId: member.id,
+      tierId: tier.id,
+      status: "churned",
+      nextBillingDate: "2026-03-10",
+      graceEndsAt: new Date("2026-03-17T00:00:00.000Z"),
+    })
+    .returning();
+  return { community, member, channel, subscription };
+}
+
+/**
+ * A gating adapter this root selected, narrowed to the fake. An `instanceof` check
+ * rather than a cast, for the same reason as `fakeNotifierOf`.
+ */
+function fakeGatingOf(
+  worker: ReturnType<typeof bootstrapWorker>,
+  platform: string
+): FakeMessagingAdapter {
+  const provider = worker.messaging.gating.get(platform);
+  if (!(provider instanceof FakeMessagingAdapter)) {
+    throw new Error(`expected the worker to select FakeMessagingAdapter for ${platform}`);
+  }
+  return provider;
 }
 
 /**
@@ -198,6 +269,40 @@ describe("bootstrapWorker", () => {
       if (original === undefined) delete process.env.APP_BASE_URL;
       else process.env.APP_BASE_URL = original;
     }
+  });
+
+  /**
+   * Phase 5, Task 5. `ProcessChurn` enqueues these, and an unregistered handler would
+   * mean every churned member staying in the paid group for ever with nothing but
+   * `outbox.last_error` to say a removal was owed — which is the exact gap Phase 4's
+   * retry path was added to close, arriving by a different route.
+   *
+   * It also proves WHICH use-case is wired: the removal completes with no creator id
+   * anywhere in the payload, so it cannot be the creator-scoped path.
+   */
+  it("dispatches a real revoke_subscription_access row to the system revoke, not to nothing", async () => {
+    const { channel, subscription } = await seedChurnedMemberWithAccess();
+    const { id } = await new DrizzleOutboxRepository(db).enqueue({
+      eventType: OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
+      payload: { subscriptionId: subscription.id },
+    });
+    const worker = bootstrapWorker();
+    const telegram = fakeGatingOf(worker, "telegram");
+
+    const result = await worker.processOutbox.execute();
+
+    expect(result.claimed).toBe(1);
+    expect(result.sent).toBe(1);
+    const row = await rowById(id);
+    expect(row.status).toBe("sent");
+    expect(row.lastError).toBeNull();
+    // The member was actually removed, by THIS process, with the id the join webhook
+    // recorded — not merely "a handler exists".
+    expect(telegram.revocations).toEqual([
+      { externalGroupId: channel.externalGroupId!, externalMemberId: "987654321" },
+    ]);
+    const [membership] = await db.select().from(channelMemberships);
+    expect(membership.status).toBe("revoked");
   });
 
   it("wires exactly the event types it knows about, and no more", async () => {
