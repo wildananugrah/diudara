@@ -1,0 +1,1 @@
+CREATE INDEX "activity_log_community_event_created_idx" ON "activity_log" USING btree ("community_id","event_type","created_at");

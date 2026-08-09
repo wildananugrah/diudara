@@ -326,6 +326,37 @@ export const activityLogs = pgTable(
   (table) => [
     index("activity_log_member_id_idx").on(table.memberId),
     index("activity_log_community_id_idx").on(table.communityId),
+    // ===================================================================
+    // THE INDEX THE CREATOR DASHBOARD READS THROUGH.
+    //
+    // Phase 6's activity feed is the most-viewed screen in the product, and every
+    // query behind it has the same shape: one community, an ALLOWLIST of
+    // creator-facing event types, newest first, keyset-paginated on `created_at`.
+    // `activity_log_community_id_idx` alone answers only the first predicate, so
+    // Postgres then filtered every one of that community's rows by event type and
+    // SORTED them — on the one table that grows with every payment, reminder,
+    // grant and revocation. It degrades exactly as a creator becomes successful,
+    // which is the worst time for it to.
+    //
+    // Column order is (equality, IN-list, range) and that is the useful way round,
+    // for the same reason as `subscription_status_next_billing_date_idx` above:
+    // `community_id` is a single equality, `event_type` is an `in (...)` against a
+    // small set, and `created_at` is the range the keyset cursor compares and the
+    // order the feed sorts by. Leading with the two selective predicates lets the
+    // index be SCANNED rather than merely filtered, and it delivers rows already
+    // ordered by `created_at`, which removes the sort as well as the scan.
+    //
+    // Not partial on the allowlist, deliberately: the visible set is a product
+    // decision that Task 3 states in `domain/activity-feed.ts` and that will change
+    // (a hidden diagnostic becoming visible is a one-line edit). A partial index
+    // would make that edit silently stop using the index, and the metrics and CSV
+    // paths read other event types through the same prefix.
+    // ===================================================================
+    index("activity_log_community_event_created_idx").on(
+      table.communityId,
+      table.eventType,
+      table.createdAt
+    ),
   ],
 );
 
