@@ -101,6 +101,63 @@ worker must **not** assume one row per activation:
 - Sending the same invite twice is a bug, not a cosmetic issue: it means two links for one
   member, either of which could be passed to a non-payer.
 
+### 4.2 The credential-lifecycle invariant
+
+> **At most one live invite link per `(member, channel)` may exist at the provider at any
+> time, and every link that exists is recorded in `channel_membership.invite_link`.**
+
+Added after the final whole-branch review (2026-08-09). §4.1 above was stated as a property
+of **our database** — one membership row, one link — and that is not the same property, so
+the implementation satisfied §4.1 while leaking credentials. Both halves of the invariant
+above are load-bearing, and the **second** is the one §4.1 never said:
+
+- An **unrecorded** link is worse than a duplicate we know about. It is a bearer token for a
+  paid group that the system cannot revoke, cannot attribute to a joiner (the `chat_member`
+  webhook resolves it to `unknown_invite_link`, so no `external_member_id` is ever
+  captured), and therefore can never remove from the group.
+- Telegram's `revokeChatInviteLink` takes the link's **value**, and no Bot API method
+  enumerates the links a bot created. A link whose value we lost is **unkillable**. This
+  asymmetry is why the rules below are shaped the way they are.
+
+**What was measured against the pre-fix implementation**, counting links at the provider
+rather than rows in the database:
+
+| Scenario | Live links at provider | Membership rows |
+| --- | --- | --- |
+| `recordGrant` fails after a successful mint, across the full 5-attempt retry bound | **5** (one per attempt, all single-use, all valid 24h, **none recorded**) | 1, with `invite_link = NULL` |
+| Two concurrent grants for one `(member, channel)` | **2**, both delivered to the member | 1 |
+
+The leak scaled linearly with `maxAttempts`. The whole suite passed throughout.
+
+**The rules this imposes.** No one of them is sufficient; the first two were absent entirely.
+
+1. `MessagingProviderPort` must expose **`revokeInviteLink`**. Without a way to unmint, a
+   `recordGrant` that fails after a successful mint can only leak.
+2. A **mint marker** (`channel_membership.link_minted_at`) must be written **in the same
+   statement as the claim**. `invite_link IS NULL` on a claimed row otherwise conflates
+   three states — nobody has minted, somebody is minting, somebody minted and lost it — and
+   reading all three as "finish the grant" is what produced the table above.
+3. Marker set with no link means **a link was minted and lost, so do NOT mint another**.
+   This **fails closed**: it is reported as `manual` with an `activity_log` reason for a
+   deliberate reissue. A caller that died between the claim and the provider call lands
+   here too, and a spurious manual reissue is the correct price for never issuing a second
+   key.
+4. The mint window must be **serialised per membership** (`mint_lease_until`), so a
+   concurrent or reclaimed caller reports "grant in progress" and retries instead of
+   minting beside the holder.
+5. `recordGrant` must be **conditional on `invite_link IS NULL`** and report whether it
+   recorded. A loser that overwrites the winner's link orphans a credential that has
+   already reached a member.
+6. Revocation must **revoke the link at the provider too**. `revoke` nulls
+   `invite_link` — correctly, a revoked row must not carry a live credential — so without
+   this an unused link goes on admitting whoever holds it, unrecorded, until it expires.
+   `member_limit: 1` does not help a link nobody used, which is exactly the never-joined
+   case.
+
+**Testing consequence.** A test of this invariant must count **links minted at the
+provider**, not memberships in the database. `expect(memberships).toHaveLength(1)` is not
+evidence: it passed against four live unrevocable credentials. See §10.
+
 ## 5. Schema changes
 
 One generated Drizzle migration:
@@ -110,7 +167,11 @@ One generated Drizzle migration:
   `created_at`, `updated_at`.
 - **`channel_membership`** — `id`, `member_id`, `channel_id`, `status`
   (`active`/`revoked`), `invite_link`, `granted_at`, `revoked_at`, with a **unique
-  `(member_id, channel_id)`**.
+  `(member_id, channel_id)`**. Plus, from the final review (see §4.2):
+  `external_member_id` (the platform user id `banChatMember` needs, learned at join
+  time), `link_minted_at` (the mint marker) and `mint_lease_until` (the per-membership
+  mint lease). A partial unique index on `invite_link` keeps the credential an
+  unambiguous lookup key.
 - `channel` already has `external_group_id`, `invite_link`, and `bot_status` from Phase 1.
 
 ## 6. Architecture
@@ -120,9 +181,16 @@ One generated Drizzle migration:
 ```
 capabilities(): { canGateAccess: boolean }
 grantAccess(input): Promise<{ inviteLink: string }>
+revokeInviteLink(input): Promise<void>      // see §4.2 — required, not optional
 revokeAccess(input): Promise<void>
 notify(input): Promise<void>
 ```
+
+`revokeInviteLink` is what makes §4.2's invariant enforceable at all: minting is an HTTP
+call and recording is a separate database write, so there is a window in which a credential
+exists and our record does not, and without a way to **unmint** that window can only be
+closed by leaking. It throws `UnsupportedOperationError` on a notify-only adapter, exactly
+like `grantAccess`.
 
 `capabilities()` is how WhatsApp's limitation is expressed **in the type system rather than
 in a comment**. `FonnteWhatsAppAdapter` reports `canGateAccess: false`, and
@@ -133,7 +201,8 @@ access and was not — the worst failure mode in the phase.
 ### 6.2 Adapters
 
 - `TelegramBotAdapter` — `createChatInviteLink` (`member_limit: 1`, `expire_date`),
-  `banChatMember`, `unbanChatMember`. **Unverified against the live API** — no bot token
+  `revokeChatInviteLink`, `banChatMember`, `unbanChatMember`. **Unverified against the live
+  API** — no bot token
   exists yet, though unlike Xendit this one is free and instant to obtain, so verification
   should happen early.
 - `FonnteWhatsAppAdapter` — `notify` only.
@@ -141,7 +210,9 @@ access and was not — the worst failure mode in the phase.
 
 ### 6.3 Use-cases
 
-`GrantChannelAccess`, `RevokeChannelAccess`, `ProcessOutbox` (the worker's entry point).
+`GrantChannelAccess`, `RevokeChannelAccess`, `RetryChannelAccessRevocation` (the worker's
+`revoke_access` handler, added by the final review — see §9), `ProcessOutbox` (the worker's
+entry point).
 
 ## 7. Flow
 
@@ -189,6 +260,26 @@ know whether it worked, and there is no transaction to protect.
 | Telegram rejects the invite creation | outbox retry, then `failed` |
 | Member already has active access | idempotent no-op |
 | Revoking a member with no membership | 404 |
+| **Member already holds an active subscription to this tier** | **409, BEFORE the invoice is created** |
+| **A concurrent grant holds the mint lease** | **reported, outbox retry — never a second mint** |
+| **A link was minted and could not be recorded** | **revoked at the provider; window reopened for a clean retry** |
+| **…and the revoke also failed** | **reported `manual` (`invite_link_minted_but_not_recorded`); no replacement ever minted** |
+| **Provider removal fails during revocation** | **membership still revoked, `revoke_access` outbox row enqueued, bounded retry** |
+| **A removal that can never be automated** | **`revocation_manual_required` in `activity_log`; not retried** |
+
+Three of these were added by the final whole-branch review, and two are worth stating as
+decisions rather than table rows:
+
+- **Re-paying for a tier you already hold is refused before any money moves.** It used to be
+  charged, then `superseded` on activation: the subscription was `cancelled`, no outbox row
+  was enqueued so **no message was sent at all**, and the status page read `cancelled`. Money
+  in, nothing out, member never told — and re-paying is exactly what someone does when the
+  invite did not arrive. The `superseded` path remains as the backstop for the genuine race.
+- **Revocation is synchronous but a failed platform removal is not dropped.** The creator is
+  still told `automated: false` immediately, because they are waiting for an answer. The
+  outstanding removal becomes a `revoke_access` outbox row so the person actually leaves the
+  group. Without it a churned member stays in the paid group forever with no durable record
+  that a removal is owed — which is what Phase 5's churn job would have inherited.
 
 ## 10. Testing
 
@@ -199,6 +290,17 @@ know whether it worked, and there is no transaction to protect.
 - A test proving an invite link never appears in a log or a response body
 - Idempotency proven by mutation: remove the unique constraint reliance and a test must fail
 - End-to-end: pay → outbox row → worker → membership + invite + notification
+- **Grant idempotency must be tested as a CONCURRENT property, and by counting links minted
+  AT THE PROVIDER** (added by the final review). Two specific cases, neither of which
+  existed and both of which failed when written:
+  1. `recordGrant` failing across the **full retry bound** — 5 live links before the fix,
+     0 after.
+  2. **Two concurrent** `execute` calls for one `(member, channel)`, with the interleaving
+     **forced** rather than raced — 2 live links before, 1 after. Written first as two bare
+     concurrent calls, this PASSED against the broken code because the scheduler happened
+     to order them safely; a concurrency test that depends on the scheduler proves nothing.
+- A test proving a link that cannot be recorded is **revoked at the provider**, and that
+  when that cleanup ALSO fails no replacement is ever minted on top of the orphan.
 
 ## 11. Carry-forward items to address here
 

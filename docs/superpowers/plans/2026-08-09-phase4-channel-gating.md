@@ -36,6 +36,17 @@ Phases 1-3. Every task's work implicitly includes these:
   Phase 3 proved duplicate `activity_log` "joined" rows are producible, so the worker must
   not assume one row per activation. Phase 2 and 3 each shipped a TOCTOU that returned 500s
   — do not add a fourth.
+- **Grant idempotency is a CONCURRENT property about the PROVIDER's state, not a sequential
+  one about ours.** Added by the final whole-branch review; see spec §4.2 for the
+  credential-lifecycle invariant and the measurements. This constraint as originally written
+  above says "unique on `(member_id, channel_id)`", and the implementation satisfied that
+  exactly — one row, one link recorded — while five live unrevocable invite links sat at
+  Telegram behind a row whose `invite_link` was `NULL`. The unique index bounds our TABLE;
+  it does not bound how many times an external provider was asked to mint a credential.
+  So: the claim must also take a **mint marker and a lease in the same statement**, a link
+  that cannot be recorded must be **revoked at the provider**, and a lost mint must **fail
+  closed** rather than mint a replacement. And every test of it must count **links minted at
+  the provider** — `expect(memberships).toHaveLength(1)` passed against the leak.
 - **Bounded retries.** A permanently failing row ends as `failed` with `last_error`, never
   retrying forever.
 - Secrets from the environment with no committed defaults, and the **`NODE_ENV` allowlist**
@@ -666,3 +677,71 @@ Each needs a test that fails before the fix. Commit separately per item.
 - [ ] Run the full suite **5 times** and confirm no flakes — Phase 3 had an unreproducible
   failure that turned out to be a probabilistic test, and this phase adds a worker with
   concurrent claims.
+
+---
+
+### Task 9: Final whole-branch review fixes (added 2026-08-09)
+
+The final gate before merging `phase-4-gating` into `main` returned **"No — with fixes"**.
+All findings were reproduced independently before being fixed, and every fix has a test that
+failed before it and passes after. Report:
+`.superpowers/sdd/2026-08-09-phase4-channel-gating/final-fix-report.md`.
+
+**What this task changed about the PLAN itself, and why it is recorded here rather than
+quietly fixed:**
+
+> **Grant idempotency was specified as a SEQUENTIAL property and needed to be a CONCURRENT
+> one.**
+
+Spec §4.1 and this plan's Global Constraints both stated idempotency as a property of
+`channel_membership`'s unique `(member_id, channel_id)` index: process the same payload
+twice, get one membership row and one link. The implementation satisfied that literally, and
+the test suite proved it — with a test named "issues ONE membership and ONE invite link when
+the same payload is processed twice", which exercised the sequential, successful path and
+passed.
+
+Neither document said anything about how many times the **provider** may be asked to mint,
+which is the thing that actually matters, because an invite link is a bearer credential that
+exists at Telegram whether or not our write succeeded. Under a failing `recordGrant` the
+bounded retry minted a fresh link every attempt: **5 live single-use links, one membership
+row, `invite_link = NULL`**, none recorded and therefore none revocable. Two concurrent
+grants for one `(member, channel)` produced **2**, both delivered.
+
+Three lessons, worth carrying into Phase 5:
+
+1. **An idempotency requirement has to name the resource it bounds.** "One membership row"
+   and "one credential at the provider" are different claims, and the cheap one to test is
+   the one that does not matter.
+2. **A property about concurrency must be tested with the interleaving FORCED.** The
+   two-concurrent-grants test was written first as two bare `Promise.all` calls and **passed
+   against the broken code**, because the scheduler happened to order them safely. It only
+   reproduced once a barrier held both callers inside the mint window. This repeats a lesson
+   already recorded in `drizzle-outbox.repository.test.ts` for `claimBatch` — a racing test
+   is a smoke check, never a guard.
+3. **Where an external call and a local write must agree, the plan owes a rule for the
+   window between them.** This plan said "the row is claimed before the provider is called",
+   which handles a crash before the call and says nothing about a failure after it. That gap
+   is where the leak lived, and closing it needed a provider capability
+   (`revokeInviteLink`) that no task had asked for.
+
+**Fixes, in the commits that made them:**
+
+- **C1 (critical)** — the credential leak above. `revokeInviteLink` added to the port and
+  both real adapters; `link_minted_at` + `mint_lease_until` written in the same statement as
+  the claim; `recordGrant` made conditional and reporting. Live links: 5 → 0 under the retry
+  bound, 2 → 1 under forced concurrency.
+- **I1** — `StartCheckout` now 409s before the invoice when the member already holds the
+  tier. It used to charge them, then `supersede` the subscription with no notification of any
+  kind.
+- **I2** — the stale-processing clock was per-batch, so a slow pass invited a double claim.
+  Per-row heartbeat plus a bounded pass that releases what it did not reach.
+- **I3** — a failed platform removal is now a `revoke_access` outbox row the worker retries,
+  rather than an `automated: false` that nothing ever acted on. Phase 5's churn job depends
+  on this.
+- **Minors** — log-guard symmetry (`redactLinks(safeErrorSummary(err))` in all three
+  places), a length cap on the inbound `invite_link`, the chat id matched (not just logged)
+  on the join write, and `reclaimStaleProcessing` keeping the previous diagnostic instead of
+  overwriting it.
+
+- [x] Full suite and typecheck green from the repo root; suite run **3×** with no flakes
+  (793 pass / 0 fail: api 721, shared 44, worker 19, web 9).
