@@ -47,6 +47,16 @@ export interface MarkPaidResult {
  */
 export interface SubscriptionRepositoryPort {
   createPending(input: { memberId: string; tierId: string }): Promise<SubscriptionRecord>;
+  /**
+   * Backs the public, unauthenticated status endpoint
+   * (`GET /c/subscription/:subscriptionId/status`) — the id travels in a
+   * redirect URL after checkout and may sit in browser history, so a value
+   * that cannot possibly be an id must be reported as a MISS (`null`), never
+   * raised as a driver error that would become a 500 instead of the 404 an
+   * unknown/malformed id deserves. Same shape as
+   * `findTransactionByExternalId` below, for the same reason.
+   */
+  findById(id: string): Promise<SubscriptionRecord | null>;
   createTransaction(input: {
     subscriptionId: string;
     amount: number;

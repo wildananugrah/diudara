@@ -48,6 +48,23 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
   }
 
   /**
+   * `id` arrives straight off a public URL — see the port docstring — so it
+   * is shape-checked before it reaches the driver for the same reason as
+   * `findTransactionByExternalId` below.
+   */
+  async findById(id: string): Promise<SubscriptionRecord | null> {
+    if (!UUID_PATTERN.test(id)) {
+      return null;
+    }
+    const [row] = await this.db
+      .select()
+      .from(subscriptions)
+      .where(eq(subscriptions.id, id))
+      .limit(1);
+    return row ?? null;
+  }
+
+  /**
    * `id` arrives straight off an untrusted webhook body, so it is shape-checked
    * before it reaches the driver — see UUID_PATTERN above for why a malformed
    * value must be a miss and not an error.

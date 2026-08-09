@@ -59,6 +59,9 @@ function harness(
     async createTransaction() {
       throw new Error("not used");
     },
+    async findById() {
+      throw new Error("not used");
+    },
     async findTransactionByExternalId(id) {
       calls.findTransactionByExternalId.push(id);
       order.push("find");

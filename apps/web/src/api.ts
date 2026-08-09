@@ -29,6 +29,16 @@ export interface CheckoutResult {
   transactionId: string;
 }
 
+/**
+ * Mirrors apps/api/src/application/use-cases/get-subscription-status.ts.
+ * Deliberately the ONLY field the endpoint returns — see that file and
+ * routes/public-subscription.ts for why: the subscription id travels in a
+ * public, unauthenticated URL.
+ */
+export interface SubscriptionStatus {
+  status: string;
+}
+
 /** Thrown for any non-2xx response from the API. */
 export class ApiError extends Error {
   constructor(
@@ -71,6 +81,14 @@ export async function startCheckout(slug: string, input: StartCheckoutInput): Pr
     throw new ApiError(await readErrorMessage(res, `checkout failed (${res.status})`), res.status);
   }
   return (await res.json()) as CheckoutResult;
+}
+
+export async function fetchSubscriptionStatus(subscriptionId: string): Promise<SubscriptionStatus> {
+  const res = await fetch(`/c/subscription/${encodeURIComponent(subscriptionId)}/status`);
+  if (!res.ok) {
+    throw new ApiError(await readErrorMessage(res, `failed to load status (${res.status})`), res.status);
+  }
+  return (await res.json()) as SubscriptionStatus;
 }
 
 /**

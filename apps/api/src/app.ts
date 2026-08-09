@@ -6,6 +6,7 @@ import { tierRoutes } from "./routes/tiers";
 import { channelRoutes } from "./routes/channels";
 import { paymentAccountRoutes } from "./routes/payment-account";
 import { publicCommunityRoutes } from "./routes/public-community";
+import { publicSubscriptionRoutes } from "./routes/public-subscription";
 import { webhookRoutes } from "./routes/webhooks";
 import { errorHandler } from "./http/error-handler";
 import type { AuthVariables } from "./http/auth.middleware";
@@ -17,6 +18,11 @@ export function createApp(deps: Dependencies) {
   app.route("/health", healthRoute(deps));
   app.route("/auth", authRoutes(deps));
   app.route("/payment-account", paymentAccountRoutes(deps));
+  // Mounted before publicCommunityRoutes: /c/:slug is a single path segment,
+  // while this route's literal "subscription" prefix and its 3-segment shape
+  // never collide with it — but ordering it first makes that reasoning
+  // visible instead of relying on segment-count math staying true forever.
+  app.route("/c", publicSubscriptionRoutes(deps));
   app.route("/c", publicCommunityRoutes(deps));
   // Public by design and authenticated by X-CALLBACK-TOKEN instead of a bearer
   // token — see routes/webhooks.ts. Never put this behind requireAuth.

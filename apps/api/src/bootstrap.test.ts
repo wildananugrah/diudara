@@ -25,6 +25,7 @@ import { ConnectChannel, ListChannels } from "./application/use-cases/manage-cha
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
+import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import type {
   CreatorRecord,
@@ -51,7 +52,8 @@ import type { PaymentProviderPort } from "./application/ports/payment-provider.p
  *
  * `registerCreator`/`authenticateCreator`/`createCommunity`/`listCommunities`/
  * `updateCommunity`/`defineTier`/`listTiers`/`updateTier`/`connectChannel`/
- * `listChannels`/`createPaymentAccount`/`getPublicCommunity`/`startCheckout` are typed as the
+ * `listChannels`/`createPaymentAccount`/`getPublicCommunity`/`startCheckout`/
+ * `getSubscriptionStatus` are typed as the
  * concrete use-case classes (there's only one implementation of each, so no
  * port exists for them) — a class with private members can't be satisfied by
  * a plain object literal without a cast, so the fakes below construct real
@@ -128,6 +130,9 @@ const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
     throw new Error("not used");
   },
   async createTransaction() {
+    throw new Error("not used");
+  },
+  async findById() {
     throw new Error("not used");
   },
   async findTransactionByExternalId() {
@@ -238,6 +243,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeCreatorRepository,
         fakePaymentProvider
       ),
+      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
         fakePaymentActivationUnitOfWork
@@ -310,6 +316,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeCreatorRepository,
         fakePaymentProvider
       ),
+      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
         fakePaymentActivationUnitOfWork

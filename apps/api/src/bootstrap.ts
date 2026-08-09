@@ -19,6 +19,7 @@ import { ConnectChannel, ListChannels } from "./application/use-cases/manage-cha
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
+import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
@@ -71,6 +72,7 @@ export interface Dependencies {
   createPaymentAccount: CreatePaymentAccount;
   getPublicCommunity: GetPublicCommunity;
   startCheckout: StartCheckout;
+  getSubscriptionStatus: GetSubscriptionStatus;
   handlePaymentWebhook: HandlePaymentWebhook;
   /**
    * The static token Xendit sends as `X-CALLBACK-TOKEN`, the ONLY thing
@@ -357,6 +359,7 @@ export function bootstrap(): Dependencies {
     creatorRepository,
     payments
   );
+  const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository);
 
   // The webhook's three writes commit together or not at all — see
   // PaymentActivationUnitOfWorkPort. The read that precedes them uses the
@@ -384,6 +387,7 @@ export function bootstrap(): Dependencies {
     createPaymentAccount,
     getPublicCommunity,
     startCheckout,
+    getSubscriptionStatus,
     handlePaymentWebhook,
     xenditCallbackToken,
     sql,

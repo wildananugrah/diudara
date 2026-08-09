@@ -124,6 +124,9 @@ describe("StartCheckout — funds routing", () => {
           updatedAt: new Date(0),
         };
       },
+      async findById() {
+        throw new Error("not used");
+      },
       async findTransactionByExternalId() {
         return null;
       },
