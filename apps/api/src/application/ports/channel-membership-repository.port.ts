@@ -15,12 +15,16 @@ export interface ChannelMembershipRecord {
    */
   inviteLink: string | null;
   /**
-   * The member's id ON THE PLATFORM (a Telegram integer user id), or `null` when
-   * we never learned it — which is the ordinary case in Phase 4, because access
-   * is granted with an invite link and checkout only ever knows a WhatsApp
-   * number. Revocation needs it (`banChatMember` addresses a user id), so
-   * `RevokeChannelAccess` reports "not automated" rather than claiming a removal
-   * it could not perform. See the column comment in db/schema.ts.
+   * The member's id ON THE PLATFORM (a Telegram integer user id), or `null` until
+   * the member actually JOINS — access is granted with an invite link precisely
+   * because checkout only ever knows a WhatsApp number, so no id can exist at grant
+   * time. `recordPlatformMemberIdByInviteLink` below is what fills it, from
+   * Telegram's `chat_member` update.
+   *
+   * Revocation needs it (`banChatMember` addresses a user id): while it is null,
+   * `RevokeChannelAccess` reports "not automated" rather than claiming a removal it
+   * could not perform. See the column comment in db/schema.ts, including why it
+   * deliberately survives a revoke.
    */
   externalMemberId: string | null;
   grantedAt: Date;

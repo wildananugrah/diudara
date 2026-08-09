@@ -53,9 +53,11 @@ async function seed(options: { platform?: string; externalMemberId?: string | nu
       // `channel_membership_invite_link_unique` (Task 7b) makes the link the
       // unambiguous lookup key for recording a joining member's platform user id.
       inviteLink: `https://t.me/+granted-${seq}-${Date.now()}`,
-      // Phase 4 records no provider member id at grant time (there is nothing to
+      // Nothing records a provider member id at GRANT time (there is nothing to
       // record it from). Tests that want the AUTOMATED path set it explicitly,
-      // which is exactly the state Phase 5's chat_member handler will produce.
+      // which is exactly the state POST /webhooks/telegram produces when the member
+      // joins — see routes/channel-access-lifecycle.test.ts for that path end to
+      // end, through real HTTP, with no value set by hand.
       externalMemberId: options.externalMemberId ?? null,
     })
     .returning();
@@ -218,9 +220,9 @@ describe("RevokeChannelAccess", () => {
     });
 
     it("says so when no provider member id was ever recorded", async () => {
-      // The normal Phase 4 state: access was granted by invite link, so we never
-      // learned the member's Telegram user id, and banChatMember addresses a user
-      // id. This must not look like a completed removal.
+      // A member who was invited but never joined, so no `chat_member` update ever
+      // arrived and we never learned their Telegram user id — and banChatMember
+      // addresses one. This must not look like a completed removal.
       const { creator, community, member } = await seed({ externalMemberId: null });
       const { telegram, useCase } = wire();
 

@@ -329,15 +329,26 @@ export const channelMemberships = pgTable(
      * The member's id ON THE PLATFORM (a Telegram integer user id), once we learn
      * it.
      *
-     * NULL for every row Phase 4 writes, and that is not an oversight: access is
-     * granted with an INVITE LINK precisely because we do not know who the member
-     * is on Telegram — a WhatsApp number is all checkout gives us. The id only
-     * becomes knowable when the member actually joins, from Telegram's
-     * `chat_member` update, which no handler exists for yet.
+     * NULL at grant time, always, and that is not an oversight: access is granted
+     * with an INVITE LINK precisely because we do not know who the member is on
+     * Telegram — a WhatsApp number is all checkout gives us. The id only becomes
+     * knowable when the member actually JOINS.
      *
-     * It is here because revocation NEEDS it: `banChatMember` addresses a user id,
-     * so a revocation with no id recorded cannot be automated, and
-     * `RevokeChannelAccess` reports exactly that rather than claiming success.
+     * Filled by `POST /webhooks/telegram` (Task 7b), which receives Telegram's
+     * `chat_member` update and matches it to this row by the `invite_link` it
+     * reports — single-use per member, so it identifies exactly one row (see
+     * `channel_membership_invite_link_unique`).
+     *
+     * It exists because revocation NEEDS it: `banChatMember` addresses a user id.
+     * A row that still has none cannot be revoked automatically, and
+     * `RevokeChannelAccess` reports `no_provider_member_id_recorded` rather than
+     * claiming success — which is what EVERY revocation did before that endpoint.
+     *
+     * DELIBERATELY SURVIVES A REVOKE. Neither `revoke` nor `claim`'s reactivation
+     * clears it, only the link. `banChatMember` also blocks the user from joining
+     * via any invite link, so a churned member who re-pays must be UNBANNED first,
+     * and `unbanChatMember` needs this id — `GrantChannelAccess` reads it back off
+     * a reactivated row and passes it as `previousExternalMemberId`.
      */
     externalMemberId: varchar("external_member_id", { length: 64 }),
     grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),

@@ -18,7 +18,12 @@ export type RevokeNotAutomatedReason =
   | "provider_cannot_gate_access"
   /** No adapter is wired for this channel's platform in this deployment. */
   | "no_provider_for_platform"
-  /** We never learned the member's id on the platform — see the schema comment. */
+  /**
+   * We never learned the member's id on the platform, so there is nothing to aim
+   * `banChatMember` at. Populated by `POST /webhooks/telegram` when the member
+   * joins, so this now means "invited but never joined" — see the
+   * `external_member_id` comment in db/schema.ts.
+   */
   | "no_provider_member_id_recorded"
   /** The provider was called and refused or failed. */
   | "provider_error";
@@ -166,8 +171,11 @@ export class RevokeChannelAccess {
       return { automated: false, reason: "no_provider_for_platform" };
     }
     if (membership.externalMemberId === null) {
-      // The ordinary Phase 4 case: access was granted by invite link, so no
-      // platform user id was ever recorded, and `banChatMember` addresses one.
+      // The member was invited but never JOINED, so no `chat_member` update ever
+      // arrived to record their platform user id — and `banChatMember` addresses
+      // one. This was every revocation's outcome before `POST /webhooks/telegram`
+      // existed; it is now the exception rather than the rule, and it is still
+      // reported honestly rather than claimed as a removal.
       return { automated: false, reason: "no_provider_member_id_recorded" };
     }
 

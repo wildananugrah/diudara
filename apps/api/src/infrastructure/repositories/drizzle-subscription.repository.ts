@@ -168,8 +168,20 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
    * field. Probed before it was: 12 concurrent PAID deliveries with 12 DIFFERENT
    * `body.id` values produced 12 `activity_log` "joined" rows — 12 WhatsApp
    * invites in Phase 4 — because `provider_event_id` derives from `body.id` and
-   * every one of them was distinct. Zero affected rows is now a no-op (`null`),
-   * not an error and never a second activation.
+   * every one of them was distinct. Zero affected rows is reported, never an error
+   * and never a second activation.
+   *
+   * WHAT IT REPORTS is a `MarkPaidOutcome` rather than a nullable result, and the
+   * distinctions cost nothing because the reads that make them are already here:
+   *
+   *   already_settled    — the transaction is `success`. A replay; a 2xx no-op.
+   *   conflicting_status — any other non-`pending` status (today `failed`). A real
+   *                        payment nobody can settle without looking at it, and
+   *                        answering "duplicate" used to throw it away.
+   *   superseded         — the member already holds an active subscription to this
+   *                        tier, so this one is `cancelled` rather than granted a
+   *                        second time. The transaction still settles: the money
+   *                        arrived, and hiding that hides a refund that is owed.
    */
   async markPaid(input: {
     transactionId: string;
