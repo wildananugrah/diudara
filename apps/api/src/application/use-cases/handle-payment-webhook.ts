@@ -362,6 +362,13 @@ export class HandlePaymentWebhook {
           memberId: subscription.memberId,
           communityId,
           transactionId: transaction.id,
+          // WHAT THE MEMBER IS TOLD depends on this, and only `markPaid` can know it —
+          // it is the only thing that saw the status the row was in before activation.
+          // A renewal's grant takes the already-granted path and must confirm the
+          // membership WITHOUT naming an invite link: the member never left the group,
+          // and the link on their row is the one they already spent. See
+          // `GrantChannelAccessInput.renewal`.
+          renewal: paid.renewed,
         },
       });
 

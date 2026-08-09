@@ -34,7 +34,7 @@ import { DrizzleRenewalReminderRepository } from "../../infrastructure/repositor
 import { DrizzleSubscriptionRepository } from "../../infrastructure/repositories/drizzle-subscription.repository";
 import type { MessagingProviderPort } from "../ports/messaging-provider.port";
 import { OUTBOX_SEND_RENEWAL_REMINDER } from "../ports/outbox-repository.port";
-import { GrantChannelAccess } from "./grant-channel-access";
+import { GrantChannelAccess, grantAccessOutboxHandler } from "./grant-channel-access";
 import { HandlePaymentWebhook, RENEWED } from "./handle-payment-webhook";
 import { ProcessChurn } from "./process-churn";
 import { ProcessRenewals } from "./process-renewals";
@@ -327,6 +327,120 @@ describe("renewal payment — paying while past_due", () => {
     expect(after.status).toBe("active");
     expect(after.inviteLink).toBe(membership.inviteLink);
     expect(await db.select().from(channelMemberships)).toHaveLength(1);
+  });
+
+  /**
+   * I3, final whole-branch review. The webhook enqueues `grant_access` on every
+   * activation, renewals included; the grant takes the `already_granted` branch, mints
+   * nothing — and used to push the member's RECORDED, ALREADY-CONSUMED link into a
+   * message saying "join the community group via the following link… it can only be used
+   * once". On every renewal. Meanwhile the renewal reminder they had just acted on
+   * promised the opposite ("Anda tetap berada di grup"), so the two messages contradicted
+   * each other on the happy path, and a bearer credential was re-transmitted over
+   * WhatsApp for no reason at all.
+   */
+  describe("what the member is TOLD when their renewal is granted", () => {
+    /** The renewal, end to end, returning the messages the member received. */
+    async function renewAndGrant() {
+      const { community, tier } = await seedCommunity();
+      const h = harness();
+      const { subscriptionId, membership } = await firstPurchase(h, community.slug, tier.id);
+      const whatsapp = fake(h.whatsapp);
+      const firstMessages = whatsapp.notifications.length;
+
+      h.clock.set(at(0));
+      await h.renewals.execute();
+      h.clock.set(at(5));
+      const renewal = await h.startCheckout.execute({
+        slug: community.slug,
+        tierId: tier.id,
+        ...PAYER,
+      });
+      await pay(h, renewal.transactionId);
+      // Handled exactly as the worker does it, THROUGH the outbox payload — so the
+      // `renewal` flag is read out of the row rather than passed by the test.
+      const [row] = (await outboxRows()).filter((r) => r.eventType === "grant_access").slice(-1);
+      await grantAccessOutboxHandler(h.grant)(row.payload);
+
+      return {
+        membership,
+        subscriptionId,
+        renewalMessages: whatsapp.notifications.slice(firstMessages).map((n) => n.message),
+        telegram: fake(h.telegram),
+      };
+    }
+
+    it("names NO invite link", async () => {
+      const { renewalMessages, membership } = await renewAndGrant();
+
+      expect(renewalMessages).toHaveLength(1);
+      const message = renewalMessages[0];
+      // The credential itself, and any URL that could be one.
+      expect(message).not.toContain(membership.inviteLink!);
+      expect(message).not.toContain("fake-invite.local");
+      // And not the sentence that made the link's presence a promise.
+      expect(message).not.toContain("tautan berikut");
+      expect(message).not.toContain("hanya bisa dipakai satu kali");
+    });
+
+    it("confirms the renewal, and agrees with what the reminder promised", async () => {
+      const { renewalMessages } = await renewAndGrant();
+
+      const message = renewalMessages[0];
+      expect(message).toContain("Pembayaran perpanjangan Anda sudah kami terima");
+      // Verbatim from `SendRenewalReminder`'s own message, which is the point: the
+      // reminder says the member stays in the group, so the confirmation must not tell
+      // them to join it again.
+      expect(message).toContain("tetap berada di grup");
+      expect(message).toContain("tidak perlu keluar atau bergabung ulang");
+    });
+
+    it("still keeps the grant row, and still mints nothing", async () => {
+      // The grant row is a genuine recovery path for a member whose ORIGINAL grant
+      // failed, so it is not removed — only the wording changes.
+      const { telegram, membership } = await renewAndGrant();
+
+      expect(telegram.issuedLinks).toHaveLength(1);
+      expect(telegram.liveInviteLinks).toHaveLength(1);
+      const [after] = await db
+        .select()
+        .from(channelMemberships)
+        .where(eq(channelMemberships.id, membership.id));
+      expect(after.status).toBe("active");
+      expect(after.inviteLink).toBe(membership.inviteLink);
+    });
+
+    it("STILL sends the link on a FIRST grant that is being retried", async () => {
+      // The recovery path the default protects: a first payment whose grant failed must
+      // get its link on the retry, and that row carries `renewal: false`.
+      const { community, tier } = await seedCommunity();
+      const h = harness();
+      const whatsapp = fake(h.whatsapp);
+      const { membership } = await firstPurchase(h, community.slug, tier.id);
+      const before = whatsapp.notifications.length;
+
+      const [row] = (await outboxRows()).filter((r) => r.eventType === "grant_access");
+      expect((row.payload as { renewal: boolean }).renewal).toBe(false);
+      await grantAccessOutboxHandler(h.grant)(row.payload);
+
+      const retryMessage = whatsapp.notifications.slice(before).map((n) => n.message)[0];
+      expect(retryMessage).toContain(membership.inviteLink!);
+    });
+
+    it("sends the link too when a payload predates the field", async () => {
+      // A `grant_access` row written before `renewal` existed carries no value for it.
+      // False is the recovery-safe reading, so the member gets their link rather than a
+      // confirmation of access they may not have.
+      const { community, tier } = await seedCommunity();
+      const h = harness();
+      const whatsapp = fake(h.whatsapp);
+      const { subscriptionId, membership } = await firstPurchase(h, community.slug, tier.id);
+      const before = whatsapp.notifications.length;
+
+      await grantAccessOutboxHandler(h.grant)({ subscriptionId });
+
+      expect(whatsapp.notifications.slice(before)[0].message).toContain(membership.inviteLink!);
+    });
   });
 
   it("DELETES the completed period's reminder rows, in the same transaction", async () => {
@@ -946,6 +1060,9 @@ describe("payment AFTER revocation — a genuinely new grant", () => {
       memberId: (await reloadSubscription(subscriptionId)).memberId,
       communityId: community.id,
       transactionId: renewal.transactionId,
+      // `renewal: true` is what stops the grant quoting the member's already-spent
+      // invite link back at them — only `markPaid` can know it, so it travels here.
+      renewal: true,
     });
   });
 });
