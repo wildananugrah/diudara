@@ -92,6 +92,12 @@ function harness(
      */
     conflictingStatus?: string;
     /**
+     * `markPaid` refused: the subscription this payment was for has been CHURNED,
+     * which is terminal. Nothing was written, so the delivery must be refused too
+     * rather than answered 200 — see C2 in the final whole-branch review.
+     */
+    subscriptionChurned?: boolean;
+    /**
      * `markPaid` reports the member already holds an active subscription to this
      * tier, so this one was cancelled instead of activated.
      */
@@ -156,6 +162,9 @@ function harness(
     async findRenewalContext() {
       throw new Error("not used");
     },
+    async hasLiveSubscriptionInCommunity() {
+      throw new Error("not used");
+    },
     async markPaid(input): Promise<MarkPaidOutcome> {
       calls.markPaid.push(input.transactionId);
       order.push("markPaid");
@@ -175,6 +184,12 @@ function harness(
       }
       if (options.conflictingStatus !== undefined) {
         return { outcome: "conflicting_status", status: options.conflictingStatus };
+      }
+      if (options.subscriptionChurned === true) {
+        // The real repository rolls its own statement back before returning this, so
+        // NOTHING was written — including the transaction's settlement. Mirrored by
+        // returning it without recording an activation.
+        return { outcome: "subscription_churned", subscriptionStatus: "churned" };
       }
       if (options.alreadySettled === true) {
         return { outcome: "already_settled", status: "success" };
@@ -542,6 +557,63 @@ describe("HandlePaymentWebhook", () => {
         expect(thrown).toBeInstanceOf(ConflictError);
         expect(calls.enqueued).toEqual([]);
       }
+    });
+  });
+
+  /**
+   * C2, final whole-branch review. `churned` is the state machine's terminal state, so
+   * a payment that arrives for a churned subscription cannot be applied — and it must
+   * not be swallowed either. The same treatment `conflicting_status` gets, because it is
+   * the same problem: a real payment nobody can settle without a person looking at it.
+   */
+  describe("a payment for a subscription that has already been CHURNED", () => {
+    it("throws a 409, so the delivery is not answered 200 and thrown away", async () => {
+      const { useCase } = harness({ subscriptionChurned: true });
+
+      let thrown: unknown;
+      await captureWarnings(async () => {
+        thrown = await useCase.execute(paidEvent()).catch((err: unknown) => err);
+      });
+
+      expect(thrown).toBeInstanceOf(ConflictError);
+      expect((thrown as ConflictError).status).toBe(409);
+    });
+
+    it("records nothing and rolls the event id back, so it can be replayed", async () => {
+      const { useCase, calls, order } = harness({ subscriptionChurned: true });
+
+      let thrown: unknown;
+      await captureWarnings(async () => {
+        thrown = await useCase.execute(paidEvent()).catch((err: unknown) => err);
+      });
+
+      // Asserted here too, and not only above: an UNHANDLED outcome also rolls back —
+      // by reading `subscription` off a result that has none and throwing a TypeError —
+      // so the emptiness below proves nothing on its own.
+      expect(thrown).toBeInstanceOf(ConflictError);
+      expect(calls.activity).toEqual([]);
+      // A churned member's re-grant is a NEW subscription with an unban and a fresh
+      // link. Enqueuing a grant here would reactivate the revoked membership and mint a
+      // second invite link against a subscription nobody is paying for.
+      expect(calls.enqueued).toEqual([]);
+      expect(order).toEqual(["find", "uow:begin", "recordIfNew", "markPaid", "uow:rollback"]);
+    });
+
+    it("ALERTS, naming the transaction and the subscription status only", async () => {
+      const { useCase } = harness({ subscriptionChurned: true });
+
+      const warnings = await captureWarnings(() =>
+        useCase.execute(paidEvent()).catch(() => undefined)
+      );
+
+      const text = warnings.join("\n");
+      expect(text).toContain("ALERT");
+      expect(text).toContain("CHURNED");
+      expect(text).toContain(TRANSACTION_ID);
+      // The member HAS paid, and the line has to say so — that is what makes this
+      // recoverable rather than a silent loss.
+      expect(text).toMatch(/has PAID/);
+      expect(text).not.toMatch(/already-settled/);
     });
   });
 

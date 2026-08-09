@@ -179,6 +179,9 @@ describe("StartCheckout — funds routing", () => {
       async findRenewalContext() {
         throw new Error("not used");
       },
+      async hasLiveSubscriptionInCommunity() {
+        throw new Error("not used");
+      },
       async markPaid() {
         throw new Error("not used");
       },
@@ -577,6 +580,9 @@ function harness(
       throw new Error("not used");
     },
     async findRenewalContext() {
+      throw new Error("not used");
+    },
+    async hasLiveSubscriptionInCommunity() {
       throw new Error("not used");
     },
     async markPaid() {

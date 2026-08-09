@@ -869,6 +869,97 @@ describe("RevokeChannelAccessForSystem", () => {
     expect(await db.select().from(activityLogs)).toHaveLength(0);
   });
 
+  /**
+   * THE REGRESSION SHAPE NOTHING ELSE IN THIS FILE COVERS: an outbox row delivered
+   * after the entitlement it was written for has changed.
+   *
+   * Same shape as `RetryChannelAccessRevocation`'s "does nothing when the member has
+   * been re-granted since" above, applied to the use-case that has the most to lose by
+   * getting it wrong — this is the only one that TAKES access away, and its own failure
+   * mode is a member who has paid being locked out of a group with no live invite link,
+   * nothing retrying, and no `revocation_manual_required` row to find them by.
+   */
+  describe("an entitlement that changed while the revoke row waited", () => {
+    it("does NOT revoke when the subscription is no longer churned", async () => {
+      const { community, member, membership } = await seed({ externalMemberId: "987654321" });
+      const subscription = await seedSubscription(community, member);
+      const { telegram, useCase } = wireSystem();
+
+      // The state the reviewer reproduced: the member's payment settled after the churn
+      // pass had already queued this revocation, so by the time the worker gets here the
+      // subscription is `active` again. (`markPaid` now REFUSES to do this — see
+      // `subscription_churned` — so this is defence in depth, written by hand.)
+      await db
+        .update(subscriptions)
+        .set({ status: "active", updatedAt: new Date() })
+        .where(eq(subscriptions.id, subscription.id));
+
+      const result = await useCase.execute({ subscriptionId: subscription.id });
+
+      expect(result).toEqual({ revoked: 0, automated: false, channels: [] });
+      // Nothing at the provider, and — the assertion that matters — the member is still
+      // in the group with the link they hold.
+      expect(telegram.revocations).toHaveLength(0);
+      expect(telegram.revokedInviteLinks).toHaveLength(0);
+      const row = await membershipById(membership.id);
+      expect(row.status).toBe("active");
+      expect(row.inviteLink).toBe(membership.inviteLink);
+
+      const logs = await db.select().from(activityLogs);
+      expect(logs).toHaveLength(1);
+      expect(logs[0].eventType).toBe("access_not_revoked");
+      expect(JSON.stringify(logs[0].metadata)).toContain("subscription_no_longer_churned");
+    });
+
+    it("does NOT revoke when the member has bought a NEW subscription since", async () => {
+      // No ordering assumption at all, and the case a status re-check alone cannot
+      // catch: the churned row STAYS churned for ever, because a member whose access was
+      // taken away buys a new subscription rather than resurrecting the dead one. The
+      // stale revoke row used to evict them from the group they had just re-joined.
+      const { community, member, membership } = await seed({ externalMemberId: "987654321" });
+      const churned = await seedSubscription(community, member);
+      const fresh = await seedSubscription(community, member, { status: "active" });
+      expect(fresh.id).not.toBe(churned.id);
+      const { telegram, useCase } = wireSystem();
+
+      const result = await useCase.execute({ subscriptionId: churned.id });
+
+      expect(result.revoked).toBe(0);
+      expect(telegram.revocations).toHaveLength(0);
+      expect((await membershipById(membership.id)).status).toBe("active");
+      const logs = await db.select().from(activityLogs);
+      expect(logs).toHaveLength(1);
+      expect(JSON.stringify(logs[0].metadata)).toContain("member_holds_a_live_subscription");
+    });
+
+    it("does NOT revoke a member who still pays for ANOTHER tier of the same community", async () => {
+      // Channel access is community-wide, so churning out of one tier must not evict a
+      // member from the groups their other tier pays for.
+      const { community, member, membership } = await seed({ externalMemberId: "987654321" });
+      const churned = await seedSubscription(community, member);
+      await seedSubscription(community, member, { status: "past_due" });
+      const { telegram, useCase } = wireSystem();
+
+      expect((await useCase.execute({ subscriptionId: churned.id })).revoked).toBe(0);
+      expect(telegram.revocations).toHaveLength(0);
+      expect((await membershipById(membership.id)).status).toBe("active");
+    });
+
+    it("still revokes when the member holds a live subscription ELSEWHERE only", async () => {
+      // The guard must not become "never revoke anybody who pays somebody": a live
+      // subscription in a DIFFERENT creator's community says nothing about this one.
+      const mine = await seed({ externalMemberId: "987654321" });
+      const elsewhere = await seed({ externalMemberId: "987654321" });
+      const churned = await seedSubscription(mine.community, mine.member);
+      await seedSubscription(elsewhere.community, mine.member, { status: "active" });
+      const { telegram, useCase } = wireSystem();
+
+      expect((await useCase.execute({ subscriptionId: churned.id })).revoked).toBe(1);
+      expect(telegram.revocations).toHaveLength(1);
+      expect((await membershipById(mine.membership.id)).status).toBe("revoked");
+    });
+  });
+
   it("throws for a subscription that does not exist, so the row fails loudly", async () => {
     const { useCase } = wireSystem();
     await expect(

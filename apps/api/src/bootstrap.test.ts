@@ -194,6 +194,10 @@ const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
     // Phase 5's reminder delivery runs in the worker, not behind an HTTP route.
     return null;
   },
+  async hasLiveSubscriptionInCommunity() {
+    // Read only by the churn revoke, which runs in the worker.
+    return false;
+  },
   async markPaid() {
     throw new Error("not used");
   },

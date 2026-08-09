@@ -245,6 +245,37 @@ export class HandlePaymentWebhook {
         );
       }
 
+      if (paid.outcome === "subscription_churned") {
+        // The member's grace ran out between their invoice being created and this
+        // callback arriving, so the subscription they were paying for is CHURNED —
+        // terminal, by the state machine's own rule. `markPaid` wrote nothing.
+        //
+        // The same treatment as `conflicting_status`, and for the same reason: a real
+        // payment has arrived that we cannot apply, and answering 200 is how it would
+        // disappear (Xendit does not retry a 2xx, and the delivery cannot be replayed by
+        // hand once the event id is spent). So this THROWS, which rolls the unit of work
+        // back including `recordIfNew`, leaving the event id unspent.
+        //
+        // What the member is OWED is a fresh subscription — a new row, a new grant with
+        // the unban a churned member needs, and a new invite link — which is what
+        // checkout gives them, and which is why resurrecting this row was not the
+        // answer. That decision belongs to a person, and this line is how they find out.
+        // Ids and enum values only: the payload carries the payer's name and phone.
+        console.warn(
+          `[payments] ALERT: a payment arrived for a CHURNED subscription: provider=xendit ` +
+            `transaction=${transaction.id} subscription=${transaction.subscriptionId} ` +
+            `subscription_status=${safeLabel(paid.subscriptionStatus)} ` +
+            `event=${safeLabel(input.eventType)} amount=${transaction.amount} — the member ` +
+            "has PAID and has NOT been activated, and their old subscription was NOT " +
+            "resurrected (churned is terminal). Nothing was recorded, so this delivery can " +
+            "be replayed once somebody has decided whether to refund or to sell them a new " +
+            "subscription."
+        );
+        throw new ConflictError(
+          "this subscription has already been churned, so this payment needs manual review"
+        );
+      }
+
       if (paid.outcome === "superseded") {
         // A double-submit at checkout produced two pending subscriptions for one
         // (member, tier), and the member already holds an active one. The payment

@@ -12,9 +12,11 @@ import {
   renewalReminders,
   subscriptions,
   transactions,
+  webhookEvents,
 } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { computeNextBillingDate } from "../../domain/billing-cycle";
+import { ConflictError } from "../errors";
 import { FixedClock } from "../../infrastructure/clock/fixed.clock";
 import { FakeMessagingAdapter } from "../../infrastructure/messaging/fake-messaging.adapter";
 import { TelegramBotAdapter } from "../../infrastructure/messaging/telegram-bot.adapter";
@@ -214,6 +216,15 @@ async function firstPurchase(h: ReturnType<typeof harness>, slug: string, tierId
   await h.grant.execute({ subscriptionId: checkout.subscriptionId });
   const [membership] = await db.select().from(channelMemberships);
   return { subscriptionId: checkout.subscriptionId, membership };
+}
+
+/** One channel_membership row, straight from the database. */
+async function membershipRow(id: string) {
+  const [row] = await db
+    .select()
+    .from(channelMemberships)
+    .where(eq(channelMemberships.id, id));
+  return row;
 }
 
 async function reloadSubscription(id: string) {
@@ -721,6 +732,126 @@ describe("payment AFTER revocation — a genuinely new grant", () => {
     expect(after.inviteLink).toBe("https://t.me/+regranted");
     // Still ONE membership row for this (member, channel) — the claim reactivated it.
     expect(await db.select().from(channelMemberships)).toHaveLength(1);
+  });
+
+  /**
+   * C1 and C2, final whole-branch review. THE REGRESSION SHAPE NOTHING ELSE COVERED: an
+   * outbox row delivered after the entitlement it was written for has changed.
+   *
+   * Both findings live in the same window — a member paying around the instant their
+   * grace runs out — and the reviewer reproduced both against real Postgres. They are
+   * walked here end to end, through the real passes and the real repositories, because
+   * neither is visible from inside a single use-case.
+   */
+  describe("a payment and a churn that cross in flight", () => {
+    it("REFUSES a payment for a subscription the churn pass has already ended", async () => {
+      const { community, tier } = await seedCommunity();
+      const h = harness();
+      const { subscriptionId, membership } = await firstPurchase(h, community.slug, tier.id);
+      const telegram = fake(h.telegram);
+
+      // Past due, then chased to the last warning, then the invoice they create from
+      // their own reminder link on day 9 — still inside grace.
+      h.clock.set(at(0));
+      await h.renewals.execute();
+      h.clock.set(at(9));
+      const late = await h.startCheckout.execute({
+        slug: community.slug,
+        tierId: tier.id,
+        ...PAYER,
+      });
+      expect(late.subscriptionId).toBe(subscriptionId);
+
+      // Their deadline passes before the callback arrives.
+      h.clock.set(at(11));
+      expect((await h.churn.execute()).churned).toBe(1);
+      expect((await reloadSubscription(subscriptionId)).status).toBe("churned");
+
+      // THE PAYMENT LANDS. It used to flip `churned` back to `active`, advance the
+      // billing date, clear the deadline, delete the reminder claims and enqueue a
+      // grant — while the revocation the churn pass had already queued was still
+      // pending. Now it is refused, loudly, with nothing written.
+      await expect(pay(h, late.transactionId)).rejects.toBeInstanceOf(ConflictError);
+
+      const row = await reloadSubscription(subscriptionId);
+      expect(row.status).toBe("churned");
+      expect(row.nextBillingDate).toBe(FIRST_DUE_DATE);
+      expect(row.graceEndsAt).toBeInstanceOf(Date);
+      // The event id is unspent and the money is not recorded as collected, so the
+      // delivery can be replayed once a person has decided what the member gets.
+      const [tx] = await db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, late.transactionId));
+      expect(tx.status).toBe("pending");
+      expect(await db.select().from(webhookEvents)).toHaveLength(1);
+      // NO second grant, and therefore no second invite link — spec §7.
+      expect((await outboxRows()).filter((r) => r.eventType === "grant_access")).toHaveLength(1);
+      expect(telegram.issuedLinks).toHaveLength(1);
+
+      // And the eviction the churn pass queued still applies, because it does: the
+      // member's subscription is churned and they hold no other.
+      await h.systemRevoke.execute({ subscriptionId });
+      expect((await membershipRow(membership.id)).status).toBe("revoked");
+    });
+
+    it("does NOT evict a member whose NEW subscription arrived before the stale revoke did", async () => {
+      // No race and no ordering assumption: the worker was simply down. The revoke row
+      // the churn pass wrote sits in the outbox while the member buys again — and a
+      // churned member buying again gets a NEW subscription, so the row's own
+      // subscription stays `churned` for ever and a status re-check alone never fires.
+      const { community, tier } = await seedCommunity();
+      const h = harness();
+      const { subscriptionId, membership } = await firstPurchase(h, community.slug, tier.id);
+      const telegram = fake(h.telegram);
+
+      h.clock.set(at(0));
+      await h.renewals.execute();
+      h.clock.set(at(11));
+      expect((await h.churn.execute()).churned).toBe(1);
+      const queued = (await outboxRows()).filter(
+        (row) => row.eventType === "revoke_subscription_access"
+      );
+      expect(queued).toHaveLength(1);
+
+      // The next day they buy again and are granted a fresh link — the whole re-grant,
+      // through checkout, the callback and the grant use-case.
+      h.clock.set(at(12));
+      const fresh = await h.startCheckout.execute({
+        slug: community.slug,
+        tierId: tier.id,
+        ...PAYER,
+      });
+      expect(fresh.subscriptionId).not.toBe(subscriptionId);
+      expect((await pay(h, fresh.transactionId)).activated).toBe(true);
+      await h.grant.execute({ subscriptionId: fresh.subscriptionId });
+      const regranted = await membershipRow(membership.id);
+      expect(regranted.status).toBe("active");
+      expect(regranted.inviteLink).not.toBeNull();
+      expect(telegram.liveInviteLinks).toHaveLength(1);
+
+      // ONLY NOW does the worker come back and deliver the stale row.
+      const result = await h.systemRevoke.execute({
+        subscriptionId: (queued[0].payload as { subscriptionId: string }).subscriptionId,
+      });
+
+      // THE ASSERTIONS: measured at the provider, because the database was never the
+      // thing at risk. Before this guard the member was removed from the group, their
+      // brand-new link was revoked, `invite_link` was nulled, and nothing retried —
+      // the system revoke swallows provider errors and completes.
+      expect(result).toEqual({ revoked: 0, automated: false, channels: [] });
+      expect(telegram.revocations).toHaveLength(0);
+      expect(telegram.liveInviteLinks).toHaveLength(1);
+      const after = await membershipRow(membership.id);
+      expect(after.status).toBe("active");
+      expect(after.inviteLink).toBe(regranted.inviteLink);
+      // And it is recorded, so "the member kept access" is never a silent decision.
+      const logs = await db
+        .select()
+        .from(activityLogs)
+        .where(eq(activityLogs.eventType, "access_not_revoked"));
+      expect(logs).toHaveLength(1);
+    });
   });
 
   it("queues the grant through the outbox, as every activation does", async () => {

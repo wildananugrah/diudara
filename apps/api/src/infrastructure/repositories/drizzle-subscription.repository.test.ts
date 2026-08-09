@@ -41,6 +41,15 @@ async function settle(input: {
   return result;
 }
 
+/** One subscription row, straight from the database. */
+async function reload(subscriptionId: string) {
+  const [row] = await db
+    .select()
+    .from(subscriptions)
+    .where(eq(subscriptions.id, subscriptionId));
+  return row;
+}
+
 let seedCounter = 0;
 
 /**
@@ -422,6 +431,106 @@ describe("DrizzleSubscriptionRepository.markPaid", () => {
         .from(subscriptions)
         .where(eq(subscriptions.id, subscription.id));
       expect(sub.status).toBe("pending");
+    });
+
+    /**
+     * C2, final whole-branch review. `churned` is documented as TERMINAL — "nothing
+     * moves a row out of it — a member who pays again gets a NEW subscription, which is
+     * what makes their re-grant an honest new grant" — and the UPDATE was predicated
+     * only on the id, so it flipped `churned` back to `active`.
+     *
+     * These are the deterministic pins for the refusal. The webhook test pins what the
+     * API does with it, and renewal-payment.test.ts walks the whole race.
+     */
+    describe("a payment that arrives for a CHURNED subscription", () => {
+      /** A settled subscription that the churn pass has since ended. */
+      async function churnedWithASecondInvoice() {
+        const seeded = await seedPendingCheckout();
+        await settle({
+          transactionId: seeded.transaction.id,
+          gatewayReferenceId: "inv-first",
+          paidAt: new Date("2026-02-10T02:00:00Z"),
+        });
+        // The invoice the member created from their own reminder link, while still
+        // `past_due`: a SECOND transaction against the SAME subscription row, which is
+        // what `StartCheckout` does for a renewal.
+        const renewal = await repo.createTransaction({
+          subscriptionId: seeded.subscription.id,
+          amount: 50000,
+          paymentMethod: "invoice",
+        });
+        // …and then the churn pass reached their deadline before the callback arrived.
+        await db
+          .update(subscriptions)
+          .set({ status: "churned", updatedAt: new Date() })
+          .where(eq(subscriptions.id, seeded.subscription.id));
+        return { ...seeded, renewal };
+      }
+
+      it("REFUSES, and says which status refused it", async () => {
+        const { renewal } = await churnedWithASecondInvoice();
+
+        expect(
+          await repo.markPaid({
+            transactionId: renewal.id,
+            gatewayReferenceId: "inv-renewal",
+            paidAt: new Date("2026-03-20T02:00:00Z"),
+          })
+        ).toEqual({ outcome: "subscription_churned", subscriptionStatus: "churned" });
+      });
+
+      it("leaves the subscription CHURNED: no resurrection, no new period, no cleared deadline", async () => {
+        const { subscription, renewal } = await churnedWithASecondInvoice();
+        const before = await reload(subscription.id);
+
+        await repo.markPaid({
+          transactionId: renewal.id,
+          gatewayReferenceId: "inv-renewal",
+          paidAt: new Date("2026-03-20T02:00:00Z"),
+        });
+
+        const after = await reload(subscription.id);
+        expect(after.status).toBe("churned");
+        expect(after.nextBillingDate).toBe(before.nextBillingDate);
+        expect(after.graceEndsAt).toEqual(before.graceEndsAt);
+      });
+
+      it("ROLLS THE SETTLEMENT BACK, so the money is not recorded as collected", async () => {
+        // The half that makes this safe rather than merely strict: the transaction row is
+        // updated to `success` before the subscription's status is even known, so a
+        // refusal that RETURNED would commit money against a subscription that was never
+        // activated — unrecoverable, because the webhook event id would be spent too.
+        const { renewal } = await churnedWithASecondInvoice();
+
+        await repo.markPaid({
+          transactionId: renewal.id,
+          gatewayReferenceId: "inv-renewal",
+          paidAt: new Date("2026-03-20T02:00:00Z"),
+        });
+
+        const [tx] = await db.select().from(transactions).where(eq(transactions.id, renewal.id));
+        expect(tx.status).toBe("pending");
+        expect(tx.paidAt).toBeNull();
+        expect(tx.gatewayReferenceId).toBeNull();
+      });
+
+      it("keeps the reminder claims, because the period they belong to did not end", async () => {
+        // The renewal path DELETES them. A refused payment is not a renewal, so a member
+        // whose churn is later reversed by hand must not have lost their audit of what
+        // they were warned about.
+        const { subscription, renewal } = await churnedWithASecondInvoice();
+        await db
+          .insert(schema.renewalReminders)
+          .values({ subscriptionId: subscription.id, stage: "overdue_7d" });
+
+        await repo.markPaid({
+          transactionId: renewal.id,
+          gatewayReferenceId: "inv-renewal",
+          paidAt: new Date("2026-03-20T02:00:00Z"),
+        });
+
+        expect(await db.select().from(schema.renewalReminders)).toHaveLength(1);
+      });
     });
 
     it("reports conflicting_status for any status that is neither pending nor success", async () => {

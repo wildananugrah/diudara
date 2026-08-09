@@ -80,6 +80,18 @@ const RETRYABLE_REASONS: ReadonlySet<RevokeNotAutomatedReason> = new Set([
   "no_provider_member_id_recorded",
 ]);
 
+/** The one `subscription.status` a churn revocation is entitled to act on. */
+const CHURNED = "churned";
+
+/**
+ * `activity_log.event_type` for a queued revocation this system deliberately did NOT
+ * perform, because the member turned out to still be entitled.
+ *
+ * The mirror of `GrantChannelAccess`'s `access_not_granted`, and named to match, so a
+ * dashboard needs no new vocabulary for "we were told to change access and did not".
+ */
+export const ACCESS_NOT_REVOKED = "access_not_revoked";
+
 /**
  * Removes a member's access to a community's channels.
  *
@@ -370,9 +382,46 @@ class ChannelAccessRevoker {
  *     an operator to read about a member who is correctly gone.
  *  2. AN ABSENT SUBSCRIPTION DOES throw, because that is a payload naming a row that
  *     does not exist, which no retry can fix and somebody should see.
+ *
+ * =====================================================================
+ * AND IT RE-READS THE ENTITLEMENT BEFORE IT TAKES ANYTHING AWAY.
+ *
+ * Every other outbox consumer does: `GrantChannelAccess` refuses when the subscription
+ * is no longer `active`, `SendRenewalReminder` re-tests the remindable statuses, and
+ * `RetryChannelAccessRevocation` refuses when the membership is no longer `revoked`.
+ * This one — the only one that takes access AWAY — did not, and its own docstring
+ * quoted the reason ("an outbox row can sit for a long time").
+ *
+ * What that cost, measured against real Postgres:
+ *
+ *  1. A `past_due` member opens their reminder link, the churn pass reaches their
+ *     deadline in the same instant, and their payment settles seconds later. The outbox
+ *     then holds a grant AND a revoke, and `claimBatch`'s `update … returning` has no
+ *     defined order, so the grant can run first. Result: `subscription=active`,
+ *     `membership=revoked`, `invite_link=null`, zero live links at the provider, and
+ *     nothing retrying — the system revoke swallows provider errors and completes. A
+ *     member who had paid was permanently locked out with no `revocation_manual_required`
+ *     row to find them by.
+ *  2. No ordering assumption needed: a churned member's revoke row is still pending at a
+ *     worker restart, they buy a NEW subscription the next day and are granted a fresh
+ *     link, and the stale row then revokes the new membership.
+ *
+ * A status re-check alone fixes (1) and not (2) — the row the stale payload names stays
+ * `churned` for ever, because a re-paying member gets a new subscription. So the
+ * question asked is the one that actually decides whether the member should be in the
+ * group: does this member still hold a LIVE subscription to any tier of this community?
+ * That covers both, and it covers the member who holds two tiers of one community and
+ * churns out of one of them — channel access is community-wide, so evicting them would
+ * take away the tier they still pay for.
+ *
+ * Both checks are here. The status one is kept because it names the specific case in
+ * `activity_log` and costs nothing (the row is already in hand), and because a
+ * subscription that is no longer churned is a fact worth reporting on its own.
+ * =====================================================================
  */
 export class RevokeChannelAccessForSystem {
   private readonly revoker: ChannelAccessRevoker;
+  private readonly activityLog: ActivityLogRepositoryPort;
 
   constructor(
     /**
@@ -388,6 +437,7 @@ export class RevokeChannelAccessForSystem {
     providers: ReadonlyMap<string, MessagingProviderPort>,
     outbox: OutboxRepositoryPort
   ) {
+    this.activityLog = activityLog;
     this.revoker = new ChannelAccessRevoker(memberships, activityLog, providers, outbox);
   }
 
@@ -397,6 +447,43 @@ export class RevokeChannelAccessForSystem {
       throw new NotFoundError(`subscription ${input.subscriptionId} not found`);
     }
     const { subscription, communityId } = context;
+
+    // THE ENTITLEMENT AS IT IS NOW, not as it was when the row was written. See the
+    // class docstring for the two states this prevents, both of which end with a member
+    // who has paid sitting outside the group with no live invite link and nothing
+    // retrying.
+    const reason =
+      subscription.status !== CHURNED
+        ? "subscription_no_longer_churned"
+        : (await this.subscriptions.hasLiveSubscriptionInCommunity(
+              subscription.memberId,
+              communityId
+            ))
+          ? "member_holds_a_live_subscription"
+          : null;
+    if (reason !== null) {
+      console.warn(
+        `[churn] NOT revoking access for subscription=${safeLabel(input.subscriptionId)}: ` +
+          `${reason} (subscription is '${safeLabel(subscription.status)}') — the member is ` +
+          "entitled to be in this community's groups, and this queued revocation no longer " +
+          "applies. Recorded in activity_log"
+      );
+      await this.activityLog.record({
+        memberId: subscription.memberId,
+        communityId,
+        eventType: ACCESS_NOT_REVOKED,
+        // Ids and statuses only, like every other entry this file writes.
+        metadata: {
+          reason,
+          subscriptionId: input.subscriptionId,
+          subscriptionStatus: subscription.status,
+        },
+      });
+      // A COMPLETED row, not a throw: there is nothing outstanding, and a retry would
+      // reach the same answer five times before parking a `failed` row about a member
+      // who is correctly still in the group.
+      return { revoked: 0, automated: false, channels: [] };
+    }
 
     // The subscription's OWN community, not every community the member belongs to. A
     // member who churns out of one creator's community keeps the access they are still

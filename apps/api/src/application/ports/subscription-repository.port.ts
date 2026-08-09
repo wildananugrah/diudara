@@ -128,6 +128,29 @@ export type MarkPaidOutcome =
    */
   | { outcome: "conflicting_status"; status: string }
   /**
+   * The transaction was `pending` and settleable, but its SUBSCRIPTION has already
+   * been CHURNED. Nothing was written: the whole statement is rolled back, including
+   * the transaction's own settlement, so the delivery can be replayed.
+   *
+   * `churned` is terminal (see `CHURNED_SUBSCRIPTION` in the implementation) and this
+   * outcome is what makes that true rather than merely stated. The window is real: a
+   * member goes `past_due`, opens the checkout link in their own reminder, and the
+   * churn pass reaches their deadline between the invoice being created and the
+   * callback arriving. Left unguarded, the UPDATE — predicated only on the id —
+   * flipped `churned` back to `active`, and three things followed: the member's
+   * pending `revoke_subscription_access` row then evicted a paid-up member; the
+   * "renewal" reactivated a revoked membership and minted a SECOND invite link, which
+   * spec §7 forbids; and the state machine's terminal state was no longer terminal,
+   * which every later reader (Phase 6 included) would have been misled by.
+   *
+   * IT MUST NOT SILENTLY DROP THE MONEY, which is why it is a rollback and not a
+   * shrug. The caller gets the same loud `ALERT` + refusal treatment as
+   * `conflicting_status`: nothing is recorded, the webhook event id stays unspent, and
+   * the payment is visible and replayable once a person has decided what the member
+   * should get — which is a fresh subscription, not a resurrected one.
+   */
+  | { outcome: "subscription_churned"; subscriptionStatus: string }
+  /**
    * The transaction settled, but the member ALREADY holds an active subscription
    * to this tier, so this one was `cancelled` instead of activated.
    *
@@ -381,6 +404,30 @@ export interface SubscriptionRepositoryPort {
    * explicitly like every other write here.
    */
   markChurned(subscriptionId: string): Promise<boolean>;
+  /**
+   * Whether this member still holds a LIVE subscription — `active` or `past_due` — to
+   * ANY tier of this community.
+   *
+   * It answers one question, asked at the far end of the outbox by
+   * `RevokeChannelAccessForSystem`: is this member still entitled to be in this
+   * community's groups? A `revoke_subscription_access` row can sit for a long time (a
+   * provider outage, a stopped worker, a reclaimed row), and access must reflect the
+   * entitlement as it is NOW — the same rule `GrantChannelAccess`, `SendRenewalReminder`
+   * and `RetryChannelAccessRevocation` each apply at their own end of the queue.
+   *
+   * WHY IT IS NOT "is this subscription still churned". That question is asked too, and
+   * it is not enough on its own: a churned member who pays again gets a NEW subscription
+   * row (see `findCurrentSubscriptionForTier`), so the row the stale revoke names stays
+   * `churned` for ever while the member is legitimately back in the group. Only the
+   * community-wide entitlement covers that, and it also covers the member who holds two
+   * tiers of one community and churns out of one of them — channel access is
+   * community-wide, so evicting them for the tier they dropped would take away the one
+   * they still pay for.
+   *
+   * Community-scoped through `subscription → membership_tier → community`, for the same
+   * reason `findByIdWithCommunity` is: the worker has no creator to scope a lookup by.
+   */
+  hasLiveSubscriptionInCommunity(memberId: string, communityId: string): Promise<boolean>;
   /**
    * One subscription with the tier and community a reminder message needs — see
    * `RenewalReminderContext`.

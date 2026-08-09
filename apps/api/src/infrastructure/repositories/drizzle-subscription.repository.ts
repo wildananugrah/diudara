@@ -67,8 +67,43 @@ const PAST_DUE_SUBSCRIPTION = "past_due";
  * churn pass writes it once, and nothing moves a row out of it — a member who pays again
  * gets a NEW subscription, which is what makes their re-grant an honest new grant
  * (`unbanChatMember` and a fresh invite) rather than a renewal.
+ *
+ * "Nothing moves a row out of it" IS ENFORCED, not just asserted, and the enforcement is
+ * in `markPaid`: a payment that arrives for a churned subscription is refused with
+ * `subscription_churned` and rolls the whole statement back. It used to be only the
+ * comment. The UPDATE was predicated on the id and the no-sibling-active subquery and on
+ * nothing else, so a transaction created while `past_due` and settled after the churn
+ * pass ran flipped `churned` → `active`, advanced the billing date, cleared the deadline
+ * and deleted the reminder claims. See `MarkPaidOutcome`'s `subscription_churned` for the
+ * three things that followed, one of which was a paid-up member being evicted by their
+ * own stale revoke row.
  */
 const CHURNED_SUBSCRIPTION = "churned";
+
+/**
+ * Thrown inside `markPaid`'s transaction to REFUSE a payment for a churned subscription,
+ * and caught immediately outside it.
+ *
+ * A throw rather than a return, because the transaction has already settled the
+ * `transaction` row by the time the subscription's status is known, and a return would
+ * COMMIT that — money recorded as collected against a subscription that was never
+ * activated, which is the exact unrecoverable state `markPaid`'s wrapper exists to
+ * prevent. Throwing rolls it back (to the savepoint, when nested inside
+ * `DrizzlePaymentActivationUnitOfWork`), and the catch turns it back into an ordinary
+ * `MarkPaidOutcome` so the caller branches on a value like it does for every other
+ * outcome instead of pattern-matching on an error.
+ *
+ * Reading the subscription's status BEFORE settling the transaction was the alternative,
+ * and it is worse: the status has to be read under `for update of subscription` to be
+ * trustworthy, and taking that lock before the `transaction` row's would reverse this
+ * method's lock order against itself — see the block comment on that read.
+ */
+class ChurnedSubscriptionRefusal extends Error {
+  constructor(readonly subscriptionStatus: string) {
+    super("markPaid: the subscription is churned, which is terminal");
+    this.name = "ChurnedSubscriptionRefusal";
+  }
+}
 
 /**
  * The statuses of a subscription that is still LIVE: one whose member is expected to pay
@@ -385,6 +420,36 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
   }
 
   /**
+   * See the port docstring. The same `subscription → membership_tier` join every
+   * unscoped read here uses, filtered to the community and to the statuses that mean
+   * "still entitled" — `RENEWABLE_STATUSES`, shared with `findCurrentSubscriptionForTier`
+   * so "which statuses are live" has one answer.
+   *
+   * `limit(1)`: it is an existence question, and a member with three live tiers must not
+   * cost three rows to answer it.
+   */
+  async hasLiveSubscriptionInCommunity(memberId: string, communityId: string): Promise<boolean> {
+    if (!UUID_PATTERN.test(memberId) || !UUID_PATTERN.test(communityId)) {
+      // A MISS, not a driver error — same rule as `findById`. The ids come out of an
+      // outbox payload, which is a jsonb column that can outlive a deploy.
+      return false;
+    }
+    const [row] = await this.db
+      .select({ id: subscriptions.id })
+      .from(subscriptions)
+      .innerJoin(membershipTiers, eq(subscriptions.tierId, membershipTiers.id))
+      .where(
+        and(
+          eq(subscriptions.memberId, memberId),
+          eq(membershipTiers.communityId, communityId),
+          inArray(subscriptions.status, RENEWABLE_STATUSES)
+        )
+      )
+      .limit(1);
+    return row !== undefined;
+  }
+
+  /**
    * The reminder message's context, in one read. See the port docstring for why the
    * join lives here rather than becoming two unscoped by-id methods on the community
    * and tier repositories.
@@ -471,8 +536,33 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
    *                        tier, so this one is `cancelled` rather than granted a
    *                        second time. The transaction still settles: the money
    *                        arrived, and hiding that hides a refund that is owed.
+   *   subscription_churned
+   *                      — the subscription is CHURNED, which is terminal. Nothing is
+   *                        written at all, including the transaction's settlement: the
+   *                        whole statement rolls back so the delivery can be replayed.
+   *                        See `ChurnedSubscriptionRefusal` and the `MarkPaidOutcome`
+   *                        entry for why resurrecting the row was the worse answer.
    */
   async markPaid(input: {
+    transactionId: string;
+    gatewayReferenceId: string;
+    paidAt: Date;
+    paymentMethod?: string | undefined;
+  }): Promise<MarkPaidOutcome> {
+    try {
+      return await this.markPaidInTransaction(input);
+    } catch (err) {
+      if (err instanceof ChurnedSubscriptionRefusal) {
+        // The transaction (or savepoint) is rolled back by the time we get here, so
+        // nothing this method touched survives. Reported as an outcome, because the
+        // caller has a decision to make and an exception would make it guess.
+        return { outcome: "subscription_churned", subscriptionStatus: err.subscriptionStatus };
+      }
+      throw err;
+    }
+  }
+
+  private async markPaidInTransaction(input: {
     transactionId: string;
     gatewayReferenceId: string;
     paidAt: Date;
@@ -570,6 +660,18 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
         .limit(1);
       if (!context) {
         throw new Error(`markPaid: subscription for transaction ${input.transactionId} not found`);
+      }
+
+      // CHURNED IS TERMINAL, AND THIS IS WHERE THAT IS TRUE RATHER THAN MERELY WRITTEN
+      // DOWN. Read under the row lock taken just above, so it cannot race the churn
+      // pass: whichever of the two gets the lock first, the other sees its result.
+      //
+      // Adding `status <> 'churned'` to the UPDATE below instead would not do, because
+      // zero affected rows there already MEANS `superseded` — the two cases would become
+      // indistinguishable, and a churned member's payment would be reported as a
+      // duplicate and thrown away, which is the failure this refusal exists to avoid.
+      if (context.status === CHURNED_SUBSCRIPTION) {
+        throw new ChurnedSubscriptionRefusal(context.status);
       }
 
       // `not exists` is IN the predicate, so a subscription that is being
