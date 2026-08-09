@@ -16,8 +16,17 @@
  * file's imports from that file's directory, so `apps/api`'s dependencies keep
  * resolving inside `apps/api`.
  */
-import { bootstrapWorker } from "../../api/src/worker-bootstrap";
+import { loadApiEnv } from "./api-env";
 import { installShutdownSignals, PollLoop, resolvePollIntervalMs } from "./poll-loop";
+
+// BEFORE the composition root is even imported. Bun auto-loads `.env` from the
+// current working directory, and this process runs from `apps/worker`, which has
+// no `.env` — so `apps/api/src/db/client.ts` threw `DATABASE_URL is not set` at
+// IMPORT time, before any statement here could run. A static import of
+// `worker-bootstrap` would be hoisted above this call and fail again, so the
+// import is dynamic and deliberately stays that way.
+loadApiEnv();
+const { bootstrapWorker } = await import("../../api/src/worker-bootstrap");
 
 const { processOutbox } = bootstrapWorker();
 const intervalMs = resolvePollIntervalMs(process.env.WORKER_POLL_INTERVAL_MS);
@@ -50,4 +59,11 @@ const uninstallSignals = installShutdownSignals(loop);
 console.log(`[worker] polling the outbox every ${intervalMs}ms`);
 await loop.run();
 uninstallSignals();
+
+// Closing the pool is what actually ends the process. postgres.js keeps its
+// connections — and therefore the event loop — alive, so without this the worker
+// printed "stopped" on SIGTERM and then hung until the orchestrator SIGKILLed it
+// (measured). The timeout bounds the wait on an in-flight query.
+const { sql } = await import("../../api/src/db/client");
+await sql.end({ timeout: 5 });
 console.log("[worker] stopped");
