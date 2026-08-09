@@ -147,13 +147,22 @@ export interface ChannelMembershipRepositoryPort {
    */
   recordGrant(membershipId: string, inviteLink: string): Promise<boolean>;
   /**
-   * Reopens the mint window after a lost link was successfully KILLED at the
-   * provider: clears `link_minted_at` and `mint_lease_until` so a retry may mint
-   * again.
+   * Reopens the mint window: clears `link_minted_at` and `mint_lease_until` so a
+   * retry may mint again.
    *
-   * Only ever legitimate once `revokeInviteLink` has SUCCEEDED. Calling it after a
-   * failed revoke would clear the one marker that stops a replacement being minted
-   * on top of a live orphan — the exact leak the marker exists to prevent.
+   * THE ONE PRECONDITION IS THAT NO CREDENTIAL CAN EXIST. Exactly two states satisfy
+   * it, and both are checked by the caller, not here:
+   *
+   *   1. A link was minted, could not be recorded, and WAS successfully revoked at
+   *      the provider. Calling this after a FAILED revoke would clear the one marker
+   *      that stops a replacement being minted on top of a live orphan.
+   *   2. `grantAccess` failed and the provider ANSWERED (a non-2xx, or a body saying
+   *      the method failed) — so nothing was minted at all. See `ProviderCallError`.
+   *      Not releasing here is what turned one transient provider blip into a
+   *      permanently ungrantable paying member.
+   *
+   * A failure with NO response received satisfies neither: a link may be live with
+   * nobody holding its value, so the marker must stay set.
    *
    * Conditional on `invite_link IS NULL`, so it cannot reopen a finished grant.
    */

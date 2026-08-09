@@ -1,4 +1,4 @@
-import { NotFoundError } from "../errors";
+import { NotFoundError, providerCallOutcome } from "../errors";
 import { redactLinks, safeErrorSummary } from "../log-safety";
 import type { ActivityLogRepositoryPort } from "../ports/activity-log-repository.port";
 import type { ChannelMembershipRepositoryPort } from "../ports/channel-membership-repository.port";
@@ -72,13 +72,21 @@ export interface GrantChannelAccessResult {
  *   (a) `revokeInviteLink` on the provider port, so a link that cannot be
  *       recorded can be UNMINTED instead of dropped. Without it there is
  *       nowhere to put a fix.
- *   (b) `link_minted_at`, written in the SAME statement as the claim, so
- *       "claimed, no link" stops being ambiguous. Marker set + no link means a
- *       link was minted and lost, and no replacement is ever minted: Telegram
- *       cannot enumerate a bot's links, so an orphan whose value we lost is
- *       unkillable, and a replacement would only add a second live key.
- *   (c) `mint_lease_until`, so a concurrent or reclaimed caller reports "grant
- *       in progress" rather than minting beside the holder.
+ *   (b) `link_minted_at`, written in the SAME statement as the claim. This is the
+ *       MUTUAL EXCLUSION: a second caller's `DO UPDATE` finds the marker already
+ *       set against the locked tuple and is excluded, so only one caller ever
+ *       holds the window. Marker set + no link means a link MAY be live and
+ *       unrecorded, and no replacement is minted while that holds: Telegram cannot
+ *       enumerate a bot's links, so an orphan whose value we lost is unkillable and
+ *       a replacement would only add a second live key.
+ *   (c) `mint_lease_until`, which CLASSIFIES the excluded caller — a live lease is
+ *       a retryable `mint_in_progress`, a lapsed one is a fail-closed `mint_lost`.
+ *       It does not provide the exclusion; (b) does.
+ *
+ * The marker is held only while a link may actually exist. A `grantAccess` failure
+ * that came back AS A RESPONSE minted nothing, and releases the window — see `mint`.
+ * Keeping it in that case traded a credential leak for a paying member who could
+ * never be granted access again.
  *
  * Measured before these existed, with `recordGrant` failing after a successful
  * mint: FIVE live single-use links at the provider, one membership row,
@@ -301,13 +309,18 @@ export class GrantChannelAccess {
       // from joining via ANY invite link, so a churned member who re-pays gets a
       // fresh link that does nothing until they are unbanned. The adapter owns the
       // ordering (`unbanChatMember` with `only_if_banned` first); this use-case
-      // just hands over the id it has. ABSENT rather than null when we never
-      // learned one — the adapter treats presence as "call unbanChatMember".
+      // just hands over the id it has.
+      //
+      // `mint` owns what happens if the provider throws — see its docstring for why
+      // that is not a one-liner.
       const previousExternalMemberId = claim.membership.externalMemberId;
-      const { inviteLink } = await provider.grantAccess({
+      const inviteLink = await this.mint({
+        provider,
+        membershipId: claim.membership.id,
+        channelId: channel.id,
         externalGroupId: channel.externalGroupId,
         memberWhatsappNumber: member.whatsappNumber,
-        ...(previousExternalMemberId === null ? {} : { previousExternalMemberId }),
+        previousExternalMemberId,
       });
 
       // FROM HERE UNTIL recordGrant RETURNS TRUE, a live credential exists that the
@@ -395,6 +408,90 @@ export class GrantChannelAccess {
       mintLost,
       automated: granted + alreadyGranted > 0,
     };
+  }
+
+  /**
+   * Calls the provider inside the mint window this caller already holds, and — on
+   * failure — decides whether the window may be handed back.
+   *
+   * THE MINT WINDOW IS OPENED BY `claim`, BEFORE ANY OF THIS RUNS. That ordering is
+   * what makes (b) of the invariant work, and it means a `grantAccess` that throws
+   * leaves `link_minted_at` set with ZERO links minted. Left alone, every later
+   * attempt reads that as `mint_in_progress` and then `mint_lost` and refuses to mint,
+   * so the pair can never be granted again except through a `revoke` — and there is no
+   * reissue tool. Measured: one transient provider failure followed by a perfectly
+   * healthy provider produced 5 retries with `minted=0`, a `failed` outbox row, ZERO
+   * WhatsApp notifications and ZERO `activity_log` rows, then three further `execute`
+   * calls that each minted nothing. A silent, permanent lockout of someone who paid.
+   *
+   * The earlier justification for leaving the marker set — "that window is a few
+   * milliseconds wide" — was simply wrong. The window spans the ENTIRE provider
+   * round-trip (up to two Telegram calls at a 15s timeout each) and covers every
+   * provider error, not just a process death between the claim and the call.
+   *
+   * So the two cases are told apart, and the adapter is the one that tells them apart
+   * because it is the only thing that knows (see `ProviderCallError`):
+   *
+   *   "rejected"      a response WAS received — a non-2xx, or a body saying the method
+   *                   failed — or the call never left the process. Nothing was minted,
+   *                   demonstrably. Release the window; the next attempt mints cleanly.
+   *   "indeterminate" no response, or one we could not read. A link may be live at the
+   *                   provider with nobody holding its value. KEEP the marker: this is
+   *                   the only state that justifies `mint_lost`.
+   *
+   * Releasing on `"rejected"` reopens none of the invariant's three paths. (a) is
+   * untouched. (b) still gives mutual exclusion, because releasing happens only when
+   * this caller minted nothing, so a caller that takes the window afterwards is still
+   * the only one holding a credential. (c) still classifies, and the `mint_lost` branch
+   * keeps every state that can hide a live link: a `recordGrant` failure whose cleanup
+   * revoke also failed, an unreadable success body, a timeout, a process death.
+   *
+   * Rethrows always. A failed mint is a failed grant, and the outbox row must come back.
+   */
+  private async mint(input: {
+    provider: MessagingProviderPort;
+    membershipId: string;
+    channelId: string;
+    externalGroupId: string;
+    memberWhatsappNumber: string;
+    previousExternalMemberId: string | null;
+  }): Promise<string> {
+    try {
+      const { inviteLink } = await input.provider.grantAccess({
+        externalGroupId: input.externalGroupId,
+        memberWhatsappNumber: input.memberWhatsappNumber,
+        // ABSENT rather than null when we never learned one — the adapter treats
+        // presence as "call unbanChatMember".
+        ...(input.previousExternalMemberId === null
+          ? {}
+          : { previousExternalMemberId: input.previousExternalMemberId }),
+      });
+      return inviteLink;
+    } catch (err) {
+      // `providerCallOutcome` defaults to "indeterminate", so an adapter that throws
+      // something unclassified still fails closed. Fail-closed by not knowing.
+      if (providerCallOutcome(err) === "rejected") {
+        await this.memberships.releaseMintWindow(input.membershipId);
+        console.warn(
+          `[gating] the provider REFUSED to mint an invite link, and answered, so nothing ` +
+            `was minted: membership=${input.membershipId} channel=${input.channelId}. The ` +
+            "mint window is reopened; the retry will issue a fresh link: " +
+            redactLinks(safeErrorSummary(err))
+        );
+      } else {
+        // No response, so a link may exist that we do not hold. The marker stays, which
+        // is what makes the next attempt report `mint_lost` instead of stacking a second
+        // credential on an unkillable first one.
+        console.error(
+          `[gating] a mint may or may not have happened: membership=${input.membershipId} ` +
+            `channel=${input.channelId} — the provider never answered, so an invite link ` +
+            "may be live at the provider with nobody holding its value. The mint marker is " +
+            "left SET, so no replacement will be minted and a person must reissue: " +
+            redactLinks(safeErrorSummary(err))
+        );
+      }
+      throw err;
+    }
   }
 
   /**

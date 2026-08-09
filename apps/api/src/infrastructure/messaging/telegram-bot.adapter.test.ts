@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { TelegramBotAdapter, TELEGRAM_DEFAULT_INVITE_TTL_SECONDS } from "./telegram-bot.adapter";
-import { UnsupportedOperationError } from "../../application/errors";
+import { ProviderCallError, UnsupportedOperationError } from "../../application/errors";
 
 /**
  * The token is INSIDE the request URL for every Bot API call
@@ -412,6 +412,123 @@ describe("TelegramBotAdapter error handling", () => {
 
     expect(error).toBeInstanceOf(Error);
     expect(error.message).not.toContain(BOT_TOKEN);
+  });
+
+  /**
+   * WHETHER A RESPONSE WAS RECEIVED, surfaced as a typed field.
+   *
+   * The adapter is the only thing that knows, and `GrantChannelAccess` cannot fix a
+   * transiently-failed grant without being told: it takes the mint window BEFORE
+   * calling `grantAccess`, and the marker it writes forbids minting for that (member,
+   * channel) forever unless something releases it. `"rejected"` means the provider
+   * answered and therefore minted nothing, so the window may be released and the retry
+   * mints cleanly. `"indeterminate"` means a link may be live with nobody holding it,
+   * so the grant must fail closed.
+   *
+   * Measured with no distinction: one transient Telegram failure followed by a healthy
+   * provider left the pair permanently ungrantable, silently.
+   *
+   * The classification is asserted on the FIELD, never on the message text. A caller
+   * that had to grep an error string for "timeout" would be deciding a paying member's
+   * access from a sentence that varies by runtime, proxy and Bun version.
+   */
+  it("classifies a non-2xx as `rejected` — Telegram answered, so nothing was minted", async () => {
+    for (const status of [400, 401, 429, 500, 502, 503]) {
+      const { fetchFn } = captureFetch({ ok: false, description: "nope" }, status);
+
+      const error = (await adapter(fetchFn).grantAccess(GRANT).catch((e) => e)) as Error;
+
+      expect(error).toBeInstanceOf(ProviderCallError);
+      expect((error as ProviderCallError).outcome).toBe("rejected");
+    }
+  });
+
+  it("classifies a 200 with ok: false as `rejected`", async () => {
+    const { fetchFn } = captureFetch({ ok: false, error_code: 400, description: "CHAT_ADMIN_REQUIRED" });
+
+    const error = (await adapter(fetchFn).grantAccess(GRANT).catch((e) => e)) as Error;
+
+    expect(error).toBeInstanceOf(ProviderCallError);
+    expect((error as ProviderCallError).outcome).toBe("rejected");
+  });
+
+  it("classifies a failed unban leg as `rejected`, so a re-grant is retryable", async () => {
+    // The unban runs BEFORE createChatInviteLink, so a rejection there means the mint
+    // never happened at all. Reading it as ambiguous would strand a churned member who
+    // re-paid — the exact population this leg exists to serve.
+    const { fetchFn } = captureRoutedFetch({
+      unbanChatMember: { body: { ok: false, error_code: 400, description: "not enough rights" } },
+    });
+
+    const error = (await adapter(fetchFn)
+      .grantAccess({ ...GRANT, previousExternalMemberId: "987654321" })
+      .catch((e) => e)) as Error;
+
+    expect(error).toBeInstanceOf(ProviderCallError);
+    expect((error as ProviderCallError).outcome).toBe("rejected");
+  });
+
+  it("classifies a locally refused member id as `rejected` — no request was made", async () => {
+    const { calls, fetchFn } = captureFetch({ ok: true, result: { invite_link: "https://t.me/+x" } });
+
+    const error = (await adapter(fetchFn)
+      .grantAccess({ ...GRANT, previousExternalMemberId: "+6281234567890" })
+      .catch((e) => e)) as Error;
+
+    expect(calls).toHaveLength(0);
+    expect(error).toBeInstanceOf(ProviderCallError);
+    expect((error as ProviderCallError).outcome).toBe("rejected");
+  });
+
+  it("classifies a request that never completed as `indeterminate`", async () => {
+    // What the 15s AbortSignal produces, and what a reset connection produces. The
+    // request may have reached Telegram and been acted on: a link could be live with
+    // nobody holding its value, which is the one state that must fail closed.
+    for (const thrown of [
+      Object.assign(new Error("The operation timed out."), { name: "TimeoutError" }),
+      Object.assign(new Error("The operation was aborted."), { name: "AbortError" }),
+      new TypeError("fetch failed"),
+    ]) {
+      const fetchFn = async () => {
+        throw thrown;
+      };
+
+      const error = (await adapter(fetchFn).grantAccess(GRANT).catch((e) => e)) as Error;
+
+      expect(error).toBeInstanceOf(ProviderCallError);
+      expect((error as ProviderCallError).outcome).toBe("indeterminate");
+      // The original is kept for diagnosis; the message interpolates nothing, because
+      // the URL that failed carries the bot token.
+      expect(error.cause).toBe(thrown);
+      expect(error.message).not.toContain(BOT_TOKEN);
+    }
+  });
+
+  it("classifies an unreadable SUCCESS as `indeterminate` — a link probably exists", async () => {
+    // `ok: true` with a shape we cannot read is the worst case: Telegram made a link
+    // and we do not hold its value, so it can never be revoked. Same for a 200 that is
+    // not JSON at all, where we cannot tell whether the method ran.
+    const bodies: { body: unknown; json?: boolean }[] = [
+      { body: { ok: true, result: {} } },
+      { body: { ok: true, result: { invite_link: "" } } },
+      { body: { ok: true, result: { invite_link: "javascript:alert(1)" } } },
+      { body: { ok: true } },
+    ];
+    for (const { body } of bodies) {
+      const { fetchFn } = captureFetch(body);
+      const error = (await adapter(fetchFn).grantAccess(GRANT).catch((e) => e)) as Error;
+      expect(error).toBeInstanceOf(ProviderCallError);
+      expect((error as ProviderCallError).outcome).toBe("indeterminate");
+    }
+
+    const htmlFetch = async () =>
+      new Response("<html>502 Bad Gateway</html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      });
+    const htmlError = (await adapter(htmlFetch).grantAccess(GRANT).catch((e) => e)) as Error;
+    expect(htmlError).toBeInstanceOf(ProviderCallError);
+    expect((htmlError as ProviderCallError).outcome).toBe("indeterminate");
   });
 
   it("never puts the token in an error, on any failure path", async () => {

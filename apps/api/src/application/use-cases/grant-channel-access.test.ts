@@ -506,7 +506,10 @@ describe("GrantChannelAccess", () => {
   it("propagates a provider failure so the outbox row retries", async () => {
     await seed();
     const { telegram, whatsapp, useCase } = wire();
-    telegram.failNextGrant = true;
+    // Explicit about WHICH failure: the provider answered, so nothing was minted.
+    // Which failure it is decides whether the retry this test is named for can do
+    // anything at all — see the pair of tests in the invariant block below.
+    telegram.failNextGrant = "rejected";
 
     await expect(
       useCase.execute({ subscriptionId: (await onlySubscription()).id })
@@ -517,6 +520,10 @@ describe("GrantChannelAccess", () => {
     const [membership] = await db.select().from(channelMemberships);
     expect(membership.inviteLink).toBeNull();
     expect(whatsapp.notifications).toHaveLength(0);
+    // And the retry CAN do the whole thing: the mint window was handed back, because
+    // this caller demonstrably minted nothing.
+    expect(membership.linkMintedAt).toBeNull();
+    expect(membership.mintLeaseUntil).toBeNull();
   });
 
   it("refuses to grant access for a subscription that is not active", async () => {
@@ -669,6 +676,162 @@ describe("GrantChannelAccess: at most one LIVE invite link per (member, channel)
     expect(reported.length).toBeGreaterThan(0);
     // The orphan is never named in the audit trail — it is still a live credential.
     expect(JSON.stringify(logs)).not.toContain(telegram.issuedLinks[0]);
+  });
+
+  /**
+   * THE OTHER HALF OF THE INVARIANT, and the one the first fix wave got wrong.
+   *
+   * The mint window is taken by `claim`, BEFORE the provider is called. So a
+   * `grantAccess` that throws leaves `link_minted_at` and `mint_lease_until` set with
+   * ZERO links minted. Keeping the marker in that case was justified in the fix report
+   * as "that window is a few milliseconds wide". It is not: it spans the whole provider
+   * round-trip and covers every provider error.
+   *
+   * Measured with the marker always kept, one transient failure then a healthy
+   * provider: 5 retries, outbox `failed`, `minted=0`, `LIVE=0`, marker still set, ZERO
+   * WhatsApp messages and ZERO `activity_log` rows — then three further `execute` calls
+   * that minted nothing. A paying member who could never be granted access again,
+   * silently, with no reissue tool. Pre-fix, the very next retry had recovered.
+   *
+   * So the tests below are a PAIR, and neither alone is the property:
+   *   - a failure the provider ANSWERED must release the window and recover;
+   *   - a failure that never completed must still fail closed.
+   */
+  it("recovers from a mint failure the provider ANSWERED: one live link, one grant", async () => {
+    await seed();
+    const { telegram, whatsapp, useCase } = wire();
+    const subscriptionId = (await onlySubscription()).id;
+    // A Telegram 429 or 5xx, or an `ok: false` — a response came back, so nothing was
+    // minted. The DEFAULT 60s lease, deliberately: this is the reviewer's first
+    // measurement, where the retry lands INSIDE the lease and used to be classified
+    // `mint_in_progress` forever.
+    telegram.failNextGrant = "rejected";
+
+    // Driven through the real outbox retry policy rather than a bare second `execute`,
+    // because "the retry recovers" is the property, and the retry is what production runs.
+    const outboxRepository = new DrizzleOutboxRepository(db);
+    await outboxRepository.enqueue({
+      eventType: OUTBOX_GRANT_ACCESS,
+      payload: { subscriptionId },
+    });
+    const processOutbox = new ProcessOutbox(
+      outboxRepository,
+      new Map([[OUTBOX_GRANT_ACCESS, grantAccessOutboxHandler(useCase)]]),
+      { maxAttempts: 5, baseBackoffMs: 0 }
+    );
+    for (let pass = 0; pass < 20; pass++) {
+      const [current] = await db.select().from(outbox);
+      if (current.status !== "pending") break;
+      await processOutbox.execute();
+    }
+
+    // The row COMPLETED. Before the fix it reached `failed` with attempts = 5.
+    const [row] = await db.select().from(outbox);
+    expect(row.status).toBe("sent");
+
+    // EXACTLY ONE live credential — the invariant still holds. The failed attempt
+    // minted nothing (the provider answered), so the successful retry is the only mint.
+    expect(telegram.issuedLinks).toHaveLength(1);
+    expect(telegram.liveInviteLinks).toHaveLength(1);
+    expect(telegram.revokedInviteLinks).toHaveLength(0);
+
+    // And it is a real, recorded, granted membership rather than a manual report.
+    const [membership] = await db.select().from(channelMemberships);
+    expect(membership.status).toBe("active");
+    expect(membership.inviteLink).toBe(telegram.liveInviteLinks[0]);
+    expect(membership.linkMintedAt).toBeNull();
+    expect(membership.mintLeaseUntil).toBeNull();
+
+    // The member is TOLD, with a link that works. Zero notifications was the silent
+    // half of the regression.
+    expect(whatsapp.notifications).toHaveLength(1);
+    expect(whatsapp.notifications[0].message).toContain(telegram.liveInviteLinks[0]);
+    const logs = await db.select().from(activityLogs);
+    expect(logs.filter((log) => log.eventType === "channel_access_granted")).toHaveLength(1);
+    // Never reported as needing a human — nothing was lost.
+    expect(logs.filter((log) => log.eventType === "access_manual_required")).toHaveLength(0);
+  });
+
+  it("STILL fails closed when the provider never answered — the marker is kept", async () => {
+    await seed();
+    // A zero-second lease so the next attempt reaches `mint_lost` immediately instead
+    // of after the default minute. In production the first retries report "in progress"
+    // and the later ones report manual — the same end state.
+    const { telegram, whatsapp, useCase } = wire({
+      memberships: new DrizzleChannelMembershipRepository(db, { mintLeaseSeconds: 0 }),
+    });
+    const subscriptionId = (await onlySubscription()).id;
+    // A timeout or an abort: the request may have reached Telegram and minted a link
+    // whose value nobody holds. `revokeChatInviteLink` needs that value and no Bot API
+    // method enumerates a bot's links, so a replacement would be a second unkillable key.
+    telegram.failNextGrant = "indeterminate";
+
+    await expect(useCase.execute({ subscriptionId })).rejects.toThrow();
+
+    // THE MARKER SURVIVES. This is what the release must not touch.
+    const [afterFailure] = await db.select().from(channelMemberships);
+    expect(afterFailure.linkMintedAt).not.toBeNull();
+    expect(afterFailure.inviteLink).toBeNull();
+
+    // And every later attempt refuses to mint, however many there are.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = await useCase.execute({ subscriptionId });
+      expect(result.granted).toBe(0);
+      expect(result.mintLost).toBe(1);
+      expect(result.automated).toBe(false);
+    }
+
+    expect(telegram.grants).toHaveLength(0);
+    expect(telegram.issuedLinks).toHaveLength(0);
+    expect(telegram.liveInviteLinks).toHaveLength(0);
+
+    // Fails closed, not silently: the member is told a human will add them and the
+    // creator's audit trail says why.
+    expect(whatsapp.notifications.length).toBeGreaterThan(0);
+    expect(whatsapp.notifications.at(-1)!.message).toContain(MANUAL_ADDITION_NOTICE);
+    const logs = await db.select().from(activityLogs);
+    expect(
+      logs.filter(
+        (log) =>
+          log.eventType === "access_manual_required" &&
+          JSON.stringify(log.metadata).includes("invite_link_minted_but_not_recorded")
+      ).length
+    ).toBeGreaterThan(0);
+  });
+
+  it("treats an UNCLASSIFIED provider throw as ambiguous, so a new adapter fails closed", async () => {
+    // `providerCallOutcome` defaults to "indeterminate". An adapter that has not been
+    // taught to classify — or one with a bug — must not get the permissive branch: the
+    // release is only ever earned by a positive "the provider answered me".
+    await seed();
+    const telegram = new FakeMessagingAdapter({ platform: "telegram", canGateAccess: true });
+    const whatsapp = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+    const unclassified: MessagingProviderPort = {
+      platform: telegram.platform,
+      capabilities: () => telegram.capabilities(),
+      grantAccess: async () => {
+        throw new Error("some adapter that says nothing about whether a response arrived");
+      },
+      revokeInviteLink: (input) => telegram.revokeInviteLink(input),
+      revokeAccess: (input) => telegram.revokeAccess(input),
+      notify: (input) => telegram.notify(input),
+    };
+    const useCase = new GrantChannelAccess(
+      new DrizzleSubscriptionRepository(db),
+      new DrizzleMemberRepository(db),
+      new DrizzleChannelRepository(db),
+      new DrizzleChannelMembershipRepository(db),
+      new DrizzleActivityLogRepository(db),
+      new Map<string, MessagingProviderPort>([["telegram", unclassified]]),
+      whatsapp
+    );
+
+    await expect(
+      useCase.execute({ subscriptionId: (await onlySubscription()).id })
+    ).rejects.toThrow();
+
+    const [membership] = await db.select().from(channelMemberships);
+    expect(membership.linkMintedAt).not.toBeNull();
   });
 
   it("mints ONE link for two concurrent executes of the same (member, channel)", async () => {

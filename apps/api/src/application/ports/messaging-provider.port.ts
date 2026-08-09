@@ -58,6 +58,20 @@ export interface MessagingProviderPort {
    * Issues a single-use, expiring invite. MUST throw UnsupportedOperationError
    * when capabilities().canGateAccess is false — a silent no-op would leave a
    * paying member believing they were granted access.
+   *
+   * ON FAILURE IT MUST SAY WHETHER A RESPONSE WAS RECEIVED, by throwing a
+   * `ProviderCallError` whose `outcome` is `"rejected"` (the provider answered with a
+   * failure, or the call never left this process — so NOTHING was minted) or
+   * `"indeterminate"` (the request never completed or completed unreadably — a link
+   * may exist at the provider that nobody holds).
+   *
+   * That is a real obligation, not documentation. `GrantChannelAccess` takes the mint
+   * window BEFORE calling this, and the marker it writes forbids minting for that
+   * (member, channel) forever unless something clears it. Only `"rejected"` allows it
+   * to be cleared, so an adapter that throws an unclassified error turns every
+   * transient provider blip into a permanently ungrantable paying member — measured,
+   * before this contract existed. Untyped throws are read as `"indeterminate"`, which
+   * is safe for the credential and expensive for the member; classify them.
    */
   grantAccess(input: GrantAccessInput): Promise<{ inviteLink: string }>;
   /**

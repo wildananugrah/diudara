@@ -1,4 +1,8 @@
-import { UnsupportedOperationError } from "../../application/errors";
+import {
+  ProviderCallError,
+  UnsupportedOperationError,
+  type ProviderCallOutcome,
+} from "../../application/errors";
 import type {
   GrantAccessInput,
   MessagingCapabilities,
@@ -27,7 +31,26 @@ export class FakeMessagingAdapter implements MessagingProviderPort {
   readonly revokedInviteLinks: RevokeInviteLinkInput[] = [];
   readonly revocations: RevokeAccessInput[] = [];
   readonly notifications: NotifyInput[] = [];
-  failNextGrant = false;
+  /**
+   * How the next `grantAccess` fails, and — crucially — WHETHER A RESPONSE WAS
+   * RECEIVED. `false` means it succeeds.
+   *
+   * A plain boolean would not do, because the two failures have opposite consequences
+   * for the mint window and therefore for whether a paying member can ever be granted
+   * access again:
+   *
+   *   "rejected"      the provider answered "no" (a Telegram 429/5xx, an `ok: false`).
+   *                   Nothing was minted, so `GrantChannelAccess` releases the mint
+   *                   window and the next attempt mints normally.
+   *   "indeterminate" the request never completed (a timeout, an abort). A link may be
+   *                   live at the provider with nobody holding its value, so the marker
+   *                   stays set and the grant fails closed.
+   *
+   * `true` is accepted and means `"indeterminate"`: the fail-closed direction, so a
+   * test that does not think about the distinction cannot accidentally assert the
+   * permissive behaviour.
+   */
+  failNextGrant: boolean | ProviderCallOutcome = false;
   failNextRevoke = false;
   /**
    * Makes `revokeInviteLink` fail once, so a test can cover the case where the
@@ -69,9 +92,14 @@ export class FakeMessagingAdapter implements MessagingProviderPort {
 
   async grantAccess(input: GrantAccessInput): Promise<{ inviteLink: string }> {
     this.assertCanGate("grant access");
-    if (this.failNextGrant) {
+    if (this.failNextGrant !== false) {
+      const outcome: ProviderCallOutcome =
+        this.failNextGrant === true ? "indeterminate" : this.failNextGrant;
       this.failNextGrant = false;
-      throw new Error("fake messaging provider: grantAccess failed");
+      throw new ProviderCallError(
+        `fake messaging provider: grantAccess failed (${outcome})`,
+        outcome
+      );
     }
     this.grants.push(input);
     this.counter += 1;

@@ -1,4 +1,4 @@
-import { UnsupportedOperationError } from "../../application/errors";
+import { ProviderCallError, UnsupportedOperationError } from "../../application/errors";
 import type {
   GrantAccessInput,
   MessagingCapabilities,
@@ -180,26 +180,69 @@ export class TelegramBotAdapter implements MessagingProviderPort {
   }
 
   /**
-   * One Bot API call, with every failure turned into a throw.
+   * One Bot API call, with every failure turned into a CLASSIFIED throw.
    *
    * Telegram reports plenty of failures as HTTP 200 with `ok: false`, so the
    * status check alone is not enough — and returning a "successful" result from an
    * unrecognised body is how `String(body.id)` produced the literal invite link
    * "undefined" in Phase 3.
+   *
+   * EVERY THROW CARRIES A `ProviderCallOutcome`, and the line between them is whether
+   * a response came back (see the port's `grantAccess` docstring for why the caller
+   * needs it — a `"rejected"` mint failure reopens the mint window, an
+   * `"indeterminate"` one leaves a paying member needing a manual reissue):
+   *
+   *   fetch itself threw    -> indeterminate  the request may have reached Telegram and
+   *                                           been acted on; an AbortSignal timeout at
+   *                                           15s lands here, and so does a reset
+   *                                           connection. WE DO NOT KNOW.
+   *   non-2xx status        -> rejected       Telegram answered and refused. A 429 or a
+   *                                           5xx did not create anything.
+   *   200, body not JSON    -> indeterminate  a proxy or error page. The Bot API may or
+   *                                           may not have run the method.
+   *   200, "ok": false      -> rejected       Telegram answered that the method failed.
+   *   200, "ok": true       -> success, or `requireInviteLink` throws indeterminate:
+   *                                           a link probably EXISTS and we cannot read
+   *                                           its value, which is the worst case and
+   *                                           must fail closed.
+   *
+   * The 5xx-is-rejected call is worth stating plainly: a gateway 502 in front of
+   * Telegram could in principle sit on a request that succeeded. But Telegram's own
+   * documented failures (429 rate limits, 5xx) come back as a status with `ok: false`
+   * before the method runs, and treating them as ambiguous is what made a single
+   * transient blip permanently poison a grant. The residual risk is bounded by
+   * `member_limit: 1` and the 24h expiry; the alternative was measured to strand
+   * paying members.
    */
   private async call(method: string, body: Record<string, unknown>): Promise<unknown> {
-    const response = await this.fetchFn(`${this.baseUrl}/bot${this.botToken}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchFn(`${this.baseUrl}/bot${this.botToken}/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      // No response at all: a timeout, an abort, a DNS or TLS failure, a reset. The
+      // request may have been delivered and acted on, so this is the ambiguous case.
+      // `cause` is kept for diagnosis; nothing is interpolated, since the URL that
+      // failed carries the bot token.
+      throw new ProviderCallError(
+        `telegram ${method} never completed: no HTTP response was received (a timeout, ` +
+          "abort or connection failure). Whether Telegram acted on the request is UNKNOWN.",
+        "indeterminate",
+        { cause: err }
+      );
+    }
 
     if (!response.ok) {
-      throw new Error(
+      throw new ProviderCallError(
         `telegram ${method} failed with status ${response.status} ` +
           "(no request or response detail is included on purpose: the bot token is part " +
-          "of every Bot API request path)"
+          "of every Bot API request path)",
+        // Telegram answered. It did not do the thing.
+        "rejected"
       );
     }
 
@@ -207,17 +250,21 @@ export class TelegramBotAdapter implements MessagingProviderPort {
     try {
       parsed = await response.json();
     } catch {
-      throw new Error(
+      throw new ProviderCallError(
         `telegram ${method} returned a 200 whose body is not JSON — most likely a proxy ` +
-          "or error page rather than the Bot API"
+          "or error page rather than the Bot API",
+        // A 200 we cannot read is not evidence that nothing happened.
+        "indeterminate"
       );
     }
 
     if (!isRecord(parsed) || parsed.ok !== true) {
-      throw new Error(
+      throw new ProviderCallError(
         `telegram ${method} failed: the response does not carry "ok": true. The provider ` +
           "description is deliberately not repeated here — see the SECRET HANDLING note in " +
-          "telegram-bot.adapter.ts"
+          "telegram-bot.adapter.ts",
+        // Telegram's own way of saying the method failed.
+        "rejected"
       );
     }
 
@@ -235,30 +282,40 @@ export class TelegramBotAdapter implements MessagingProviderPort {
    * fail loudly.
    *
    * The scheme check is here because the member is told to open it.
+   *
+   * Every refusal here is `"indeterminate"`, and that is the pessimistic answer on
+   * purpose: these are all reached AFTER Telegram answered `ok: true`, so a link very
+   * probably EXISTS and this adapter cannot read its value. That is precisely the
+   * unkillable-orphan case (`revokeChatInviteLink` needs the value; no Bot API method
+   * enumerates a bot's links), so the mint window must stay closed and a person must
+   * reissue.
    */
   private requireInviteLink(result: unknown): string {
     if (!isRecord(result)) {
-      throw new Error(
+      throw new ProviderCallError(
         'telegram createChatInviteLink returned no result object, so it carries no "invite_link" ' +
           "(expected { ok: true, result: { invite_link } }) — see the UNVERIFIED warning in " +
-          "telegram-bot.adapter.ts"
+          "telegram-bot.adapter.ts",
+        "indeterminate"
       );
     }
 
     const value = result.invite_link;
     if (typeof value !== "string" || value.length === 0) {
-      throw new Error(
+      throw new ProviderCallError(
         'telegram createChatInviteLink returned a result with no usable "invite_link" ' +
           "(expected a non-empty string). The response shape does not match what this " +
-          "adapter assumes — see the UNVERIFIED warning in telegram-bot.adapter.ts"
+          "adapter assumes — see the UNVERIFIED warning in telegram-bot.adapter.ts",
+        "indeterminate"
       );
     }
 
     if (!value.startsWith("https://") && !value.startsWith("http://")) {
-      throw new Error(
+      throw new ProviderCallError(
         'telegram createChatInviteLink returned an "invite_link" that is not an http(s) URL. ' +
           "It is sent to a member to open, so a javascript: or data: value would be handed " +
-          "straight to them. Refusing it."
+          "straight to them. Refusing it.",
+        "indeterminate"
       );
     }
 
@@ -271,20 +328,28 @@ export class TelegramBotAdapter implements MessagingProviderPort {
    * wrong — checking locally turns a confusing provider error ("user not found",
    * or worse, an action against a different account) into a clear one, and avoids
    * spending an HTTP call to learn it.
+   *
+   * `"rejected"`, because no request was made AT ALL: this runs before `call`, so
+   * nothing can have been minted. It matters on the `grantAccess` path — a bad
+   * `external_member_id` on the unban leg would otherwise be read as ambiguous and
+   * permanently forbid minting for a member whose record is merely wrong, which is a
+   * repairable problem that must not cost them their access forever.
    */
   private requireTelegramUserId(value: string): number {
     if (!TELEGRAM_USER_ID.test(value)) {
-      throw new Error(
+      throw new ProviderCallError(
         `telegram requires an integer user id, and "${value}" is not one. This is the ` +
           "provider member id recorded at grant time; a WhatsApp number or an empty value " +
-          "here means our own record is wrong."
+          "here means our own record is wrong.",
+        "rejected"
       );
     }
     const parsed = Number(value);
     if (!Number.isSafeInteger(parsed)) {
-      throw new Error(
+      throw new ProviderCallError(
         `telegram user id "${value}" is outside the safe integer range, so it cannot be ` +
-          "sent without corruption."
+          "sent without corruption.",
+        "rejected"
       );
     }
     return parsed;
