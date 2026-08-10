@@ -208,16 +208,27 @@ export class SendAiMessage {
  * (`MAX_MESSAGE_LENGTH` in routes/ai.ts caps any single message at 4000
  * characters), so keeping it unconditionally cannot itself blow the budget.
  *
- * INVARIANT THIS FUNCTION MUST NEVER BREAK: the result strictly alternates
- * `user`/`assistant` and starts with `user`. Several models proxied through
- * OpenRouter (Anthropic's among them) enforce strict role alternation and
- * reject a request outright otherwise — and since this adapter is
- * unverified against a live API, a shape error like that is exactly the
- * class of failure nobody would catch before a creator hit it (finding from
- * review round 2). A naive "always prepend `first`" implementation breaks
- * this: whether the recency window's own leading message happens to be
- * `user` or `assistant` depends only on where the character budget runs
- * out, so prepending `first` unconditionally can and did produce
+ * BEST-EFFORT ALTERNATION — NOT an invariant this function itself guarantees.
+ * It tries hard to make the result start with `user` and strictly alternate
+ * `user`/`assistant`, because several models proxied through OpenRouter
+ * (Anthropic's among them) enforce strict role alternation and reject a
+ * request outright otherwise. But `history` can legitimately arrive already
+ * ending in TWO consecutive `user` messages — a turn that failed after the
+ * user's message was persisted but before any reply (design spec §10: that
+ * message is kept, never dropped or retyped) followed by the creator's next
+ * attempt — and this function has no way to fix that: `[user, user]` in is
+ * `[user, user]` out, unchanged and non-alternating. That is harmless, NOT a
+ * bug to chase here: `buildMessages` (ai-prompt.ts) is the function that
+ * actually owns this invariant over the assembled list, via its own
+ * `collapseConsecutiveSameRole` step (see ai-prompt.ts:83-89) — do not read
+ * this docstring as license to delete that step; it is the real guarantor,
+ * not a redundant safety net. What follows describes what THIS function
+ * does try to do, for the common case where it is sufficient on its own:
+ *
+ *  A naive "always prepend `first`" implementation would still break even
+ * the common case: whether the recency window's own leading message happens
+ * to be `user` or `assistant` depends only on where the character budget
+ * runs out, so prepending `first` unconditionally can and did produce
  * `["user","user","assistant","user","assistant",…]` on a realistic
  * alternating transcript. The fix:
  *

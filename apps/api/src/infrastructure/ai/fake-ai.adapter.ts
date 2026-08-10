@@ -103,8 +103,24 @@ function stripJsonFence(raw: string): string {
  * `converse` genuinely round-trips through `JSON.parse` and
  * `communityDraftSchema` for every behaviour that claims to attempt a draft
  * — it does not shortcut straight to a hand-built `AiTurn` — so a test
- * against this fake exercises the same parse-or-throw pipeline
- * `OpenRouterAiAdapter` will run against real model text.
+ * against this fake DOES exercise real parse-and-validate failures (a
+ * missing field, a truncated body, and so on land here exactly as they
+ * would there).
+ *
+ * What it does NOT exercise, unlike `OpenRouterAiAdapter.parseAttemptedDraft`
+ * (openrouter-ai.adapter.ts:279):
+ *   - The `startsWith("{")` heuristic (openrouter-ai.adapter.ts:283) that
+ *     decides WHETHER a draft was attempted at all. This fake's `switch` on
+ *     `nextBehaviour` picks the branch directly — `"prose"`, for instance,
+ *     is wired to run PROSE_REPLY through the JSON pipeline and get a
+ *     `"malformed"` throw (see the tests that comment `// malformed` next to
+ *     it), where the real adapter's heuristic would instead see no leading
+ *     `{` and return it as an ordinary conversational reply, `draft: null`,
+ *     no throw at all. A caller that only ever exercises this fake would
+ *     never see that divergence.
+ *   - `requireBoundedReply` (openrouter-ai.adapter.ts:63), which the real
+ *     adapter runs over every `reply` it returns. This fake never bounds
+ *     `reply`'s length at all.
  */
 export class FakeAiAdapter implements AiProviderPort {
   nextBehaviour: FakeAiBehaviour = "draft";
