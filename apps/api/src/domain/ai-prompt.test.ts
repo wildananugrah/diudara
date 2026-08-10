@@ -82,4 +82,99 @@ describe("buildMessages", () => {
 
     expect(history).toEqual(historyCopy);
   });
+
+  it("never mutates a caller's message OBJECT, even when it is collapsed into another", () => {
+    // The array-identity check above cannot catch this: historyCopy shares
+    // the same object references as history, so an in-place content
+    // mutation would show up on both sides and the test would pass for the
+    // wrong reason. Assert directly on the original object's own field.
+    const original = { role: "user" as const, content: "Pesan yang gagal" };
+    const history = [original];
+
+    buildMessages(history, "Pesan baru setelah gagal");
+
+    expect(original.content).toBe("Pesan yang gagal");
+  });
+});
+
+/**
+ * THE INVARIANT review round 3 added: the final list `buildMessages`
+ * produces must start with `system`, be followed by `user`, and contain no
+ * two ADJACENT messages of the same role — enforced HERE, not only by
+ * `boundHistory`'s window-shaping, because a retry-exhausted turn (design
+ * spec §5.1's malformed output is a NORMAL, expected failure, not exotic)
+ * leaves a dangling unanswered `user` message in storage, and the next
+ * turn's new message is then a SECOND consecutive `user` — a shape several
+ * models proxied through OpenRouter (Anthropic's among them) reject
+ * outright. See `SendAiMessage`'s own test file for the end-to-end version
+ * of this scenario, asserted against what the fake provider actually
+ * received rather than against this function in isolation.
+ */
+describe("buildMessages — collapses consecutive same-role messages (review round 3)", () => {
+  it("collapses two consecutive user messages into one, joined by a blank line", () => {
+    // Simulates a retry-exhausted turn: history ends in a dangling,
+    // unanswered user message, and the caller's new message is also user.
+    const history = [{ role: "user" as const, content: "pesan yang gagal direspons" }];
+
+    const messages = buildMessages(history, "pesan baru setelah gagal");
+
+    expect(messages).toHaveLength(2); // system + one collapsed user message
+    expect(messages[0].role).toBe("system");
+    expect(messages[1]).toEqual({
+      role: "user",
+      content: "pesan yang gagal direspons\n\npesan baru setelah gagal",
+    });
+  });
+
+  it("collapses three consecutive user messages (two failed retries in a row)", () => {
+    const history = [
+      { role: "user" as const, content: "percobaan pertama" },
+      { role: "user" as const, content: "percobaan kedua" },
+    ];
+
+    const messages = buildMessages(history, "percobaan ketiga");
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1].content).toBe(
+      "percobaan pertama\n\npercobaan kedua\n\npercobaan ketiga"
+    );
+  });
+
+  it("does not collapse anything when roles already alternate normally", () => {
+    const history = [
+      { role: "user" as const, content: "halo" },
+      { role: "assistant" as const, content: "hai, ceritakan tentang komunitasmu" },
+    ];
+
+    const messages = buildMessages(history, "pesan baru");
+
+    expect(messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
+    expect(messages.map((m) => m.content)).toEqual([
+      SYSTEM_PROMPT,
+      "halo",
+      "hai, ceritakan tentang komunitasmu",
+      "pesan baru",
+    ]);
+  });
+
+  it("the result never has two adjacent messages of the same role, for any input", () => {
+    const history = [
+      { role: "user" as const, content: "a" },
+      { role: "user" as const, content: "b" },
+      { role: "assistant" as const, content: "c" },
+      { role: "assistant" as const, content: "d" },
+      { role: "user" as const, content: "e" },
+    ];
+
+    const messages = buildMessages(history, "f");
+
+    for (let i = 1; i < messages.length; i++) {
+      expect(messages[i].role).not.toBe(messages[i - 1].role);
+    }
+    // Nothing dropped: every letter is still present somewhere.
+    const combined = messages.map((m) => m.content).join("\n\n");
+    for (const letter of ["a", "b", "c", "d", "e", "f"]) {
+      expect(combined).toContain(letter);
+    }
+  });
 });

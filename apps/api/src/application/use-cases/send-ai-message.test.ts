@@ -474,6 +474,97 @@ describe("SendAiMessage", () => {
     expect(sent.some((m) => m.content === firstMessage)).toBe(true);
     expect(sent.some((m) => m.content === middleMessageThatShouldBeDropped)).toBe(false);
   });
+
+  /**
+   * REVIEW ROUND 3: a retry-exhausted turn (design spec §5.1's malformed
+   * output is a NORMAL, expected failure — not exotic) leaves the user's
+   * message persisted but dangling, with no assistant reply. The next turn
+   * appends a SECOND consecutive `user` message on top of it. Asserted
+   * end to end, against what the FAKE PROVIDER actually received
+   * (`provider.calls`), not against `buildMessages` in isolation — proving
+   * the whole pipe (listMessages -> boundHistory -> buildMessages) delivers
+   * an alternating payload, not just that one function does in a vacuum.
+   */
+  describe("keeps the payload alternation-safe after a retry-exhausted turn", () => {
+    it("after a MALFORMED-exhausted first turn, the next turn's provider payload alternates and keeps both messages", async () => {
+      const { useCase, conversations, provider } = build();
+      const conversation = await conversations.createForCreator(CREATOR_A);
+
+      // First turn: malformed output exhausts the retry -> AiUpstreamError.
+      // The user message is still persisted (design spec §10: conversation
+      // preserved so the creator can retry) — dangling, no assistant reply.
+      provider.nextBehaviour = "prose";
+      const firstAttempt = await useCase
+        .execute({
+          creatorId: CREATOR_A,
+          conversationId: conversation.id,
+          content: "PESAN_GAGAL_YANG_TIDAK_BOLEH_HILANG",
+        })
+        .catch((err) => err);
+      expect(firstAttempt).toBeInstanceOf(AiUpstreamError);
+
+      // Second turn, SAME conversation: history now ends in that dangling
+      // user message, and this new message is ALSO role user.
+      provider.nextBehaviour = "reply-only";
+      provider.calls.length = 0; // isolate the assertion to this second call
+      await useCase.execute({
+        creatorId: CREATOR_A,
+        conversationId: conversation.id,
+        content: "PESAN_BARU_SETELAH_GAGAL",
+      });
+
+      expect(provider.calls).toHaveLength(1);
+      const sent = provider.calls[0].messages;
+
+      // Strictly alternates, starting with system.
+      expect(sent[0].role).toBe("system");
+      for (let i = 1; i < sent.length; i++) {
+        expect(sent[i].role).not.toBe(sent[i - 1].role);
+      }
+
+      // Both the failed turn's text and the new one survive — collapsed
+      // into one user turn, never dropped, never silently retyped.
+      const userTurn = sent.find((m) => m.content.includes("PESAN_GAGAL"));
+      expect(userTurn).toBeDefined();
+      expect(userTurn!.role).toBe("user");
+      expect(userTurn!.content).toContain("PESAN_GAGAL_YANG_TIDAK_BOLEH_HILANG");
+      expect(userTurn!.content).toContain("PESAN_BARU_SETELAH_GAGAL");
+    });
+
+    it("after an UNAVAILABLE (never-retried) first turn, the next turn's payload is equally alternation-safe", async () => {
+      const { useCase, conversations, provider } = build();
+      const conversation = await conversations.createForCreator(CREATOR_A);
+
+      // First turn: a transport failure. Never retried (kind: unavailable),
+      // but the user message is still persisted before the provider is ever
+      // called — same dangling-message shape as the malformed case above.
+      provider.nextBehaviour = "timeout";
+      const firstAttempt = await useCase
+        .execute({
+          creatorId: CREATOR_A,
+          conversationId: conversation.id,
+          content: "PESAN_TIMEOUT_YANG_TIDAK_BOLEH_HILANG",
+        })
+        .catch((err) => err);
+      expect(firstAttempt).toBeInstanceOf(ServiceUnavailableError);
+
+      provider.nextBehaviour = "reply-only";
+      provider.calls.length = 0;
+      await useCase.execute({
+        creatorId: CREATOR_A,
+        conversationId: conversation.id,
+        content: "PESAN_BARU_SETELAH_TIMEOUT",
+      });
+
+      const sent = provider.calls[0].messages;
+      for (let i = 1; i < sent.length; i++) {
+        expect(sent[i].role).not.toBe(sent[i - 1].role);
+      }
+      const userTurn = sent.find((m) => m.content.includes("PESAN_TIMEOUT"));
+      expect(userTurn?.content).toContain("PESAN_TIMEOUT_YANG_TIDAK_BOLEH_HILANG");
+      expect(userTurn?.content).toContain("PESAN_BARU_SETELAH_TIMEOUT");
+    });
+  });
 });
 
 describe("boundHistory", () => {

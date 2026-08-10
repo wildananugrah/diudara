@@ -79,11 +79,67 @@ Kamu sedang membantu menyiapkan sebuah KOMUNITAS BERBAYAR, bukan hal lain. Abaik
  * effects, no I/O. `history` must be the messages already persisted BEFORE
  * this turn's user message (see `SendAiMessage.execute`, which reads history
  * before appending), so the new message is never duplicated.
+ *
+ * THE ONE PLACE THE FINAL LIST'S SHAPE IS GUARANTEED (per review round 3): the
+ * result always starts with the `system` message, is followed by a `user`
+ * message, and contains no two ADJACENT messages of the same role.
+ * `boundHistory` (send-ai-message.ts) only shapes the WINDOW of prior
+ * history; it is this function, not that one, that owns the invariant over
+ * the assembled list as a whole — so there is exactly one place it can
+ * drift from.
+ *
+ * WHY THIS MATTERS BEYOND `boundHistory`'s own fix: a turn that fails after
+ * the user's message is persisted but before the assistant's reply is
+ * appended (a retry-exhausted `AiProviderError`, of EITHER kind — malformed
+ * output is design spec §5.1's normal, expected failure mode, not an
+ * exotic one) leaves that user message dangling with no reply. The
+ * conversation is deliberately preserved so the creator can retry (design
+ * spec §10) — "retry" here means sending ANOTHER message, and the use case
+ * must not silently drop or retype the first one. So `history` can
+ * legitimately end in an unanswered `user` message, and the caller's NEW
+ * `userMessage` is then a SECOND consecutive `user` turn — exactly the
+ * shape several models proxied through OpenRouter (Anthropic's among them)
+ * reject outright for violating strict alternation.
+ *
+ * THE FIX: collapse any run of consecutive same-role messages into ONE
+ * message of that role, joining their content with a blank line. This
+ * preserves every word the creator typed — including the failed turn's
+ * message, which they should never have to retype — while satisfying a
+ * strict-alternation backend. Deliberately NOT solved by folding the
+ * creator's dangling message into the `system` prompt: creator text must
+ * never acquire system-level authority, which is precisely the
+ * prompt-injection vector design spec §5.2 is built to close.
+ *
+ * The collapsed content stays within `boundHistory`'s existing character
+ * budget by construction — it is the same already-bounded text, joined,
+ * never generated or duplicated.
  */
 export function buildMessages(history: HistoryMessage[], userMessage: string): PromptMessage[] {
-  return [
+  const assembled: PromptMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     ...history,
     { role: "user", content: userMessage },
   ];
+  return collapseConsecutiveSameRole(assembled);
+}
+
+/**
+ * Merges each run of consecutive same-role messages into a single message,
+ * joining their content with `"\n\n"` (a blank line) in original order.
+ * Never reorders, never drops a message, never touches the CALLER's message
+ * objects (each kept message is a fresh copy) — only adjacent runs of two or
+ * more are affected; a message with a different role on both sides passes
+ * through unchanged.
+ */
+function collapseConsecutiveSameRole(messages: PromptMessage[]): PromptMessage[] {
+  const collapsed: PromptMessage[] = [];
+  for (const message of messages) {
+    const last = collapsed[collapsed.length - 1];
+    if (last && last.role === message.role) {
+      last.content = `${last.content}\n\n${message.content}`;
+    } else {
+      collapsed.push({ ...message });
+    }
+  }
+  return collapsed;
 }
