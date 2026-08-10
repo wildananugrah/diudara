@@ -4,6 +4,7 @@ import ChannelsPage from "./ChannelsPage";
 import { renderPage, stubFetch, TEST_COMMUNITY } from "../testing";
 
 const CHANNELS_PATH = `/communities/${TEST_COMMUNITY.id}/channels`;
+const COMMUNITY_PATH = `/communities/${TEST_COMMUNITY.id}`;
 
 const TELEGRAM_CHANNEL = {
   id: "channel-1",
@@ -40,7 +41,7 @@ afterEach(() => {
 describe("ChannelsPage", () => {
   it("lists the connected groups", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       { path: CHANNELS_PATH, body: [TELEGRAM_CHANNEL] },
     ]);
 
@@ -54,7 +55,7 @@ describe("ChannelsPage", () => {
 
   it("shows an empty state that says what to do next", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       { path: CHANNELS_PATH, body: [] },
     ]);
 
@@ -65,7 +66,7 @@ describe("ChannelsPage", () => {
 
   it("says on the form that Telegram needs the NUMERIC chat id and where to find it", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       { path: CHANNELS_PATH, body: [] },
     ]);
 
@@ -87,7 +88,7 @@ describe("ChannelsPage", () => {
 
   it("refuses an @username for Telegram without asking the API", async () => {
     const stub = stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       { path: CHANNELS_PATH, body: [] },
     ]);
 
@@ -103,7 +104,7 @@ describe("ChannelsPage", () => {
 
   it("accepts a numeric Telegram chat id", async () => {
     const stub = stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       { path: CHANNELS_PATH, body: [] },
       { method: "POST", path: CHANNELS_PATH, status: 201, body: TELEGRAM_CHANNEL },
     ]);
@@ -127,7 +128,7 @@ describe("ChannelsPage", () => {
       externalGroupId: "120363123456789@g.us",
     };
     const stub = stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       { path: CHANNELS_PATH, body: [] },
       { method: "POST", path: CHANNELS_PATH, status: 201, body: whatsapp },
     ]);
@@ -148,7 +149,7 @@ describe("ChannelsPage", () => {
 
   it("says WhatsApp cannot remove members automatically", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       {
         path: CHANNELS_PATH,
         body: [{ ...TELEGRAM_CHANNEL, platform: "whatsapp", externalGroupId: "120363@g.us" }],
@@ -162,7 +163,7 @@ describe("ChannelsPage", () => {
 
   it("renders a 409 inline with the form still filled in", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       { path: CHANNELS_PATH, body: [] },
       {
         method: "POST",
@@ -183,7 +184,7 @@ describe("ChannelsPage", () => {
 
   it("surfaces the API's own numeric-chat-id message if it ever gets past the form", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       { path: CHANNELS_PATH, body: [] },
       {
         method: "POST",

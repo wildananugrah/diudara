@@ -1,100 +1,156 @@
+import { apiFetch, DashboardApiError } from "./apiClient";
 import { getCreator, notifyAuthChange } from "./auth";
 
 /**
- * WHETHER THIS CREATOR CAN TAKE MONEY — as far as the browser is able to know.
+ * WHETHER THIS CREATOR CAN TAKE MONEY, as the SERVER knows it.
  *
- * ================= A GAP IN THE API, RECORDED HONESTLY =================
- * There is NO endpoint that reports payment-account state. `POST /payment-account`
- * is the only route on it; `creator.xendit_account_id` is read by
- * `StartCheckout` and by `CreatePaymentAccount` and is never returned to a client
- * — not by `POST /auth/login`, not by `GET /communities`.
+ * This used to be guessed from `localStorage`, because no endpoint reported
+ * payment-account state: a creator who connected on a laptop still looked
+ * unconnected on their phone. `GET /payment-account` (apps/api's
+ * `GetPaymentAccountStatus`) closed that gap by reading
+ * `creator.xendit_account_id` on the server, so this module now caches THE
+ * SERVER'S ANSWER in memory rather than one browser's memory of its own past
+ * POSTs.
  *
- * So this module records what THIS BROWSER has observed, and nothing more:
+ * Three states, matching the column's three states 1:1 (see
+ * apps/api/src/domain/payment-account.ts):
  *
- *   "connected"   — a POST answered 201, or answered 409 "already connected".
- *   "in_progress" — a POST answered 409 "connection is already in progress".
- *   "unknown"     — nothing has been observed here. NOT "not connected".
+ *   "connected"     — `isConnectedPaymentAccount` — money can settle.
+ *   "provisioning"  — `isProvisioningPlaceholder` — a connect attempt (from
+ *                      ANY device) is claimed but not finished.
+ *   "not_connected" — neither of the above, including "the GET has not
+ *                      answered yet or failed" — this fails towards SHOWING
+ *                      the warning, the same direction the old localStorage
+ *                      design failed in for its "unknown" state.
  *
- * The distinction between `unknown` and "not connected" is the whole reason this
- * is a tri-state and not a boolean. A creator who connected payments last month on
- * their laptop and opens the dashboard on their phone is CONNECTED, and a UI that
- * told them "payments are not connected" would be lying to them. So the notice
- * says what is true — that this browser has no confirmation — and tells them the
- * one safe way to find out: press "Hubungkan pembayaran", which answers "sudah
- * terhubung" if it is already done.
+ * PROBING WITH `POST /payment-account` IS STILL NOT AN OPTION and this module
+ * never calls it — see `CreatePaymentAccount`'s docstring for why: it
+ * provisions a Xendit MANAGED sub-account, a KYC entity with no delete
+ * endpoint. Only a person pressing "Hubungkan pembayaran" on `AccountPage`
+ * may call the POST; this module only ever GETs, and only when nothing is
+ * known yet.
  *
- * PROBING WITH A POST IS NOT AN OPTION and must never be added. If the account is
- * absent, that request CREATES a Xendit MANAGED sub-account — a KYC entity with no
- * delete endpoint — so an automatic probe on page load would permanently provision
- * accounts for creators who never asked. It has to be a button a person presses.
- *
- * What would fix this properly: a `GET /payment-account` returning
- * `{ connected: boolean }` (or `xenditAccountId` on the login/`GET /communities`
- * response). Escalated in the task report rather than invented here.
- * =======================================================================
+ * KEYED BY CREATOR ID, in memory, for the same reason the old localStorage key
+ * was: two creators can share a browser, and one's connected account must
+ * never suppress — or, now, leak into — the other's.
  */
-export type PaymentAccountState = "unknown" | "connected" | "in_progress";
+export type PaymentAccountState = "loading" | "connected" | "provisioning" | "not_connected";
 
-/**
- * Per-creator, because two creators can share a browser and one's connected
- * account must never suppress the other's warning.
- */
-function storageKey(creatorId: string): string {
-  return `diudara.dashboard.payments.${creatorId}`;
+interface PaymentAccountStatusResponse {
+  connected: boolean;
+  provisioning: boolean;
 }
 
+function fromResponse(body: PaymentAccountStatusResponse): PaymentAccountState {
+  if (body.connected) return "connected";
+  if (body.provisioning) return "provisioning";
+  return "not_connected";
+}
+
+let cacheByCreator = new Map<string, PaymentAccountState>();
+/**
+ * Bumped on every write this module makes for ANY creator, and captured by
+ * `ensurePaymentAccountStatusLoaded` before its GET goes out. If the number has
+ * moved by the time the GET answers, something more authoritative — a
+ * `recordPaymentAccountState` from a POST that just succeeded, most likely —
+ * arrived first, and the GET's answer is DROPPED rather than applied. Without
+ * this, a slow GET started on mount could land after a creator pressed
+ * "Hubungkan pembayaran" and flip a just-cleared warning back on.
+ */
+let generation = 0;
+let inFlight: Promise<void> | null = null;
+
+function currentCreatorId(): string | null {
+  return getCreator()?.id ?? null;
+}
+
+function setCached(creatorId: string, next: PaymentAccountState): void {
+  generation += 1;
+  if (cacheByCreator.get(creatorId) === next) return;
+  cacheByCreator.set(creatorId, next);
+  // See auth.ts's `notifyAuthChange` docstring: one notifier, reused, so a
+  // component subscribed to session changes also hears about this.
+  notifyAuthChange();
+}
+
+/** `useSyncExternalStore`'s snapshot function. Never throws, never fetches. */
 export function getPaymentAccountState(): PaymentAccountState {
-  const creator = getCreator();
-  if (creator === null) return "unknown";
-  let raw: string | null;
-  try {
-    raw = localStorage.getItem(storageKey(creator.id));
-  } catch {
-    return "unknown";
-  }
-  return raw === "connected" || raw === "in_progress" ? raw : "unknown";
+  const id = currentCreatorId();
+  if (id === null) return "loading";
+  return cacheByCreator.get(id) ?? "loading";
 }
 
 /**
- * Writes the observed state, THEN TELLS EVERY MOUNTED SCREEN.
+ * Starts the ONE `GET /payment-account` this creator's session needs, unless
+ * the answer is already known (for this creator) or a request for it is
+ * already in flight.
  *
- * The notification is not a nicety. `PaymentAccountNotice` renders on the
- * communities list and on the tier editor, and both can be mounted while the
- * creator presses "Hubungkan pembayaran" on the account screen — so without it the
- * account screen went green while the others carried on telling the same creator
- * that nobody could buy anything, until a navigation happened to re-render them.
- * Nothing re-reads `localStorage` on its own; see the module docstring in
- * `auth.ts`, whose notifier this reuses.
+ * Safe to call from every mounted copy of `PaymentAccountNotice` and from
+ * `AccountPage` on every render — the in-flight and "already known" guards
+ * mean N callers cost at most ONE request, and a resolved answer costs none.
+ */
+export function ensurePaymentAccountStatusLoaded(): void {
+  const id = currentCreatorId();
+  if (id === null || inFlight !== null) return;
+  if ((cacheByCreator.get(id) ?? "loading") !== "loading") return;
+
+  const startedGeneration = generation;
+  inFlight = apiFetch<PaymentAccountStatusResponse>("/payment-account")
+    .then((body) => {
+      if (generation !== startedGeneration || currentCreatorId() !== id) return;
+      setCached(id, fromResponse(body));
+    })
+    .catch((err) => {
+      // A 401 already cleared the session (see apiClient.ts) and a redirect to
+      // login is in flight; nothing to record for a creator who is no longer
+      // signed in.
+      if (err instanceof DashboardApiError && err.status === 401) return;
+      if (generation !== startedGeneration || currentCreatorId() !== id) return;
+      setCached(id, "not_connected");
+    })
+    .finally(() => {
+      inFlight = null;
+    });
+}
+
+/**
+ * Records what a `POST /payment-account` attempt just learned, THEN TELLS
+ * EVERY MOUNTED SCREEN — immediately, and without waiting for a re-fetch.
  *
- * Notified even on the failed-write path, deliberately: `getPaymentAccountState`
- * would then answer `unknown` and the warning belongs back on screen. Failing
- * towards showing it is the safe direction, and a listener re-reading and finding
- * nothing changed costs one render.
+ * See `PaymentAccountNotice`'s docstring in `ui.tsx` for why the notification
+ * is not a nicety: it renders on the communities list and the tier editor,
+ * both of which can be mounted while the creator presses "Hubungkan
+ * pembayaran" on the account screen.
  */
 export function recordPaymentAccountState(state: PaymentAccountState): void {
-  const creator = getCreator();
-  if (creator === null) return;
-  try {
-    if (state === "unknown") localStorage.removeItem(storageKey(creator.id));
-    else localStorage.setItem(storageKey(creator.id), state);
-  } catch {
-    // Storage unavailable: the warning simply keeps showing. Harmless, and
-    // strictly better than suppressing it on a guess.
-  }
-  notifyAuthChange();
+  const id = currentCreatorId();
+  if (id === null) return;
+  setCached(id, state);
 }
 
 /**
  * Reads `POST /payment-account`'s 409 message.
  *
  * Matched on the API's own wording (see `CreatePaymentAccount.alreadyClaimed`),
- * which is the only signal on the wire — the endpoint returns `{ error }` and no
- * code. `startsWith`-style substring matching rather than equality so a later
- * suffix does not silently flip a connected account back to unknown; and an
- * unrecognised 409 stays `unknown`, which fails towards showing the warning.
+ * which is the only signal on the wire for THAT route — the endpoint returns
+ * `{ error }` and no code. `startsWith`-style substring matching rather than
+ * equality so a later suffix does not silently misclassify; an unrecognised
+ * 409 is treated as `not_connected`, which fails towards showing the warning.
  */
 export function paymentAccountStateFromConflict(message: string): PaymentAccountState {
   if (message.includes("already connected")) return "connected";
-  if (message.includes("already in progress")) return "in_progress";
-  return "unknown";
+  if (message.includes("already in progress")) return "provisioning";
+  return "not_connected";
+}
+
+/**
+ * TEST-ONLY. Resets the module-level cache between tests — this module is a
+ * singleton for the lifetime of the page (or the test file), so without this
+ * one test's `recordPaymentAccountState` call would leak into the next.
+ * Never called from application code.
+ */
+export function resetPaymentAccountCacheForTesting(): void {
+  cacheByCreator = new Map();
+  generation = 0;
+  inFlight = null;
 }

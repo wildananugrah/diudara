@@ -31,6 +31,7 @@ import { AuthenticateCreator } from "./application/use-cases/authenticate-creato
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
+import { GetCommunity } from "./application/use-cases/get-community";
 import {
   DefineMembershipTier,
   ListTiers,
@@ -38,6 +39,7 @@ import {
 } from "./application/use-cases/manage-tiers";
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
+import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
@@ -406,12 +408,14 @@ describe("Dependencies (composition root contract)", () => {
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),
       updateCommunity: new UpdateCommunity(fakeCommunityRepository),
+      getCommunity: new GetCommunity(fakeCommunityRepository),
       defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
       listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
       updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
       connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
       listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
+      getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository
@@ -521,12 +525,14 @@ describe("Dependencies (composition root contract)", () => {
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),
       updateCommunity: new UpdateCommunity(fakeCommunityRepository),
+      getCommunity: new GetCommunity(fakeCommunityRepository),
       defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
       listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
       updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
       connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
       listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
+      getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository

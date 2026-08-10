@@ -1,8 +1,8 @@
-import { useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { subscribeToAuth } from "./auth";
 import { communityStatusExplanation, communityStatusLabel, publicCheckoutUrl } from "./format";
-import { getPaymentAccountState } from "./paymentAccount";
+import { ensurePaymentAccountStatusLoaded, getPaymentAccountState } from "./paymentAccount";
 import type { Community } from "./types";
 
 /** A label, its input, and that field's own error message. Shared by every form. */
@@ -121,33 +121,38 @@ export function CopyableLink({ url, label }: { url: string; label: string }) {
  * "You cannot sell yet", shown wherever a creator is about to build something
  * nobody can buy.
  *
- * Renders nothing once this browser has seen the account connected. Everything
- * else — including "we do not know" — gets the warning, because a creator building
- * tiers behind a missing payment account is the failure this exists to prevent:
- * `StartCheckout` answers every purchase with 409 "this community is not ready to
- * accept payments yet", and nothing else in the product would tell them.
+ * Renders nothing once the SERVER has confirmed the account connected.
+ * Everything else — including "still loading" — gets the warning, because a
+ * creator building tiers behind a missing payment account is the failure this
+ * exists to prevent: `StartCheckout` answers every purchase with 409 "this
+ * community is not ready to accept payments yet", and nothing else in the
+ * product would tell them.
  *
- * The wording never claims "not connected", only that this browser has no
- * confirmation — see `paymentAccount.ts` for why that distinction is not
- * pedantry.
+ * The answer comes from `GET /payment-account` (see `paymentAccount.ts`), so —
+ * unlike the `localStorage` design this replaced — it is the same on every
+ * device the creator opens the dashboard from.
  *
- * SUBSCRIBED, not read during render. This used to call
- * `getPaymentAccountState()` straight out of `localStorage` with nothing watching
- * it, so connecting payments on the account screen left every OTHER mounted screen
- * still warning that nobody could buy anything until a navigation happened to
- * re-render it — the creator had just fixed the problem and was still being told
- * they had it. `useSyncExternalStore` over the session notifier is the same
- * mechanism `RequireAuth` uses for an expiring token, and the snapshot is a
- * string, so React's `Object.is` comparison settles immediately.
+ * SUBSCRIBED, not read during render, and it kicks the fetch off itself on
+ * mount. This used to call `getPaymentAccountState()` straight out of
+ * `localStorage` with nothing watching it, so connecting payments on the
+ * account screen left every OTHER mounted screen still warning that nobody
+ * could buy anything until a navigation happened to re-render it — the
+ * creator had just fixed the problem and was still being told they had it.
+ * `useSyncExternalStore` over the session notifier is the same mechanism
+ * `RequireAuth` uses for an expiring token, and the snapshot is a string, so
+ * React's `Object.is` comparison settles immediately.
  */
 export function PaymentAccountNotice() {
   const state = useSyncExternalStore(subscribeToAuth, getPaymentAccountState);
+  useEffect(() => {
+    ensurePaymentAccountStatusLoaded();
+  }, []);
   if (state === "connected") return null;
 
   return (
     <div className="notice notice-warning" data-testid="payment-account-notice" role="status">
       <h3>
-        {state === "in_progress"
+        {state === "provisioning"
           ? "Penghubungan pembayaran sedang diproses — anggota belum bisa membayar"
           : "Pembayaran belum terhubung — anggota belum bisa membayar"}
       </h3>
@@ -157,8 +162,8 @@ export function PaymentAccountNotice() {
       </p>
       <p>
         Buka <Link to="/dashboard/account">Akun &amp; pembayaran</Link> lalu tekan “Hubungkan
-        pembayaran”. Status ini hanya tercatat di peramban ini — jika Anda sudah pernah
-        menghubungkannya, tombol tersebut akan menjawab “sudah terhubung” dan peringatan ini hilang.
+        pembayaran”. Jika Anda sudah pernah menghubungkannya, tombol itu akan menjawab “sudah
+        terhubung” dan peringatan ini akan hilang di semua perangkat Anda.
       </p>
     </div>
   );

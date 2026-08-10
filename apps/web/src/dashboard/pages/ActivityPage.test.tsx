@@ -4,6 +4,7 @@ import ActivityPage from "./ActivityPage";
 import { renderPage, stubFetch, TEST_COMMUNITY, type StubRoute } from "../testing";
 
 const FEED = `/communities/${TEST_COMMUNITY.id}/activity`;
+const COMMUNITY_PATH = `/communities/${TEST_COMMUNITY.id}`;
 
 /**
  * Entries as the API sends them: the label and the severity are decided in
@@ -60,7 +61,7 @@ function render() {
 }
 
 function stub(routes: StubRoute[]) {
-  return stubFetch([{ path: "/communities", body: [TEST_COMMUNITY] }, ...routes]);
+  return stubFetch([{ path: COMMUNITY_PATH, body: TEST_COMMUNITY }, ...routes]);
 }
 
 let originalFetch: typeof fetch;
@@ -68,7 +69,6 @@ let originalFetch: typeof fetch;
 beforeEach(() => {
   originalFetch = global.fetch;
   localStorage.clear();
-  localStorage.setItem("diudara.dashboard.payments.creator-1", "connected");
 });
 
 afterEach(() => {
@@ -203,7 +203,7 @@ describe("ActivityPage", () => {
   });
 
   it("says the community was not found when the id is not one of the creator's", async () => {
-    stubFetch([{ path: "/communities", body: [] }]);
+    stubFetch([{ path: COMMUNITY_PATH, status: 404, body: { error: "community not found" } }]);
 
     render();
 

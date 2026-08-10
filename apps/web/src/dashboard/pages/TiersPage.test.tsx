@@ -1,9 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import TiersPage from "./TiersPage";
-import { renderPage, stubFetch, TEST_COMMUNITY } from "../testing";
+import { resetPaymentAccountCacheForTesting } from "../paymentAccount";
+import { renderPage, stubFetch, TEST_COMMUNITY, type StubRoute } from "../testing";
 
 const TIERS_PATH = `/communities/${TEST_COMMUNITY.id}/tiers`;
+const COMMUNITY_PATH = `/communities/${TEST_COMMUNITY.id}`;
+
+/** `PaymentAccountNotice` fetches this on mount; default it to "connected" so a
+ * test that is not about the warning does not have to think about it — the one
+ * test that IS about the warning overrides this entry. */
+const CONNECTED: StubRoute = {
+  path: "/payment-account",
+  body: { connected: true, provisioning: false },
+};
+
+const COMMUNITY: StubRoute = { path: COMMUNITY_PATH, body: TEST_COMMUNITY };
 
 const BASIC = {
   id: "tier-1",
@@ -26,7 +38,7 @@ let originalFetch: typeof fetch;
 beforeEach(() => {
   originalFetch = global.fetch;
   localStorage.clear();
-  localStorage.setItem("diudara.dashboard.payments.creator-1", "connected");
+  resetPaymentAccountCacheForTesting();
 });
 
 afterEach(() => {
@@ -37,7 +49,8 @@ afterEach(() => {
 describe("TiersPage", () => {
   it("shows prices as integer Rupiah formatted for Indonesian readers", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      CONNECTED,
+      COMMUNITY,
       { path: TIERS_PATH, body: [BASIC, { ...BASIC, id: "tier-2", name: "Pro", priceAmount: 50000, billingCycle: "yearly" }] },
     ]);
 
@@ -51,10 +64,7 @@ describe("TiersPage", () => {
   });
 
   it("shows an empty state that says what to do next when there are no tiers", async () => {
-    stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
-      { path: TIERS_PATH, body: [] },
-    ]);
+    stubFetch([CONNECTED, COMMUNITY, { path: TIERS_PATH, body: [] }]);
 
     render();
 
@@ -63,7 +73,8 @@ describe("TiersPage", () => {
 
   it("creates a tier with an integer price", async () => {
     const stub = stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      CONNECTED,
+      COMMUNITY,
       { path: TIERS_PATH, body: [] },
       { method: "POST", path: TIERS_PATH, status: 201, body: BASIC },
     ]);
@@ -82,10 +93,7 @@ describe("TiersPage", () => {
   });
 
   it("refuses a non-integer price without even asking the API", async () => {
-    const stub = stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
-      { path: TIERS_PATH, body: [] },
-    ]);
+    const stub = stubFetch([CONNECTED, COMMUNITY, { path: TIERS_PATH, body: [] }]);
 
     render();
     await screen.findByText(/Belum ada paket/);
@@ -101,7 +109,8 @@ describe("TiersPage", () => {
 
   it("renders a 400 from the API as a field-level message", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      CONNECTED,
+      COMMUNITY,
       { path: TIERS_PATH, body: [] },
       {
         method: "POST",
@@ -123,7 +132,8 @@ describe("TiersPage", () => {
 
   it("deactivates a tier and says what that means for the checkout page", async () => {
     const stub = stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      CONNECTED,
+      COMMUNITY,
       { path: TIERS_PATH, body: [BASIC] },
       { method: "PATCH", path: TIERS_PATH, body: { ...BASIC, isActive: false } },
     ]);
@@ -141,9 +151,9 @@ describe("TiersPage", () => {
   });
 
   it("warns that tiers cannot be bought while payments are not connected", async () => {
-    localStorage.removeItem("diudara.dashboard.payments.creator-1");
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: "/payment-account", body: { connected: false, provisioning: false } },
+      COMMUNITY,
       { path: TIERS_PATH, body: [BASIC] },
     ]);
 
@@ -151,13 +161,15 @@ describe("TiersPage", () => {
     await screen.findByText("Rp 1.250.000");
 
     // Building tiers nobody can buy is the failure this warning exists to prevent.
-    expect(screen.getByTestId("payment-account-notice").className).toContain("notice-warning");
+    expect(
+      (await screen.findByTestId("payment-account-notice")).className
+    ).toContain("notice-warning");
   });
 
   it("says the community was not found rather than showing an empty page for a 404", async () => {
     stubFetch([
-      { path: "/communities", body: [] },
-      { path: TIERS_PATH, status: 404, body: { error: "community not found" } },
+      CONNECTED,
+      { path: COMMUNITY_PATH, status: 404, body: { error: "community not found" } },
     ]);
 
     render();

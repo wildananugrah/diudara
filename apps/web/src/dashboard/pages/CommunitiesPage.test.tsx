@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import CommunitiesPage from "./CommunitiesPage";
-import { renderPage, stubFetch, TEST_COMMUNITY } from "../testing";
+import { resetPaymentAccountCacheForTesting } from "../paymentAccount";
+import { renderPage, stubFetch, TEST_COMMUNITY, type StubRoute } from "../testing";
+
+/** `PaymentAccountNotice` fetches this on mount; default it to "connected" so
+ * a test that does not care about the warning does not have to think about it —
+ * the one test that DOES care overrides this entry. */
+const CONNECTED: StubRoute = { path: "/payment-account", body: { connected: true, provisioning: false } };
 
 function render() {
   return renderPage(<CommunitiesPage />, { path: "/dashboard", at: "/dashboard" });
@@ -12,6 +18,7 @@ let originalFetch: typeof fetch;
 beforeEach(() => {
   originalFetch = global.fetch;
   localStorage.clear();
+  resetPaymentAccountCacheForTesting();
 });
 
 afterEach(() => {
@@ -22,6 +29,7 @@ afterEach(() => {
 describe("CommunitiesPage", () => {
   it("lists the creator's communities with their status", async () => {
     stubFetch([
+      CONNECTED,
       {
         path: "/communities",
         body: [TEST_COMMUNITY, { ...TEST_COMMUNITY, id: "c2", name: "Kelas Sore", slug: "kelas-sore", status: "paused" }],
@@ -37,7 +45,7 @@ describe("CommunitiesPage", () => {
   });
 
   it("shows the copyable public checkout link for each community", async () => {
-    stubFetch([{ path: "/communities", body: [TEST_COMMUNITY] }]);
+    stubFetch([CONNECTED, { path: "/communities", body: [TEST_COMMUNITY] }]);
 
     render();
     await screen.findByText("Kelas Bimbel Budi");
@@ -49,7 +57,7 @@ describe("CommunitiesPage", () => {
   });
 
   it("copies the checkout link to the clipboard", async () => {
-    stubFetch([{ path: "/communities", body: [TEST_COMMUNITY] }]);
+    stubFetch([CONNECTED, { path: "/communities", body: [TEST_COMMUNITY] }]);
     const written: string[] = [];
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -66,7 +74,7 @@ describe("CommunitiesPage", () => {
   });
 
   it("shows an empty state that says what to do next when there are no communities", async () => {
-    stubFetch([{ path: "/communities", body: [] }]);
+    stubFetch([CONNECTED, { path: "/communities", body: [] }]);
 
     render();
 
@@ -75,29 +83,34 @@ describe("CommunitiesPage", () => {
   });
 
   it("warns prominently that nobody can buy anything until payments are connected", async () => {
-    stubFetch([{ path: "/communities", body: [TEST_COMMUNITY] }]);
+    stubFetch([
+      { path: "/payment-account", body: { connected: false, provisioning: false } },
+      { path: "/communities", body: [TEST_COMMUNITY] },
+    ]);
 
     render();
     await screen.findByText("Kelas Bimbel Budi");
 
-    const notice = screen.getByTestId("payment-account-notice");
+    const notice = await screen.findByTestId("payment-account-notice");
     expect(notice.textContent).toMatch(/belum bisa membayar|belum terhubung/);
     expect(notice.className).toContain("notice-warning");
   });
 
-  it("hides the payment warning once payments are recorded as connected", async () => {
-    localStorage.setItem("diudara.dashboard.payments.creator-1", "connected");
-    stubFetch([{ path: "/communities", body: [TEST_COMMUNITY] }]);
+  it("hides the payment warning once the server reports payments connected", async () => {
+    stubFetch([CONNECTED, { path: "/communities", body: [TEST_COMMUNITY] }]);
 
     render();
     await screen.findByText("Kelas Bimbel Budi");
 
-    expect(screen.queryAllByTestId("payment-account-notice").length).toBe(0);
+    await waitFor(() =>
+      expect(screen.queryAllByTestId("payment-account-notice").length).toBe(0)
+    );
   });
 
   it("creates a community and shows it without a reload", async () => {
     const created = { ...TEST_COMMUNITY, id: "c-new", name: "Kelas Malam", slug: "kelas-malam" };
     const stub = stubFetch([
+      CONNECTED,
       { path: "/communities", body: [] },
       { method: "POST", path: "/communities", status: 201, body: created },
     ]);
@@ -117,6 +130,7 @@ describe("CommunitiesPage", () => {
 
   it("omits an empty niche rather than sending an empty string", async () => {
     const stub = stubFetch([
+      CONNECTED,
       { path: "/communities", body: [] },
       { method: "POST", path: "/communities", status: 201, body: TEST_COMMUNITY },
     ]);
@@ -132,6 +146,7 @@ describe("CommunitiesPage", () => {
 
   it("renders a 400 as a field-level message and keeps what was typed", async () => {
     stubFetch([
+      CONNECTED,
       { path: "/communities", body: [] },
       {
         method: "POST",
@@ -151,7 +166,10 @@ describe("CommunitiesPage", () => {
   });
 
   it("shows an error state rather than a blank panel when the list fails to load", async () => {
-    stubFetch([{ path: "/communities", status: 500, body: { error: "internal server error" } }]);
+    stubFetch([
+      CONNECTED,
+      { path: "/communities", status: 500, body: { error: "internal server error" } },
+    ]);
 
     render();
 

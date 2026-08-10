@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { apiFetch, DashboardApiError } from "../apiClient";
-import { getCreator } from "../auth";
+import { getCreator, subscribeToAuth } from "../auth";
 import {
+  ensurePaymentAccountStatusLoaded,
   getPaymentAccountState,
   paymentAccountStateFromConflict,
   recordPaymentAccountState,
@@ -18,11 +19,13 @@ type Outcome =
  * Connecting payments — the one thing a creator must do before anybody can buy
  * anything.
  *
- * `POST /payment-account` is the ONLY route on this resource, so this screen is
- * also the only way to find out whether it is done: there is no `GET`, and
- * `creator.xendit_account_id` never reaches a client. See `paymentAccount.ts` for
- * why that is recorded per-browser rather than guessed at, and why the POST is
- * behind a button a person presses rather than run on page load.
+ * `GET /payment-account` reports whether it is already done — see
+ * `paymentAccount.ts` for how that answer is cached and shared with
+ * `PaymentAccountNotice` on every other screen. `POST /payment-account` is
+ * still the only way to CONNECT, and it stays behind a button a person
+ * presses rather than running on page load: it provisions a Xendit MANAGED
+ * sub-account, a KYC entity with no delete endpoint, so an automatic call
+ * would permanently provision accounts for creators who never asked.
  *
  * A 409 is NOT a failure here. "already connected" is the answer a creator on a new
  * device needs, and reporting it as an error would send them looking for a problem
@@ -31,7 +34,10 @@ type Outcome =
 export default function AccountPage() {
   const creator = getCreator();
   const [outcome, setOutcome] = useState<Outcome>({ kind: "idle" });
-  const knownState = getPaymentAccountState();
+  const knownState = useSyncExternalStore(subscribeToAuth, getPaymentAccountState);
+  useEffect(() => {
+    ensurePaymentAccountStatusLoaded();
+  }, []);
 
   async function connect() {
     setOutcome({ kind: "working" });
@@ -49,7 +55,7 @@ export default function AccountPage() {
           setOutcome({ kind: "connected", accountId: null, alreadyWas: true });
           return;
         }
-        if (state === "in_progress") {
+        if (state === "provisioning") {
           setOutcome({ kind: "in-progress" });
           return;
         }
@@ -105,8 +111,7 @@ export default function AccountPage() {
 
         {knownState === "connected" && outcome.kind === "idle" ? (
           <p className="form-ok">
-            Peramban ini mencatat pembayaran sudah terhubung. Tekan tombol di bawah kapan pun untuk
-            memastikan.
+            Akun Anda tercatat sudah terhubung. Tekan tombol di bawah kapan pun untuk memastikan.
           </p>
         ) : null}
 

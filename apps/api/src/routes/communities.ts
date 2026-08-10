@@ -13,7 +13,7 @@ import type { Dependencies } from "../bootstrap";
 export function communityRoutes(
   deps: Pick<
     Dependencies,
-    "tokenIssuer" | "createCommunity" | "listCommunities" | "updateCommunity"
+    "tokenIssuer" | "createCommunity" | "listCommunities" | "updateCommunity" | "getCommunity"
   >
 ) {
   const app = new Hono<{ Variables: AuthVariables }>();
@@ -33,6 +33,14 @@ export function communityRoutes(
   });
 
   const idParams = z.object({ id: uuidParam });
+
+  app.get<"/:id">("/:id", validateParams(idParams), async (c) => {
+    const community = await deps.getCommunity.execute({
+      communityId: c.req.param("id"),
+      creatorId: c.get("creatorId"),
+    });
+    return c.json(community);
+  });
 
   app.patch<"/:id">("/:id", validateParams(idParams), validate(updateCommunitySchema), async (c) => {
     const patch = c.get("validated") as UpdateCommunityInput;

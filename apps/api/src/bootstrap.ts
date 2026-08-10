@@ -8,6 +8,7 @@ import { AuthenticateCreator } from "./application/use-cases/authenticate-creato
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
+import { GetCommunity } from "./application/use-cases/get-community";
 import { DrizzleMembershipTierRepository } from "./infrastructure/repositories/drizzle-membership-tier.repository";
 import {
   DefineMembershipTier,
@@ -17,6 +18,7 @@ import {
 import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
+import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
@@ -86,12 +88,31 @@ export interface Dependencies {
   createCommunity: CreateCommunity;
   listCommunities: ListCommunities;
   updateCommunity: UpdateCommunity;
+  /**
+   * `GET /communities/:id` (Phase 7 carry-forward from Phase 6). Creator-scoped
+   * through `CommunityRepositoryPort.findByIdForCreator` — the same method
+   * `UpdateCommunity` uses — so a stranger's id 404s rather than 403ing and
+   * confirming the resource exists.
+   */
+  getCommunity: GetCommunity;
   defineTier: DefineMembershipTier;
   listTiers: ListTiers;
   updateTier: UpdateTier;
   connectChannel: ConnectChannel;
   listChannels: ListChannels;
   createPaymentAccount: CreatePaymentAccount;
+  /**
+   * `GET /payment-account` (Phase 7 carry-forward from Phase 6): whether the
+   * AUTHENTICATED creator has connected payments, read from
+   * `creator.xendit_account_id` through the same `isConnectedPaymentAccount` /
+   * `isProvisioningPlaceholder` predicates `CreatePaymentAccount` uses. Read-only
+   * and safe to call on every dashboard load — unlike the POST route above, it
+   * provisions nothing at Xendit. Replaces the dashboard's per-browser
+   * `localStorage` guess (see apps/web's `paymentAccount.ts`) with the server's
+   * own truth, which is also what the AI co-builder checks before proposing a
+   * paid tier.
+   */
+  getPaymentAccountStatus: GetPaymentAccountStatus;
   getPublicCommunity: GetPublicCommunity;
   startCheckout: StartCheckout;
   getSubscriptionStatus: GetSubscriptionStatus;
@@ -910,6 +931,7 @@ export function bootstrap(): Dependencies {
   const createCommunity = new CreateCommunity(communityRepository);
   const listCommunities = new ListCommunities(communityRepository);
   const updateCommunity = new UpdateCommunity(communityRepository);
+  const getCommunity = new GetCommunity(communityRepository);
 
   const tierRepository = new DrizzleMembershipTierRepository(db);
   const defineTier = new DefineMembershipTier(communityRepository, tierRepository);
@@ -926,6 +948,7 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
   const createPaymentAccount = new CreatePaymentAccount(creatorRepository, payments);
+  const getPaymentAccountStatus = new GetPaymentAccountStatus(creatorRepository);
   // After selectPaymentProvider on purpose: on a production box with nothing
   // configured at all, "you are about to take fake money" is the more urgent of
   // the two messages, and the existing test pins that wording.
@@ -1059,12 +1082,14 @@ export function bootstrap(): Dependencies {
     createCommunity,
     listCommunities,
     updateCommunity,
+    getCommunity,
     defineTier,
     listTiers,
     updateTier,
     connectChannel,
     listChannels,
     createPaymentAccount,
+    getPaymentAccountStatus,
     getPublicCommunity,
     startCheckout,
     getSubscriptionStatus,

@@ -5,6 +5,7 @@ import { renderPage, stubFetch, TEST_COMMUNITY, type StubRoute } from "../testin
 
 const ROSTER = `/communities/${TEST_COMMUNITY.id}/members`;
 const CSV = `/communities/${TEST_COMMUNITY.id}/members.csv`;
+const COMMUNITY_PATH = `/communities/${TEST_COMMUNITY.id}`;
 
 const SITI = {
   memberId: "22222222-2222-4222-8222-222222222222",
@@ -64,7 +65,7 @@ function revokeFromRow(name: string): void {
 
 /** The community lookup every community screen makes, plus whatever the test needs. */
 function stub(routes: StubRoute[]) {
-  return stubFetch([{ path: "/communities", body: [TEST_COMMUNITY] }, ...routes]);
+  return stubFetch([{ path: COMMUNITY_PATH, body: TEST_COMMUNITY }, ...routes]);
 }
 
 let originalFetch: typeof fetch;
@@ -74,7 +75,6 @@ beforeEach(() => {
   originalFetch = global.fetch;
   originalCreateObjectURL = (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
   localStorage.clear();
-  localStorage.setItem("diudara.dashboard.payments.creator-1", "connected");
 });
 
 afterEach(() => {
@@ -420,7 +420,7 @@ describe("MembersPage", () => {
   });
 
   it("says the community was not found when the id is not one of the creator's", async () => {
-    stubFetch([{ path: "/communities", body: [] }]);
+    stubFetch([{ path: COMMUNITY_PATH, status: 404, body: { error: "community not found" } }]);
 
     render();
 

@@ -16,10 +16,12 @@ const METRICS = {
   ],
 };
 
+const COMMUNITY_PATH = `/communities/${TEST_COMMUNITY.id}`;
+
 /** Every overview render also loads the metrics, so every stub set needs them. */
 function stub(routes: StubRoute[] = []) {
   return stubFetch([
-    { path: "/communities", body: [TEST_COMMUNITY] },
+    { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
     { path: METRICS_PATH, body: METRICS },
     ...routes,
   ]);
@@ -37,7 +39,6 @@ let originalFetch: typeof fetch;
 beforeEach(() => {
   originalFetch = global.fetch;
   localStorage.clear();
-  localStorage.setItem("diudara.dashboard.payments.creator-1", "connected");
 });
 
 afterEach(() => {
@@ -57,7 +58,7 @@ describe("CommunityOverviewPage", () => {
 
   it("explains a paused community keeps its checkout page but refuses purchases", async () => {
     stubFetch([
-      { path: "/communities", body: [{ ...TEST_COMMUNITY, status: "paused" }] },
+      { path: COMMUNITY_PATH, body: { ...TEST_COMMUNITY, status: "paused" } },
       { path: METRICS_PATH, body: METRICS },
     ]);
 
@@ -71,7 +72,7 @@ describe("CommunityOverviewPage", () => {
 
   it("explains an archived community's page is gone", async () => {
     stubFetch([
-      { path: "/communities", body: [{ ...TEST_COMMUNITY, status: "archived" }] },
+      { path: COMMUNITY_PATH, body: { ...TEST_COMMUNITY, status: "archived" } },
       { path: METRICS_PATH, body: METRICS },
     ]);
 
@@ -130,7 +131,9 @@ describe("CommunityOverviewPage", () => {
   });
 
   it("says the community was not found when the id is not one of the creator's", async () => {
-    stubFetch([{ path: "/communities", body: [] }]);
+    stubFetch([
+      { path: COMMUNITY_PATH, status: 404, body: { error: "community not found" } },
+    ]);
 
     render();
 
@@ -213,7 +216,7 @@ describe("CommunityOverviewPage", () => {
 
   it("shows an empty state for the tier distribution when there are no tiers", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       { path: METRICS_PATH, body: { ...METRICS, tierDistribution: [] } },
     ]);
 
@@ -224,7 +227,7 @@ describe("CommunityOverviewPage", () => {
 
   it("shows a day-one empty state instead of a wall of zeroes for a brand-new community", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       {
         path: METRICS_PATH,
         body: {
@@ -243,7 +246,7 @@ describe("CommunityOverviewPage", () => {
 
   it("still lists the tiers on a day-one community, so a new creator sees what they defined", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       {
         path: METRICS_PATH,
         body: {
@@ -264,7 +267,7 @@ describe("CommunityOverviewPage", () => {
 
   it("renders a failed metrics load with a retry rather than a blank panel", async () => {
     stubFetch([
-      { path: "/communities", body: [TEST_COMMUNITY] },
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
       { path: METRICS_PATH, status: 500, body: { error: "boom" } },
     ]);
 

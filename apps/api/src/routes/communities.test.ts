@@ -163,6 +163,75 @@ describe("GET /communities", () => {
   });
 });
 
+describe("GET /communities/:id", () => {
+  it("returns a community the caller owns", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+    const created = await (
+      await a.request("/communities", {
+        method: "POST",
+        headers: bearer(token),
+        body: JSON.stringify({ name: "Kelas Satu", niche: "bimbel" }),
+      })
+    ).json();
+
+    const res = await a.request(`/communities/${created.id}`, { headers: bearer(token) });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.id).toBe(created.id);
+    expect(body.name).toBe("Kelas Satu");
+    expect(body.niche).toBe("bimbel");
+  });
+
+  it("returns 404 — not 403 — for another creator's community", async () => {
+    const a = app();
+    const owner = await signupAndGetToken(a);
+    const stranger = await signupAndGetToken(a);
+
+    const created = await (
+      await a.request("/communities", {
+        method: "POST",
+        headers: bearer(owner.token),
+        body: JSON.stringify({ name: "Punya Owner" }),
+      })
+    ).json();
+
+    const res = await a.request(`/communities/${created.id}`, {
+      headers: bearer(stranger.token),
+    });
+
+    // 404, not 403: never confirm the resource exists to a non-owner.
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for a well-formed id that does not exist", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+
+    const res = await a.request("/communities/00000000-0000-0000-0000-000000000000", {
+      headers: bearer(token),
+    });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("rejects a non-UUID id with 400, not 500", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+
+    const res = await a.request("/communities/not-a-uuid", { headers: bearer(token) });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("id");
+  });
+
+  it("still requires authentication before validating the id", async () => {
+    const res = await app().request("/communities/not-a-uuid");
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("PATCH /communities/:id", () => {
   it("updates a community the caller owns", async () => {
     const a = app();

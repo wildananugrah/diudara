@@ -2,17 +2,31 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { setSession } from "./auth";
-import { recordPaymentAccountState } from "./paymentAccount";
+import { recordPaymentAccountState, resetPaymentAccountCacheForTesting } from "./paymentAccount";
+import { stubFetch } from "./testing";
 import { PaymentAccountNotice } from "./ui";
 
 const CREATOR = { id: "creator-1", name: "Budi", email: "budi@example.com" };
 
+let originalFetch: typeof fetch;
+
 beforeEach(() => {
+  originalFetch = global.fetch;
   localStorage.clear();
   setSession("jwt-test", CREATOR);
+  resetPaymentAccountCacheForTesting();
+  // Every mount kicks off `GET /payment-account` — see PaymentAccountNotice's
+  // docstring. Most of these tests drive the notice with
+  // `recordPaymentAccountState` directly instead of waiting on this fetch, so
+  // the default answer barely matters; it only has to exist so the request
+  // does not go unstubbed.
+  stubFetch([{ path: "/payment-account", body: { connected: false, provisioning: false } }]);
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  global.fetch = originalFetch;
+  cleanup();
+});
 
 /** The notice needs a router, because it links to the account screen. */
 function mount(count: number) {
@@ -26,17 +40,25 @@ function mount(count: number) {
 }
 
 describe("PaymentAccountNotice", () => {
-  it("warns while this browser has no confirmation that payments are connected", () => {
+  it("warns while nothing has confirmed that payments are connected", async () => {
     mount(1);
     expect(screen.getAllByTestId("payment-account-notice").length).toBe(1);
+
+    // Let the mount's own `GET /payment-account` resolve before the test ends,
+    // so its state update (to the same "not connected" answer, in this case)
+    // happens inside `act` rather than bleeding into whatever runs next.
+    await act(async () => {
+      await Promise.resolve();
+    });
   });
 
   it("CLEARS ITSELF THE MOMENT PAYMENTS CONNECT, with no navigation in between", () => {
-    // It read `localStorage` during render and subscribed to nothing, so it only
-    // noticed a connected account when something else happened to re-render it.
-    // In practice that meant a creator pressed "Hubungkan pembayaran", the account
-    // screen went green, and every other mounted screen carried on telling them
-    // nobody could buy anything until they navigated.
+    // It used to read `localStorage` during render and subscribe to nothing, so
+    // it only noticed a connected account when something else happened to
+    // re-render it. In practice that meant a creator pressed "Hubungkan
+    // pembayaran", the account screen went green, and every other mounted
+    // screen carried on telling them nobody could buy anything until they
+    // navigated.
     mount(1);
     expect(screen.getAllByTestId("payment-account-notice").length).toBe(1);
 
@@ -68,7 +90,7 @@ describe("PaymentAccountNotice", () => {
     expect(screen.queryAllByTestId("payment-account-notice").length).toBe(0);
 
     act(() => {
-      recordPaymentAccountState("unknown");
+      recordPaymentAccountState("not_connected");
     });
 
     expect(screen.getAllByTestId("payment-account-notice").length).toBe(1);
@@ -78,7 +100,7 @@ describe("PaymentAccountNotice", () => {
     mount(1);
 
     act(() => {
-      recordPaymentAccountState("in_progress");
+      recordPaymentAccountState("provisioning");
     });
 
     const notice = screen.getByTestId("payment-account-notice").textContent ?? "";

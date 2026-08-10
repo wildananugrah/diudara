@@ -11,6 +11,70 @@ function app() {
   return createApp(bootstrap());
 }
 
+describe("GET /payment-account", () => {
+  it("rejects an unauthenticated request with 401", async () => {
+    const res = await app().request("/payment-account");
+    expect(res.status).toBe(401);
+  });
+
+  it("reports not connected and not provisioning for a fresh creator", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+
+    const res = await a.request("/payment-account", { headers: bearer(token) });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ connected: false, provisioning: false });
+  });
+
+  // Setting up "connected"/"provisioning" state WITHOUT calling POST
+  // /payment-account: that route calls the (fake, but real-shaped) payment
+  // provider and the brief forbids probing it in tests, since the real Xendit
+  // adapter's equivalent call provisions a KYC entity with no delete endpoint.
+  // Instead this writes the creator row directly through
+  // CreatorRepositoryPort, the same two methods CreatePaymentAccount itself
+  // uses to claim and fill the column — no HTTP call, no provider call.
+  it("reports provisioning while a connection is claimed but not finished", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { token, creatorId } = await signupAndGetToken(a);
+    await deps.creatorRepository.beginXenditAccountProvisioning(creatorId);
+
+    const res = await a.request("/payment-account", { headers: bearer(token) });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ connected: false, provisioning: true });
+  });
+
+  it("reports connected once the column holds a real account id", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { token, creatorId } = await signupAndGetToken(a);
+    await deps.creatorRepository.beginXenditAccountProvisioning(creatorId);
+    await deps.creatorRepository.finishXenditAccountProvisioning(creatorId, "xnd-acct-test");
+
+    const res = await a.request("/payment-account", { headers: bearer(token) });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ connected: true, provisioning: false });
+  });
+
+  it("keeps each creator's status independent of another creator's", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const owner = await signupAndGetToken(a);
+    const stranger = await signupAndGetToken(a);
+    await deps.creatorRepository.beginXenditAccountProvisioning(owner.creatorId);
+    await deps.creatorRepository.finishXenditAccountProvisioning(owner.creatorId, "xnd-acct-owner");
+
+    const ownerRes = await a.request("/payment-account", { headers: bearer(owner.token) });
+    const strangerRes = await a.request("/payment-account", { headers: bearer(stranger.token) });
+
+    expect(await ownerRes.json()).toEqual({ connected: true, provisioning: false });
+    expect(await strangerRes.json()).toEqual({ connected: false, provisioning: false });
+  });
+});
+
 describe("POST /payment-account", () => {
   it("rejects an unauthenticated request with 401", async () => {
     const a = app();
