@@ -762,6 +762,106 @@ describe("CoBuilderPage", () => {
     // The FIRST save's own confirmation is unaffected and not duplicated —
     // it does not re-render or re-fire just because the stale write bailed.
     expect(screen.getAllByText(/berhasil dibuat/).length).toBe(1);
+
+    // "Dasar" had an UNKNOWN outcome at the instant the draft was replaced
+    // (its request was still in flight) and went on to actually SUCCEED —
+    // the sticky banner must never have claimed it as not-created. "Pro"
+    // (never even attempted before the replacement) is legitimately
+    // outstanding and IS named.
+    const outstandingNotice = await screen.findByTestId("outstanding-tiers-notice");
+    expect(outstandingNotice.textContent).not.toContain("Dasar");
+    expect(outstandingNotice.textContent).toContain("Pro");
+  });
+
+  it("does not let a second 'Coba lagi paket yang gagal' click jump ahead of the first retry's own sequential loop", async () => {
+    // BOTH tiers fail on the initial save, so the retry has TWO tiers queued
+    // — this is what keeps "Coba lagi paket yang gagal" rendered (and, before
+    // this fix, clickable) for the whole time the first retry's sequential
+    // loop is still working through them: `anyTierFailed` only goes false
+    // once every failed tier has been reached, and "Dasar" (index 0) is held
+    // open here specifically so the loop never reaches "Pro" (index 1) on
+    // its own within this test.
+    let resolveDasarRetry: ((res: Response) => void) | null = null;
+    let dasarAttempt = 0;
+    let proAttempt = 0;
+
+    recordingFetch((url, method, body) => {
+      if (url === "/ai/status") return jsonResponse({ enabled: true });
+      if (url === "/payment-account") return jsonResponse({ connected: true, provisioning: false });
+      if (url === "/ai/messages" && method === "POST") {
+        return jsonResponse({ conversationId: "conv-1", reply: "Berikut draf komunitasmu.", draft: VALID_DRAFT });
+      }
+      if (url === "/communities" && method === "POST") {
+        return jsonResponse(CREATED_COMMUNITY, 201);
+      }
+      if (url === `/communities/${CREATED_COMMUNITY.id}/tiers` && method === "POST") {
+        const tierBody = body as { name: string };
+        if (tierBody.name === "Dasar") {
+          dasarAttempt += 1;
+          if (dasarAttempt === 1) {
+            return jsonResponse({ error: "priceAmount: too large" }, 400); // fails on the initial save
+          }
+          // Every retry attempt is held open.
+          return new Promise<Response>((resolve) => {
+            resolveDasarRetry = resolve;
+          });
+        }
+        // "Pro"
+        proAttempt += 1;
+        if (proAttempt === 1) {
+          return jsonResponse({ error: "priceAmount: too large" }, 400); // also fails on the initial save
+        }
+        return jsonResponse({ id: "tier-pro", communityId: CREATED_COMMUNITY.id, ...tierBody, isActive: true }, 201);
+      }
+      throw new Error(`unstubbed request: ${method} ${url}`);
+    });
+
+    render();
+    await screen.findByText(/Mulai obrolan/);
+    await sendMessage("halo");
+    await screen.findByText("Berikut draf komunitasmu.");
+    fireEvent.click(screen.getByRole("button", { name: "Buat komunitas ini" }));
+
+    await screen.findByTestId("error-tier-price-0");
+    await screen.findByTestId("error-tier-price-1");
+
+    const retryButton = await screen.findByRole("button", { name: "Coba lagi paket yang gagal" });
+    fireEvent.click(retryButton);
+
+    // "Dasar" (index 0) is attempted first by the retry's own sequential
+    // loop and held open; "Pro" (index 1) has not been touched by THIS
+    // retry at all yet.
+    await waitFor(() => expect(dasarAttempt).toBe(2));
+    expect(proAttempt).toBe(1); // still only its original, failed, initial-save attempt.
+
+    // The button is disabled by now (the UI convention) — bypass it on
+    // purpose, same reasoning as the generation-guard test: the internal
+    // `saveInFlight` check, not the browser's native disabled-element
+    // behaviour, is what actually has to stop this.
+    const retryButtonAgain = screen.getByRole("button", { name: "Coba lagi paket yang gagal" }) as HTMLButtonElement;
+    expect(retryButtonAgain.disabled).toBe(true);
+    retryButtonAgain.removeAttribute("disabled");
+    fireEvent.click(retryButtonAgain);
+
+    // Give a wrongly-fired second call a chance to jump ahead and attempt
+    // "Pro" out of turn, before the first call's own loop ever gets there.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(proAttempt).toBe(1); // UNCHANGED — the second call must bail immediately.
+
+    // Now let the first call's own loop finish normally.
+    await act(async () => {
+      resolveDasarRetry!(
+        jsonResponse(
+          { id: "tier-dasar", communityId: CREATED_COMMUNITY.id, name: "Dasar", priceAmount: 50000, billingCycle: "monthly", isActive: true },
+          201
+        )
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    await waitFor(() => expect(proAttempt).toBe(2)); // exactly one real retry attempt, in order.
+    expect(screen.queryAllByTestId("error-tier-price-0").length).toBe(0);
+    expect(screen.queryAllByTestId("error-tier-price-1").length).toBe(0);
   });
 
   it("carries outstanding tier names into the sticky summary when a later draft replaces an incomplete save", async () => {

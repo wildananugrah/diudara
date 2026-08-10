@@ -316,9 +316,22 @@ export default function CoBuilderPage() {
       setContent("");
       if (result.draft !== null) {
         // BEFORE the panel is replaced: if the draft being replaced is the
-        // one that created `createdCommunity` and it left any tier not
-        // `"created"`, remember those names now — this is the only moment
+        // one that created `createdCommunity` and it left any tier KNOWN to
+        // be unfinished, remember those names now — this is the only moment
         // that fact is still attached to a live draft at all.
+        //
+        // "KNOWN" excludes `"creating"` ON PURPOSE. A tier whose `POST` is
+        // still in flight at this exact instant has an outcome the draft-
+        // generation guard is ABOUT to throw away (the bump two lines below
+        // makes that request's eventual response — success or failure — get
+        // dropped, never writing `"created"` even if that is what happened)
+        // — so `status` here is not "not created", it is "we will never
+        // find out". Reporting it as outstanding would be a FALSE claim that
+        // can never self-correct: the creator follows the link to the Paket
+        // page and finds the tier already sitting there. `"failed"` (a real,
+        // observed failure) and `"pending"` (never even attempted — e.g. the
+        // sequential loop had not reached it yet) are both genuinely known
+        // to be unfinished; only those two are reported.
         const priorDraftForm = draftFormRef.current;
         const priorSaveState = saveStateRef.current;
         const created = createdCommunityRef.current;
@@ -329,7 +342,7 @@ export default function CoBuilderPage() {
           priorSaveState.community.id === created.id
         ) {
           const outstanding = priorDraftForm.tiers
-            .filter((tier) => tier.status !== "created")
+            .filter((tier) => tier.status === "failed" || tier.status === "pending")
             .map((tier) => tier.name.trim())
             .filter((name) => name !== "");
           setOutstandingTierNames(outstanding);
@@ -539,7 +552,15 @@ export default function CoBuilderPage() {
    * never a tier already marked `"created"` (would duplicate it).
    */
   async function retryFailedTiers() {
-    if (saveState.kind !== "saved" || draftForm === null) return;
+    // `saveInFlight` closes the same hole `saveCommunity`'s own guard closed
+    // in round 1 — a rapid double-click firing this twice before the first
+    // call's `setSaveInFlight(true)` has even committed would otherwise
+    // compute the SAME `failedIndices` twice and double-POST the same tier.
+    // Checked here, not just via the button's own `disabled` prop, for the
+    // same reason the draft-generation guard is not just a UI lock: a
+    // disabled attribute is a convention a test (or a stray event) can
+    // bypass; this is the actual correctness check.
+    if (saveState.kind !== "saved" || draftForm === null || saveInFlight) return;
 
     const failedIndices: number[] = [];
     let hasFieldError = false;
@@ -687,6 +708,7 @@ export default function CoBuilderPage() {
               onChangeTier={updateTierField}
               onSave={saveCommunity}
               onRetryFailedTiers={retryFailedTiers}
+              saveInFlight={saveInFlight}
             />
           ) : null}
         </>
@@ -706,6 +728,7 @@ function DraftPanel({
   onChangeTier,
   onSave,
   onRetryFailedTiers,
+  saveInFlight,
 }: {
   draftForm: DraftFormState;
   saveState: SaveState;
@@ -714,6 +737,7 @@ function DraftPanel({
   confirmSeparateCommunity: boolean;
   onToggleConfirmSeparate: (checked: boolean) => void;
   onChangeField: (field: "name" | "niche" | "description" | "welcomeMessage", value: string) => void;
+  saveInFlight: boolean;
   onChangeTier: (index: number, patch: Partial<Pick<DraftTierForm, "name" | "price" | "billingCycle">>) => void;
   onSave: () => void;
   onRetryFailedTiers: () => void;
@@ -877,7 +901,12 @@ function DraftPanel({
                 secara manual di{" "}
                 <Link to={`/dashboard/c/${saveState.community.id}/tiers`}>halaman Paket</Link>.
               </p>
-              <button type="button" className="button-secondary" onClick={onRetryFailedTiers}>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={onRetryFailedTiers}
+                disabled={saveInFlight}
+              >
                 Coba lagi paket yang gagal
               </button>
             </>
