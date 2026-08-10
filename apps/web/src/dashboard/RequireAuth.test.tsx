@@ -56,7 +56,7 @@ describe("RequireAuth", () => {
     renderAt("/dashboard");
 
     expect(await screen.findByText("Masuk ke DIUDARA")).toBeTruthy();
-    expect(screen.queryByText(/Panel terlindungi/)).toBeNull();
+    expect(screen.queryAllByText(/Panel terlindungi/).length).toBe(0);
   });
 
   it("renders the protected panel when a token is present", async () => {
@@ -84,7 +84,7 @@ describe("RequireAuth", () => {
     // showing an error with no way out.
     expect(await screen.findByText("Masuk ke DIUDARA")).toBeTruthy();
     expect(getToken()).toBeNull();
-    expect(screen.queryByText(/Panel terlindungi/)).toBeNull();
+    expect(screen.queryAllByText(/Panel terlindungi/).length).toBe(0);
   });
 
   it("keeps the token out of the rendered DOM", async () => {

@@ -92,7 +92,7 @@ describe("CommunitiesPage", () => {
     render();
     await screen.findByText("Kelas Bimbel Budi");
 
-    expect(screen.queryByTestId("payment-account-notice")).toBeNull();
+    expect(screen.queryAllByTestId("payment-account-notice").length).toBe(0);
   });
 
   it("creates a community and shows it without a reload", async () => {
