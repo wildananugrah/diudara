@@ -1,26 +1,31 @@
 import { useState, type FormEvent } from "react";
 import { useParams } from "react-router-dom";
 import { apiFetch, DashboardApiError } from "../apiClient";
-import { communityStatusLabel } from "../format";
+import {
+  communityStatusLabel,
+  formatRupiah,
+  memberStatusExplanation,
+  memberStatusLabel,
+} from "../format";
 import {
   CheckoutLink,
   CommunityHeader,
+  EmptyState,
   ErrorPanel,
   Field,
   NotFoundPanel,
   StatusExplanation,
 } from "../ui";
 import { useCommunity } from "../useCommunity";
-import type { Community } from "../types";
+import { useLoad } from "../useLoad";
+import type { Community, CommunityMetrics } from "../types";
 
 /** `updateCommunitySchema`'s enum. Offering anything else would earn a 400. */
 const STATUSES = ["active", "paused", "archived"] as const;
 
 /**
- * One community's overview: what state it is in, the link to share, and the two
- * settings a creator actually changes.
- *
- * Task 7 adds the metrics to this screen.
+ * One community's overview: the numbers, what state it is in, the link to share,
+ * and the two settings a creator actually changes.
  */
 export default function CommunityOverviewPage() {
   const { communityId } = useParams<{ communityId: string }>();
@@ -36,6 +41,8 @@ export default function CommunityOverviewPage() {
     <section>
       <CommunityHeader community={community} />
 
+      <MetricsPanel community={community} />
+
       <div className="section card stack">
         <div>
           <h2>Status: {communityStatusLabel(community.status)}</h2>
@@ -50,6 +57,186 @@ export default function CommunityOverviewPage() {
         <SlugForm community={community} onSaved={handle.update} />
       </div>
     </section>
+  );
+}
+
+/**
+ * One metric tile: a label, the figure, and WHAT THE FIGURE MEANS.
+ *
+ * The note is not decoration. Every number on this screen is one a creator can
+ * misread — gross revenue as take-home pay, past-due as locked-out — and a tile
+ * without its note is a number with no units.
+ */
+function Metric({
+  testId,
+  label,
+  value,
+  note,
+}: {
+  testId: string;
+  label: string;
+  value: string;
+  note: string;
+}) {
+  return (
+    <div className="metric" data-testid={testId}>
+      <p className="metric-label">{label}</p>
+      <p className="metric-value">{value}</p>
+      <p className="metric-note">{note}</p>
+    </div>
+  );
+}
+
+/**
+ * The numbers a creator opens the dashboard for.
+ *
+ * ITS OWN `useLoad`, NOT the community's, so a metrics failure costs the creator
+ * the numbers and nothing else — the checkout link they were about to copy and the
+ * status they were about to change are still on the screen behind it.
+ *
+ * ============================ REVENUE IS GROSS ============================
+ * `grossRevenueAmount` is the sum of SUCCESSFUL transactions BEFORE DIUDARA's
+ * platform fee. Xendit's split rule deducts that fee before a single Rupiah
+ * reaches the creator, so this figure is NOT what they earned and must never be
+ * labelled as if it were. There is no endpoint that reports the fee or the net, so
+ * the honest thing available is to name the figure "kotor (bruto)" and say in the
+ * tile that the fee comes out of it. Labelling it "Pendapatan Anda" would overstate
+ * a creator's income on the first screen they see — a correctness bug, not copy.
+ * ==========================================================================
+ */
+function MetricsPanel({ community }: { community: Community }) {
+  const [load, handle] = useLoad(
+    () => apiFetch<CommunityMetrics>(`/communities/${community.id}/metrics`),
+    [community.id]
+  );
+
+  if (load.kind === "loading") return <p className="muted">Memuat angka...</p>;
+  if (load.kind === "error") {
+    return (
+      <div className="section">
+        <ErrorPanel message={load.message} onRetry={handle.reload} />
+      </div>
+    );
+  }
+
+  const metrics = load.data;
+  const { active, pastDue, churned } = metrics.members;
+  // "How many people can currently see my group" and "how many are paid up" are
+  // different questions, which is exactly why the API reports past-due separately
+  // instead of folding it into active. Both answers are on the screen.
+  const withAccess = active + pastDue;
+  const nothingYet =
+    active === 0 && pastDue === 0 && churned === 0 && metrics.grossRevenueAmount === 0;
+
+  if (nothingYet) {
+    // A grid of zeroes on day one reads as a broken panel rather than as a new
+    // community, so it says what to do next instead.
+    //
+    // The tier list stays, though: a creator who has just defined their packages
+    // needs to see them confirmed, and one who has not needs to be told that is the
+    // next thing to do. Replacing the whole panel would hide both.
+    return (
+      <div className="section stack">
+        <div data-testid="metrics-empty">
+          <EmptyState
+            title="Belum ada anggota dan belum ada pembayaran"
+            action="Sebarkan tautan checkout di bawah ke calon anggota. Angka keanggotaan dan pendapatan muncul di sini setelah pembayaran pertama berhasil."
+          />
+        </div>
+        <TierDistribution tiers={metrics.tierDistribution} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="section stack">
+      <div className="metrics">
+        <Metric
+          testId="metric-gross-revenue"
+          label="Pendapatan kotor (bruto)"
+          value={formatRupiah(metrics.grossRevenueAmount)}
+          note="Total pembayaran yang berhasil, SEBELUM biaya platform DIUDARA. Xendit memotong biaya itu sebelum dana diteruskan, jadi jumlah yang masuk ke rekening lebih kecil dari angka ini."
+        />
+        <Metric
+          testId="metric-with-access"
+          label="Bisa mengakses grup"
+          value={String(withAccess)}
+          note={`Aktif (${active}) + lewat jatuh tempo (${pastDue}). Ini jumlah orang yang saat ini masih ada di dalam grup Anda.`}
+        />
+        <Metric
+          testId="metric-active"
+          label={`Anggota ${memberStatusLabel("active").toLowerCase()}`}
+          value={String(active)}
+          note={memberStatusExplanation("active")}
+        />
+        <Metric
+          testId="metric-past-due"
+          label={memberStatusLabel("past_due")}
+          value={String(pastDue)}
+          note={memberStatusExplanation("past_due")}
+        />
+        <Metric
+          testId="metric-churned"
+          label={memberStatusLabel("churned")}
+          value={String(churned)}
+          note={memberStatusExplanation("churned")}
+        />
+      </div>
+
+      <TierDistribution tiers={metrics.tierDistribution} />
+    </div>
+  );
+}
+
+/**
+ * Members per tier, INCLUDING TIERS NOBODY HAS BOUGHT.
+ *
+ * The zero rows are the point rather than padding: a tier with no members is a
+ * price nobody accepted or a package nobody saw, and it is invisible in any view
+ * that only lists what sold.
+ */
+function TierDistribution({
+  tiers,
+}: {
+  tiers: CommunityMetrics["tierDistribution"];
+}) {
+  if (tiers.length === 0) {
+    return (
+      <EmptyState
+        title="Belum ada paket"
+        action="Buat paket di tab “Paket”. Tanpa paket aktif, halaman checkout Anda tidak menawarkan apa pun untuk dibeli."
+      />
+    );
+  }
+
+  return (
+    <div>
+      <h2>Anggota per paket</h2>
+      <div className="table-scroll" data-testid="tier-distribution">
+        <table>
+          <thead>
+            <tr>
+              <th>Paket</th>
+              <th className="numeric">Harga</th>
+              <th className="numeric">Anggota aktif</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tiers.map((tier) => (
+              <tr key={tier.tierId} data-testid={`tier-row-${tier.tierId}`}>
+                <td>{tier.tierName}</td>
+                <td className="numeric">{formatRupiah(tier.priceAmount)}</td>
+                <td className="numeric">{tier.activeMembers}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="hint">
+        Hanya anggota berstatus aktif yang dihitung di sini. Paket yang menunjukkan 0 anggota belum
+        pernah dibeli siapa pun.
+      </p>
+    </div>
   );
 }
 

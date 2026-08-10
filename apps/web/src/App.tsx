@@ -9,7 +9,8 @@ import CommunityOverviewPage from "./dashboard/pages/CommunityOverviewPage";
 import TiersPage from "./dashboard/pages/TiersPage";
 import ChannelsPage from "./dashboard/pages/ChannelsPage";
 import AccountPage from "./dashboard/pages/AccountPage";
-import PlaceholderPage from "./dashboard/PlaceholderPage";
+import MembersPage from "./dashboard/pages/MembersPage";
+import ActivityPage from "./dashboard/pages/ActivityPage";
 
 export default function App() {
   return (
@@ -48,8 +49,8 @@ export default function App() {
           <Route path="c/:communityId" element={<CommunityOverviewPage />} />
           <Route path="c/:communityId/tiers" element={<TiersPage />} />
           <Route path="c/:communityId/channels" element={<ChannelsPage />} />
-          <Route path="c/:communityId/members" element={<PlaceholderPage title="Anggota" />} />
-          <Route path="c/:communityId/activity" element={<PlaceholderPage title="Aktivitas" />} />
+          <Route path="c/:communityId/members" element={<MembersPage />} />
+          <Route path="c/:communityId/activity" element={<ActivityPage />} />
           {/* An unknown /dashboard/... path goes to the dashboard's own home, not
               to the public checkout 404 the catch-all below serves. */}
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
