@@ -6,6 +6,7 @@ import {
   memberCsvLine,
 } from "../../domain/member-csv";
 import { NotFoundError } from "../errors";
+import { redactLinks, safeErrorSummary, safeLabel } from "../log-safety";
 import type { AnalyticsRepositoryPort } from "../ports/analytics-repository.port";
 import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 
@@ -47,9 +48,12 @@ export interface MemberExport {
  * the filename's slug comes from — so the two things that need the community are one
  * query.
  *
- * NOTHING HERE LOGS. The rows carry WhatsApp numbers, and a log line reaches an
- * aggregator, is retained, and is read by people who are not the creator. There is no
- * diagnostic worth that.
+ * NO ROW EVER REACHES A LOG. The rows carry WhatsApp numbers, and a log line reaches
+ * an aggregator, is retained, and is read by people who are not the creator. There is
+ * no diagnostic worth that. The ONE thing that is logged is a failure of the stream
+ * itself, ids-and-reason only, through the same `redactLinks(safeErrorSummary(...))`
+ * pairing the rest of the codebase uses — see `streamCsv` for why silence there is
+ * not an option.
  */
 export class ExportCommunityMembers {
   constructor(
@@ -99,10 +103,37 @@ export class ExportCommunityMembers {
           wroteHeader = true;
         }
 
-        const rows = await analytics.listMembersForCreator(communityId, creatorId, {
-          limit: MEMBER_EXPORT_PAGE_SIZE,
-          ...(cursor === undefined ? {} : { before: cursor }),
-        });
+        let rows;
+        try {
+          rows = await analytics.listMembersForCreator(communityId, creatorId, {
+            limit: MEMBER_EXPORT_PAGE_SIZE,
+            ...(cursor === undefined ? {} : { before: cursor }),
+          });
+        } catch (err) {
+          // THE ONLY PLACE THIS FILE LOGS, and it has to.
+          //
+          // The status line and `Content-Disposition` went out with the first chunk,
+          // so a failure here CANNOT become a 500 — the response simply stops. A
+          // browser shows a failed download, but `curl -o roster.csv` writes a file
+          // that opens, parses, and is quietly missing members. Rethrowing errors the
+          // stream, which aborts the transfer rather than ending it cleanly (that is
+          // the only truncation signal available on the wire once a 200 has been
+          // sent) — but nothing would have recorded, anywhere, that a creator's
+          // export was cut short. Now something does.
+          //
+          // IDS AND THE REASON ONLY. `safeErrorSummary` walks the cause chain and
+          // drops the bound parameters — which for THIS query are members' WhatsApp
+          // numbers — and `redactLinks` covers a provider or driver message that
+          // interpolated a URL. Never a row, never the roster's size.
+          console.error(
+            `[export] the member CSV export failed mid-stream: community=${safeLabel(
+              communityId
+            )} — the response has already been sent with a 200, so the creator has a ` +
+              "TRUNCATED roster file. The transfer is aborted rather than closed: " +
+              redactLinks(safeErrorSummary(err))
+          );
+          throw err;
+        }
 
         // `null` here would mean the community stopped being the creator's between
         // the ownership check and this read. Ending the stream is the only honest

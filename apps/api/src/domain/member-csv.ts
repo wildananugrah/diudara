@@ -60,7 +60,11 @@ export const MEMBER_CSV_COLUMNS = [
  * `-` is in here even though a negative number is harmless, because `-2+3+cmd|…` is
  * a documented Excel command-execution vector and no member's display name
  * legitimately begins with a minus. Tab and carriage return are in here because
- * Excel strips leading whitespace before deciding, so `\t=1+1` is a formula.
+ * Excel treats a cell LEADING with one as a formula in its own right.
+ *
+ * The set does NOT need to list every whitespace character, because
+ * `escapeCsvField` tests the first character of the TRIMMED value as well — see
+ * there for why that matters and for the bug it fixes.
  */
 const FORMULA_LEADERS = new Set(["=", "+", "-", "@", "\t", "\r"]);
 
@@ -85,10 +89,22 @@ const MUST_QUOTE = [",", '"', "\n", "\r"];
  *
  * Leading and trailing spaces force quoting too, so a name of `"  Siti  "` is not
  * silently trimmed by a reader that strips unquoted whitespace.
+ *
+ * THE LEADER IS LOOKED FOR AFTER LEADING WHITESPACE, not only at position 0. This
+ * is the same reasoning `FORMULA_LEADERS` states — a spreadsheet strips leading
+ * whitespace before deciding whether the cell is a formula — applied consistently.
+ * The first version of this function tested `value[0]` alone, so `\t=1+1` was
+ * defused (tab is in the set) while `" =1+1"` and `"\n=1+1"` went out UNPREFIXED
+ * and executed on open. A single space defeated the whole mitigation.
+ *
+ * The apostrophe still goes in FRONT of the whitespace rather than in front of the
+ * `=`: whatever the reader chooses to strip, the first character it can reach is
+ * then text, and the value a person sees in the cell is unaltered apart from the
+ * apostrophe.
  */
 export function escapeCsvField(value: string): string {
   const first = value.slice(0, 1);
-  const dangerous = FORMULA_LEADERS.has(first);
+  const dangerous = FORMULA_LEADERS.has(first) || FORMULA_LEADERS.has(value.trimStart().slice(0, 1));
   const body = dangerous ? `'${value}` : value;
 
   const needsQuoting =

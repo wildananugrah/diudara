@@ -165,6 +165,58 @@ describe("ExportCommunityMembers", () => {
     expect(requests).toEqual([]);
   });
 
+  it("LOGS a mid-stream failure instead of truncating the roster in silence", async () => {
+    // THE SHAPE OF THE BUG. The status line and `Content-Disposition` have already
+    // gone out by the time page two is read, so a database error here cannot become
+    // a 500 — the response just stops. A browser shows a failed download, but
+    // `curl -o roster.csv` writes a file that opens, parses, and is missing members,
+    // with nothing anywhere saying so. The stream must fail loudly on our side even
+    // though it cannot change its own status code.
+    const { repository } = analyticsWith(MEMBER_EXPORT_PAGE_SIZE * 2);
+    const readPage = repository.listMembersForCreator.bind(repository);
+    let pages = 0;
+    repository.listMembersForCreator = async (communityId, creatorId, page) => {
+      if (pages++ === 1) {
+        // Drizzle's shape: the statement in `message`, the bound values behind
+        // `params:` — which is where a member's WhatsApp number would be.
+        throw new Error(
+          'Failed query: select … from "member"\nparams: +6281234567890,kelas-budi'
+        );
+      }
+      return readPage(communityId, creatorId, page);
+    };
+
+    const useCase = new ExportCommunityMembers(communities(COMMUNITY), repository);
+    const exported = await useCase.execute({
+      communityId: COMMUNITY.id,
+      creatorId: COMMUNITY.creatorId,
+    });
+
+    const logged: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      // The consumer must SEE the failure. A stream that closed cleanly here is the
+      // silent partial roster.
+      await expect(drain(exported.body)).rejects.toThrow();
+    } finally {
+      console.error = original;
+    }
+
+    const line = logged.find((entry) => entry.includes("export"));
+    expect(line).toBeDefined();
+    // Diagnosable: which community, and what went wrong.
+    expect(line).toContain(COMMUNITY.id);
+    expect(line).toContain("Failed query");
+    // NOT AT THE COST OF THE THING THIS ENDPOINT EXISTS TO PROTECT. The roster is
+    // members' phone numbers; a log line reaches an aggregator and is read by people
+    // who are not the creator.
+    expect(line).not.toContain("+6281234567890");
+    expect(line).not.toContain("params:");
+  });
+
   it("emits a header even when the roster is empty", async () => {
     const { repository } = analyticsWith(0);
     const useCase = new ExportCommunityMembers(communities(COMMUNITY), repository);
