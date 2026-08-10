@@ -313,6 +313,22 @@ code {
   padding: 8px 10px;
 }
 
+/*
+ * A CELL that carries "somebody still has to act", inside a table of cells that
+ * mostly do not.
+ *
+ * The member roster's revoke column uses it for a revocation the provider could
+ * not carry out: the entitlement is gone from our records and the member is still
+ * inside the creator's paid group. It reads as amber rather than as `.muted`
+ * precisely because the muted version of that sentence — which is what this
+ * column used to show — is indistinguishable from a removal that worked.
+ */
+.cell-warning {
+  color: var(--amber);
+  font-weight: 600;
+  font-size: 0.8125rem;
+}
+
 .form-ok {
   color: #166534;
   background: #f0fdf4;

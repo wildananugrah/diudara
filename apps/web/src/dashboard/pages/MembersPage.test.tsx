@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import MembersPage from "./MembersPage";
 import { renderPage, stubFetch, TEST_COMMUNITY, type StubRoute } from "../testing";
 
@@ -44,6 +44,22 @@ function render() {
     path: "/dashboard/c/:communityId/members",
     at: `/dashboard/c/${TEST_COMMUNITY.id}/members`,
   });
+}
+
+/**
+ * The `<tr>` a member's name sits in — the row a creator actually reads a member's
+ * fate from, as opposed to the panel that only describes the last action taken.
+ */
+function rowFor(name: string): HTMLElement {
+  const row = screen.getByText(name).closest("tr");
+  if (row === null) throw new Error(`no roster row for ${name}`);
+  return row;
+}
+
+/** Presses that member's OWN revoke button and confirms it. */
+function revokeFromRow(name: string): void {
+  fireEvent.click(within(rowFor(name)).getByRole("button", { name: "Cabut akses" }));
+  fireEvent.click(screen.getByRole("button", { name: "Ya, cabut akses" }));
 }
 
 /** The community lookup every community screen makes, plus whatever the test needs. */
@@ -251,6 +267,71 @@ describe("MembersPage", () => {
 
     const result = await screen.findByTestId("revoke-result");
     expect(result.textContent).toMatch(/WhatsApp/);
+  });
+
+  it("KEEPS AN UNRESOLVED MANUAL REVOCATION VISIBLE when a second member is revoked", async () => {
+    stub([
+      { path: ROSTER, body: { members: [SITI, AGUS], nextCursor: null } },
+      {
+        method: "POST",
+        path: `${ROSTER}/${SITI.memberId}/revoke`,
+        body: {
+          revoked: 1,
+          automated: false,
+          channels: [
+            {
+              channelId: "c1",
+              platform: "whatsapp",
+              automated: false,
+              reason: "provider_cannot_gate_access",
+            },
+          ],
+        },
+      },
+      {
+        method: "POST",
+        path: `${ROSTER}/${AGUS.memberId}/revoke`,
+        body: {
+          revoked: 1,
+          automated: true,
+          channels: [{ channelId: "c2", platform: "telegram", automated: true }],
+        },
+      },
+    ]);
+
+    render();
+    await screen.findByText("Siti Rahayu");
+
+    revokeFromRow("Siti Rahayu");
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("revoke-result")
+          .some((panel) => (panel.textContent ?? "").includes("Siti Rahayu"))
+      ).toBe(true)
+    );
+
+    revokeFromRow("Agus Pratama");
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("revoke-result")
+          .some((panel) => (panel.textContent ?? "").includes("Agus Pratama"))
+      ).toBe(true)
+    );
+
+    // SITI IS STILL INSIDE THE PAID GROUP. Dropping her warning to make room for
+    // Agus's success panel is the exact dishonesty this screen exists to prevent:
+    // the creator's only record that they still have to remove her by hand.
+    const panels = screen.getAllByTestId("revoke-result").map((p) => p.textContent ?? "");
+    expect(panels.some((t) => t.includes("Siti Rahayu") && /BELUM dikeluarkan/.test(t))).toBe(true);
+
+    // And her ROW must not read like the member who really was removed.
+    const sitiRow = rowFor("Siti Rahayu").textContent ?? "";
+    const agusRow = rowFor("Agus Pratama").textContent ?? "";
+    expect(sitiRow).toMatch(/BELUM keluar dari grup/);
+    expect(agusRow).toMatch(/Akses grup dicabut/);
+    expect(sitiRow.includes("Akses grup dicabut")).toBe(false);
   });
 
   it("says the subscription itself is unchanged, because the API does not change it", async () => {

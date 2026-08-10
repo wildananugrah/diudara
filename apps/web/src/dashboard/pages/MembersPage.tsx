@@ -201,27 +201,53 @@ function MemberTable({ community, members }: { community: Community; members: Me
   /** The row awaiting confirmation, or null. Destructive, so nothing is sent
       until a second, deliberate press. */
   const [confirming, setConfirming] = useState<MemberRow | null>(null);
-  const [result, setResult] = useState<RevokeOutcome | null>(null);
   const [busy, setBusy] = useState(false);
   /**
-   * Members this screen has already revoked, BY MEMBER ID rather than by row: a
-   * member holding two tiers has two rows, and revocation is per community, so
-   * both rows are done once either is.
+   * WHAT HAPPENED TO EACH MEMBER — one entry PER MEMBER, not one slot for the
+   * screen.
+   *
+   * A single slot was a lie generator, and it is the exact lie this phase set out
+   * to prevent: revoke somebody the provider could not remove, revoke somebody it
+   * could, and the second outcome overwrote the first — so the only record that a
+   * non-payer was still sitting in the paid group vanished the moment the creator
+   * did their next piece of work. A map cannot do that.
+   *
+   * KEYED BY MEMBER ID rather than by row: a member holding two tiers has two
+   * rows, and revocation is per community, so both rows are settled once either
+   * one is.
+   *
+   * INSERTION ORDER IS RECENCY ORDER, maintained by deleting before setting (see
+   * `confirmRevoke`), which is what lets `visibleOutcomes` take "the latest".
    */
-  const [revoked, setRevoked] = useState<ReadonlySet<string>>(new Set());
+  const [outcomes, setOutcomes] = useState<ReadonlyMap<string, RevokeOutcome>>(new Map());
 
   async function confirmRevoke(member: MemberRow) {
     setBusy(true);
     try {
       const outcome = await revokeMember(community.id, member);
-      setResult(outcome);
-      if (outcome.kind !== "failed") {
-        setRevoked((previous) => new Set([...previous, member.memberId]));
-      }
+      setOutcomes((previous) => {
+        const next = new Map(previous);
+        // Delete first: `Map.set` on an existing key keeps the ORIGINAL insertion
+        // position, so re-revoking a member after a failure would otherwise leave
+        // a stale entry looking like the most recent action.
+        next.delete(member.memberId);
+        next.set(member.memberId, outcome);
+        return next;
+      });
     } finally {
       setBusy(false);
       setConfirming(null);
     }
+  }
+
+  /** Forgets one member's outcome, so a retry starts from a clean panel. */
+  function clearOutcome(memberId: string) {
+    setOutcomes((previous) => {
+      if (!previous.has(memberId)) return previous;
+      const next = new Map(previous);
+      next.delete(memberId);
+      return next;
+    });
   }
 
   return (
@@ -255,7 +281,9 @@ function MemberTable({ community, members }: { community: Community; members: Me
         </div>
       ) : null}
 
-      {result !== null ? <RevokeResultPanel outcome={result} /> : null}
+      {visibleOutcomes(outcomes).map((outcome) => (
+        <RevokeResultPanel key={outcomeKey(outcome)} outcome={outcome} />
+      ))}
 
       <div className="table-scroll">
         <table>
@@ -271,7 +299,9 @@ function MemberTable({ community, members }: { community: Community; members: Me
             </tr>
           </thead>
           <tbody>
-            {members.map((member) => (
+            {members.map((member) => {
+              const outcome = outcomes.get(member.memberId);
+              return (
               <tr key={member.subscriptionId}>
                 <td>{member.name ?? "(tanpa nama)"}</td>
                 <td>{member.whatsappNumber}</td>
@@ -284,14 +314,14 @@ function MemberTable({ community, members }: { community: Community; members: Me
                 <td>{formatDateTime(member.joinedAt)}</td>
                 <td>{member.nextBillingDate === null ? "—" : formatDate(member.nextBillingDate)}</td>
                 <td>
-                  {revoked.has(member.memberId) ? (
-                    <span className="muted">Akses grup dicabut</span>
+                  {outcome !== undefined && outcome.kind !== "failed" ? (
+                    <RevokeOutcomeCell outcome={outcome} />
                   ) : REVOCABLE.has(member.status) ? (
                     <button
                       type="button"
                       className="button-danger"
                       onClick={() => {
-                        setResult(null);
+                        clearOutcome(member.memberId);
                         setConfirming(member);
                       }}
                       disabled={busy || confirming !== null}
@@ -301,7 +331,8 @@ function MemberTable({ community, members }: { community: Community; members: Me
                   ) : null}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -317,7 +348,57 @@ type RevokeOutcome =
   | { kind: "automated"; member: MemberRow; result: RevokeResult }
   | { kind: "manual"; member: MemberRow; result: RevokeResult }
   | { kind: "no_access"; member: MemberRow }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; member: MemberRow; message: string };
+
+/** An outcome the row can render — every kind except the one that keeps the button. */
+type SettledOutcome = Exclude<RevokeOutcome, { kind: "failed" }>;
+
+/** React key, and the member each panel is about. Stable across re-renders. */
+function outcomeKey(outcome: RevokeOutcome): string {
+  return outcome.member.memberId;
+}
+
+/**
+ * WHICH OUTCOME PANELS STAY ON SCREEN — every unresolved one, plus the latest.
+ *
+ * A `manual` outcome is not a notification, it is an OUTSTANDING TASK: a member
+ * who no longer pays is inside the creator's paid group and only the creator can
+ * remove them. Nothing this screen can observe resolves it, so it stays until the
+ * page is reloaded — however many other members are revoked afterwards.
+ *
+ * The other three describe a finished action and are also written into the
+ * member's own row, so only the most recent is kept; otherwise a creator tidying
+ * up twenty lapsed members would end up reading twenty stacked confirmations to
+ * find the one warning that mattered.
+ */
+function visibleOutcomes(outcomes: ReadonlyMap<string, RevokeOutcome>): RevokeOutcome[] {
+  const all = [...outcomes.values()];
+  const unresolved = all.filter((outcome) => outcome.kind === "manual");
+  const latest = all[all.length - 1];
+  return latest !== undefined && latest.kind !== "manual" ? [...unresolved, latest] : unresolved;
+}
+
+/**
+ * WHAT A REVOKED MEMBER'S ROW SAYS, which is NOT the same sentence for every
+ * outcome.
+ *
+ * The row is what a creator reads after the panel has scrolled away, so a `manual`
+ * revocation that rendered as "Akses grup dicabut" told them the member was out of
+ * the group when they were still in it — the same lie as the overwritten panel,
+ * one line further down. Each kind gets its own words, and only the automated one
+ * is allowed to claim the group membership ended.
+ */
+function RevokeOutcomeCell({ outcome }: { outcome: SettledOutcome }) {
+  if (outcome.kind === "manual") {
+    return (
+      <span className="cell-warning">Dicabut di catatan — BELUM keluar dari grup</span>
+    );
+  }
+  if (outcome.kind === "no_access") {
+    return <span className="muted">Tidak ada akses aktif</span>;
+  }
+  return <span className="muted">Akses grup dicabut</span>;
+}
 
 /**
  * `POST /communities/:id/members/:memberId/revoke`, classified honestly.
@@ -341,6 +422,7 @@ async function revokeMember(communityId: string, member: MemberRow): Promise<Rev
     }
     return {
       kind: "failed",
+      member,
       message: err instanceof Error ? err.message : "gagal mencabut akses",
     };
   }
@@ -352,12 +434,18 @@ async function revokeMember(communityId: string, member: MemberRow): Promise<Rev
  * The worst thing this screen could do is tell a creator a member was removed when
  * they are still in the group, so the three outcomes have three different panels
  * and only one of them says the removal happened.
+ *
+ * EVERY PANEL NAMES ITS MEMBER, including the failure one. More than one of these
+ * can be on screen at once now (see `visibleOutcomes`), and an unattributed
+ * "akses belum tentu tercabut" sitting above a warning about somebody else is
+ * worse than no panel at all.
  */
 function RevokeResultPanel({ outcome }: { outcome: RevokeOutcome }) {
   if (outcome.kind === "failed") {
     return (
       <p className="form-error" data-testid="revoke-result" role="alert">
-        {outcome.message} — akses belum tentu tercabut. Muat ulang halaman ini dan periksa lagi.
+        {memberLabel(outcome.member)}: {outcome.message} — akses belum tentu tercabut. Muat ulang
+        halaman ini dan periksa lagi.
       </p>
     );
   }
