@@ -168,6 +168,48 @@ describe("DrizzleAiConversationRepository.listMessages", () => {
     expect(messages.map((m) => m.content)).toEqual(["pertama", "kedua", "ketiga"]);
   });
 
+  // Contrives the tie a real `appendMessage` sequence cannot produce today:
+  // each call is its own implicit transaction, so Postgres's `now()` (what
+  // `created_at`'s `defaultNow()` reads) always advances between them. A
+  // future batched write could still insert two rows sharing one
+  // `created_at`, so this bypasses `appendMessage` and inserts directly
+  // with an EXPLICIT, identical timestamp to simulate that. `id` is a
+  // random v4 UUID, so the expected order is computed the same way
+  // (ascending `id`) rather than hardcoded — this pins that `listMessages`
+  // breaks the tie with `id`, without caring which of the two random UUIDs
+  // happens to sort first.
+  it("breaks a created_at tie with id, so a batched write cannot silently reorder a pair", async () => {
+    const creatorId = await seedCreator();
+    const conversation = await repo.createForCreator(creatorId);
+    const tiedAt = new Date("2026-01-01T00:00:00.000Z");
+
+    const [rowA] = await db
+      .insert(aiMessages)
+      .values({
+        conversationId: conversation.id,
+        role: "user",
+        content: "A",
+        createdAt: tiedAt,
+      })
+      .returning();
+    const [rowB] = await db
+      .insert(aiMessages)
+      .values({
+        conversationId: conversation.id,
+        role: "assistant",
+        content: "B",
+        createdAt: tiedAt,
+      })
+      .returning();
+
+    const expectedOrder = [rowA, rowB]
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((row) => row.content);
+
+    const messages = await repo.listMessages(conversation.id, creatorId);
+    expect(messages.map((m) => m.content)).toEqual(expectedOrder);
+  });
+
   it("returns an empty list for a freshly created conversation", async () => {
     const creatorId = await seedCreator();
     const conversation = await repo.createForCreator(creatorId);

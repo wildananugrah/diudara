@@ -61,11 +61,21 @@ export class DrizzleAiConversationRepository implements AiConversationRepository
       throw new NotFoundError("conversation not found");
     }
 
+    // `asc(id)` is a TIEBREAKER, not the primary key of correctness: `id` is
+    // `defaultRandom()` (a v4 UUID), so it carries no relationship to
+    // insertion order on its own. What it buys is DETERMINISM: without it,
+    // two rows sharing the same `created_at` (impossible today — each
+    // `appendMessage` call is its own implicit transaction, so `now()`
+    // always advances between them — but not guaranteed for a future
+    // batched write) would be returned in whatever order Postgres happens
+    // to pick, which can differ across calls and could silently swap a
+    // user/assistant pair. `asc(id)` makes that ordering fixed, even though
+    // it does not make it CHRONOLOGICALLY correct.
     const rows = await this.db
       .select()
       .from(aiMessages)
       .where(eq(aiMessages.conversationId, conversationId))
-      .orderBy(asc(aiMessages.createdAt));
+      .orderBy(asc(aiMessages.createdAt), asc(aiMessages.id));
     return rows as AiMessageRecord[];
   }
 }
