@@ -1,0 +1,1 @@
+DROP INDEX "activity_log_community_event_created_idx";

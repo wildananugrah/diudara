@@ -271,3 +271,38 @@ the state `0003` needs.
   Anything else — including unset — refuses to start. That is why a box with no Xendit or
   messaging tokens fails loudly instead of quietly using fakes.
 - **Member-facing strings are Indonesian.** This is an Indonesian product.
+
+
+## Deployment requirement: Postgres logs secret values on constraint violations
+
+Found during Phase 6's end-to-end gate, and it sits **underneath every layer this codebase
+controls**.
+
+When a unique constraint is violated, PostgreSQL emits a line like:
+
+```
+DETAIL:  Key (invite_link)=(https://t.me/+AbCdEf...) already exists.
+DETAIL:  Key (whatsapp_number)=(+628110000001) already exists.
+```
+
+**Bound parameters do not protect you.** The accompanying `STATEMENT:` line correctly shows only
+`$1, $2` — but the `DETAIL:` line is built from the *index tuple*, not the statement, so the real
+value appears in the database's own log. The application's logs are clean; this is beneath them.
+
+It fires unprovoked today: the test suite triggers it about five times per run, because several
+phases deliberately let the database arbitrate uniqueness rather than pre-checking. That design is
+correct and should not be changed to avoid this.
+
+**Before any production deploy, pick one deliberately** — each has a real cost:
+
+| Option | Cost |
+|---|---|
+| `log_error_verbosity = terse` | Loses `DETAIL`/`HINT` on *every* error, everywhere, which is a genuine debugging loss |
+| Redact at the log-shipping layer | Keeps diagnostics, but only works if logs never leave the host unredacted |
+| Restrict who can read the Postgres log | Simplest, but does not help if logs are aggregated |
+
+Dropping the constraints is not viable (they are the idempotency mechanism), and hashing the
+columns breaks revocation, which needs the literal invite link to match a join back.
+
+This matters for Indonesia's UU PDP 27/2022: `whatsapp_number` is members' personal data, and an
+invite link is a bearer credential for a paid group.

@@ -52,10 +52,36 @@ This is the phase that makes the product operable by a human being.
 `activity_log` currently has only single-column indexes on `member_id` and `community_id`. Every
 dashboard query is shaped `community_id + event_type + created_at range`.
 
-**Add `(community_id, event_type, created_at)` before writing a single query.** The activity feed
-is the most-viewed screen in the product and the table grows with every payment, reminder,
-revocation and grant. Getting this backwards means the dashboard degrades exactly as a creator
-becomes successful.
+**Corrected 2026-08-10 by measurement (Task 1/3 implementation).** This section originally
+prescribed `(community_id, event_type, created_at)`. Measured on PostgreSQL 16.13 with 300k rows,
+that index **does not serve the feed at all**:
+
+| Index | Time | Buffers |
+|---|---|---|
+| `(community_id, event_type, created_at)` | 15.9 ms | 1277 |
+| *that index dropped* | 12.5 ms | 1277 (same plan) |
+| `(community_id, created_at)` | **0.12 ms** | **5** |
+
+The feed filters `event_type IN (…8 values…)` and orders by `created_at`; a SAOP on the **middle**
+column cannot satisfy the ORDER BY, so Postgres ignored the index entirely. `(community_id,
+created_at)` is the one the feed needs, and the measurement lives in a schema comment so nobody
+"tidies away" the one that works.
+
+**Corrected again 2026-08-10 by the final review.** This section then said both indexes were kept,
+because the original "still answers a single-event-type plus date-range query". **No such query
+exists.** The only read of `activity_log` anywhere in the API is the feed; everything else is an
+`insert`. So `(community_id, event_type, created_at)` served nothing and was pure write
+amplification on the fastest-growing table in the product — and measured independently, with
+**only** that index present the feed ran **145 ms / 3676 buffers** against **17 ms with no
+composite index at all**, because it lured the planner into a bitmap scan over 50 000 rows. It was
+dropped in migration `0015`. Add it back in the migration that adds the query that needs it, not
+before. *An index kept for an anticipated caller is a cost paid every day for a benefit that may
+never arrive.*
+
+The underlying point stands: the activity feed is the most-viewed screen and the table grows with
+every payment, reminder, revocation and grant, so getting the index wrong means the dashboard
+degrades exactly as a creator becomes successful. **Measure it rather than reasoning about it** —
+this plan asserted a shape and was 130x wrong.
 
 Note the identifiers analytics might want later — `subscriptionId`, `tierId`, `stage` — live in
 unindexed `jsonb`. That is acceptable for this phase's queries; it is a reason not to build
@@ -98,7 +124,13 @@ compute incorrectly without anyone noticing.
 that must **not** be summed:
 - `pending` — an invoice created but never paid
 - `failed`
-- rolled-back settlements from Phase 5's `superseded` and `subscription_churned` outcomes
+- the `pending` row a `subscription_churned` rollback leaves
+
+**Corrected 2026-08-10 (Task 2 implementation).** This section originally also excluded
+`superseded`, calling it a rolled-back settlement. **That was wrong.** `markPaid` settles the
+*transaction* as `success` and marks only the duplicate *subscription* `superseded` — the money
+genuinely arrived and appears on the creator's Xendit statement. Excluding it would understate
+revenue and, worse, hide a refund that is owed. Only `subscription_churned` actually rolls back.
 
 There is no refund path yet, so no refund exclusion is needed — but when one arrives it must be
 subtracted here, and the plan should note that.

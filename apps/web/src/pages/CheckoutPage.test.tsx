@@ -108,8 +108,8 @@ describe("CheckoutPage", () => {
     renderAt("kelas-budi");
 
     expect(await screen.findByText(/tidak menerima anggota baru/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Lanjutkan pembayaran/ })).toBeNull();
-    expect(screen.queryByText("Basic")).toBeNull();
+    expect(screen.queryAllByRole("button", { name: /Lanjutkan pembayaran/ }).length).toBe(0);
+    expect(screen.queryAllByText("Basic").length).toBe(0);
   });
 
   it("renders a not-found state for a 404 instead of crashing", async () => {
