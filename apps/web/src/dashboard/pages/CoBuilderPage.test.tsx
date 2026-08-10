@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import CoBuilderPage from "./CoBuilderPage";
 import { resetPaymentAccountCacheForTesting } from "../paymentAccount";
 import { renderPage, stubFetch, type StubRoute } from "../testing";
@@ -113,6 +113,21 @@ describe("CoBuilderPage", () => {
 
     const notice = await screen.findByTestId("payment-account-notice");
     expect(notice.textContent).toMatch(/belum bisa membayar|belum terhubung/);
+  });
+
+  it("clears the payment warning once the server reports payments connected", async () => {
+    // `getPaymentAccountState()` answers "loading" until the GET resolves, and
+    // `PaymentAccountNotice` renders its warning for "loading" too — so a test
+    // that only asserts the warning is PRESENT (the one above) would pass
+    // just as well with `connected: true` stubbed, never actually reading the
+    // body `findByTestId` resolved before. This one waits for the warning to
+    // be there FIRST (proving the component mounted and is subscribed), then
+    // waits for the GET to actually land and clear it.
+    stubFetch([AI_ENABLED, { path: "/payment-account", body: { connected: true, provisioning: false } }]);
+    render();
+
+    await screen.findByTestId("payment-account-notice");
+    await waitFor(() => expect(screen.queryAllByTestId("payment-account-notice").length).toBe(0));
   });
 
   it("sends a message and shows the assistant's reply plus the resulting draft", async () => {
@@ -622,5 +637,179 @@ describe("CoBuilderPage", () => {
     await waitFor(() =>
       expect(calls.filter((c) => c.method === "POST" && c.url === "/communities").length).toBe(2)
     );
+  });
+
+  it("disables the composer while a save is in flight, with Indonesian copy explaining why", async () => {
+    let resolveCommunity: ((res: Response) => void) | null = null;
+    const { calls } = recordingFetch((url, method) => {
+      if (url === "/ai/status") return jsonResponse({ enabled: true });
+      if (url === "/payment-account") return jsonResponse({ connected: true, provisioning: false });
+      if (url === "/ai/messages" && method === "POST") {
+        return jsonResponse({ conversationId: "conv-1", reply: "Berikut draf komunitasmu.", draft: VALID_DRAFT });
+      }
+      if (url === "/communities" && method === "POST") {
+        return new Promise<Response>((resolve) => {
+          resolveCommunity = resolve;
+        });
+      }
+      throw new Error(`unstubbed request: ${method} ${url}`);
+    });
+
+    render();
+    await screen.findByText(/Mulai obrolan/);
+    await sendMessage("halo");
+    await screen.findByText("Berikut draf komunitasmu.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Buat komunitas ini" }));
+
+    await screen.findByTestId("save-in-flight-notice");
+    expect((screen.getByLabelText("Pesan Anda") as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Kirim" }) as HTMLButtonElement).disabled).toBe(true);
+
+    resolveCommunity!(jsonResponse(CREATED_COMMUNITY, 201));
+
+    await screen.findByText(/berhasil dibuat/);
+    await waitFor(() => expect(screen.queryAllByTestId("save-in-flight-notice").length).toBe(0));
+    expect((screen.getByLabelText("Pesan Anda") as HTMLTextAreaElement).disabled).toBe(false);
+    expect(calls.filter((c) => c.method === "POST" && c.url === "/communities").length).toBe(1);
+  });
+
+  it("does not corrupt a new draft that arrives while an earlier save's tier request is still in flight (draft generation guard)", async () => {
+    let resolveOldTier: ((res: Response) => void) | null = null;
+    let messageAttempt = 0;
+    const secondDraft = {
+      name: "Kelas Menulis Kreatif",
+      niche: "Menulis untuk pemula",
+      description: "Komunitas menulis.",
+      welcomeMessage: "Selamat datang di kelas menulis!",
+      tiers: [{ name: "Starter", priceAmount: 30000, billingCycle: "monthly" }],
+    };
+
+    recordingFetch((url, method, body) => {
+      if (url === "/ai/status") return jsonResponse({ enabled: true });
+      if (url === "/payment-account") return jsonResponse({ connected: true, provisioning: false });
+      if (url === "/ai/messages" && method === "POST") {
+        messageAttempt += 1;
+        if (messageAttempt === 1) {
+          return jsonResponse({ conversationId: "conv-1", reply: "Berikut draf pertama.", draft: VALID_DRAFT });
+        }
+        return jsonResponse({ conversationId: "conv-1", reply: "Berikut draf kedua.", draft: secondDraft });
+      }
+      if (url === "/communities" && method === "POST") {
+        return jsonResponse(CREATED_COMMUNITY, 201);
+      }
+      if (url === `/communities/${CREATED_COMMUNITY.id}/tiers` && method === "POST") {
+        const tierBody = body as { name: string };
+        if (tierBody.name === "Dasar") {
+          // Held open — this is the old save's tier request still in flight
+          // at the moment the new draft arrives.
+          return new Promise<Response>((resolve) => {
+            resolveOldTier = resolve;
+          });
+        }
+        return jsonResponse({ id: "tier-x", communityId: CREATED_COMMUNITY.id, ...tierBody, isActive: true }, 201);
+      }
+      throw new Error(`unstubbed request: ${method} ${url}`);
+    });
+
+    render();
+    await screen.findByText(/Mulai obrolan/);
+    await sendMessage("pesan pertama");
+    await screen.findByText("Berikut draf pertama.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Buat komunitas ini" }));
+    await waitFor(() => expect(resolveOldTier).not.toBeNull());
+    await screen.findByTestId("save-in-flight-notice");
+
+    // BYPASS THE COMPOSER LOCK ON PURPOSE — the ruling requires this not to
+    // matter: "do not rely on the composer lock alone... the stale write is a
+    // correctness bug". Removing the attribute simulates the lock being
+    // absent or defeated; the generation guard is what has to hold anyway.
+    const textarea = screen.getByLabelText("Pesan Anda") as HTMLTextAreaElement;
+    textarea.removeAttribute("disabled");
+    fireEvent.change(textarea, { target: { value: "pesan kedua" } });
+    const sendButton = screen.getByRole("button", { name: "Kirim" }) as HTMLButtonElement;
+    sendButton.removeAttribute("disabled");
+    fireEvent.click(sendButton);
+
+    await screen.findByText("Berikut draf kedua.");
+    // The new draft's own fields are immediately usable — not locked as
+    // though they belonged to the old, still-running save.
+    expect((screen.getByLabelText("Nama komunitas") as HTMLInputElement).disabled).toBe(false);
+    expect((screen.getByLabelText("Nama paket 1") as HTMLInputElement).value).toBe("Starter");
+    expect((screen.getByLabelText("Nama paket 1") as HTMLInputElement).disabled).toBe(false);
+
+    // NOW let the OLD save's held-open tier request resolve — wrapped in
+    // `act` since resolving a bare promise (not a `fireEvent`) is what to
+    // React looks like a state update from outside any event handler.
+    await act(async () => {
+      resolveOldTier!(
+        jsonResponse(
+          { id: "tier-old", communityId: CREATED_COMMUNITY.id, name: "Dasar", priceAmount: 50000, billingCycle: "monthly", isActive: true },
+          201
+        )
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The stale write must not land on the NEW draft's tier 0 — no
+    // "Sudah ditambahkan."/"Menyimpan..." bleeding through, and the field
+    // must still be exactly as it arrived: editable, still named "Starter".
+    expect(screen.queryAllByText("Sudah ditambahkan.").length).toBe(0);
+    expect(screen.queryAllByText("Menyimpan...").length).toBe(0);
+    expect((screen.getByLabelText("Nama paket 1") as HTMLInputElement).disabled).toBe(false);
+    expect((screen.getByLabelText("Nama paket 1") as HTMLInputElement).value).toBe("Starter");
+    // The FIRST save's own confirmation is unaffected and not duplicated —
+    // it does not re-render or re-fire just because the stale write bailed.
+    expect(screen.getAllByText(/berhasil dibuat/).length).toBe(1);
+  });
+
+  it("carries outstanding tier names into the sticky summary when a later draft replaces an incomplete save", async () => {
+    const secondDraft = { ...VALID_DRAFT, name: "Kelas Bisnis Digital Lanjutan" };
+    let messageAttempt = 0;
+    recordingFetch((url, method, body) => {
+      if (url === "/ai/status") return jsonResponse({ enabled: true });
+      if (url === "/payment-account") return jsonResponse({ connected: true, provisioning: false });
+      if (url === "/ai/messages" && method === "POST") {
+        messageAttempt += 1;
+        if (messageAttempt === 1) {
+          return jsonResponse({ conversationId: "conv-1", reply: "Berikut draf pertama.", draft: VALID_DRAFT });
+        }
+        return jsonResponse({ conversationId: "conv-1", reply: "Berikut draf revisi.", draft: secondDraft });
+      }
+      if (url === "/communities" && method === "POST") {
+        return jsonResponse(CREATED_COMMUNITY, 201);
+      }
+      if (url === `/communities/${CREATED_COMMUNITY.id}/tiers` && method === "POST") {
+        const tierBody = body as { name: string };
+        if (tierBody.name === "Dasar") {
+          return jsonResponse({ id: "tier-1", communityId: CREATED_COMMUNITY.id, ...tierBody, isActive: true }, 201);
+        }
+        // "Pro" fails permanently in this test.
+        return jsonResponse({ error: "priceAmount: too large" }, 400);
+      }
+      throw new Error(`unstubbed request: ${method} ${url}`);
+    });
+
+    render();
+    await screen.findByText(/Mulai obrolan/);
+    await sendMessage("pesan pertama");
+    await screen.findByText("Berikut draf pertama.");
+    fireEvent.click(screen.getByRole("button", { name: "Buat komunitas ini" }));
+
+    await screen.findByText("Sudah ditambahkan.");
+    await screen.findByTestId("error-tier-price-1");
+    // Let `saveInFlight` clear before sending the next message.
+    await waitFor(() => expect((screen.getByLabelText("Pesan Anda") as HTMLTextAreaElement).disabled).toBe(false));
+
+    await sendMessage("pesan kedua, revisi");
+    await screen.findByText("Berikut draf revisi.");
+
+    // The retry-failed-tiers button is gone with the old panel — this
+    // sticky notice is the ONLY place that fact survives.
+    expect(screen.queryAllByRole("button", { name: "Coba lagi paket yang gagal" }).length).toBe(0);
+    const outstanding = await screen.findByTestId("outstanding-tiers-notice");
+    expect(outstanding.textContent).toContain("Pro");
+    expect(outstanding.textContent).toMatch(/halaman Paket/);
   });
 });

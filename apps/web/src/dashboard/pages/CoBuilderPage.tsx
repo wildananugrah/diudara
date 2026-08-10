@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import type { CommunityDraft } from "@diudara/shared";
 import { apiFetch, apiRequest, DashboardApiError } from "../apiClient";
@@ -244,6 +244,56 @@ export default function CoBuilderPage() {
   const [createdCommunity, setCreatedCommunity] = useState<Community | null>(null);
   /** Explicit opt-in for "yes, I mean to create a SECOND community" — reset on every new draft. */
   const [confirmSeparateCommunity, setConfirmSeparateCommunity] = useState(false);
+  /**
+   * Tier names STICKILY known to be missing from `createdCommunity` — captured
+   * the moment a later draft is about to replace the panel that created it
+   * (see `handleSend`), because that is the one moment the information would
+   * otherwise vanish: `retryFailedTiers`'s own UI disappears with the panel,
+   * and nothing else on screen would ever again say "Pro was never created".
+   */
+  const [outstandingTierNames, setOutstandingTierNames] = useState<string[]>([]);
+  /**
+   * A save (community + its tiers) is in flight. Disables the composer (see
+   * the ruling: a UI lock alone is not the fix, but it IS required) and is
+   * the second half of the defence against the race below.
+   */
+  const [saveInFlight, setSaveInFlight] = useState(false);
+
+  /**
+   * THE DRAFT GENERATION COUNTER — same pattern as `paymentAccount.ts`'s
+   * `generation`, applied to the same problem: an async write landing after
+   * the thing it was about must no longer apply.
+   *
+   * A `useRef`, not `useState`: nothing should ever re-render because this
+   * changed, and every reader needs the CURRENT value synchronously inside an
+   * async closure, never a value captured at the top of some earlier render.
+   * Bumped exactly once, in `handleSend`, at the instant a NEW non-null draft
+   * is about to replace `draftForm`. `saveCommunity`/`retryFailedTiers` each
+   * capture the value at their own start and re-check it after every `await`
+   * before writing `draftForm` or `saveState` — a mismatch means the draft (or
+   * community) that write was about is gone, and the write is silently
+   * dropped instead of landing on whatever draft happens to occupy the same
+   * tier INDEX now.
+   *
+   * MEASURED: without this, sending a follow-up while a save's tier requests
+   * are still in flight let the old save's `status`/error writes land on the
+   * brand-new draft that had just replaced it — a tier the creator never even
+   * saw showing "Sudah ditambahkan." or a stale price error, and the OLD
+   * community's "berhasil dibuat" panel sitting on top of the NEW draft's
+   * fields with them locked. The UI lock below closes the straightforward
+   * "click save, then type and send" ordering; this counter is what closes
+   * every ordering, including ones that do not go through the composer at all
+   * (e.g. clicking "Buat komunitas ini" on an OLDER, still-displayed draft
+   * while an earlier `sendAiMessage` call is still resolving).
+   */
+  const draftGenerationRef = useRef(0);
+  /** Always the latest rendered value — read from async closures instead of a stale one captured at `handleSend`'s own start. */
+  const draftFormRef = useRef<DraftFormState | null>(draftForm);
+  draftFormRef.current = draftForm;
+  const saveStateRef = useRef<SaveState>(saveState);
+  saveStateRef.current = saveState;
+  const createdCommunityRef = useRef<Community | null>(createdCommunity);
+  createdCommunityRef.current = createdCommunity;
 
   async function handleSend(event?: FormEvent) {
     event?.preventDefault();
@@ -265,6 +315,30 @@ export default function CoBuilderPage() {
       // lost").
       setContent("");
       if (result.draft !== null) {
+        // BEFORE the panel is replaced: if the draft being replaced is the
+        // one that created `createdCommunity` and it left any tier not
+        // `"created"`, remember those names now — this is the only moment
+        // that fact is still attached to a live draft at all.
+        const priorDraftForm = draftFormRef.current;
+        const priorSaveState = saveStateRef.current;
+        const created = createdCommunityRef.current;
+        if (
+          priorDraftForm !== null &&
+          priorSaveState.kind === "saved" &&
+          created !== null &&
+          priorSaveState.community.id === created.id
+        ) {
+          const outstanding = priorDraftForm.tiers
+            .filter((tier) => tier.status !== "created")
+            .map((tier) => tier.name.trim())
+            .filter((name) => name !== "");
+          setOutstandingTierNames(outstanding);
+        }
+        // Bumped BEFORE the replacement, and unconditionally on every new
+        // draft — any save already in flight for the draft being replaced
+        // must lose the race from this point on, whether or not it belongs
+        // to the community above.
+        draftGenerationRef.current += 1;
         setDraftForm(toDraftForm(result.draft));
         setSaveState({ kind: "idle" });
         setConfirmSeparateCommunity(false);
@@ -303,13 +377,23 @@ export default function CoBuilderPage() {
     });
   }
 
-  /** Runs `POST /communities/:id/tiers` for each of `indices`, in order, recording each one's own outcome. */
+  /**
+   * Runs `POST /communities/:id/tiers` for each of `indices`, in order,
+   * recording each one's own outcome — but ONLY while `startedGeneration`
+   * still matches the live draft generation. Checked before starting each
+   * tier (so a stale call never even issues its next request) and again
+   * after every `await` (so a request already in flight when the draft
+   * changed underneath it cannot write its result into whatever now
+   * occupies that same tier index).
+   */
   async function runTierAttempts(
     communityId: string,
     indices: number[],
-    parsedByIndex: ReadonlyMap<number, { name: string; priceAmount: number; billingCycle: string }>
+    parsedByIndex: ReadonlyMap<number, { name: string; priceAmount: number; billingCycle: string }>,
+    startedGeneration: number
   ) {
     for (const index of indices) {
+      if (draftGenerationRef.current !== startedGeneration) return;
       const parsed = parsedByIndex.get(index);
       if (parsed === undefined) continue;
       setDraftForm((prev) => (prev === null ? prev : updateTierAt(prev, index, { status: "creating" })));
@@ -318,6 +402,7 @@ export default function CoBuilderPage() {
           method: "POST",
           body: JSON.stringify(parsed),
         });
+        if (draftGenerationRef.current !== startedGeneration) return;
         setDraftForm((prev) =>
           prev === null
             ? prev
@@ -329,6 +414,7 @@ export default function CoBuilderPage() {
               })
         );
       } catch (err) {
+        if (draftGenerationRef.current !== startedGeneration) return;
         setDraftForm((prev) =>
           prev === null ? prev : updateTierAt(prev, index, { status: "failed", ...tierErrorPatch(err) })
         );
@@ -394,38 +480,57 @@ export default function CoBuilderPage() {
     setDraftForm({ ...draftForm, tiers: validatedTiers });
     setSaveState({ kind: "creating_community" });
 
-    let community: Community;
+    // Captured BEFORE the network call — this save belongs to whichever
+    // draft is live right now, and every write below re-checks this exact
+    // value before touching `saveState`/`draftForm`. `saveInFlight` disables
+    // the composer for the same window, but is not what makes this safe —
+    // see the ref's own docstring.
+    const startedGeneration = draftGenerationRef.current;
+    setSaveInFlight(true);
     try {
-      community = await apiFetch<Community>("/communities", {
-        method: "POST",
-        body: JSON.stringify({ name: trimmedName, ...(trimmedNiche === "" ? {} : { niche: trimmedNiche }) }),
-      });
-    } catch (err) {
-      // BACK TO AN EDITABLE, RE-SUBMITTABLE STATE — never a dead end. Every
-      // input this panel disables is keyed off `saveState.kind !== "idle" &&
-      // saveState.kind !== "community_error"`, so this state re-enables them,
-      // and `saveCommunity`'s own guard above allows this exact function to
-      // run again from here.
-      setSaveState({
-        kind: "community_error",
-        message: err instanceof Error ? err.message : "Tidak dapat menghubungi server. Coba lagi.",
-      });
-      return;
-    }
+      let community: Community;
+      try {
+        community = await apiFetch<Community>("/communities", {
+          method: "POST",
+          body: JSON.stringify({ name: trimmedName, ...(trimmedNiche === "" ? {} : { niche: trimmedNiche }) }),
+        });
+      } catch (err) {
+        if (draftGenerationRef.current === startedGeneration) {
+          // BACK TO AN EDITABLE, RE-SUBMITTABLE STATE — never a dead end.
+          // Every input this panel disables is keyed off
+          // `saveState.kind !== "idle" && saveState.kind !== "community_error"`,
+          // so this state re-enables them, and `saveCommunity`'s own guard
+          // above allows this exact function to run again from here.
+          setSaveState({
+            kind: "community_error",
+            message: err instanceof Error ? err.message : "Tidak dapat menghubungi server. Coba lagi.",
+          });
+        }
+        // A stale generation means a new draft already replaced this one —
+        // there is nothing left on screen for a `community_error` to attach
+        // to, so the write is dropped rather than resurrecting the old panel.
+        return;
+      }
 
-    // The community exists now, no matter what happens to any tier below —
-    // this state can never go back to "idle", so a tier failure can never
-    // make this screen try to create the SAME community a second time.
-    setSaveState({ kind: "saved", community });
-    // STICKY — see the field's own docstring. Set once, kept forever, so a
-    // LATER draft in this same conversation can never silently create a
-    // second community with one more click.
-    setCreatedCommunity(community);
-    await runTierAttempts(
-      community.id,
-      validatedTiers.map((_, index) => index),
-      parsedByIndex
-    );
+      if (draftGenerationRef.current !== startedGeneration) return;
+
+      // The community exists now, no matter what happens to any tier below —
+      // this state can never go back to "idle", so a tier failure can never
+      // make this screen try to create the SAME community a second time.
+      setSaveState({ kind: "saved", community });
+      // STICKY — see the field's own docstring. Set once, kept forever, so a
+      // LATER draft in this same conversation can never silently create a
+      // second community with one more click.
+      setCreatedCommunity(community);
+      await runTierAttempts(
+        community.id,
+        validatedTiers.map((_, index) => index),
+        parsedByIndex,
+        startedGeneration
+      );
+    } finally {
+      setSaveInFlight(false);
+    }
   }
 
   /**
@@ -461,7 +566,13 @@ export default function CoBuilderPage() {
     setDraftForm({ ...draftForm, tiers: nextTiers });
     if (hasFieldError) return;
 
-    await runTierAttempts(saveState.community.id, failedIndices, parsedByIndex);
+    const startedGeneration = draftGenerationRef.current;
+    setSaveInFlight(true);
+    try {
+      await runTierAttempts(saveState.community.id, failedIndices, parsedByIndex, startedGeneration);
+    } finally {
+      setSaveInFlight(false);
+    }
   }
 
   return (
@@ -534,16 +645,32 @@ export default function CoBuilderPage() {
             </div>
           ) : null}
 
+          {/* A UI CONVENTION, not the actual fix (see `draftGenerationRef`'s
+              docstring) — but required regardless: without it, a creator
+              could send a follow-up while a save's tier requests are still
+              running, which is the exact ordering that used to corrupt the
+              screen even though the generation counter alone already stops
+              the corruption itself. */}
+          {saveInFlight ? (
+            <p className="muted" data-testid="save-in-flight-notice">
+              Menyimpan komunitas — tunggu sampai selesai sebelum mengirim pesan baru.
+            </p>
+          ) : null}
+
           <form onSubmit={handleSend} className="chat-composer">
             <textarea
               aria-label="Pesan Anda"
               value={content}
               onChange={(event) => setContent(event.target.value)}
-              disabled={sending}
+              disabled={sending || saveInFlight}
               maxLength={4000}
               placeholder="Tulis pesan Anda di sini..."
             />
-            <button type="submit" className="button-primary" disabled={sending || content.trim() === ""}>
+            <button
+              type="submit"
+              className="button-primary"
+              disabled={sending || saveInFlight || content.trim() === ""}
+            >
               Kirim
             </button>
           </form>
@@ -553,6 +680,7 @@ export default function CoBuilderPage() {
               draftForm={draftForm}
               saveState={saveState}
               createdCommunity={createdCommunity}
+              outstandingTierNames={outstandingTierNames}
               confirmSeparateCommunity={confirmSeparateCommunity}
               onToggleConfirmSeparate={setConfirmSeparateCommunity}
               onChangeField={updateDraftField}
@@ -571,6 +699,7 @@ function DraftPanel({
   draftForm,
   saveState,
   createdCommunity,
+  outstandingTierNames,
   confirmSeparateCommunity,
   onToggleConfirmSeparate,
   onChangeField,
@@ -581,6 +710,7 @@ function DraftPanel({
   draftForm: DraftFormState;
   saveState: SaveState;
   createdCommunity: Community | null;
+  outstandingTierNames: string[];
   confirmSeparateCommunity: boolean;
   onToggleConfirmSeparate: (checked: boolean) => void;
   onChangeField: (field: "name" | "niche" | "description" | "welcomeMessage", value: string) => void;
@@ -599,6 +729,27 @@ function DraftPanel({
 
   return (
     <div className="card cobuilder-draft" data-testid="draft-panel">
+      {/* STICKY, and independent of `saveState` — visible for every draft
+          shown AFTER a community was created in this conversation, not just
+          while `saveState.kind === "idle"` the way the duplicate-risk notice
+          below is. This is the ONE place "already created X" and "X is
+          missing these paket" live once the draft that made them is gone. */}
+      {createdCommunity !== null ? (
+        <div className="notice notice-info" data-testid="created-community-summary">
+          <p>
+            Komunitas “{createdCommunity.name}” berhasil dibuat.{" "}
+            <Link to={`/dashboard/c/${createdCommunity.id}`}>Lihat komunitas</Link>.
+          </p>
+          {outstandingTierNames.length > 0 ? (
+            <p className="cell-warning" data-testid="outstanding-tiers-notice">
+              Paket berikut belum dibuat untuk komunitas itu: {outstandingTierNames.join(", ")}.
+              Tambahkan secara manual di{" "}
+              <Link to={`/dashboard/c/${createdCommunity.id}/tiers`}>halaman Paket</Link>.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
       <h2>Draf komunitas</h2>
       <p className="hint">
         Semua isi di bawah ini bisa Anda ubah sebelum disimpan — AI bisa saja salah, terutama soal
@@ -673,11 +824,9 @@ function DraftPanel({
           <div className="notice notice-warning" data-testid="duplicate-risk-notice">
             <h3>Draf ini adalah revisi</h3>
             <p>
-              Komunitas “{createdCommunity!.name}” sudah dibuat dari draf sebelumnya di percakapan ini —{" "}
-              <Link to={`/dashboard/c/${createdCommunity!.id}`}>Lihat komunitas</Link>. Untuk mengubah
-              paket atau info komunitas itu, gunakan{" "}
-              <Link to={`/dashboard/c/${createdCommunity!.id}/tiers`}>halaman Paket</Link> — bukan draf
-              ini, yang akan membuat komunitas BARU jika disimpan.
+              Draf ini akan membuat komunitas BARU jika disimpan — bukan mengubah komunitas yang sudah
+              dibuat di atas. Untuk mengubah paket atau info komunitas itu, gunakan{" "}
+              <Link to={`/dashboard/c/${createdCommunity!.id}/tiers`}>halaman Paket</Link>.
             </p>
             <label className="row">
               <input
@@ -717,10 +866,10 @@ function DraftPanel({
 
       {saveState.kind === "saved" ? (
         <div className="form-ok" data-testid="save-result">
-          <p>
-            Komunitas “{saveState.community.name}” berhasil dibuat.{" "}
-            <Link to={`/dashboard/c/${saveState.community.id}`}>Lihat komunitas</Link>
-          </p>
+          {/* The "berhasil dibuat" confirmation and its link live in the
+              STICKY summary banner at the top of this panel now, not here —
+              that banner is what stays visible once a later draft replaces
+              this one, which is the whole point of it being sticky. */}
           {anyTierFailed ? (
             <>
               <p className="cell-warning">
@@ -732,7 +881,9 @@ function DraftPanel({
                 Coba lagi paket yang gagal
               </button>
             </>
-          ) : null}
+          ) : (
+            <p className="muted">Tersimpan.</p>
+          )}
         </div>
       ) : null}
     </div>
