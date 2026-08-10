@@ -10,6 +10,7 @@ import { paymentAccountRoutes } from "./routes/payment-account";
 import { publicCommunityRoutes } from "./routes/public-community";
 import { publicSubscriptionRoutes } from "./routes/public-subscription";
 import { webhookRoutes } from "./routes/webhooks";
+import { aiRoutes } from "./routes/ai";
 import { errorHandler } from "./http/error-handler";
 import type { AuthVariables } from "./http/auth.middleware";
 import type { Dependencies } from "./bootstrap";
@@ -46,5 +47,8 @@ export function createApp(deps: Dependencies) {
   // community list and create endpoints. See routes/analytics.ts.
   app.route("/communities", analyticsRoutes(deps));
   app.route("/communities", communityRoutes(deps));
+  // Phase 7's AI co-builder chat. A distinct top-level path, so mount order
+  // relative to /communities does not matter.
+  app.route("/ai", aiRoutes(deps));
   return app;
 }

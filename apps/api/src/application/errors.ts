@@ -38,6 +38,48 @@ export class UnsupportedOperationError extends AppError {
 }
 
 /**
+ * The AI co-builder's daily spend cap (Phase 7) was already reached for this
+ * creator. Carries `resetAt` — an ISO-8601 UTC instant — as a typed field
+ * rather than only inside `message`, so `errorHandler` can put it in the
+ * response body as its own key and a caller (the dashboard) never has to
+ * parse a timestamp out of human prose. `message` still carries a
+ * human-readable Indonesian sentence with the same instant baked in, for any
+ * caller that only reads `error`.
+ */
+export class RateLimitedError extends AppError {
+  constructor(message: string, readonly resetAt: string) {
+    super(message, 429);
+  }
+}
+
+/**
+ * The AI co-builder is not configured on this box — `Dependencies.
+ * sendAiMessage` is `undefined` (see `selectAiProvider` in bootstrap.ts).
+ * Unlike a 404/409/etc, this is never the caller's fault: the same request
+ * would succeed on a fully configured box. `GET /ai/status` lets the
+ * dashboard avoid ever reaching this by hiding the chat screen instead.
+ */
+export class ServiceUnavailableError extends AppError {
+  constructor(message = "service unavailable") {
+    super(message, 503);
+  }
+}
+
+/**
+ * The AI provider failed twice in a row — the malformed-output or
+ * timeout/5xx `AiProviderError` SendAiMessage's retry-once policy could not
+ * recover from (see send-ai-message.ts). 502, not 500: this box is fine, the
+ * upstream model provider is what failed. The conversation is left exactly
+ * as it was before the call — the creator's message is saved, no assistant
+ * reply is appended — so retrying is just sending another message.
+ */
+export class AiUpstreamError extends AppError {
+  constructor(message = "AI provider error") {
+    super(message, 502);
+  }
+}
+
+/**
  * How far a gating-provider call got before it failed.
  *
  *  - `"rejected"`      — the provider ANSWERED and the answer was a failure (a non-2xx

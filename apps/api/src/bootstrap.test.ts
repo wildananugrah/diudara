@@ -4,10 +4,13 @@ import { join } from "node:path";
 import {
   bootstrap,
   DEFAULT_APP_BASE_URL,
+  DEFAULT_AI_DAILY_MESSAGE_LIMIT,
   RELAXED_NODE_ENVS,
+  resolveAiDailyMessageLimit,
   resolveAppBaseUrl,
   resolveCallbackToken,
   resolveTelegramWebhookSecret,
+  selectAiProvider,
   selectMessagingProviders,
   selectPaymentProvider,
   TEST_CALLBACK_TOKEN,
@@ -17,6 +20,9 @@ import {
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
 import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
+import { FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
+import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
+import { SendAiMessage } from "./application/use-cases/send-ai-message";
 import { createApp } from "./app";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
@@ -456,6 +462,11 @@ describe("Dependencies (composition root contract)", () => {
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
+      // Phase 7's AI co-builder. `undefined` is a valid value of both fields
+      // (the feature disabled) and needs no fake use-case to satisfy the
+      // type — these two tests are not about the AI path.
+      aiProvider: undefined,
+      sendAiMessage: undefined,
     };
 
     const created = await deps.creatorRepository.create({
@@ -566,6 +577,11 @@ describe("Dependencies (composition root contract)", () => {
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
+      // Phase 7's AI co-builder. `undefined` is a valid value of both fields
+      // (the feature disabled) and needs no fake use-case to satisfy the
+      // type — these two tests are not about the AI path.
+      aiProvider: undefined,
+      sendAiMessage: undefined,
     };
 
     const res = await createApp(deps).request("/health");
@@ -1712,6 +1728,173 @@ describe("bootstrap() TELEGRAM_WEBHOOK_SECRET guard", () => {
     // RevokeChannelAccess can only ever report no_provider_member_id_recorded.
     withJwtSecret("x".repeat(32), () => {
       expect(bootstrap().recordChannelJoin).toBeInstanceOf(RecordChannelJoin);
+    });
+  });
+});
+
+describe("selectAiProvider", () => {
+  it("selects OpenRouterAiAdapter when both env vars are set", () => {
+    captureConsoleLog(() => {
+      const provider = selectAiProvider({
+        apiKey: "sk-or-x",
+        model: "openai/gpt-4o-mini",
+        nodeEnv: "test",
+      });
+      expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
+    });
+  });
+
+  it("selects the real adapter in production when fully configured", () => {
+    const logs = captureConsoleLog(() => {
+      const provider = selectAiProvider({
+        apiKey: "sk-or-x",
+        model: "openai/gpt-4o-mini",
+        nodeEnv: "production",
+      });
+      expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
+    });
+    expect(logs.some((line) => /OpenRouterAiAdapter/.test(line))).toBe(true);
+  });
+
+  it("selects FakeAiAdapter when both env vars are unset in development or test", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of ["test", "development"]) {
+        expect(
+          selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv })
+        ).toBeInstanceOf(FakeAiAdapter);
+      }
+    });
+  });
+
+  // THE DELIBERATE DIVERGENCE from selectPaymentProvider/selectMessagingProviders:
+  // absent configuration outside the allowlist returns undefined — the feature is
+  // disabled, not the boot (design spec §11).
+  it("returns undefined — does NOT throw — outside the allowlist with no configuration", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "production"]) {
+        expect(selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv })).toBeUndefined();
+      }
+    });
+  });
+
+  it("says out loud that the feature is disabled, outside the allowlist with no configuration", () => {
+    const logs = captureConsoleLog(() => {
+      selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv: "production" });
+    });
+    expect(logs.some((line) => /AI co-builder is DISABLED/.test(line))).toBe(true);
+  });
+
+  it("still starts on the allowlist when OpenRouter IS configured, whatever nodeEnv says", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [undefined, "staging", "prod", "production"]) {
+        expect(
+          selectAiProvider({ apiKey: "sk-or-x", model: "openai/gpt-4o-mini", nodeEnv })
+        ).toBeInstanceOf(OpenRouterAiAdapter);
+      }
+    });
+  });
+
+  it("refuses to start on PARTIAL configuration in EVERY environment", () => {
+    for (const nodeEnv of ["test", "development", "production", undefined]) {
+      expect(() =>
+        selectAiProvider({ apiKey: "sk-or-x", model: undefined, nodeEnv })
+      ).toThrow(/half-configured/);
+      expect(() =>
+        selectAiProvider({ apiKey: undefined, model: "openai/gpt-4o-mini", nodeEnv })
+      ).toThrow(/half-configured/);
+    }
+  });
+
+  it("names the missing variable, not the one that is set", () => {
+    expect(() =>
+      selectAiProvider({ apiKey: "sk-or-x", model: undefined, nodeEnv: "test" })
+    ).toThrow(/OPENROUTER_API_KEY is set but OPENROUTER_MODEL is not/);
+  });
+
+  it("treats empty and whitespace-only configuration as unset", () => {
+    captureConsoleLog(() => {
+      for (const blank of ["", "   "]) {
+        expect(
+          selectAiProvider({ apiKey: blank, model: blank, nodeEnv: "test" })
+        ).toBeInstanceOf(FakeAiAdapter);
+      }
+    });
+  });
+
+  it("stays silent under NODE_ENV=test and speaks up everywhere else", () => {
+    const quiet = captureConsoleLog(() => {
+      selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv: "test" });
+    });
+    expect(quiet).toEqual([]);
+
+    const loud = captureConsoleLog(() => {
+      selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv: "development" });
+    });
+    expect(loud.length).toBeGreaterThan(0);
+  });
+});
+
+describe("resolveAiDailyMessageLimit", () => {
+  it("defaults to DEFAULT_AI_DAILY_MESSAGE_LIMIT when unset", () => {
+    expect(resolveAiDailyMessageLimit({ value: undefined })).toBe(
+      DEFAULT_AI_DAILY_MESSAGE_LIMIT
+    );
+  });
+
+  it("uses a configured positive whole number", () => {
+    expect(resolveAiDailyMessageLimit({ value: "10" })).toBe(10);
+  });
+
+  it("treats an empty or whitespace-only value as unset", () => {
+    expect(resolveAiDailyMessageLimit({ value: "" })).toBe(DEFAULT_AI_DAILY_MESSAGE_LIMIT);
+    expect(resolveAiDailyMessageLimit({ value: "   " })).toBe(DEFAULT_AI_DAILY_MESSAGE_LIMIT);
+  });
+
+  it("fails closed on a non-numeric value rather than silently allowing nothing", () => {
+    expect(() => resolveAiDailyMessageLimit({ value: "abc" })).toThrow(
+      /must be a positive whole number/
+    );
+  });
+
+  it("fails closed on zero, a negative number, or a fraction", () => {
+    for (const bad of ["0", "-5", "1.5"]) {
+      expect(() => resolveAiDailyMessageLimit({ value: bad })).toThrow(
+        /must be a positive whole number/
+      );
+    }
+  });
+});
+
+describe("bootstrap() AI provider wiring", () => {
+  it("wires a SendAiMessage and a FakeAiAdapter under NODE_ENV=test with no OpenRouter config", () => {
+    withJwtSecret("x".repeat(32), () => {
+      const deps = bootstrap();
+      expect(deps.aiProvider).toBeInstanceOf(FakeAiAdapter);
+      expect(deps.sendAiMessage).toBeInstanceOf(SendAiMessage);
+    });
+  });
+
+  it("wires OpenRouterAiAdapter and a SendAiMessage when both env vars are configured", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        { OPENROUTER_API_KEY: "sk-or-x", OPENROUTER_MODEL: "openai/gpt-4o-mini" },
+        () => {
+          const deps = bootstrap();
+          expect(deps.aiProvider).toBeInstanceOf(OpenRouterAiAdapter);
+          expect(deps.sendAiMessage).toBeInstanceOf(SendAiMessage);
+        }
+      );
+    });
+  });
+
+  it("honours a configured AI_DAILY_MESSAGE_LIMIT rather than the default", () => {
+    // Wiring-level smoke check: the value reaches SendAiMessage's constructor
+    // rather than being silently ignored. The cap's actual enforcement is
+    // covered by send-ai-message.test.ts and drizzle-ai-usage.repository.test.ts.
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ AI_DAILY_MESSAGE_LIMIT: "not-a-number" }, () => {
+        expect(() => bootstrap()).toThrow(/must be a positive whole number/);
+      });
     });
   });
 });

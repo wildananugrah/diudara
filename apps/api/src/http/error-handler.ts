@@ -1,10 +1,18 @@
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { AppError } from "../application/errors";
+import { AppError, RateLimitedError } from "../application/errors";
 import { redactLinks, safeErrorSummary } from "../application/log-safety";
 
 export function errorHandler(err: Error, c: Context): Response {
   if (err instanceof AppError) {
+    // RateLimitedError carries a machine-readable `resetAt` alongside the
+    // human message, so the dashboard can format "coba lagi pukul ..." itself
+    // rather than parsing a timestamp out of prose (design spec §10, plan
+    // Task 5/7: "429 renders as ... with the reset time — not a generic
+    // error").
+    if (err instanceof RateLimitedError) {
+      return c.json({ error: err.message, resetAt: err.resetAt }, err.status);
+    }
     // No cast needed: AppError.status is typed as Hono's ContentfulStatusCode.
     return c.json({ error: err.message }, err.status);
   }

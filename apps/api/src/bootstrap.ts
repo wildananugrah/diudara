@@ -41,10 +41,16 @@ import { SystemClock } from "./infrastructure/clock/system.clock";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
 import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
+import { FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
+import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
+import { DrizzleAiConversationRepository } from "./infrastructure/repositories/drizzle-ai-conversation.repository";
+import { DrizzleAiUsageRepository } from "./infrastructure/repositories/drizzle-ai-usage.repository";
+import { SendAiMessage } from "./application/use-cases/send-ai-message";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
+import type { AiProviderPort } from "./application/ports/ai-provider.port";
 
 /** Values that may be interpolated into a `DatabasePing` tagged template. */
 type PingValue = string | number | boolean | Date | null;
@@ -176,6 +182,27 @@ export interface Dependencies {
    */
   appBaseUrl: string;
   sql: DatabasePing;
+  /**
+   * The AI co-builder's provider adapter (Phase 7), `undefined` when the
+   * feature is disabled — see `selectAiProvider`. Exposed for the same
+   * reason `payments` and `messaging` are: a test must be able to prove what
+   * THIS process actually wired (e.g. drive `FakeAiAdapter.nextBehaviour`
+   * directly against a route test built on `bootstrap()`), and reading it
+   * off a fake constructed by the test instead would prove only that the
+   * test can call the fake.
+   */
+  aiProvider: AiProviderPort | undefined;
+  /**
+   * `undefined` EXACTLY when `aiProvider` is `undefined`. This is the ONE
+   * signal `GET /ai/status` (routes/ai.ts) surfaces to the dashboard so it
+   * can hide the chat screen instead of linking to one that always 503s —
+   * see `selectAiProvider` for when that happens: a NODE_ENV outside
+   * `RELAXED_NODE_ENVS` with no `OPENROUTER_API_KEY`/`OPENROUTER_MODEL`
+   * configured. Unlike every other feature in this codebase, this is NOT a
+   * reason to refuse to boot (design spec §11): the product works fine
+   * without a co-builder.
+   */
+  sendAiMessage: SendAiMessage | undefined;
 }
 
 /**
@@ -455,6 +482,114 @@ export function selectMessagingProviders(env: {
     ]),
     notifier: fakeNotifier,
   };
+}
+
+/**
+ * Chooses the AI co-builder's provider adapter (Phase 7) — the ONE selector
+ * in this file that does NOT refuse to boot when configuration is absent.
+ * Unlike payments and messaging, nothing is on the line if the co-builder is
+ * unavailable: no money moves and no invite is issued through this path
+ * (design spec §11, plan Global Constraints) — the AI never writes to the
+ * database beyond its own conversation transcript and usage counter.
+ *
+ *   1. Both `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` set -> the real
+ *      adapter, in every environment.
+ *   2. PARTIAL configuration throws in EVERY environment — same reasoning as
+ *      `selectPaymentProvider`/`selectMessagingProviders`: a key with no
+ *      model id (or vice versa) is a typo, never intentional.
+ *   3. ABSENT configuration selects `FakeAiAdapter` ONLY inside
+ *      `RELAXED_NODE_ENVS` (development/test) — the SAME allowlist reused
+ *      from `isRelaxedNodeEnv`, not a second gate.
+ *   4. ABSENT configuration OUTSIDE the allowlist returns `undefined` RATHER
+ *      THAN THROWING: this is the one deliberate divergence from every other
+ *      selector in this file. The feature is disabled, not the boot.
+ *      `Dependencies.sendAiMessage` becomes `undefined` too, and
+ *      `GET /ai/status` (routes/ai.ts) reports `enabled: false` so the
+ *      dashboard hides the chat screen rather than linking to one that
+ *      always 503s (plan Task 7).
+ */
+export function selectAiProvider(env: {
+  apiKey: string | undefined;
+  model: string | undefined;
+  nodeEnv: string | undefined;
+}): AiProviderPort | undefined {
+  const apiKey = presentOrUndefined(env.apiKey);
+  const model = presentOrUndefined(env.model);
+
+  if (apiKey && model) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] AI provider: OpenRouterAiAdapter " +
+        "(OPENROUTER_API_KEY and OPENROUTER_MODEL are set)"
+    );
+    return new OpenRouterAiAdapter({ apiKey, model });
+  }
+
+  if (apiKey || model) {
+    const missing = apiKey ? "OPENROUTER_MODEL" : "OPENROUTER_API_KEY";
+    const present = apiKey ? "OPENROUTER_API_KEY" : "OPENROUTER_MODEL";
+    throw new Error(
+      `AI co-builder is half-configured: ${present} is set but ${missing} is not. ` +
+        "Set both or neither — see apps/api/.env.example. Refusing to start rather " +
+        "than booting the fake AI adapter while looking configured."
+    );
+  }
+
+  if (isRelaxedNodeEnv(env.nodeEnv)) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] AI provider: FakeAiAdapter " +
+        "(OPENROUTER_API_KEY/OPENROUTER_MODEL not set — no real model will be called; " +
+        "set both to switch to OpenRouterAiAdapter)"
+    );
+    return new FakeAiAdapter();
+  }
+
+  logProviderChoice(
+    env.nodeEnv,
+    "[bootstrap] AI provider: none — the AI co-builder is DISABLED " +
+      "(OPENROUTER_API_KEY/OPENROUTER_MODEL not set, and NODE_ENV is " +
+      `${describeNodeEnv(env.nodeEnv)}, outside ${RELAXED_NODE_ENVS_LIST}). Unlike ` +
+      "payments/messaging this does NOT block boot: GET /ai/status reports " +
+      "enabled: false and POST /ai/messages returns 503. Set both env vars to enable it."
+  );
+  return undefined;
+}
+
+/**
+ * The per-creator daily message cap `SendAiMessage` enforces through
+ * `AiUsageRepositoryPort.consumeOne` — the only thing standing between a
+ * creator (or a bug, or a stolen session) and an unbounded bill once a real
+ * key is configured (see `ai-usage-repository.port.ts`). 50 is a judgement
+ * call, not a mirrored value from anywhere else: generous enough that a
+ * real onboarding conversation (a dozen or so turns) never gets cut off
+ * mid-conversation, tight enough that a runaway loop cannot run up a
+ * meaningful bill in one day.
+ */
+export const DEFAULT_AI_DAILY_MESSAGE_LIMIT = 50;
+
+/**
+ * Parses `AI_DAILY_MESSAGE_LIMIT`, failing closed on anything that is not a
+ * positive whole number — the same rule `WORKER_POLL_INTERVAL_MS` follows in
+ * `apps/worker`, for the same reason: `Number("abc")` is `NaN`, and a cap
+ * that silently became `NaN` would make every `message_count < NaN`
+ * comparison false, which is "allow nothing" rather than "no cap", the
+ * opposite of what an operator fat-fingering this value would expect.
+ */
+export function resolveAiDailyMessageLimit(env: { value: string | undefined }): number {
+  const raw = presentOrUndefined(env.value);
+  if (raw === undefined) {
+    return DEFAULT_AI_DAILY_MESSAGE_LIMIT;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `AI_DAILY_MESSAGE_LIMIT must be a positive whole number (got "${raw}"). Unset it to ` +
+        `use the default of ${DEFAULT_AI_DAILY_MESSAGE_LIMIT}.`
+    );
+  }
+  return parsed;
 }
 
 /**
@@ -893,6 +1028,28 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
+  // Phase 7's AI co-builder. The ONE feature in this codebase that boots
+  // disabled rather than refusing to start — see selectAiProvider.
+  // `sendAiMessage` mirrors `aiProvider`'s undefined-ness exactly, which is
+  // what `GET /ai/status` reports and what `POST /ai/messages` checks.
+  const aiProvider = selectAiProvider({
+    apiKey: process.env.OPENROUTER_API_KEY,
+    model: process.env.OPENROUTER_MODEL,
+    nodeEnv: process.env.NODE_ENV,
+  });
+  const aiDailyMessageLimit = resolveAiDailyMessageLimit({
+    value: process.env.AI_DAILY_MESSAGE_LIMIT,
+  });
+  const sendAiMessage = aiProvider
+    ? new SendAiMessage(
+        new DrizzleAiConversationRepository(db),
+        new DrizzleAiUsageRepository(db),
+        aiProvider,
+        clock,
+        { dailyLimit: aiDailyMessageLimit }
+      )
+    : undefined;
+
   return {
     creatorRepository,
     tokenIssuer,
@@ -924,5 +1081,7 @@ export function bootstrap(): Dependencies {
     xenditCallbackToken,
     appBaseUrl,
     sql,
+    aiProvider,
+    sendAiMessage,
   };
 }
