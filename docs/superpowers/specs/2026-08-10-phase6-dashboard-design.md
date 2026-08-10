@@ -64,9 +64,19 @@ that index **does not serve the feed at all**:
 
 The feed filters `event_type IN (…8 values…)` and orders by `created_at`; a SAOP on the **middle**
 column cannot satisfy the ORDER BY, so Postgres ignored the index entirely. `(community_id,
-created_at)` is the one the feed needs. Both are kept — the original still answers a
-single-event-type plus date-range query — and the measurement lives in a schema comment so nobody
+created_at)` is the one the feed needs, and the measurement lives in a schema comment so nobody
 "tidies away" the one that works.
+
+**Corrected again 2026-08-10 by the final review.** This section then said both indexes were kept,
+because the original "still answers a single-event-type plus date-range query". **No such query
+exists.** The only read of `activity_log` anywhere in the API is the feed; everything else is an
+`insert`. So `(community_id, event_type, created_at)` served nothing and was pure write
+amplification on the fastest-growing table in the product — and measured independently, with
+**only** that index present the feed ran **145 ms / 3676 buffers** against **17 ms with no
+composite index at all**, because it lured the planner into a bitmap scan over 50 000 rows. It was
+dropped in migration `0015`. Add it back in the migration that adds the query that needs it, not
+before. *An index kept for an anticipated caller is a cost paid every day for a benefit that may
+never arrive.*
 
 The underlying point stands: the activity feed is the most-viewed screen and the table grows with
 every payment, reminder, revocation and grant, so getting the index wrong means the dashboard

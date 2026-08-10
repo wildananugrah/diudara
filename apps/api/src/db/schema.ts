@@ -327,54 +327,57 @@ export const activityLogs = pgTable(
     index("activity_log_member_id_idx").on(table.memberId),
     index("activity_log_community_id_idx").on(table.communityId),
     // ===================================================================
-    // THE TWO INDEXES THE CREATOR DASHBOARD READS THROUGH, and WHICH QUERY EACH ONE
-    // IS ACTUALLY FOR — measured with EXPLAIN (ANALYZE, BUFFERS) against live
-    // PostgreSQL 16.13, 300 000 rows across six communities with 100 000 of them in
-    // the one being read.
+    // THE INDEX THE CREATOR DASHBOARD READS THROUGH — measured with
+    // EXPLAIN (ANALYZE, BUFFERS) against live PostgreSQL 16.13, 300 000 rows across
+    // six communities with 100 000 of them in the one being read.
     //
     // `activity_log` grows with every payment, reminder, grant and revocation, and
     // the activity feed is the most-viewed screen in the product — so this table
     // degrades exactly as a creator becomes successful, which is the worst possible
-    // time for it to.
+    // time for it to. It is also the fastest-growing table in the product, which is
+    // why the index list below is SHORT: every index here is paid for on every
+    // insert, forever, by every creator.
     //
-    // 1. (community_id, event_type, created_at) — FOR A SINGLE EVENT TYPE OVER A
-    //    DATE RANGE. "How many renewal reminders went out last month" is
-    //    `community_id = ? and event_type = ? and created_at >= ?`: equality,
-    //    equality, range, which this index answers entirely as an index condition
-    //    (11.7 ms / 246 index buffers, against 15.0 ms and a bitmap scan that read
-    //    all 100 000 of the community's rows and filtered 83% of them away).
+    // (community_id, created_at) — FOR THE FEED. One equality then the range the
+    // keyset cursor compares and the order the feed sorts by, so Postgres walks the
+    // index BACKWARDS for that community and stops after one page: 0.12 ms and
+    // 5 buffers, an Index Scan Backward with no full sort, against 15 ms and 1277
+    // buffers with only the two single-column indexes. Two orders of magnitude, and
+    // the gap widens with the history, because this is the only one that lets the
+    // scan STOP instead of reading everything the community has ever produced. The
+    // feed's 8-value `event_type` filter is applied to the ~26 rows a page actually
+    // touches, which costs nothing.
     //
-    //    IT IS NOT THE INDEX THE FEED USES, and an earlier version of this comment
-    //    claimed it was. That claim was wrong in the specific way worth writing
-    //    down, because a misleading invariant comment is how the next person removes
-    //    the wrong index: the feed's predicate is `event_type in (<8 values>)`, a
-    //    ScalarArrayOp on this index's MIDDLE column, and a btree scan with one of
-    //    those cannot deliver rows ordered by the TRAILING column. So it can satisfy
-    //    neither the ORDER BY nor anything `community_id` alone does not already do,
-    //    and the planner ignores it — measured at 15.9 ms / 1277 buffers with it
-    //    present and 12.5 ms / 1277 buffers with it DROPPED. The same plan both
-    //    times.
+    // ---- WHY THERE IS NO (community_id, event_type, created_at) HERE ----
+    // There was one, added in Phase 6 Task 1 for a query that does not exist. It was
+    // dropped in migration 0015 after the final review, on two independent grounds:
     //
-    // 2. (community_id, created_at) — FOR THE FEED. One equality then the range the
-    //    keyset cursor compares and the order the feed sorts by, so Postgres walks
-    //    the index BACKWARDS for that community and stops after one page:
-    //    0.12 ms and 5 buffers, an Index Scan Backward with no full sort. Two orders
-    //    of magnitude, and the gap widens with the history, because this is the only
-    //    one of the three that lets the scan stop instead of reading everything the
-    //    community has ever produced. The 8-value `event_type` filter is applied to
-    //    the ~26 rows a page actually touches, which costs nothing.
+    //  a. NOTHING READS THIS TABLE BY `event_type`. Grep it: the only read in the
+    //     whole API is the feed (`DrizzleAnalyticsRepository.listActivityForCreator`);
+    //     everything else is `insert`. The metrics and CSV paths read `subscription`
+    //     and `transaction`, not this table — an earlier version of this comment said
+    //     otherwise and was simply wrong. So the index served nothing and was pure
+    //     write amplification on the table that grows fastest.
     //
-    // Neither is partial on the creator-visible allowlist, deliberately: the visible
-    // set is a product decision stated in `domain/activity-feed.ts` and it will
-    // change (making a hidden diagnostic visible is a one-line edit). A partial
-    // index would silently stop being used by that edit, and the metrics and CSV
-    // paths read other event types through the same prefix.
+    //  b. IT MADE THE FEED WORSE, not neutral. The feed's predicate is
+    //     `event_type in (<8 values>)`, a ScalarArrayOp on that index's MIDDLE
+    //     column, and a btree scan with one of those cannot deliver rows ordered by
+    //     the TRAILING column — so it could satisfy neither the ORDER BY nor anything
+    //     `community_id` alone did not already do. With ONLY that index present the
+    //     feed measured 145 ms / 3676 buffers against 17 ms with no composite index
+    //     at all: it lured the planner into a bitmap scan over 50 000 rows.
+    //
+    // "How many renewal reminders went out last month" — `community_id = ? and
+    // event_type = ? and created_at >= ?` — WOULD use it (11.7 ms / 246 buffers when
+    // it existed). Add it back in the migration that adds that query, not before.
+    // An index kept for an anticipated caller is a cost paid every day for a benefit
+    // that may never arrive, and this one was also making today's query slower.
+    //
+    // This index is not partial on the creator-visible allowlist, deliberately: the
+    // visible set is a product decision stated in `domain/activity-feed.ts` and it
+    // will change (making a hidden diagnostic visible is a one-line edit), and a
+    // partial index would silently stop being used by that edit.
     // ===================================================================
-    index("activity_log_community_event_created_idx").on(
-      table.communityId,
-      table.eventType,
-      table.createdAt
-    ),
     index("activity_log_community_created_idx").on(table.communityId, table.createdAt),
   ],
 );

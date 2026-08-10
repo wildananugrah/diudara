@@ -201,12 +201,22 @@ export class DrizzleAnalyticsRepository implements AnalyticsRepositoryPort {
    * One page of the activity feed: this community's creator-facing events, newest
    * first, windowed by a `(created_at, id)` keyset cursor.
    *
-   * READS THROUGH `activity_log_community_event_created_idx` — the composite index
-   * Task 1 added for exactly this query. The predicate is
-   * `community_id = ? and event_type = any(?)` with `created_at` as the range, in
-   * that column order, and the ORDER BY matches the index (backwards, which a btree
-   * scans as cheaply as forwards). Without it every page seq-scanned the community's
-   * whole history and sorted it.
+   * READS THROUGH `activity_log_community_created_idx` — `(community_id,
+   * created_at)`, and NOT the wider `(community_id, event_type, created_at)` that an
+   * earlier version of this comment named. Getting that wrong here is how the next
+   * person removes the index the feed actually depends on, so state it precisely:
+   * one equality on `community_id`, then `created_at` as both the keyset range and
+   * the sort key, which Postgres serves as an Index Scan Backward that STOPS after
+   * one page (0.12 ms / 5 buffers, against 15 ms / 1277 with only the single-column
+   * indexes).
+   *
+   * The `event_type in (…)` allowlist below is a FILTER on the ~26 rows a page
+   * touches, not something an index leads with. A composite index carrying
+   * `event_type` in the middle cannot help it at all — a btree with a ScalarArrayOp
+   * on a middle column cannot deliver rows ordered by the trailing one — and the one
+   * that used to exist made this query 145 ms / 3676 buffers by luring the planner
+   * into a bitmap scan. It was dropped in migration 0015; the measurements and the
+   * full reasoning are in `db/schema.ts` above `activity_log`'s index list.
    *
    * THE ALLOWLIST IS IN THE SQL, not applied afterwards, and that matters for more
    * than tidiness: filtering in JS would make `limit` count HIDDEN rows, so a
