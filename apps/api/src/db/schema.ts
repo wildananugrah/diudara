@@ -7,6 +7,7 @@ import {
   timestamp,
   date,
   jsonb,
+  text,
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
@@ -630,4 +631,51 @@ export const channelMemberships = pgTable(
       .on(table.inviteLink)
       .where(sql`${table.inviteLink} is not null`),
   ]
+);
+
+export const aiConversations = pgTable(
+  "ai_conversation",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    creatorId: uuid("creator_id")
+      .notNull()
+      .references(() => creators.id),
+    status: varchar("status", { length: 16 }).notNull().default("open"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("ai_conversation_creator_idx").on(table.creatorId, table.createdAt)]
+);
+
+export const aiMessages = pgTable(
+  "ai_message",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => aiConversations.id),
+    role: varchar("role", { length: 16 }).notNull(),
+    content: text("content").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("ai_message_conversation_idx").on(table.conversationId, table.createdAt)]
+);
+
+/**
+ * One row per creator per UTC day. UNIQUE (creator_id, usage_date) is what lets
+ * the cap be enforced by a single upsert — two concurrent requests cannot both
+ * pass a limit with one slot left, because the database arbitrates rather than
+ * a read-then-write in application code.
+ */
+export const aiUsage = pgTable(
+  "ai_usage",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    creatorId: uuid("creator_id")
+      .notNull()
+      .references(() => creators.id),
+    usageDate: date("usage_date").notNull(),
+    messageCount: integer("message_count").notNull().default(0),
+  },
+  (table) => [uniqueIndex("ai_usage_creator_date_unique").on(table.creatorId, table.usageDate)]
 );

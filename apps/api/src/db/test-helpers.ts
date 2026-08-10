@@ -17,6 +17,9 @@ import {
   creators,
   webhookEvents,
   outbox,
+  aiMessages,
+  aiConversations,
+  aiUsage,
 } from "./schema";
 
 /**
@@ -76,5 +79,10 @@ export async function resetDatabase() {
   await db.delete(membershipTiers);
   await db.delete(communities);
   await db.delete(members);
+  // aiMessages references aiConversations, and both reference creators, so
+  // both must clear before creators — aiMessages first, per FK order.
+  await db.delete(aiMessages);
+  await db.delete(aiConversations);
+  await db.delete(aiUsage);
   await db.delete(creators);
 }
