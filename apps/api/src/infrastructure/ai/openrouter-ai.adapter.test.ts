@@ -66,7 +66,7 @@ describe("OpenRouterAiAdapter — outgoing request shape", () => {
     expect(calls[0].url).toBe("http://localhost:9999/v1/chat/completions");
   });
 
-  it("sends the model, a numeric temperature, a leading system prompt, and the full message history in order", async () => {
+  it("sends the model, a numeric temperature, and the message history verbatim — no system prompt of its own", async () => {
     const { calls, fetchFn } = captureFetch(JSON.stringify(VALID_DRAFT));
     const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
 
@@ -75,16 +75,25 @@ describe("OpenRouterAiAdapter — outgoing request shape", () => {
     const body = JSON.parse(calls[0].init.body as string);
     expect(body.model).toBe("test/model");
     expect(typeof body.temperature).toBe("number");
-    expect(Array.isArray(body.messages)).toBe(true);
-    expect(body.messages[0].role).toBe("system");
-    expect(typeof body.messages[0].content).toBe("string");
-    expect(body.messages[0].content.length).toBeGreaterThan(0);
-    // The whole point of the system prompt: it must tell the model to answer
-    // the creator in Bahasa Indonesia (design spec §1) and to never mix prose
-    // with a JSON draft in one message (the heuristic this adapter's parsing
-    // depends on).
-    expect(body.messages[0].content).toContain("Indonesia");
-    expect(body.messages.slice(1)).toEqual(MESSAGES);
+    // The adapter supplies NO prompt of its own — see the CONTRACT note on
+    // `converse` in openrouter-ai.adapter.ts. `domain/ai-prompt.ts` (a later
+    // task) owns the system-role framing, so whatever the caller passes in
+    // `messages` must be forwarded exactly as given, in order.
+    expect(body.messages).toEqual(MESSAGES);
+  });
+
+  it("forwards a caller-supplied system message verbatim rather than adding one of its own", async () => {
+    const withSystemPrompt = [
+      { role: "system" as const, content: "Balas dalam Bahasa Indonesia. Jangan campur JSON dengan teks." },
+      ...MESSAGES,
+    ];
+    const { calls, fetchFn } = captureFetch(JSON.stringify(VALID_DRAFT));
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    await adapter.converse({ messages: withSystemPrompt });
+
+    const body = JSON.parse(calls[0].init.body as string);
+    expect(body.messages).toEqual(withSystemPrompt);
   });
 
   it("carries an AbortSignal so a hung response cannot hold the chat request open forever", async () => {
@@ -106,8 +115,9 @@ describe("OpenRouterAiAdapter — draft parsing, happy paths", () => {
 
     expect(turn.draft).toEqual(VALID_DRAFT);
     expect(turn.reply.length).toBeGreaterThan(0);
-    // The model's content IS the JSON in this case, per the system prompt's
-    // "never mix prose and JSON" rule — the reply shown to the creator must
+    // The model's content IS the JSON in this case, per the "never mix prose
+    // and JSON" rule the CALLER's system prompt is responsible for (see the
+    // CONTRACT note on `converse`) — the reply shown to the creator must
     // never be the raw JSON blob itself.
     expect(turn.reply).not.toContain("{");
   });
@@ -142,6 +152,41 @@ describe("OpenRouterAiAdapter — draft parsing, happy paths", () => {
 
     expect(turn.draft).toBeNull();
     expect(turn.reply).toBe(reply);
+  });
+});
+
+describe("OpenRouterAiAdapter — reply length bound (throws, never truncates)", () => {
+  it("accepts a conversational reply exactly at the 4000-character bound", async () => {
+    const reply = "a".repeat(4000);
+    const { fetchFn } = captureFetch(reply);
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    const turn = await adapter.converse({ messages: MESSAGES });
+
+    expect(turn.reply).toBe(reply);
+    expect(turn.draft).toBeNull();
+  });
+
+  it("throws — rather than truncating — a conversational reply one character over the bound", async () => {
+    const reply = "a".repeat(4001);
+    const { fetchFn } = captureFetch(reply);
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as Error;
+    expect(error).toBeInstanceOf(AiProviderError);
+    // Never silently cut: the thrown message names the bound, not a
+    // truncated copy of the offending reply.
+    expect(error.message).toContain("4000");
+    expect(error.message).not.toBe(reply.slice(0, 4000));
+  });
+
+  it("also enforces the bound on the fixed DRAFT_REPLY_TEXT path (defense in depth, even though it is well under the limit)", async () => {
+    const { fetchFn } = captureFetch(JSON.stringify(VALID_DRAFT));
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    const turn = await adapter.converse({ messages: MESSAGES });
+
+    expect(turn.reply.length).toBeLessThanOrEqual(4000);
   });
 });
 

@@ -1,13 +1,22 @@
 import type { CommunityDraft } from "@diudara/shared";
 
 /**
- * One turn of chat history sent to the provider. Mirrors `ai_message`'s
- * `role` (`user`/`assistant`) and `content` columns — this port is the
+ * One turn of chat history sent to the provider. `user`/`assistant` mirror
+ * `ai_message`'s `role` and `content` columns exactly — this port is the
  * boundary between that stored history and whatever a concrete adapter sends
  * over the wire.
+ *
+ * `system` is NOT a stored role: `ai_message` only ever persists `user` and
+ * `assistant` turns. It exists here purely so a caller can prepend the
+ * framing instructions a concrete adapter needs (Bahasa Indonesia output, the
+ * draft JSON shape, the "never mix prose and JSON in one message" rule an
+ * adapter's parsing may depend on — see `OpenRouterAiAdapter.converse`)
+ * without that prompt ever being written to the database or owned by the
+ * adapter itself. An adapter forwards whatever `messages` it is given,
+ * verbatim, in order; it supplies no prompt of its own.
  */
 export interface AiMessage {
-  role: "user" | "assistant";
+  role: "system" | "user" | "assistant";
   content: string;
 }
 

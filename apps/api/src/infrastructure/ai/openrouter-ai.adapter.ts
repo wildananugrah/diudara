@@ -26,57 +26,60 @@ const REQUEST_TIMEOUT_MS = 60_000;
 const TEMPERATURE = 0.2;
 
 /**
- * Sent as the FIRST message on every turn. English instructions (for
- * reliability across models) that require Bahasa Indonesia OUTPUT, and — this
- * part is load-bearing — require the model to send EITHER plain prose OR a
- * single bare/fenced JSON object, never both in the same message.
- *
- * `parseAttemptedDraft` below decides "was a draft attempted" purely from
- * whether the message, once a fence is stripped, starts with `{`. A model
- * that prefixes JSON with an explanatory sentence ("Here's your draft: { ...
- * }") would defeat that heuristic and have a real draft silently read back as
- * a plain conversational reply instead of either a parsed draft or a thrown
- * error. Whether real models actually honour "never mix prose and JSON" is
- * exactly the kind of thing the class-level warning says must be checked
- * against a live model before this is trusted.
- */
-const SYSTEM_PROMPT = `You are DIUDARA's community co-builder, helping an Indonesian creator set up a paid online community.
-
-Always reply to the creator in Bahasa Indonesia, in a natural, conversational tone. Ask about their niche, target audience, and pricing before proposing anything.
-
-When — and only when — you have enough information to propose a concrete draft, respond with ONLY a single JSON object matching this exact shape, optionally wrapped in a single \`\`\`json code fence, and nothing else in the message (no preamble, no explanation before or after it):
-
-{
-  "name": string, 1-255 characters,
-  "niche": string, 1-128 characters,
-  "description": string, 1-2000 characters,
-  "welcomeMessage": string, 1-1000 characters,
-  "tiers": array of 1 to 3 objects, each:
-    { "name": string 1-128 characters, "priceAmount": a WHOLE NUMBER of Indonesian Rupiah between 0 and 2000000000 (never a decimal, never a string), "billingCycle": one of "monthly", "quarterly", "yearly" }
-}
-
-If you are asking a question, making small talk, or declining the request, reply with plain Bahasa Indonesia text only — never include JSON, and never mix prose with the JSON object in the same message.`;
-
-/**
  * Returned as `reply` whenever a draft was attempted and validated
- * successfully. Per SYSTEM_PROMPT, the model's own message IS the JSON in
- * that case — it must contain nothing else — so it is never fit for display
- * in a chat transcript. This fixed, friendly line stands in for it, the same
- * fixed-string convention `fake-ai.adapter.ts` uses for its own `"draft"`
- * case.
+ * successfully. A caller's system prompt (see the CONTRACT note on
+ * `converse` below) must instruct the model to send ONLY the JSON when
+ * proposing a draft — nothing else in the message — so the model's own
+ * content is never fit for display in a chat transcript in that case. This
+ * fixed, friendly line stands in for it, the same fixed-string convention
+ * `fake-ai.adapter.ts` uses for its own `"draft"` case.
  */
 const DRAFT_REPLY_TEXT =
   "Berikut draf komunitas berdasarkan percakapan kita. Silakan tinjau dan ubah sebelum disimpan.";
+
+/**
+ * `reply` is model output rendered directly in the creator's dashboard, so —
+ * same rule as the draft path, which is bounded by `communityDraftSchema` —
+ * it must be length-bounded before it leaves this adapter. 4000 characters is
+ * a judgement call, not a mirrored value: roughly one long chat turn of
+ * Indonesian prose, generous enough that a real conversational reply should
+ * never hit it, tight enough to stop an unbounded/degenerate completion (a
+ * model stuck in a repetition loop, for instance) from reaching the browser.
+ *
+ * Exceeding it THROWS rather than truncates. Silently cutting a message
+ * could leave the creator acting on half an instruction — worse than surfacing
+ * nothing — and throwing routes a degenerate completion through the same
+ * retry-once policy a caller already applies to malformed drafts, giving it
+ * a second chance instead of a mangled first one.
+ */
+const MAX_REPLY_LENGTH = 4000;
+
+/**
+ * Enforces MAX_REPLY_LENGTH on every `reply` this adapter produces, whichever
+ * path produced it (a plain conversational turn or the fixed `DRAFT_REPLY_TEXT`
+ * on a successful draft parse) — see MAX_REPLY_LENGTH for why this throws
+ * instead of truncating.
+ */
+function requireBoundedReply(reply: string): string {
+  if (reply.length > MAX_REPLY_LENGTH) {
+    throw new AiProviderError(
+      `openrouter converse: model reply exceeded ${MAX_REPLY_LENGTH} characters ` +
+        `(was ${reply.length}) — refusing to forward unbounded model output to the dashboard`
+    );
+  }
+  return reply;
+}
 
 /**
  * Strips a ```json ... ``` (or bare ``` ... ```) fence if the ENTIRE trimmed
  * message is that fence — the unprompted quirk real models add per the
  * design plan. Deliberately anchored (`^...$`), same regex as
  * `fake-ai.adapter.ts`'s `stripJsonFence`: it assumes the model never mixes
- * prose with a fenced block in one message, which is exactly what
- * SYSTEM_PROMPT instructs and exactly what is unverified against a real
- * model. Not shared between the two files — each adapter stays
- * self-contained, same as `XenditPaymentAdapter`'s private helpers.
+ * prose with a fenced block in one message, which is a property of the
+ * CALLER's system prompt (see the CONTRACT note on `converse` below), not of
+ * anything this adapter controls. Not shared between the two files — each
+ * adapter stays self-contained, same as `XenditPaymentAdapter`'s private
+ * helpers.
  */
 function stripJsonFence(raw: string): string {
   const trimmed = raw.trim();
@@ -99,7 +102,7 @@ function stripJsonFence(raw: string): string {
  *   - Does it return valid JSON RELIABLY at TEMPERATURE (0.2) when it
  *     proposes a draft, or does it wander into prose-plus-JSON often enough
  *     that the "starts with `{`" heuristic in `parseAttemptedDraft` below
- *     misses real drafts (see the SYSTEM_PROMPT comment)?
+ *     misses real drafts (see the CONTRACT note on `converse`)?
  *   - Does it actually answer in Bahasa Indonesia, unprompted, on every turn
  *     — or does it drift to English after a few exchanges?
  *   - Does it ever refuse something an ordinary Indonesian creator would
@@ -110,6 +113,11 @@ function stripJsonFence(raw: string): string {
  *     is reliably bad at the instruction?
  * Exercise all four against a real OpenRouter key before removing this
  * warning.
+ *
+ * This adapter supplies NO system prompt of its own — `domain/ai-prompt.ts`
+ * (a later task) owns the Bahasa Indonesia framing and the "never mix prose
+ * and JSON" instruction the heuristic below depends on. See the CONTRACT note
+ * on `converse`.
  */
 export class OpenRouterAiAdapter implements AiProviderPort {
   private readonly apiKey: string;
@@ -124,12 +132,28 @@ export class OpenRouterAiAdapter implements AiProviderPort {
     this.fetchFn = config.fetchFn ?? ((url, init) => fetch(url, init));
   }
 
+  /**
+   * CONTRACT this adapter depends on but does not enforce: whatever
+   * `messages` this is called with must already begin with the system-role
+   * framing a real completion needs (Bahasa Indonesia output, the draft JSON
+   * shape) — this adapter sends `input.messages` to OpenRouter VERBATIM, in
+   * order, and supplies no prompt of its own. `domain/ai-prompt.ts` (a later
+   * task) owns that prompt so it has exactly one source of truth instead of
+   * drifting between this file and wherever else it might otherwise be
+   * duplicated.
+   *
+   * That system prompt carries an obligation this adapter's parsing leans on
+   * completely: it MUST instruct the model to send EITHER plain prose OR a
+   * single bare/fenced JSON object, never both in the same message.
+   * `parseAttemptedDraft` below decides "was a draft attempted" purely from
+   * whether the content, once a fence is stripped, starts with `{` — a
+   * caller whose prompt allows prose-plus-JSON ("Here's your draft: { ... }")
+   * would silently defeat that heuristic, having a real draft read back as a
+   * plain reply instead of either succeeding or throwing. Do not remove that
+   * instruction from the system prompt without understanding this is why it
+   * is there.
+   */
   async converse(input: { messages: AiMessage[] }): Promise<AiTurn> {
-    const requestMessages = [
-      { role: "system" as const, content: SYSTEM_PROMPT },
-      ...input.messages.map((message) => ({ role: message.role, content: message.content })),
-    ];
-
     let response: Response;
     try {
       response = await this.fetchFn(`${this.baseUrl}/chat/completions`, {
@@ -141,7 +165,10 @@ export class OpenRouterAiAdapter implements AiProviderPort {
         body: JSON.stringify({
           model: this.model,
           temperature: TEMPERATURE,
-          messages: requestMessages,
+          messages: input.messages.map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
         }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
@@ -215,22 +242,29 @@ export class OpenRouterAiAdapter implements AiProviderPort {
    * model text and never a half-parsed object.
    *
    * "Was a draft attempted" is decided purely by whether the content, once a
-   * fence is stripped, starts with `{` — see the SYSTEM_PROMPT comment for
-   * why that is safe ONLY if the model honours "never mix prose and JSON",
-   * which is unverified. Content that does not look like an attempted draft
-   * is passed straight through as a legitimate conversational reply
-   * (`draft: null`); content that does start with `{` is held to the full
-   * JSON.parse + `communityDraftSchema` pipeline and throws on ANY failure —
-   * a missing field, a string price, a non-integer price, four tiers,
-   * truncated JSON — so malformed output is never mistaken for "no draft was
-   * offered", and a broken draft is never handed back as a partial one.
+   * fence is stripped, starts with `{`. This is safe ONLY if the CALLER's
+   * system prompt instructs the model to never mix prose and JSON in one
+   * message — see the CONTRACT note on `converse` above; this adapter cannot
+   * enforce that instruction, only depend on it. Content that does not look
+   * like an attempted draft is passed straight through as a legitimate
+   * conversational reply (`draft: null`); content that does start with `{` is
+   * held to the full JSON.parse + `communityDraftSchema` pipeline and throws
+   * on ANY failure — a missing field, a string price, a non-integer price,
+   * four tiers, truncated JSON — so malformed output is never mistaken for
+   * "no draft was offered", and a broken draft is never handed back as a
+   * partial one.
+   *
+   * Every `reply` this returns — the plain-conversational branch and
+   * `DRAFT_REPLY_TEXT` alike — is run through `requireBoundedReply`: `reply`
+   * is model output rendered in the dashboard, and it must be length-bounded
+   * before it leaves this adapter exactly like the draft path is.
    */
   private parseAttemptedDraft(raw: string): AiTurn {
     const stripped = stripJsonFence(raw);
     const trimmed = stripped.trim();
 
     if (!trimmed.startsWith("{")) {
-      return { reply: trimmed, draft: null };
+      return { reply: requireBoundedReply(trimmed), draft: null };
     }
 
     let parsed: unknown;
@@ -252,6 +286,6 @@ export class OpenRouterAiAdapter implements AiProviderPort {
       );
     }
 
-    return { reply: DRAFT_REPLY_TEXT, draft: result.data };
+    return { reply: requireBoundedReply(DRAFT_REPLY_TEXT), draft: result.data };
   }
 }
