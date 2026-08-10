@@ -156,6 +156,63 @@ describe("DrizzleAiUsageRepository.consumeOne", () => {
   });
 
   /**
+   * THE GUARD on the DENIED branch's shape, equally timing-free. The denied
+   * path is genuinely two statements — the guarded UPSERT that loses its own
+   * `WHERE` and returns no row, then a plain `select` to report the current
+   * count back to the caller (see the repository docstring for why that
+   * second read cannot reopen the race: by the time it runs, the cap is
+   * already final and monotonic). Without this test, a regression that
+   * widened that reporting query, duplicated it, or replaced it with
+   * something else would only be caught — if at all — by the forced-race
+   * test's outcome assertions, which is exactly the class of risk SQL-shape
+   * tests exist to remove in this codebase.
+   */
+  it("emits exactly two statements on the denied path: the guarded upsert, then a scoped select", async () => {
+    const statements: string[] = [];
+    const debugClient = postgres(process.env.DATABASE_URL!, {
+      max: 1,
+      debug: (_connection, query) => statements.push(query),
+    });
+    try {
+      const creatorId = await seedCreator();
+      const usageDate = "2026-08-13";
+      const dailyLimit = 1;
+      // Reach the cap first, on the plain (non-debug) repo, so only the
+      // DENIED call below is captured by the debug client.
+      expect(await repo.consumeOne({ creatorId, usageDate, dailyLimit })).toEqual({
+        allowed: true,
+        used: 1,
+      });
+
+      const debugRepo = new DrizzleAiUsageRepository(drizzle(debugClient, { schema }));
+      const result = await debugRepo.consumeOne({ creatorId, usageDate, dailyLimit });
+      expect(result).toEqual({ allowed: false, used: 1 });
+
+      const touchingTheTable = statements.filter((q) => /ai_usage/i.test(q));
+      expect(touchingTheTable).toHaveLength(2);
+
+      const upsert = touchingTheTable[0].toLowerCase();
+      expect(upsert).toContain("insert into");
+      expect(upsert).toContain("on conflict");
+      expect(upsert).toContain("do update set");
+      expect(upsert).toContain("where");
+      expect(upsert).not.toContain("select");
+
+      const reportingRead = touchingTheTable[1].toLowerCase();
+      expect(reportingRead).toContain("select");
+      expect(reportingRead).toContain("where");
+      // Scoped to the same (creator_id, usage_date) pair the upsert targeted
+      // — not an unscoped read of the table.
+      expect(reportingRead).toContain("creator_id");
+      expect(reportingRead).toContain("usage_date");
+      expect(reportingRead).not.toContain("insert into");
+      expect(reportingRead).not.toContain("update");
+    } finally {
+      await debugClient.end();
+    }
+  });
+
+  /**
    * THE REAL GUARD on the race. A bare `Promise.all` of two `consumeOne()`
    * calls does not construct an interleaving; it merely hopes the scheduler
    * happens to overlap them, and in this project that hope has produced a
@@ -220,6 +277,17 @@ describe("DrizzleAiUsageRepository.consumeOne", () => {
 
       const allowedCount = [winnerResult.allowed, loserResult.allowed].filter(Boolean).length;
       expect(allowedCount).toBe(1);
+
+      // The winner is provably first (the test never starts the loser until
+      // winnerHasRun is observed), so it is deterministically the one that
+      // takes the last slot, and `used` on BOTH sides should land on
+      // `dailyLimit`: the winner because it incremented dailyLimit - 1 to
+      // dailyLimit, the loser because its reporting read runs only after the
+      // winner's commit. A racy implementation can report something else
+      // here (e.g. the loser's stale-based literal write), which is exactly
+      // what the mutation-check caught, so pin both explicitly.
+      expect(winnerResult).toEqual({ allowed: true, used: dailyLimit });
+      expect(loserResult).toEqual({ allowed: false, used: dailyLimit });
 
       const [row] = await db.select().from(aiUsage);
       expect(row.messageCount).toBe(dailyLimit);

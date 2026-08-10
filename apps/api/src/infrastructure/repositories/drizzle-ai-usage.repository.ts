@@ -61,6 +61,18 @@ export class DrizzleAiUsageRepository implements AiUsageRepositoryPort {
       .from(aiUsage)
       .where(and(eq(aiUsage.creatorId, input.creatorId), eq(aiUsage.usageDate, input.usageDate)));
 
-    return { allowed: false, used: existing?.messageCount ?? input.dailyLimit };
+    // The UPSERT above only reaches this branch by losing its ON CONFLICT
+    // race — which requires a conflicting row to exist. A missing row here
+    // means that invariant broke (the row was deleted between the UPSERT and
+    // this read, or something else is wrong), so surface that loudly rather
+    // than silently reporting a guessed value.
+    if (!existing) {
+      throw new Error(
+        `ai_usage row for creator=${input.creatorId} date=${input.usageDate} vanished ` +
+          "between the guarded UPSERT reporting the cap as reached and this reporting read"
+      );
+    }
+
+    return { allowed: false, used: existing.messageCount };
   }
 }
