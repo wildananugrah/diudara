@@ -271,7 +271,8 @@ code {
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   font: inherit;
   font-size: 1rem;
   padding: 9px 11px;
@@ -282,8 +283,18 @@ code {
   width: 100%;
 }
 
+/* `TiersPage`/`CommunitiesPage` have no textarea field, so this rule was
+ * never exercised before the AI co-builder's Deskripsi/Pesan sambutan
+ * fields — without it those two render with UA defaults (monospace, no
+ * resize control) beside every other styled field on the same panel. */
+.field textarea {
+  min-height: 80px;
+  resize: vertical;
+}
+
 .field input:focus,
-.field select:focus {
+.field select:focus,
+.field textarea:focus {
   outline: 2px solid var(--green);
   outline-offset: 1px;
   border-color: var(--green);

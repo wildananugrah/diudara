@@ -52,8 +52,10 @@ export function aiRoutes(deps: Pick<Dependencies, "tokenIssuer" | "sendAiMessage
     if (!deps.sendAiMessage) {
       // Reachable only if a caller ignores GET /status (or the feature was
       // disabled after the dashboard last checked it) — a 503, not a 500:
-      // this box is fine, the feature just is not configured on it.
-      throw new ServiceUnavailableError("the AI co-builder is not configured on this server");
+      // this box is fine, the feature just is not configured on it. Indonesian
+      // copy: this message is meant to be shown to a creator (see
+      // CoBuilderPage.tsx's "provider" error banner), not just logged.
+      throw new ServiceUnavailableError("AI co-builder belum dikonfigurasi di server ini.");
     }
 
     const input = c.get("validated") as { conversationId?: string | null; content: string };

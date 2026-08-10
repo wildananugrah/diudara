@@ -2,8 +2,8 @@ import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import type { CommunityDraft } from "@diudara/shared";
 import { apiFetch, apiRequest, DashboardApiError } from "../apiClient";
-import { billingCycleLabel, formatRupiah } from "../format";
-import { EmptyState, ErrorPanel, Field } from "../ui";
+import { billingCycleLabel, billingCycleOptionLabel, formatRupiah } from "../format";
+import { EmptyState, ErrorPanel, Field, PaymentAccountNotice } from "../ui";
 import { useLoad } from "../useLoad";
 import type { AiMessageResult, AiStatus, Community, Tier } from "../types";
 
@@ -22,6 +22,9 @@ import type { AiMessageResult, AiStatus, Community, Tier } from "../types";
  * explicitly labelled "not stored" rather than silently dropped (ruling #1).
  */
 
+/** Mirrors `TiersPage`'s own list — the enum `createTierSchema` accepts. */
+const BILLING_CYCLES = ["monthly", "quarterly", "yearly"] as const;
+
 type ChatRole = "user" | "assistant";
 
 interface ChatMessage {
@@ -35,8 +38,13 @@ interface DraftTierForm {
   price: string;
   billingCycle: string;
   status: "pending" | "creating" | "created" | "failed";
-  error?: string;
-  tierId?: string;
+  /** Split by FIELD, the way `TiersPage`'s `CreateTierForm` splits `err.fieldErrors` —
+   * a name problem must render under the name input, not the price one. */
+  nameError?: string;
+  priceError?: string;
+  /** A failure that is not attributable to either field (a 500, a network error,
+   * or a 400 whose message did not parse into `name`/`priceAmount`). */
+  generalError?: string;
 }
 
 interface DraftFormState {
@@ -63,11 +71,12 @@ interface SendErrorState {
 /**
  * The 429 body's typed half — see `RateLimitedError` (apps/api/src/application/errors.ts).
  * `message` already carries the Indonesian sentence with the Jakarta-local reset
- * time baked in by the API; `resetAt` is kept on the error for any caller that
- * wants the raw instant, even though this screen only ever renders `message`.
+ * time baked in by the API, and that is the only half this screen ever needs —
+ * so unlike the API's own type, this does not also carry a raw `resetAt`: an
+ * unused field is worse than no field.
  */
 class AiRateLimitedError extends Error {
-  constructor(message: string, readonly resetAt: string) {
+  constructor(message: string) {
     super(message);
     this.name = "AiRateLimitedError";
   }
@@ -75,10 +84,11 @@ class AiRateLimitedError extends Error {
 
 /**
  * `POST /ai/messages`, with its OWN error handling rather than the shared
- * `apiFetch` — this endpoint's 429 carries a machine-readable `resetAt`
- * alongside `error`, which `apiFetch`'s generic `readError` throws away (it
- * only ever keeps `error`). Built on `apiRequest` (not `apiFetch`) so the 401
- * interceptor still applies unmodified.
+ * `apiFetch` — this endpoint's 429 body's `error` is the one thing this
+ * screen renders, and reading it here (rather than through `apiFetch`'s
+ * generic `readError`) keeps that reading local to the one place it matters.
+ * Built on `apiRequest` (not `apiFetch`) so the 401 interceptor still applies
+ * unmodified.
  */
 async function sendAiMessage(input: {
   conversationId: string | null;
@@ -90,12 +100,11 @@ async function sendAiMessage(input: {
   });
 
   if (res.status === 429) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string; resetAt?: string };
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new AiRateLimitedError(
       typeof body.error === "string" && body.error.length > 0
         ? body.error
-        : "Batas harian AI co-builder sudah tercapai.",
-      typeof body.resetAt === "string" ? body.resetAt : new Date().toISOString()
+        : "Batas harian AI co-builder sudah tercapai."
     );
   }
 
@@ -196,6 +205,23 @@ function updateTierAt(form: DraftFormState, index: number, patch: Partial<DraftT
   return { ...form, tiers: form.tiers.map((tier, i) => (i === index ? { ...tier, ...patch } : tier)) };
 }
 
+/** Splits a failed tier POST into the SAME per-field shape `TiersPage`'s `CreateTierForm` uses. */
+function tierErrorPatch(err: unknown): Pick<DraftTierForm, "nameError" | "priceError" | "generalError"> {
+  if (err instanceof DashboardApiError) {
+    const nameError = err.fieldErrors.name;
+    const priceError = err.fieldErrors.priceAmount;
+    if (nameError !== undefined || priceError !== undefined) {
+      return { nameError, priceError, generalError: undefined };
+    }
+    return { nameError: undefined, priceError: undefined, generalError: err.message };
+  }
+  return {
+    nameError: undefined,
+    priceError: undefined,
+    generalError: err instanceof Error ? err.message : "Gagal menyimpan paket.",
+  };
+}
+
 export default function CoBuilderPage() {
   const [statusLoad, statusHandle] = useLoad(() => apiFetch<AiStatus>("/ai/status"), []);
 
@@ -207,6 +233,17 @@ export default function CoBuilderPage() {
 
   const [draftForm, setDraftForm] = useState<DraftFormState | null>(null);
   const [saveState, setSaveState] = useState<SaveState>({ kind: "idle" });
+  /**
+   * STICKY for the rest of this conversation, once set — never cleared by a
+   * later draft arriving. This is what stops a follow-up ("ubah harga Pro
+   * jadi 200rb", which the system prompt has the model answer with a FRESH
+   * full draft) from quietly producing a second community: as long as this
+   * is non-null, the panel for any LATER draft refuses to offer a plain
+   * "Buat komunitas ini" — see the duplicate-risk notice in `DraftPanel`.
+   */
+  const [createdCommunity, setCreatedCommunity] = useState<Community | null>(null);
+  /** Explicit opt-in for "yes, I mean to create a SECOND community" — reset on every new draft. */
+  const [confirmSeparateCommunity, setConfirmSeparateCommunity] = useState(false);
 
   async function handleSend(event?: FormEvent) {
     event?.preventDefault();
@@ -230,6 +267,7 @@ export default function CoBuilderPage() {
       if (result.draft !== null) {
         setDraftForm(toDraftForm(result.draft));
         setSaveState({ kind: "idle" });
+        setConfirmSeparateCommunity(false);
       }
     } catch (err) {
       const classified = classifySendError(err);
@@ -249,8 +287,20 @@ export default function CoBuilderPage() {
     setDraftForm((prev) => (prev === null ? prev : { ...prev, [field]: value }));
   }
 
-  function updateTierField(index: number, patch: Partial<Pick<DraftTierForm, "name" | "price">>) {
-    setDraftForm((prev) => (prev === null ? prev : updateTierAt(prev, index, { ...patch, error: undefined })));
+  function updateTierField(
+    index: number,
+    patch: Partial<Pick<DraftTierForm, "name" | "price" | "billingCycle">>
+  ) {
+    setDraftForm((prev) => {
+      if (prev === null) return prev;
+      // A general (whole-tier) failure was about the OLD values; any edit
+      // makes it stale. The per-field errors clear only for the field that
+      // actually changed, same as `TiersPage`.
+      const clear: Partial<DraftTierForm> = { generalError: undefined };
+      if ("name" in patch) clear.nameError = undefined;
+      if ("price" in patch) clear.priceError = undefined;
+      return updateTierAt(prev, index, { ...patch, ...clear });
+    });
   }
 
   /** Runs `POST /communities/:id/tiers` for each of `indices`, in order, recording each one's own outcome. */
@@ -264,16 +314,24 @@ export default function CoBuilderPage() {
       if (parsed === undefined) continue;
       setDraftForm((prev) => (prev === null ? prev : updateTierAt(prev, index, { status: "creating" })));
       try {
-        const created = await apiFetch<Tier>(`/communities/${communityId}/tiers`, {
+        await apiFetch<Tier>(`/communities/${communityId}/tiers`, {
           method: "POST",
           body: JSON.stringify(parsed),
         });
         setDraftForm((prev) =>
-          prev === null ? prev : updateTierAt(prev, index, { status: "created", tierId: created.id, error: undefined })
+          prev === null
+            ? prev
+            : updateTierAt(prev, index, {
+                status: "created",
+                nameError: undefined,
+                priceError: undefined,
+                generalError: undefined,
+              })
         );
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Gagal menyimpan paket.";
-        setDraftForm((prev) => (prev === null ? prev : updateTierAt(prev, index, { status: "failed", error: message })));
+        setDraftForm((prev) =>
+          prev === null ? prev : updateTierAt(prev, index, { status: "failed", ...tierErrorPatch(err) })
+        );
       }
     }
   }
@@ -283,9 +341,17 @@ export default function CoBuilderPage() {
    * PATH this screen has (ruling #2). Every tier is validated locally first,
    * same rule and same message as `TiersPage`'s `parseRupiahInput`, so an
    * obviously-bad price never even reaches the network.
+   *
+   * CALLABLE FROM "idle" OR "community_error" — never from "creating_community"
+   * (already in flight) or "saved" (would re-create the same community). This
+   * is what makes the `community_error` panel's own "Coba lagi" button
+   * actually retry, rather than silently no-op: a prior bug guarded this with
+   * `saveState.kind !== "idle"`, which is true for `community_error` too, so
+   * the very button offered on a failed save could never do anything.
    */
   async function saveCommunity() {
-    if (draftForm === null || saveState.kind !== "idle") return;
+    if (draftForm === null) return;
+    if (saveState.kind === "creating_community" || saveState.kind === "saved") return;
 
     const trimmedName = draftForm.name.trim();
     const trimmedNiche = draftForm.niche.trim();
@@ -296,16 +362,22 @@ export default function CoBuilderPage() {
       const name = tier.name.trim();
       if (name === "") {
         hasFieldError = true;
-        return { ...tier, error: "Nama paket wajib diisi." };
+        return { ...tier, nameError: "Nama paket wajib diisi.", priceError: undefined, generalError: undefined };
       }
       const parsed = parseRupiahInput(tier.price);
       if ("error" in parsed) {
         hasFieldError = true;
-        return { ...tier, error: parsed.error };
+        return { ...tier, nameError: undefined, priceError: parsed.error, generalError: undefined };
       }
       parsedByIndex.set(index, { name, priceAmount: parsed.amount, billingCycle: tier.billingCycle });
-      return { ...tier, error: undefined };
+      return { ...tier, nameError: undefined, priceError: undefined, generalError: undefined };
     });
+
+    // Committed REGARDLESS of the name check below — a bad tier price must
+    // never be silently discarded just because the name was ALSO blank.
+    if (hasFieldError) {
+      setDraftForm({ ...draftForm, tiers: validatedTiers });
+    }
 
     if (trimmedName === "") {
       setSaveState({ kind: "community_error", message: "Nama komunitas wajib diisi." });
@@ -313,8 +385,9 @@ export default function CoBuilderPage() {
     }
     if (hasFieldError) {
       // No request at all — mirrors CreateTierForm: money never becomes a
-      // float (or a blank name) on the way to the API.
-      setDraftForm({ ...draftForm, tiers: validatedTiers });
+      // float (or a blank name) on the way to the API. `saveState` stays
+      // whatever it already was (idle, or a previous community_error the
+      // creator has not yet fixed) rather than being overwritten here.
       return;
     }
 
@@ -328,6 +401,11 @@ export default function CoBuilderPage() {
         body: JSON.stringify({ name: trimmedName, ...(trimmedNiche === "" ? {} : { niche: trimmedNiche }) }),
       });
     } catch (err) {
+      // BACK TO AN EDITABLE, RE-SUBMITTABLE STATE — never a dead end. Every
+      // input this panel disables is keyed off `saveState.kind !== "idle" &&
+      // saveState.kind !== "community_error"`, so this state re-enables them,
+      // and `saveCommunity`'s own guard above allows this exact function to
+      // run again from here.
       setSaveState({
         kind: "community_error",
         message: err instanceof Error ? err.message : "Tidak dapat menghubungi server. Coba lagi.",
@@ -339,6 +417,10 @@ export default function CoBuilderPage() {
     // this state can never go back to "idle", so a tier failure can never
     // make this screen try to create the SAME community a second time.
     setSaveState({ kind: "saved", community });
+    // STICKY — see the field's own docstring. Set once, kept forever, so a
+    // LATER draft in this same conversation can never silently create a
+    // second community with one more click.
+    setCreatedCommunity(community);
     await runTierAttempts(
       community.id,
       validatedTiers.map((_, index) => index),
@@ -364,15 +446,15 @@ export default function CoBuilderPage() {
       const name = tier.name.trim();
       if (name === "") {
         hasFieldError = true;
-        return { ...tier, error: "Nama paket wajib diisi." };
+        return { ...tier, nameError: "Nama paket wajib diisi.", priceError: undefined, generalError: undefined };
       }
       const parsed = parseRupiahInput(tier.price);
       if ("error" in parsed) {
         hasFieldError = true;
-        return { ...tier, error: parsed.error };
+        return { ...tier, nameError: undefined, priceError: parsed.error, generalError: undefined };
       }
       parsedByIndex.set(index, { name, priceAmount: parsed.amount, billingCycle: tier.billingCycle });
-      return { ...tier, error: undefined };
+      return { ...tier, nameError: undefined, priceError: undefined, generalError: undefined };
     });
 
     if (failedIndices.length === 0) return;
@@ -409,6 +491,12 @@ export default function CoBuilderPage() {
 
       {statusLoad.kind === "ready" && statusLoad.data.enabled ? (
         <>
+          {/* Same guardrail `CommunitiesPage`/`TiersPage` show around the exact
+              same two endpoints this screen calls — a creator who builds an
+              entire community here must see it too, not just on the two
+              manual screens. */}
+          <PaymentAccountNotice />
+
           <div className="chat-transcript" data-testid="chat-transcript" role="log" aria-live="polite">
             {messages.length === 0 ? (
               <EmptyState
@@ -464,6 +552,9 @@ export default function CoBuilderPage() {
             <DraftPanel
               draftForm={draftForm}
               saveState={saveState}
+              createdCommunity={createdCommunity}
+              confirmSeparateCommunity={confirmSeparateCommunity}
+              onToggleConfirmSeparate={setConfirmSeparateCommunity}
               onChangeField={updateDraftField}
               onChangeTier={updateTierField}
               onSave={saveCommunity}
@@ -479,6 +570,9 @@ export default function CoBuilderPage() {
 function DraftPanel({
   draftForm,
   saveState,
+  createdCommunity,
+  confirmSeparateCommunity,
+  onToggleConfirmSeparate,
   onChangeField,
   onChangeTier,
   onSave,
@@ -486,16 +580,22 @@ function DraftPanel({
 }: {
   draftForm: DraftFormState;
   saveState: SaveState;
+  createdCommunity: Community | null;
+  confirmSeparateCommunity: boolean;
+  onToggleConfirmSeparate: (checked: boolean) => void;
   onChangeField: (field: "name" | "niche" | "description" | "welcomeMessage", value: string) => void;
-  onChangeTier: (index: number, patch: Partial<Pick<DraftTierForm, "name" | "price">>) => void;
+  onChangeTier: (index: number, patch: Partial<Pick<DraftTierForm, "name" | "price" | "billingCycle">>) => void;
   onSave: () => void;
   onRetryFailedTiers: () => void;
 }) {
-  // Community-level fields lock the moment saving starts — there is nothing
-  // left to edit once `POST /communities` has already gone out, since the
-  // manual flow (CommunitiesPage) has no edit-in-place either.
-  const locked = saveState.kind !== "idle";
+  // Community-level fields lock only once THIS draft's own save is in flight
+  // or has succeeded — a failed save (`community_error`) leaves them open,
+  // because that is exactly the state a creator needs to fix and resubmit.
+  const locked = saveState.kind === "creating_community" || saveState.kind === "saved";
   const anyTierFailed = draftForm.tiers.some((tier) => tier.status === "failed");
+  // This draft has not been attempted yet, AND an EARLIER draft in this same
+  // conversation already created a community — the duplicate-risk case.
+  const risksDuplicate = saveState.kind === "idle" && createdCommunity !== null;
 
   return (
     <div className="card cobuilder-draft" data-testid="draft-panel">
@@ -511,6 +611,7 @@ function DraftPanel({
             id="field-draft-name"
             value={draftForm.name}
             disabled={locked}
+            maxLength={255}
             onChange={(event) => onChangeField("name", event.target.value)}
           />
         </Field>
@@ -519,6 +620,7 @@ function DraftPanel({
             id="field-draft-niche"
             value={draftForm.niche}
             disabled={locked}
+            maxLength={128}
             onChange={(event) => onChangeField("niche", event.target.value)}
           />
         </Field>
@@ -567,9 +669,39 @@ function DraftPanel({
       </div>
 
       {saveState.kind === "idle" ? (
-        <button type="button" className="button-primary" onClick={onSave}>
-          Buat komunitas ini
-        </button>
+        risksDuplicate ? (
+          <div className="notice notice-warning" data-testid="duplicate-risk-notice">
+            <h3>Draf ini adalah revisi</h3>
+            <p>
+              Komunitas “{createdCommunity!.name}” sudah dibuat dari draf sebelumnya di percakapan ini —{" "}
+              <Link to={`/dashboard/c/${createdCommunity!.id}`}>Lihat komunitas</Link>. Untuk mengubah
+              paket atau info komunitas itu, gunakan{" "}
+              <Link to={`/dashboard/c/${createdCommunity!.id}/tiers`}>halaman Paket</Link> — bukan draf
+              ini, yang akan membuat komunitas BARU jika disimpan.
+            </p>
+            <label className="row">
+              <input
+                type="checkbox"
+                checked={confirmSeparateCommunity}
+                onChange={(event) => onToggleConfirmSeparate(event.target.checked)}
+              />
+              Saya paham — simpan draf ini sebagai komunitas KEDUA yang terpisah dari “
+              {createdCommunity!.name}”.
+            </label>
+            <button
+              type="button"
+              className="button-primary"
+              disabled={!confirmSeparateCommunity}
+              onClick={onSave}
+            >
+              Buat komunitas kedua ini
+            </button>
+          </div>
+        ) : (
+          <button type="button" className="button-primary" onClick={onSave}>
+            Buat komunitas ini
+          </button>
+        )
       ) : null}
 
       {saveState.kind === "creating_community" ? <p className="muted">Menyimpan komunitas...</p> : null}
@@ -577,7 +709,7 @@ function DraftPanel({
       {saveState.kind === "community_error" ? (
         <div className="form-error" role="alert">
           <p>{saveState.message}</p>
-          <button type="button" className="button-secondary" onClick={onSave}>
+          <button type="button" className="button-primary" onClick={onSave}>
             Coba lagi
           </button>
         </div>
@@ -616,7 +748,7 @@ function TierRow({
   tier: DraftTierForm;
   index: number;
   locked: boolean;
-  onChange: (index: number, patch: Partial<Pick<DraftTierForm, "name" | "price">>) => void;
+  onChange: (index: number, patch: Partial<Pick<DraftTierForm, "name" | "price" | "billingCycle">>) => void;
 }) {
   const parsedPrice = parseRupiahInput(tier.price);
   const priceHint =
@@ -627,18 +759,19 @@ function TierRow({
   return (
     <div className="card" data-testid={`tier-row-${index}`}>
       <div className="inline-form">
-        <Field label={`Nama paket ${index + 1}`} name={`tier-name-${index}`}>
+        <Field label={`Nama paket ${index + 1}`} name={`tier-name-${index}`} error={tier.nameError}>
           <input
             id={`field-tier-name-${index}`}
             value={tier.name}
             disabled={locked}
+            maxLength={128}
             onChange={(event) => onChange(index, { name: event.target.value })}
           />
         </Field>
         <Field
           label={`Harga paket ${index + 1} (Rupiah)`}
           name={`tier-price-${index}`}
-          error={tier.error}
+          error={tier.priceError}
           hint={priceHint}
         >
           <input
@@ -649,7 +782,26 @@ function TierRow({
             onChange={(event) => onChange(index, { price: event.target.value })}
           />
         </Field>
+        <Field label={`Siklus paket ${index + 1}`} name={`tier-cycle-${index}`}>
+          <select
+            id={`field-tier-cycle-${index}`}
+            value={tier.billingCycle}
+            disabled={locked}
+            onChange={(event) => onChange(index, { billingCycle: event.target.value })}
+          >
+            {BILLING_CYCLES.map((cycle) => (
+              <option key={cycle} value={cycle}>
+                {billingCycleOptionLabel(cycle)}
+              </option>
+            ))}
+          </select>
+        </Field>
       </div>
+      {tier.generalError !== undefined ? (
+        <p className="field-error" data-testid={`tier-general-error-${index}`}>
+          {tier.generalError}
+        </p>
+      ) : null}
       {tier.status === "created" ? <p className="muted">Sudah ditambahkan.</p> : null}
       {tier.status === "creating" ? <p className="muted">Menyimpan...</p> : null}
     </div>
