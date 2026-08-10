@@ -4,6 +4,11 @@ import StatusPage from "./pages/StatusPage";
 import DashboardLayout from "./dashboard/DashboardLayout";
 import LoginPage from "./dashboard/LoginPage";
 import RequireAuth from "./dashboard/RequireAuth";
+import CommunitiesPage from "./dashboard/pages/CommunitiesPage";
+import CommunityOverviewPage from "./dashboard/pages/CommunityOverviewPage";
+import TiersPage from "./dashboard/pages/TiersPage";
+import ChannelsPage from "./dashboard/pages/ChannelsPage";
+import AccountPage from "./dashboard/pages/AccountPage";
 import PlaceholderPage from "./dashboard/PlaceholderPage";
 
 export default function App() {
@@ -38,11 +43,11 @@ export default function App() {
             </RequireAuth>
           }
         >
-          <Route index element={<PlaceholderPage title="Komunitas Anda" />} />
-          <Route path="account" element={<PlaceholderPage title="Akun & pembayaran" />} />
-          <Route path="c/:communityId" element={<PlaceholderPage title="Ringkasan komunitas" />} />
-          <Route path="c/:communityId/tiers" element={<PlaceholderPage title="Paket keanggotaan" />} />
-          <Route path="c/:communityId/channels" element={<PlaceholderPage title="Grup terhubung" />} />
+          <Route index element={<CommunitiesPage />} />
+          <Route path="account" element={<AccountPage />} />
+          <Route path="c/:communityId" element={<CommunityOverviewPage />} />
+          <Route path="c/:communityId/tiers" element={<TiersPage />} />
+          <Route path="c/:communityId/channels" element={<ChannelsPage />} />
           <Route path="c/:communityId/members" element={<PlaceholderPage title="Anggota" />} />
           <Route path="c/:communityId/activity" element={<PlaceholderPage title="Aktivitas" />} />
           {/* An unknown /dashboard/... path goes to the dashboard's own home, not
