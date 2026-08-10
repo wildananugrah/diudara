@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { communityDraftSchema, communityDraftTierSchema } from "./ai.schema";
+import { createTierSchema } from "./community.schema";
 
 const VALID_DRAFT = {
   name: "Kelas Bisnis Digital",
@@ -155,5 +156,71 @@ describe("communityDraftTierSchema", () => {
       billingCycle: "quarterly",
     });
     expect(parsed.billingCycle).toBe("quarterly");
+  });
+});
+
+/**
+ * `communityDraftTierSchema` duplicates `createTierSchema`
+ * (community.schema.ts) VERBATIM — a deliberate choice, not an oversight
+ * (see both schemas' own comments), because a draft tier's only real job is
+ * to survive the endpoint it is destined for: `POST /communities/:id/tiers`,
+ * which validates against `createTierSchema`, not this one. If the two ever
+ * drift apart — someone widens one bound without the other, say — the
+ * silent failure mode is a draft the AI proposes and the creator approves
+ * on screen, that then 400s the moment `saveCommunity` (CoBuilderPage.tsx)
+ * tries to actually create it. This test does not assert the two schemas
+ * are identical structurally (duplication is fine, drift is not); it
+ * asserts the actual property that matters: everything the draft schema
+ * accepts, the create endpoint's schema accepts too.
+ */
+describe("communityDraftTierSchema / createTierSchema parity", () => {
+  const CANDIDATE_TIERS: unknown[] = [
+    // Ordinary case.
+    { name: "Premium", priceAmount: 100000, billingCycle: "quarterly" },
+    // Every billing cycle.
+    { name: "Dasar", priceAmount: 50000, billingCycle: "monthly" },
+    { name: "Pro", priceAmount: 150000, billingCycle: "quarterly" },
+    { name: "VIP", priceAmount: 1_200_000, billingCycle: "yearly" },
+    // `name` at both length bounds (1 and 128).
+    { name: "A", priceAmount: 10000, billingCycle: "monthly" },
+    { name: "a".repeat(128), priceAmount: 10000, billingCycle: "monthly" },
+    // `priceAmount` at both bounds (0 and 2,000,000,000) — a free tier is
+    // valid, and so is the Postgres-integer-mirroring ceiling.
+    { name: "Gratis", priceAmount: 0, billingCycle: "monthly" },
+    { name: "Mahal", priceAmount: 2_000_000_000, billingCycle: "monthly" },
+    // Untrimmed whitespace around `name` — both schemas call `.trim()`.
+    { name: "  Spasi  ", priceAmount: 25000, billingCycle: "yearly" },
+    // Invalid inputs too — parity must hold on REJECTION, not just
+    // acceptance, or a schema that always returned `success: true` would
+    // pass the accept-only half of this test vacuously.
+    { name: "", priceAmount: 10000, billingCycle: "monthly" },
+    { name: "a".repeat(129), priceAmount: 10000, billingCycle: "monthly" },
+    { name: "Dasar", priceAmount: -1, billingCycle: "monthly" },
+    { name: "Dasar", priceAmount: 2_000_000_001, billingCycle: "monthly" },
+    { name: "Dasar", priceAmount: 50000.5, billingCycle: "monthly" },
+    { name: "Dasar", priceAmount: 50000, billingCycle: "weekly" },
+  ];
+
+  it("createTierSchema accepts everything communityDraftTierSchema accepts", () => {
+    for (const tier of CANDIDATE_TIERS) {
+      const draftResult = communityDraftTierSchema.safeParse(tier);
+      if (draftResult.success) {
+        const createResult = createTierSchema.safeParse(tier);
+        expect(createResult.success).toBe(true);
+      }
+    }
+    // Sanity check the fixture itself actually exercises the accept path —
+    // otherwise the loop above could pass by finding nothing to check.
+    expect(CANDIDATE_TIERS.some((tier) => communityDraftTierSchema.safeParse(tier).success)).toBe(
+      true
+    );
+  });
+
+  it("the two schemas agree on every candidate, accept or reject alike", () => {
+    for (const tier of CANDIDATE_TIERS) {
+      expect(communityDraftTierSchema.safeParse(tier).success).toBe(
+        createTierSchema.safeParse(tier).success
+      );
+    }
   });
 });
