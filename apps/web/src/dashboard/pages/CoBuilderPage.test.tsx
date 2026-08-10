@@ -36,6 +36,17 @@ const CREATED_COMMUNITY = {
   createdAt: "2026-08-10T02:00:00.000Z",
 };
 
+/** A deliberately SEPARATE community — a different id (and name) from
+ * `CREATED_COMMUNITY` — used to prove the sticky outstanding-tiers notice
+ * stays attached to the community it is actually about instead of bleeding
+ * onto whichever community is displayed most recently. */
+const CREATED_COMMUNITY_2 = {
+  ...CREATED_COMMUNITY,
+  id: "33333333-3333-4333-8333-333333333333",
+  name: "Kelas Bisnis Digital Lanjutan",
+  slug: "kelas-bisnis-digital-lanjutan",
+};
+
 function render() {
   return renderPage(<CoBuilderPage />, { path: "/dashboard/co-builder", at: "/dashboard/co-builder" });
 }
@@ -674,6 +685,62 @@ describe("CoBuilderPage", () => {
     expect(calls.filter((c) => c.method === "POST" && c.url === "/communities").length).toBe(1);
   });
 
+  it("keeps the composer lock consistent: a stale send-error banner's 'Coba lagi' cannot start a send while a save is in flight", async () => {
+    let resolveCommunity: ((res: Response) => void) | null = null;
+    let messageAttempt = 0;
+    const { calls } = recordingFetch((url, method) => {
+      if (url === "/ai/status") return jsonResponse({ enabled: true });
+      if (url === "/payment-account") return jsonResponse({ connected: true, provisioning: false });
+      if (url === "/ai/messages" && method === "POST") {
+        messageAttempt += 1;
+        if (messageAttempt === 1) {
+          return jsonResponse({ conversationId: "conv-1", reply: "Berikut draf komunitasmu.", draft: VALID_DRAFT });
+        }
+        if (messageAttempt === 2) {
+          return jsonResponse(
+            { error: "AI co-builder sedang tidak bisa dihubungi. Coba lagi dalam beberapa saat." },
+            503
+          );
+        }
+        throw new Error("a second send must never reach the network while a save is in flight");
+      }
+      if (url === "/communities" && method === "POST") {
+        return new Promise<Response>((resolve) => {
+          resolveCommunity = resolve;
+        });
+      }
+      throw new Error(`unstubbed request: ${method} ${url}`);
+    });
+
+    render();
+    await screen.findByText(/Mulai obrolan/);
+    await sendMessage("pesan pertama");
+    await screen.findByText("Berikut draf komunitasmu.");
+
+    // A message fails, leaving the send-error panel (and its "Coba lagi")
+    // on screen with the composer re-enabled and the rejected text still
+    // sitting in it.
+    await sendMessage("pesan kedua");
+    const notice = await screen.findByTestId("send-error");
+    expect(notice.textContent).toMatch(/tidak bisa dihubungi/);
+
+    // Start a save — the textarea/submit button both lock via `saveInFlight`
+    // (see their own `disabled` props); the stale "Coba lagi" button above
+    // must now carry the same lock.
+    fireEvent.click(screen.getByRole("button", { name: "Buat komunitas ini" }));
+    await screen.findByTestId("save-in-flight-notice");
+
+    const retryButton = screen.getByRole("button", { name: "Coba lagi" }) as HTMLButtonElement;
+    expect(retryButton.disabled).toBe(true);
+    fireEvent.click(retryButton);
+    // Give a wrongly-fired send a chance to reach the (throwing) stub.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.filter((c) => c.method === "POST" && c.url === "/ai/messages").length).toBe(2);
+
+    resolveCommunity!(jsonResponse(CREATED_COMMUNITY, 201));
+    await screen.findByText(/berhasil dibuat/);
+  });
+
   it("does not corrupt a new draft that arrives while an earlier save's tier request is still in flight (draft generation guard)", async () => {
     let resolveOldTier: ((res: Response) => void) | null = null;
     let messageAttempt = 0;
@@ -864,9 +931,10 @@ describe("CoBuilderPage", () => {
     expect(screen.queryAllByTestId("error-tier-price-1").length).toBe(0);
   });
 
-  it("carries outstanding tier names into the sticky summary when a later draft replaces an incomplete save", async () => {
+  it("carries outstanding tier names into the sticky summary when a later draft replaces an incomplete save, and never re-attributes them to a genuinely separate second community", async () => {
     const secondDraft = { ...VALID_DRAFT, name: "Kelas Bisnis Digital Lanjutan" };
     let messageAttempt = 0;
+    let communityAttempt = 0;
     recordingFetch((url, method, body) => {
       if (url === "/ai/status") return jsonResponse({ enabled: true });
       if (url === "/payment-account") return jsonResponse({ connected: true, provisioning: false });
@@ -878,15 +946,27 @@ describe("CoBuilderPage", () => {
         return jsonResponse({ conversationId: "conv-1", reply: "Berikut draf revisi.", draft: secondDraft });
       }
       if (url === "/communities" && method === "POST") {
-        return jsonResponse(CREATED_COMMUNITY, 201);
+        communityAttempt += 1;
+        // The FIRST save creates `CREATED_COMMUNITY`; the SECOND (below,
+        // behind the explicit "komunitas KEDUA" confirmation) creates a
+        // genuinely different community, `CREATED_COMMUNITY_2`.
+        return jsonResponse(communityAttempt === 1 ? CREATED_COMMUNITY : CREATED_COMMUNITY_2, 201);
       }
       if (url === `/communities/${CREATED_COMMUNITY.id}/tiers` && method === "POST") {
         const tierBody = body as { name: string };
         if (tierBody.name === "Dasar") {
           return jsonResponse({ id: "tier-1", communityId: CREATED_COMMUNITY.id, ...tierBody, isActive: true }, 201);
         }
-        // "Pro" fails permanently in this test.
+        // "Pro" fails permanently for the FIRST community in this test.
         return jsonResponse({ error: "priceAmount: too large" }, 400);
+      }
+      if (url === `/communities/${CREATED_COMMUNITY_2.id}/tiers` && method === "POST") {
+        // Every tier succeeds for the SECOND community — it is complete.
+        const tierBody = body as { name: string };
+        return jsonResponse(
+          { id: `tier-2-${tierBody.name}`, communityId: CREATED_COMMUNITY_2.id, ...tierBody, isActive: true },
+          201
+        );
       }
       throw new Error(`unstubbed request: ${method} ${url}`);
     });
@@ -911,5 +991,26 @@ describe("CoBuilderPage", () => {
     const outstanding = await screen.findByTestId("outstanding-tiers-notice");
     expect(outstanding.textContent).toContain("Pro");
     expect(outstanding.textContent).toMatch(/halaman Paket/);
+    // Still about the FIRST community — the one that is actually missing "Pro".
+    expect(screen.getByRole("link", { name: "Lihat komunitas" }).getAttribute("href")).toBe(
+      `/dashboard/c/${CREATED_COMMUNITY.id}`
+    );
+
+    // Now go on to actually create the SECOND, deliberately separate
+    // community — the step the review found this test stopped short of.
+    // Every one of ITS tiers succeeds.
+    fireEvent.click(screen.getByLabelText(/simpan draf ini sebagai komunitas KEDUA/i));
+    fireEvent.click(screen.getByRole("button", { name: "Buat komunitas kedua ini" }));
+
+    await screen.findByText(new RegExp(`${CREATED_COMMUNITY_2.name}.*berhasil dibuat`));
+    // The summary now shown is about community 2, which has no outstanding
+    // tiers of its own — it must make NO claim about "Pro" (that gap
+    // belongs to community 1, named and linked above) and must not point
+    // its "halaman Paket" link at community 2 as though community 2 were
+    // incomplete. This is the exact misattribution the review flagged.
+    expect(screen.queryAllByTestId("outstanding-tiers-notice").length).toBe(0);
+    expect(screen.getByRole("link", { name: "Lihat komunitas" }).getAttribute("href")).toBe(
+      `/dashboard/c/${CREATED_COMMUNITY_2.id}`
+    );
   });
 });

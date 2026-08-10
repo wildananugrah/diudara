@@ -245,13 +245,26 @@ export default function CoBuilderPage() {
   /** Explicit opt-in for "yes, I mean to create a SECOND community" — reset on every new draft. */
   const [confirmSeparateCommunity, setConfirmSeparateCommunity] = useState(false);
   /**
-   * Tier names STICKILY known to be missing from `createdCommunity` — captured
-   * the moment a later draft is about to replace the panel that created it
-   * (see `handleSend`), because that is the one moment the information would
-   * otherwise vanish: `retryFailedTiers`'s own UI disappears with the panel,
-   * and nothing else on screen would ever again say "Pro was never created".
+   * Tier names STICKILY known to be missing from a community this
+   * conversation created — captured the moment a later draft is about to
+   * replace the panel that created it (see `handleSend`), because that is
+   * the one moment the information would otherwise vanish: `retryFailedTiers`'s
+   * own UI disappears with the panel, and nothing else on screen would ever
+   * again say "Pro was never created".
+   *
+   * Paired with the id of the community it is ABOUT, not just left as a bare
+   * name list — `createdCommunity` is overwritten unconditionally by every
+   * later save (see its own docstring), so a bare list would silently keep
+   * pointing at whichever community happens to be shown now. Community 1
+   * saves with "Pro" failing, then community 2 (a deliberate SECOND
+   * community, ticked via "simpan sebagai komunitas KEDUA") saves with every
+   * tier succeeding: without the id, the notice would render under
+   * `createdCommunity` (now community 2) and falsely claim community 2 is
+   * missing "Pro", while community 1 — which really is missing it — is named
+   * nowhere. The render site below only shows this when the id matches the
+   * community currently displayed.
    */
-  const [outstandingTierNames, setOutstandingTierNames] = useState<string[]>([]);
+  const [outstandingTiers, setOutstandingTiers] = useState<{ communityId: string; names: string[] } | null>(null);
   /**
    * A save (community + its tiers) is in flight. Disables the composer (see
    * the ruling: a UI lock alone is not the fix, but it IS required) and is
@@ -345,7 +358,7 @@ export default function CoBuilderPage() {
             .filter((tier) => tier.status === "failed" || tier.status === "pending")
             .map((tier) => tier.name.trim())
             .filter((name) => name !== "");
-          setOutstandingTierNames(outstanding);
+          setOutstandingTiers({ communityId: created.id, names: outstanding });
         }
         // Bumped BEFORE the replacement, and unconditionally on every new
         // draft — any save already in flight for the draft being replaced
@@ -659,7 +672,20 @@ export default function CoBuilderPage() {
               <h3>{sendErrorTitle(sendError.kind)}</h3>
               <p>{sendError.message}</p>
               {sendError.kind !== "rate_limit" ? (
-                <button type="button" className="button-secondary" onClick={() => handleSend()}>
+                // `disabled` mirrors the textarea/submit button below
+                // (`saveInFlight`, see their own props) — this button calls
+                // `handleSend()` directly, bypassing whatever the composer
+                // itself renders as disabled, so without this a stale
+                // send-error banner left over from before a save started
+                // could start a second send mid-save: harmless (the draft
+                // generation counter is the actual defence), but it broke
+                // the convention every other control here enforces.
+                <button
+                  type="button"
+                  className="button-secondary"
+                  disabled={saveInFlight}
+                  onClick={() => handleSend()}
+                >
                   Coba lagi
                 </button>
               ) : null}
@@ -701,7 +727,7 @@ export default function CoBuilderPage() {
               draftForm={draftForm}
               saveState={saveState}
               createdCommunity={createdCommunity}
-              outstandingTierNames={outstandingTierNames}
+              outstandingTiers={outstandingTiers}
               confirmSeparateCommunity={confirmSeparateCommunity}
               onToggleConfirmSeparate={setConfirmSeparateCommunity}
               onChangeField={updateDraftField}
@@ -721,7 +747,7 @@ function DraftPanel({
   draftForm,
   saveState,
   createdCommunity,
-  outstandingTierNames,
+  outstandingTiers,
   confirmSeparateCommunity,
   onToggleConfirmSeparate,
   onChangeField,
@@ -733,7 +759,7 @@ function DraftPanel({
   draftForm: DraftFormState;
   saveState: SaveState;
   createdCommunity: Community | null;
-  outstandingTierNames: string[];
+  outstandingTiers: { communityId: string; names: string[] } | null;
   confirmSeparateCommunity: boolean;
   onToggleConfirmSeparate: (checked: boolean) => void;
   onChangeField: (field: "name" | "niche" | "description" | "welcomeMessage", value: string) => void;
@@ -764,9 +790,11 @@ function DraftPanel({
             Komunitas “{createdCommunity.name}” berhasil dibuat.{" "}
             <Link to={`/dashboard/c/${createdCommunity.id}`}>Lihat komunitas</Link>.
           </p>
-          {outstandingTierNames.length > 0 ? (
+          {outstandingTiers !== null &&
+          outstandingTiers.communityId === createdCommunity.id &&
+          outstandingTiers.names.length > 0 ? (
             <p className="cell-warning" data-testid="outstanding-tiers-notice">
-              Paket berikut belum dibuat untuk komunitas itu: {outstandingTierNames.join(", ")}.
+              Paket berikut belum dibuat untuk komunitas itu: {outstandingTiers.names.join(", ")}.
               Tambahkan secara manual di{" "}
               <Link to={`/dashboard/c/${createdCommunity.id}/tiers`}>halaman Paket</Link>.
             </p>
