@@ -1,5 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { useState, useSyncExternalStore, type ReactNode } from "react";
 import { Link, NavLink } from "react-router-dom";
+import { subscribeToAuth } from "./auth";
 import { communityStatusExplanation, communityStatusLabel, publicCheckoutUrl } from "./format";
 import { getPaymentAccountState } from "./paymentAccount";
 import type { Community } from "./types";
@@ -129,9 +130,18 @@ export function CopyableLink({ url, label }: { url: string; label: string }) {
  * The wording never claims "not connected", only that this browser has no
  * confirmation — see `paymentAccount.ts` for why that distinction is not
  * pedantry.
+ *
+ * SUBSCRIBED, not read during render. This used to call
+ * `getPaymentAccountState()` straight out of `localStorage` with nothing watching
+ * it, so connecting payments on the account screen left every OTHER mounted screen
+ * still warning that nobody could buy anything until a navigation happened to
+ * re-render it — the creator had just fixed the problem and was still being told
+ * they had it. `useSyncExternalStore` over the session notifier is the same
+ * mechanism `RequireAuth` uses for an expiring token, and the snapshot is a
+ * string, so React's `Object.is` comparison settles immediately.
  */
 export function PaymentAccountNotice() {
-  const state = getPaymentAccountState();
+  const state = useSyncExternalStore(subscribeToAuth, getPaymentAccountState);
   if (state === "connected") return null;
 
   return (

@@ -41,6 +41,21 @@ function notify(): void {
 }
 
 /**
+ * Announces that something about this browser's session changed.
+ *
+ * Exported for `paymentAccount.ts`, which stores a second piece of per-session
+ * browser state under its own key and has exactly the same problem this module
+ * solves: nothing re-reads `localStorage` on its own, so a screen that read the
+ * value during render kept showing the stale one until something unrelated
+ * re-rendered it. One notifier rather than two, because there is one thing
+ * observers actually want to know — "re-read what you cached about this session" —
+ * and a component subscribing to both would just re-render twice.
+ */
+export function notifyAuthChange(): void {
+  notify();
+}
+
+/**
  * Subscribes to session changes. Returns the unsubscribe function, in the shape
  * `useSyncExternalStore` expects.
  */

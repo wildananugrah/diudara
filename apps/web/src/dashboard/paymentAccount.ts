@@ -1,4 +1,4 @@
-import { getCreator } from "./auth";
+import { getCreator, notifyAuthChange } from "./auth";
 
 /**
  * WHETHER THIS CREATOR CAN TAKE MONEY — as far as the browser is able to know.
@@ -55,6 +55,22 @@ export function getPaymentAccountState(): PaymentAccountState {
   return raw === "connected" || raw === "in_progress" ? raw : "unknown";
 }
 
+/**
+ * Writes the observed state, THEN TELLS EVERY MOUNTED SCREEN.
+ *
+ * The notification is not a nicety. `PaymentAccountNotice` renders on the
+ * communities list and on the tier editor, and both can be mounted while the
+ * creator presses "Hubungkan pembayaran" on the account screen — so without it the
+ * account screen went green while the others carried on telling the same creator
+ * that nobody could buy anything, until a navigation happened to re-render them.
+ * Nothing re-reads `localStorage` on its own; see the module docstring in
+ * `auth.ts`, whose notifier this reuses.
+ *
+ * Notified even on the failed-write path, deliberately: `getPaymentAccountState`
+ * would then answer `unknown` and the warning belongs back on screen. Failing
+ * towards showing it is the safe direction, and a listener re-reading and finding
+ * nothing changed costs one render.
+ */
 export function recordPaymentAccountState(state: PaymentAccountState): void {
   const creator = getCreator();
   if (creator === null) return;
@@ -65,6 +81,7 @@ export function recordPaymentAccountState(state: PaymentAccountState): void {
     // Storage unavailable: the warning simply keeps showing. Harmless, and
     // strictly better than suppressing it on a guess.
   }
+  notifyAuthChange();
 }
 
 /**
