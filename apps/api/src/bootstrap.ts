@@ -43,7 +43,7 @@ import { SystemClock } from "./infrastructure/clock/system.clock";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
 import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
-import { FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
+import { FAKE_AI_BEHAVIOURS, FakeAiAdapter, type FakeAiBehaviour } from "./infrastructure/ai/fake-ai.adapter";
 import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
 import { DrizzleAiConversationRepository } from "./infrastructure/repositories/drizzle-ai-conversation.repository";
 import { DrizzleAiUsageRepository } from "./infrastructure/repositories/drizzle-ai-usage.repository";
@@ -506,6 +506,51 @@ export function selectMessagingProviders(env: {
 }
 
 /**
+ * Resolves `AI_FAKE_BEHAVIOUR`, the switch that makes `FakeAiAdapter`'s
+ * hostile-payload behaviours reachable from OUTSIDE the API process.
+ *
+ * Before this, `FakeAiAdapter.nextBehaviour` could only be set by a test
+ * holding a reference to the adapter instance bootstrap() constructed — so a
+ * creator driving the co-builder chat screen in a real browser could only
+ * ever see `"draft"` (the fake's hardcoded default), and the 502 ("prose"/
+ * "truncated-json"), 503 ("timeout"), and any non-draft-happy-path response
+ * were unreachable from the UI in every environment, including local dev
+ * with no OpenRouter key. Task 8's gate found that gap and it is now closed:
+ * an operator restarts the API with this set to drive any behaviour the
+ * fake supports.
+ *
+ * Fails CLOSED on an unrecognised value, same rule as
+ * `resolveAiDailyMessageLimit` and every other env parser in this file: a
+ * typo'd behaviour name silently falling back to `"draft"` would look like
+ * "it works" while testing nothing the operator intended to test.
+ *
+ * Deliberately NOT itself gated on `RELAXED_NODE_ENVS` — `selectAiProvider`
+ * only ever calls this from inside the branch that is already behind that
+ * allowlist (a `FakeAiAdapter` is never constructed outside it), so a second
+ * check here would be dead code, not a second layer of safety. This
+ * function has no effect at all in production: `OPENROUTER_API_KEY`/
+ * `OPENROUTER_MODEL` set there selects `OpenRouterAiAdapter`, which has no
+ * `nextBehaviour` to set, and unset selects `undefined` (the feature
+ * disabled) — a `FakeAiAdapter` never exists for this value to reach.
+ */
+export function resolveAiFakeBehaviour(env: {
+  value: string | undefined;
+}): FakeAiBehaviour | undefined {
+  const raw = presentOrUndefined(env.value);
+  if (raw === undefined) {
+    return undefined;
+  }
+
+  if (!(FAKE_AI_BEHAVIOURS as readonly string[]).includes(raw)) {
+    throw new Error(
+      `AI_FAKE_BEHAVIOUR must be one of ${FAKE_AI_BEHAVIOURS.join(", ")} (got "${raw}"). ` +
+        "Unset it to keep the fake's default, draft."
+    );
+  }
+  return raw as FakeAiBehaviour;
+}
+
+/**
  * Chooses the AI co-builder's provider adapter (Phase 7) — the ONE selector
  * in this file that does NOT refuse to boot when configuration is absent.
  * Unlike payments and messaging, nothing is on the line if the co-builder is
@@ -520,7 +565,10 @@ export function selectMessagingProviders(env: {
  *      model id (or vice versa) is a typo, never intentional.
  *   3. ABSENT configuration selects `FakeAiAdapter` ONLY inside
  *      `RELAXED_NODE_ENVS` (development/test) — the SAME allowlist reused
- *      from `isRelaxedNodeEnv`, not a second gate.
+ *      from `isRelaxedNodeEnv`, not a second gate. `AI_FAKE_BEHAVIOUR` (see
+ *      `resolveAiFakeBehaviour`) sets that instance's `nextBehaviour` so the
+ *      fake's hostile-payload paths are reachable from a real browser, not
+ *      only from a test holding the instance directly.
  *   4. ABSENT configuration OUTSIDE the allowlist returns `undefined` RATHER
  *      THAN THROWING: this is the one deliberate divergence from every other
  *      selector in this file. The feature is disabled, not the boot.
@@ -533,6 +581,7 @@ export function selectAiProvider(env: {
   apiKey: string | undefined;
   model: string | undefined;
   nodeEnv: string | undefined;
+  fakeBehaviour?: string | undefined;
 }): AiProviderPort | undefined {
   const apiKey = presentOrUndefined(env.apiKey);
   const model = presentOrUndefined(env.model);
@@ -557,13 +606,22 @@ export function selectAiProvider(env: {
   }
 
   if (isRelaxedNodeEnv(env.nodeEnv)) {
+    const fake = new FakeAiAdapter();
+    const behaviour = resolveAiFakeBehaviour({ value: env.fakeBehaviour });
+    if (behaviour !== undefined) {
+      fake.nextBehaviour = behaviour;
+    }
     logProviderChoice(
       env.nodeEnv,
       "[bootstrap] AI provider: FakeAiAdapter " +
         "(OPENROUTER_API_KEY/OPENROUTER_MODEL not set — no real model will be called; " +
-        "set both to switch to OpenRouterAiAdapter)"
+        "set both to switch to OpenRouterAiAdapter)" +
+        (behaviour !== undefined
+          ? ` — AI_FAKE_BEHAVIOUR=${behaviour}, so every turn from here on gets that ` +
+            "response rather than the fake's default draft"
+          : "")
     );
-    return new FakeAiAdapter();
+    return fake;
   }
 
   logProviderChoice(
@@ -1059,6 +1117,7 @@ export function bootstrap(): Dependencies {
     apiKey: process.env.OPENROUTER_API_KEY,
     model: process.env.OPENROUTER_MODEL,
     nodeEnv: process.env.NODE_ENV,
+    fakeBehaviour: process.env.AI_FAKE_BEHAVIOUR,
   });
   const aiDailyMessageLimit = resolveAiDailyMessageLimit({
     value: process.env.AI_DAILY_MESSAGE_LIMIT,

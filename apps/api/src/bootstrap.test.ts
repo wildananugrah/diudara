@@ -7,6 +7,7 @@ import {
   DEFAULT_AI_DAILY_MESSAGE_LIMIT,
   RELAXED_NODE_ENVS,
   resolveAiDailyMessageLimit,
+  resolveAiFakeBehaviour,
   resolveAppBaseUrl,
   resolveCallbackToken,
   resolveTelegramWebhookSecret,
@@ -20,7 +21,7 @@ import {
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
 import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
-import { FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
+import { FAKE_AI_BEHAVIOURS, FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
 import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
 import { SendAiMessage } from "./application/use-cases/send-ai-message";
 import { createApp } from "./app";
@@ -1838,6 +1839,98 @@ describe("selectAiProvider", () => {
     });
     expect(loud.length).toBeGreaterThan(0);
   });
+
+  // Task 8's gate: before this, FakeAiAdapter.nextBehaviour could only be
+  // set by a test holding the instance directly, so every hostile-payload
+  // path (refusal, injection, malformed-JSON-> 502, timeout -> 503) was
+  // unreachable from a real browser — the fake always answered "draft".
+  it("sets the returned FakeAiAdapter's nextBehaviour from fakeBehaviour", () => {
+    captureConsoleLog(() => {
+      const provider = selectAiProvider({
+        apiKey: undefined,
+        model: undefined,
+        nodeEnv: "development",
+        fakeBehaviour: "timeout",
+      }) as FakeAiAdapter;
+      expect(provider).toBeInstanceOf(FakeAiAdapter);
+      expect(provider.nextBehaviour).toBe("timeout");
+    });
+  });
+
+  it("leaves nextBehaviour at its default when fakeBehaviour is unset", () => {
+    captureConsoleLog(() => {
+      const provider = selectAiProvider({
+        apiKey: undefined,
+        model: undefined,
+        nodeEnv: "development",
+      }) as FakeAiAdapter;
+      expect(provider.nextBehaviour).toBe("draft");
+    });
+  });
+
+  it("mentions the configured AI_FAKE_BEHAVIOUR in the startup log", () => {
+    const logs = captureConsoleLog(() => {
+      selectAiProvider({
+        apiKey: undefined,
+        model: undefined,
+        nodeEnv: "development",
+        fakeBehaviour: "injection",
+      });
+    });
+    expect(logs.some((line) => /AI_FAKE_BEHAVIOUR=injection/.test(line))).toBe(true);
+  });
+
+  it("propagates resolveAiFakeBehaviour's own failure-closed guard", () => {
+    expect(() =>
+      selectAiProvider({
+        apiKey: undefined,
+        model: undefined,
+        nodeEnv: "development",
+        fakeBehaviour: "not-a-real-behaviour",
+      })
+    ).toThrow(/AI_FAKE_BEHAVIOUR must be one of/);
+  });
+
+  it("has no effect on the real adapter — OpenRouterAiAdapter has no nextBehaviour to set", () => {
+    captureConsoleLog(() => {
+      const provider = selectAiProvider({
+        apiKey: "sk-or-x",
+        model: "openai/gpt-4o-mini",
+        nodeEnv: "test",
+        fakeBehaviour: "timeout",
+      });
+      expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
+    });
+  });
+});
+
+describe("resolveAiFakeBehaviour", () => {
+  it("returns undefined when unset", () => {
+    expect(resolveAiFakeBehaviour({ value: undefined })).toBeUndefined();
+  });
+
+  it("treats empty and whitespace-only as unset", () => {
+    expect(resolveAiFakeBehaviour({ value: "" })).toBeUndefined();
+    expect(resolveAiFakeBehaviour({ value: "   " })).toBeUndefined();
+  });
+
+  it("accepts every behaviour FakeAiAdapter itself supports", () => {
+    for (const behaviour of FAKE_AI_BEHAVIOURS) {
+      expect(resolveAiFakeBehaviour({ value: behaviour })).toBe(behaviour);
+    }
+  });
+
+  it("fails closed on an unrecognised value rather than silently keeping the default", () => {
+    expect(() => resolveAiFakeBehaviour({ value: "garbage" })).toThrow(
+      /AI_FAKE_BEHAVIOUR must be one of/
+    );
+  });
+
+  it("is case-sensitive — the fake's own union is lowercase-hyphenated", () => {
+    expect(() => resolveAiFakeBehaviour({ value: "Draft" })).toThrow(
+      /AI_FAKE_BEHAVIOUR must be one of/
+    );
+  });
 });
 
 describe("resolveAiDailyMessageLimit", () => {
@@ -1890,6 +1983,28 @@ describe("bootstrap() AI provider wiring", () => {
           expect(deps.sendAiMessage).toBeInstanceOf(SendAiMessage);
         }
       );
+    });
+  });
+
+  it("wires AI_FAKE_BEHAVIOUR through to the constructed FakeAiAdapter", () => {
+    // End-to-end through the composition root: the env var has to reach the
+    // ACTUAL instance bootstrap() hands to SendAiMessage, not just
+    // selectAiProvider in isolation — otherwise a browser-driven turn would
+    // still hit the untouched default.
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ AI_FAKE_BEHAVIOUR: "refusal" }, () => {
+        const deps = bootstrap();
+        expect(deps.aiProvider).toBeInstanceOf(FakeAiAdapter);
+        expect((deps.aiProvider as FakeAiAdapter).nextBehaviour).toBe("refusal");
+      });
+    });
+  });
+
+  it("fails closed on an invalid AI_FAKE_BEHAVIOUR rather than silently keeping the default", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ AI_FAKE_BEHAVIOUR: "not-a-real-behaviour" }, () => {
+        expect(() => bootstrap()).toThrow(/AI_FAKE_BEHAVIOUR must be one of/);
+      });
     });
   });
 

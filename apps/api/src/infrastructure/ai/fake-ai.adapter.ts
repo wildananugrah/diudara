@@ -37,6 +37,23 @@ export type FakeAiBehaviour =
   | "injection"
   | "timeout";
 
+/**
+ * The runtime list backing `FakeAiBehaviour`, used to validate
+ * `AI_FAKE_BEHAVIOUR` (see `resolveAiFakeBehaviour` in bootstrap.ts) against
+ * the same set the type allows, without a second hand-maintained copy of the
+ * union drifting from it. Order matches the union above and its doc comment.
+ */
+export const FAKE_AI_BEHAVIOURS: readonly FakeAiBehaviour[] = [
+  "draft",
+  "reply-only",
+  "prose",
+  "truncated-json",
+  "fenced-json",
+  "refusal",
+  "injection",
+  "timeout",
+];
+
 const VALID_DRAFT: CommunityDraft = {
   name: "Kelas Bisnis Digital",
   niche: "Bisnis online untuk pemula",
