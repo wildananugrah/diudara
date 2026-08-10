@@ -1791,6 +1791,43 @@ describe("selectAiProvider", () => {
     expect(logs.some((line) => /AI co-builder is DISABLED/.test(line))).toBe(true);
   });
 
+  // Gate-review finding: every OTHER fakeBehaviour test below passes
+  // nodeEnv: "development" (or ambient "test") — none of them establishes
+  // that the switch is INERT outside RELAXED_NODE_ENVS, which is the
+  // combination that actually matters. `resolveAiFakeBehaviour` is only
+  // ever called from inside the `isRelaxedNodeEnv` branch — it does not
+  // even take a `nodeEnv` parameter to gate on — so this is really pinning
+  // THAT CALL SITE, not a second guard inside the resolver. A refactor that
+  // hoisted the resolve above the allowlist check would make a production
+  // box with a stray AI_FAKE_BEHAVIOUR throw (on a typo) or, worse, serve
+  // fake AI behaviour from an env var — and every other test in this file
+  // would keep passing while it happened.
+  it("does NOT throw and does NOT consult fakeBehaviour outside the allowlist with no configuration", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of ["production", "Development", undefined]) {
+        // A VALID value must still be ignored...
+        expect(
+          selectAiProvider({
+            apiKey: undefined,
+            model: undefined,
+            nodeEnv,
+            fakeBehaviour: "timeout",
+          })
+        ).toBeUndefined();
+        // ...and so must a GARBAGE one: if resolveAiFakeBehaviour were ever
+        // reached here, this would throw instead of returning undefined.
+        expect(
+          selectAiProvider({
+            apiKey: undefined,
+            model: undefined,
+            nodeEnv,
+            fakeBehaviour: "not-a-real-behaviour",
+          })
+        ).toBeUndefined();
+      }
+    });
+  });
+
   it("still starts on the allowlist when OpenRouter IS configured, whatever nodeEnv says", () => {
     captureConsoleLog(() => {
       for (const nodeEnv of [undefined, "staging", "prod", "production"]) {
@@ -1891,13 +1928,20 @@ describe("selectAiProvider", () => {
     ).toThrow(/AI_FAKE_BEHAVIOUR must be one of/);
   });
 
-  it("has no effect on the real adapter — OpenRouterAiAdapter has no nextBehaviour to set", () => {
+  // Strengthened per gate review: the original version passed a VALID
+  // fakeBehaviour and asserted only `instanceof OpenRouterAiAdapter`, which
+  // would keep passing even if resolveAiFakeBehaviour were (wrongly) called
+  // in this branch with a value that happened to validate. A GARBAGE value
+  // is the assertion that actually proves the resolver is never reached
+  // here at all — if it were, this would throw instead of returning the
+  // real adapter.
+  it("never consults fakeBehaviour in the real-adapter branch, not even to validate it", () => {
     captureConsoleLog(() => {
       const provider = selectAiProvider({
         apiKey: "sk-or-x",
         model: "openai/gpt-4o-mini",
         nodeEnv: "test",
-        fakeBehaviour: "timeout",
+        fakeBehaviour: "not-a-real-behaviour",
       });
       expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
     });

@@ -606,8 +606,13 @@ export function selectAiProvider(env: {
   }
 
   if (isRelaxedNodeEnv(env.nodeEnv)) {
-    const fake = new FakeAiAdapter();
+    // Resolved BEFORE the fake is constructed: an invalid AI_FAKE_BEHAVIOUR
+    // must throw with nothing left half-built, not discard an already-built
+    // instance. The adapter's own constructor has no side effects, so this
+    // reordering is cosmetic today — but it is the right shape to keep, not
+    // the one to have to notice later.
     const behaviour = resolveAiFakeBehaviour({ value: env.fakeBehaviour });
+    const fake = new FakeAiAdapter();
     if (behaviour !== undefined) {
       fake.nextBehaviour = behaviour;
     }
