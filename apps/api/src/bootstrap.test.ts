@@ -2065,4 +2065,40 @@ describe("bootstrap() AI provider wiring", () => {
       });
     });
   });
+
+  it("boots with the co-builder disabled even when AI_DAILY_MESSAGE_LIMIT is garbage — absent/irrelevant AI config must never block boot", () => {
+    // `NODE_ENV=production` with no OPENROUTER_API_KEY/OPENROUTER_MODEL is
+    // exactly `selectAiProvider`'s disabled path — see "THE DELIBERATE
+    // DIVERGENCE" above. Every OTHER provider is fully configured (mirrors
+    // the "refuses to boot a production process with no callback token" test
+    // above) so the only thing under test is the AI wiring: a fat-fingered
+    // AI_DAILY_MESSAGE_LIMIT must not even be READ, let alone thrown on,
+    // once the feature it belongs to is off.
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "production",
+          XENDIT_SECRET_KEY: "sk_live_x",
+          XENDIT_SPLIT_RULE_ID: "splitrule_1",
+          XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
+          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+          FONNTE_API_TOKEN: "real-fonnte-token",
+          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
+          OPENROUTER_API_KEY: undefined,
+          OPENROUTER_MODEL: undefined,
+          AI_DAILY_MESSAGE_LIMIT: "fifty",
+        },
+        () => {
+          captureConsoleLog(() => {
+            let deps: Dependencies;
+            expect(() => {
+              deps = bootstrap();
+            }).not.toThrow();
+            expect(deps!.aiProvider).toBeUndefined();
+            expect(deps!.sendAiMessage).toBeUndefined();
+          });
+        }
+      );
+    });
+  });
 });

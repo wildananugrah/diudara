@@ -109,8 +109,11 @@ export interface Dependencies {
    * and safe to call on every dashboard load — unlike the POST route above, it
    * provisions nothing at Xendit. Replaces the dashboard's per-browser
    * `localStorage` guess (see apps/web's `paymentAccount.ts`) with the server's
-   * own truth, which is also what the AI co-builder checks before proposing a
-   * paid tier.
+   * own truth. NOT read by the AI co-builder's model path — `SendAiMessage`
+   * has no dependency on this and the system prompt never mentions it; only
+   * the SCREEN reads it, via `PaymentAccountNotice` rendered above the
+   * co-builder chat (`CoBuilderPage.tsx`), so a creator sees the warning
+   * without the model itself being aware payments are connected or not.
    */
   getPaymentAccountStatus: GetPaymentAccountStatus;
   getPublicCommunity: GetPublicCommunity;
@@ -1124,16 +1127,21 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
     fakeBehaviour: process.env.AI_FAKE_BEHAVIOUR,
   });
-  const aiDailyMessageLimit = resolveAiDailyMessageLimit({
-    value: process.env.AI_DAILY_MESSAGE_LIMIT,
-  });
+  // `resolveAiDailyMessageLimit` is called ONLY inside this branch, not
+  // unconditionally above it — it throws on a malformed
+  // `AI_DAILY_MESSAGE_LIMIT`, and that throw must never be reachable when
+  // `aiProvider` is `undefined`. The co-builder disabled (no OpenRouter key)
+  // plus a fat-fingered limit is exactly the box that must still boot: the
+  // env var is irrelevant to a disabled feature, so it must not be read at
+  // all in that case, matching `selectAiProvider`'s own "boots disabled
+  // rather than refusing to start" rule.
   const sendAiMessage = aiProvider
     ? new SendAiMessage(
         new DrizzleAiConversationRepository(db),
         new DrizzleAiUsageRepository(db),
         aiProvider,
         clock,
-        { dailyLimit: aiDailyMessageLimit }
+        { dailyLimit: resolveAiDailyMessageLimit({ value: process.env.AI_DAILY_MESSAGE_LIMIT }) }
       )
     : undefined;
 
