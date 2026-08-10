@@ -57,21 +57,54 @@ export interface AiProviderPort {
 }
 
 /**
- * A provider call failed: malformed model output, a timeout, or a non-2xx
- * response. Callers catch this specifically (rather than a bare `Error`) to
- * distinguish an expected provider failure — the thing the retry-once policy
- * and the "clear error, conversation preserved" UX both react to — from a
- * programming bug in this codebase.
+ * `AiProviderError.kind` — WHY a provider call failed, decided by the
+ * adapter at the throw site, because only the adapter knows which branch it
+ * is in:
  *
- * Deliberately flat, unlike `ProviderCallError` in `messaging-provider.port`:
- * that port's outcome classification exists ONLY because a failed grant can
- * leave a live credential at the provider that must not be re-minted. The AI
- * path never writes anything anywhere — the draft is discarded on any
- * failure — so there is no equivalent state to protect and no outcome to
- * classify.
+ *  - `"malformed"`   the provider ANSWERED, but what came back could not be
+ *    turned into a valid turn: prose where a draft was attempted, truncated
+ *    or invalid JSON, a shape that fails `communityDraftSchema`, or (
+ *    `OpenRouterAiAdapter` specifically) a reply that exceeded
+ *    `MAX_REPLY_LENGTH`. Worth retrying — a fresh completion against the SAME
+ *    prompt may not repeat the same mistake, which is exactly what the
+ *    retry-once policy (design spec §5.1/§10) is for.
+ *  - `"unavailable"` the provider did NOT answer usefully at the TRANSPORT
+ *    level: a network failure, `AbortSignal.timeout` firing, or a non-2xx
+ *    HTTP status. Retrying immediately is the wrong response — a hung
+ *    request has already burned up to `REQUEST_TIMEOUT_MS` (60s at
+ *    `OpenRouterAiAdapter`), and retrying doubles that to ~120s, past what a
+ *    reverse proxy in front of this API holds a connection open for (nginx
+ *    60s, Cloudflare 100s): the creator gets a dead socket instead of a
+ *    clear error, having already spent a usage slot. It is also the wrong
+ *    thing to do to an upstream already signalling 429/503 — retrying
+ *    instantly with no backoff makes that worse, not better.
+ *
+ * `SendAiMessage` retries ONLY `"malformed"`, and uses this discriminator to
+ * pick a different HTTP status for each ("the model produced garbage twice"
+ * vs "the provider is down") — see `send-ai-message.ts`'s `converseWithRetry`.
+ */
+export type AiProviderErrorKind = "malformed" | "unavailable";
+
+/**
+ * A provider call failed: malformed model output, or a transport-level
+ * failure (timeout / non-2xx). Callers catch this specifically (rather than
+ * a bare `Error`) to distinguish an expected provider failure — the thing
+ * `kind` classifies further — from a programming bug in this codebase.
+ *
+ * Unlike `ProviderCallError` in `messaging-provider.port`, this carries no
+ * state-protection concern: that port's outcome classification exists ONLY
+ * because a failed grant can leave a live credential at the provider that
+ * must not be re-minted. The AI path never writes anything anywhere — the
+ * draft is discarded on any failure — so `kind` here exists purely to pick
+ * the right RESPONSE to the failure (retry vs not, which status code),
+ * never to protect any stored state.
  */
 export class AiProviderError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
+  constructor(
+    message: string,
+    readonly kind: AiProviderErrorKind,
+    options?: { cause?: unknown }
+  ) {
     super(message, options);
     this.name = new.target.name;
   }

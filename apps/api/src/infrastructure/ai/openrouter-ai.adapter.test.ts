@@ -358,6 +358,85 @@ describe("OpenRouterAiAdapter — network failure", () => {
   });
 });
 
+describe("OpenRouterAiAdapter — AiProviderError.kind classification", () => {
+  // TRANSPORT failures — the provider did not answer usefully at the wire
+  // level. SendAiMessage never retries these (retrying would double a hung
+  // request's wait past what a reverse proxy holds open).
+  it('classifies a network failure / timeout as "unavailable"', async () => {
+    const fetchFn = async () => {
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    };
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as AiProviderError;
+    expect(error.kind).toBe("unavailable");
+  });
+
+  it('classifies a non-2xx response as "unavailable"', async () => {
+    const { fetchFn } = captureFetchRaw({ error: "unauthorized" }, 401);
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as AiProviderError;
+    expect(error.kind).toBe("unavailable");
+  });
+
+  // MALFORMED — the provider DID answer (2xx), but the answer could not be
+  // turned into a valid turn. SendAiMessage retries these once.
+  it('classifies a 200 response body that is not valid JSON as "malformed"', async () => {
+    const fetchFn = async () => new Response("not-json{", { status: 200 });
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as AiProviderError;
+    expect(error.kind).toBe("malformed");
+  });
+
+  it('classifies a 200 with no usable "choices" as "malformed"', async () => {
+    const { fetchFn } = captureFetchRaw({});
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as AiProviderError;
+    expect(error.kind).toBe("malformed");
+  });
+
+  it('classifies a 200 with no usable message content as "malformed"', async () => {
+    const { fetchFn } = captureFetchRaw({ choices: [{ message: {} }] });
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as AiProviderError;
+    expect(error.kind).toBe("malformed");
+  });
+
+  it('classifies an attempted draft that is truncated/invalid JSON as "malformed"', async () => {
+    const { fetchFn } = captureFetch('{"name":"truncated');
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as AiProviderError;
+    expect(error.kind).toBe("malformed");
+  });
+
+  it('classifies an attempted draft that fails communityDraftSchema as "malformed"', async () => {
+    const missingDescription = {
+      name: VALID_DRAFT.name,
+      niche: VALID_DRAFT.niche,
+      welcomeMessage: VALID_DRAFT.welcomeMessage,
+      tiers: VALID_DRAFT.tiers,
+    };
+    const { fetchFn } = captureFetch(JSON.stringify(missingDescription));
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as AiProviderError;
+    expect(error.kind).toBe("malformed");
+  });
+
+  it('classifies a reply over MAX_REPLY_LENGTH as "malformed", per requireBoundedReply\'s own comment', async () => {
+    const { fetchFn } = captureFetch("a".repeat(4001));
+    const adapter = new OpenRouterAiAdapter({ ...CONFIG, fetchFn });
+
+    const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as AiProviderError;
+    expect(error.kind).toBe("malformed");
+  });
+});
+
 describe("OpenRouterAiAdapter — secret hygiene", () => {
   it("never leaks the api key across any failure mode", async () => {
     const secretConfig = { apiKey: "sk-or-v1-EXTRA-SECRET-VALUE", model: "test/model" };

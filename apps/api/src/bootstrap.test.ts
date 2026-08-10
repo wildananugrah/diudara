@@ -1887,10 +1887,13 @@ describe("bootstrap() AI provider wiring", () => {
     });
   });
 
-  it("honours a configured AI_DAILY_MESSAGE_LIMIT rather than the default", () => {
-    // Wiring-level smoke check: the value reaches SendAiMessage's constructor
-    // rather than being silently ignored. The cap's actual enforcement is
-    // covered by send-ai-message.test.ts and drizzle-ai-usage.repository.test.ts.
+  it("fails closed on an invalid AI_DAILY_MESSAGE_LIMIT rather than silently keeping the default", () => {
+    // This only proves resolveAiDailyMessageLimit's own guard fires from
+    // inside bootstrap() — it does NOT prove a configured valid value
+    // reaches SendAiMessage's constructor (hardcoding 50 there would still
+    // pass this). That wiring is covered by routes/ai.test.ts's
+    // AI_DAILY_MESSAGE_LIMIT=1 test, which observes the cap actually bind at
+    // 1 through a real HTTP call.
     withJwtSecret("x".repeat(32), () => {
       withEnv({ AI_DAILY_MESSAGE_LIMIT: "not-a-number" }, () => {
         expect(() => bootstrap()).toThrow(/must be a positive whole number/);

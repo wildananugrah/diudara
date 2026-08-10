@@ -62,9 +62,13 @@ const MAX_REPLY_LENGTH = 4000;
  */
 function requireBoundedReply(reply: string): string {
   if (reply.length > MAX_REPLY_LENGTH) {
+    // MALFORMED, not unavailable: the provider answered, the answer is just
+    // too big to be a real conversational reply (a repetition loop, most
+    // likely). A retry is a fresh completion that may not repeat the loop.
     throw new AiProviderError(
       `openrouter converse: model reply exceeded ${MAX_REPLY_LENGTH} characters ` +
-        `(was ${reply.length}) — refusing to forward unbounded model output to the dashboard`
+        `(was ${reply.length}) — refusing to forward unbounded model output to the dashboard`,
+      "malformed"
     );
   }
   return reply;
@@ -180,6 +184,7 @@ export class OpenRouterAiAdapter implements AiProviderPort {
       // it.
       throw new AiProviderError(
         "openrouter converse: request failed (network error or timeout)",
+        "unavailable",
         { cause }
       );
     }
@@ -196,25 +201,36 @@ export class OpenRouterAiAdapter implements AiProviderPort {
    */
   private async readContent(response: Response): Promise<string> {
     if (!response.ok) {
-      throw new AiProviderError(`openrouter converse failed with status ${response.status}`);
+      // TRANSPORT: the provider answered but with a failure status — same
+      // classification as the fetchFn catch above. Never retried.
+      throw new AiProviderError(
+        `openrouter converse failed with status ${response.status}`,
+        "unavailable"
+      );
     }
 
     let body: unknown;
     try {
       body = await response.json();
     } catch (cause) {
+      // MALFORMED: a 2xx response whose body could not be parsed as JSON —
+      // the provider answered, but with garbage. Worth one retry.
       throw new AiProviderError(
         "openrouter converse returned a response that was not valid JSON",
+        "malformed",
         { cause }
       );
     }
 
     const choices = (body as { choices?: unknown } | null)?.choices;
     if (!Array.isArray(choices) || choices.length === 0) {
+      // MALFORMED: a 2xx, valid-JSON response whose SHAPE is still unusable
+      // — the provider answered, just not usefully. Worth one retry.
       throw new AiProviderError(
         'openrouter converse returned a response with no usable "choices" (expected a ' +
           "non-empty array). The response shape does not match what this adapter assumes " +
-          "— see the UNVERIFIED warning in openrouter-ai.adapter.ts."
+          "— see the UNVERIFIED warning in openrouter-ai.adapter.ts.",
+        "malformed"
       );
     }
 
@@ -229,7 +245,8 @@ export class OpenRouterAiAdapter implements AiProviderPort {
       throw new AiProviderError(
         'openrouter converse returned a response with no usable "choices[0].message.content" ' +
           "(expected a non-empty string). See the UNVERIFIED warning in " +
-          "openrouter-ai.adapter.ts."
+          "openrouter-ai.adapter.ts.",
+        "malformed"
       );
     }
 
@@ -274,6 +291,7 @@ export class OpenRouterAiAdapter implements AiProviderPort {
       throw new AiProviderError(
         "openrouter converse: model appeared to attempt a draft but the output was not " +
           "valid JSON",
+        "malformed",
         { cause }
       );
     }
@@ -282,7 +300,8 @@ export class OpenRouterAiAdapter implements AiProviderPort {
     if (!result.success) {
       throw new AiProviderError(
         "openrouter converse: model appeared to attempt a draft but it did not match the " +
-          `community draft shape: ${result.error.message}`
+          `community draft shape: ${result.error.message}`,
+        "malformed"
       );
     }
 

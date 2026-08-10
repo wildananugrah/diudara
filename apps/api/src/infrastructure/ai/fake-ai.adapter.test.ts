@@ -91,6 +91,13 @@ describe("FakeAiAdapter", () => {
         expect(err).toBeInstanceOf(AiProviderError);
       }
     });
+
+    it('classifies as kind "malformed" — the provider answered, just not usefully', async () => {
+      const adapter = new FakeAiAdapter();
+      adapter.nextBehaviour = "prose";
+      const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as AiProviderError;
+      expect(error.kind).toBe("malformed");
+    });
   });
 
   describe("nextBehaviour: truncated-json", () => {
@@ -98,6 +105,13 @@ describe("FakeAiAdapter", () => {
       const adapter = new FakeAiAdapter();
       adapter.nextBehaviour = "truncated-json";
       await expect(adapter.converse({ messages: MESSAGES })).rejects.toThrow(AiProviderError);
+    });
+
+    it('classifies as kind "malformed"', async () => {
+      const adapter = new FakeAiAdapter();
+      adapter.nextBehaviour = "truncated-json";
+      const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as AiProviderError;
+      expect(error.kind).toBe("malformed");
     });
   });
 
@@ -134,6 +148,13 @@ describe("FakeAiAdapter", () => {
       const adapter = new FakeAiAdapter();
       adapter.nextBehaviour = "timeout";
       await expect(adapter.converse({ messages: MESSAGES })).rejects.toThrow(AiProviderError);
+    });
+
+    it('classifies as kind "unavailable" — a transport failure, never retried by SendAiMessage', async () => {
+      const adapter = new FakeAiAdapter();
+      adapter.nextBehaviour = "timeout";
+      const error = (await adapter.converse({ messages: MESSAGES }).catch((e) => e)) as AiProviderError;
+      expect(error.kind).toBe("unavailable");
     });
   });
 

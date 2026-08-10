@@ -2,6 +2,15 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { Hono } from "hono";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
+import { db } from "../db/client";
+import {
+  aiConversations,
+  aiMessages,
+  aiUsage,
+  channels,
+  communities,
+  membershipTiers,
+} from "../db/schema";
 import { resetDatabase } from "../db/test-helpers";
 import { FakeAiAdapter } from "../infrastructure/ai/fake-ai.adapter";
 import type { TokenIssuerPort } from "../application/ports/token-issuer.port";
@@ -240,5 +249,56 @@ describe("POST /ai/messages", () => {
     const body = await second.json();
     expect(typeof body.resetAt).toBe("string");
     expect(new Date(body.resetAt).getTime()).toBeGreaterThan(Date.now());
+  });
+});
+
+describe("POST /ai/messages never writes to the database beyond its own three tables", () => {
+  // Design spec §12 requires this explicitly: "a test that the draft is
+  // never written to the database by the AI path". The code path is clean
+  // (SendAiMessage's dependencies are only AiConversationRepositoryPort and
+  // AiUsageRepositoryPort — neither can reach `community`/`membership_tier`/
+  // `channel`), but nothing PINNED that before this test, so a future change
+  // could regress it silently.
+  it("a draft-producing turn creates zero community/tier/channel rows, and exactly the AI rows it should", async () => {
+    const a = app();
+    const { token } = await signupAndGetToken(a);
+
+    const res = await a.request("/ai/messages", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({
+        content: "Aku mau bikin komunitas belajar saham untuk pemula dengan tier bulanan",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Confirm a draft was ACTUALLY produced — a turn with draft: null would
+    // trivially pass "zero community rows" for the wrong reason.
+    expect(body.draft).not.toBeNull();
+    expect(body.draft.tiers.length).toBeGreaterThan(0);
+
+    const [communityRows, tierRows, channelRows] = await Promise.all([
+      db.select().from(communities),
+      db.select().from(membershipTiers),
+      db.select().from(channels),
+    ]);
+    expect(communityRows).toHaveLength(0);
+    expect(tierRows).toHaveLength(0);
+    expect(channelRows).toHaveLength(0);
+
+    // And the ONLY rows written anywhere are the conversation, its two
+    // messages (user + assistant), and the usage counter.
+    const [conversationRows, messageRows, usageRows] = await Promise.all([
+      db.select().from(aiConversations),
+      db.select().from(aiMessages),
+      db.select().from(aiUsage),
+    ]);
+    expect(conversationRows).toHaveLength(1);
+    expect(conversationRows[0].id).toBe(body.conversationId);
+    expect(messageRows).toHaveLength(2);
+    expect(messageRows.map((m) => m.role).sort()).toEqual(["assistant", "user"]);
+    expect(usageRows).toHaveLength(1);
+    expect(usageRows[0].messageCount).toBe(1);
   });
 });

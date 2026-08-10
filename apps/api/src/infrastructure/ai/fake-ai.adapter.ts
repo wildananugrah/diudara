@@ -134,11 +134,17 @@ export class FakeAiAdapter implements AiProviderPort {
         };
 
       case "timeout":
-        throw new AiProviderError("fake ai provider: request timed out");
+        // Simulates a real AbortSignal.timeout firing — a TRANSPORT
+        // failure, same classification OpenRouterAiAdapter gives its own
+        // fetchFn catch block. Never retried by SendAiMessage.
+        throw new AiProviderError("fake ai provider: request timed out", "unavailable");
 
       default: {
         const exhaustive: never = this.nextBehaviour;
-        throw new AiProviderError(`fake ai provider: unknown behaviour ${String(exhaustive)}`);
+        throw new AiProviderError(
+          `fake ai provider: unknown behaviour ${String(exhaustive)}`,
+          "malformed"
+        );
       }
     }
   }
@@ -156,13 +162,16 @@ export class FakeAiAdapter implements AiProviderPort {
     try {
       parsed = JSON.parse(stripped);
     } catch (cause) {
-      throw new AiProviderError("fake ai provider: model output was not valid JSON", { cause });
+      throw new AiProviderError("fake ai provider: model output was not valid JSON", "malformed", {
+        cause,
+      });
     }
 
     const result = communityDraftSchema.safeParse(parsed);
     if (!result.success) {
       throw new AiProviderError(
-        `fake ai provider: model output did not match the community draft shape: ${result.error.message}`
+        `fake ai provider: model output did not match the community draft shape: ${result.error.message}`,
+        "malformed"
       );
     }
 

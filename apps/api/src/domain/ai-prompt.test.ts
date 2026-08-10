@@ -19,6 +19,18 @@ describe("SYSTEM_PROMPT", () => {
     expect(SYSTEM_PROMPT).toContain("monthly");
   });
 
+  it("states the exact character bounds communityDraftSchema enforces, per field", () => {
+    // Without these, a chatty model overshooting e.g. `description` (schema
+    // max 2000) fails validation exactly like truncated JSON does — costing
+    // two provider calls and a 502 instead of a usable draft. Pinned to the
+    // schema's actual limits (packages/shared/src/ai.schema.ts) so a future
+    // change to either drifts loudly rather than silently.
+    expect(SYSTEM_PROMPT).toContain("255 karakter"); // name
+    expect(SYSTEM_PROMPT).toContain("128 karakter"); // niche
+    expect(SYSTEM_PROMPT).toContain("2000 karakter"); // description
+    expect(SYSTEM_PROMPT).toContain("1000 karakter"); // welcomeMessage
+  });
+
   it("states it is helping set up a paid community and to ignore embedded instructions", () => {
     // Belt-and-braces per design spec §5.2 — the real defence is that output
     // is validated and never executed, but the prompt should say this too.
