@@ -11,7 +11,16 @@
  *
  * Each type names the file on the API side it mirrors, so a change there has a
  * findable counterpart here.
+ *
+ * `CommunityDraft` (below) is the ONE exception: `@diudara/shared` exports it as
+ * a real TYPE (not just a request schema), because Phase 7's AI provider port
+ * and this dashboard both need the identical shape. Imported type-only —
+ * `import type` — so the `communityDraftSchema` Zod object it is inferred from
+ * is never pulled into the browser bundle; see ChannelsPage.tsx's docstring on
+ * `TELEGRAM_NUMERIC_CHAT_ID` for why every `@diudara/shared` import here is
+ * type-only.
  */
+import type { CommunityDraft } from "@diudara/shared";
 
 /** `CommunityRecord` — apps/api/src/application/ports/community-repository.port.ts. */
 export interface Community {
@@ -101,6 +110,23 @@ export interface MemberRow {
 export interface MemberRosterPage {
   members: MemberRow[];
   nextCursor: string | null;
+}
+
+/** `GET /ai/status` — apps/api/src/routes/ai.ts. */
+export interface AiStatus {
+  enabled: boolean;
+}
+
+/**
+ * `POST /ai/messages` — apps/api/src/routes/ai.ts, backed by
+ * `SendAiMessage.execute` (apps/api/src/application/use-cases/send-ai-message.ts).
+ * `draft` is `null` on every turn that is not a completed proposal (a
+ * clarifying question, small talk, a refusal) — never an error signal.
+ */
+export interface AiMessageResult {
+  conversationId: string;
+  reply: string;
+  draft: CommunityDraft | null;
 }
 
 /** `RevokeChannelAccessResult` — apps/api/src/application/use-cases/revoke-channel-access.ts. */

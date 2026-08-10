@@ -1,9 +1,10 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Link, NavLink } from "react-router-dom";
+import { apiFetch } from "./apiClient";
 import { subscribeToAuth } from "./auth";
 import { communityStatusExplanation, communityStatusLabel, publicCheckoutUrl } from "./format";
 import { ensurePaymentAccountStatusLoaded, getPaymentAccountState } from "./paymentAccount";
-import type { Community } from "./types";
+import type { AiStatus, Community } from "./types";
 
 /** A label, its input, and that field's own error message. Shared by every form. */
 export function Field({
@@ -205,6 +206,50 @@ export function StatusExplanation({ status }: { status: string }) {
       {communityStatusExplanation(status)}
     </p>
   );
+}
+
+/**
+ * The AI co-builder's nav entry — shown ONLY once `GET /ai/status` confirms a
+ * provider is actually configured on this server.
+ *
+ * FAILS TOWARD HIDING, the opposite direction from `PaymentAccountNotice`
+ * (which fails toward showing its warning). The two have different stakes: a
+ * warning that fails to show risks a creator building tiers nobody can buy;
+ * a nav link that fails to show costs nothing but one entry a creator never
+ * sees, versus a SHOWN link that is wrong costing them a dead click into a
+ * screen that can only ever answer 503 — see routes/ai.ts's docstring: "the
+ * dashboard is expected to call this once ... and hide the chat screen
+ * entirely rather than ever reach POST /ai/messages on a disabled box."
+ *
+ * Fetched once per mount rather than cached across the session the way
+ * `paymentAccount.ts` caches its answer: whether a provider is configured is
+ * decided once at server boot (env vars), not by anything a creator does
+ * inside this browser, so there is no cross-tab "just changed" state to keep
+ * in step with — an in-memory module-level cache would only add a second
+ * place this could go stale.
+ */
+export function AiCoBuilderNavLink() {
+  const [status, setStatus] = useState<"loading" | "enabled" | "disabled">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch<AiStatus>("/ai/status")
+      .then((result) => {
+        if (!cancelled) setStatus(result.enabled ? "enabled" : "disabled");
+      })
+      .catch(() => {
+        // A 401 here means a redirect to login is already in flight (see
+        // apiClient.ts); anything else is treated the same as "disabled" —
+        // failing toward hiding rather than showing a link that cannot work.
+        if (!cancelled) setStatus("disabled");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (status !== "enabled") return null;
+  return <NavLink to="/dashboard/co-builder">AI Co-Builder</NavLink>;
 }
 
 export function CheckoutLink({ community }: { community: Community }) {

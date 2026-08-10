@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { setSession } from "./auth";
 import { recordPaymentAccountState, resetPaymentAccountCacheForTesting } from "./paymentAccount";
 import { stubFetch } from "./testing";
-import { PaymentAccountNotice } from "./ui";
+import { AiCoBuilderNavLink, PaymentAccountNotice } from "./ui";
 
 const CREATOR = { id: "creator-1", name: "Budi", email: "budi@example.com" };
 
@@ -105,5 +105,46 @@ describe("PaymentAccountNotice", () => {
 
     const notice = screen.getByTestId("payment-account-notice").textContent ?? "";
     expect(notice).toMatch(/sedang diproses/);
+  });
+});
+
+describe("AiCoBuilderNavLink", () => {
+  function mountNav() {
+    return render(
+      <MemoryRouter>
+        <AiCoBuilderNavLink />
+      </MemoryRouter>
+    );
+  }
+
+  it("renders nothing while GET /ai/status has not answered yet", () => {
+    stubFetch([{ path: "/ai/status", body: { enabled: true } }]);
+    mountNav();
+    // Fails toward HIDING: before the fetch resolves, there is nothing to click.
+    expect(screen.queryAllByText("AI Co-Builder").length).toBe(0);
+  });
+
+  it("shows the link once the server confirms the feature is enabled", async () => {
+    stubFetch([{ path: "/ai/status", body: { enabled: true } }]);
+    mountNav();
+    expect(await screen.findByText("AI Co-Builder")).toBeTruthy();
+  });
+
+  it("stays hidden when the server reports the feature disabled", async () => {
+    stubFetch([{ path: "/ai/status", body: { enabled: false } }]);
+    mountNav();
+    await waitFor(() => expect(screen.queryAllByText("AI Co-Builder").length).toBe(0));
+  });
+
+  it("fails toward hiding rather than showing a link that can only ever error", async () => {
+    // GET /ai/status itself failing (a 500, a network error) must not show
+    // the link — the whole point is never reaching POST /ai/messages on a
+    // box that cannot serve it.
+    stubFetch([{ path: "/ai/status", status: 500, body: { error: "internal server error" } }]);
+    mountNav();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryAllByText("AI Co-Builder").length).toBe(0);
   });
 });

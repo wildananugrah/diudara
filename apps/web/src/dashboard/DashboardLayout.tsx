@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { clearToken, getCreator } from "./auth";
+import { AiCoBuilderNavLink } from "./ui";
 
 /**
  * The chrome every dashboard screen sits inside: brand, top-level navigation, who
@@ -29,6 +30,7 @@ export default function DashboardLayout() {
               Komunitas
             </NavLink>
             <NavLink to="/dashboard/account">Akun &amp; pembayaran</NavLink>
+            <AiCoBuilderNavLink />
           </nav>
           <div className="session">
             {creator !== null ? <span className="session-name">{creator.name}</span> : null}

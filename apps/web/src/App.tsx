@@ -11,6 +11,7 @@ import ChannelsPage from "./dashboard/pages/ChannelsPage";
 import AccountPage from "./dashboard/pages/AccountPage";
 import MembersPage from "./dashboard/pages/MembersPage";
 import ActivityPage from "./dashboard/pages/ActivityPage";
+import CoBuilderPage from "./dashboard/pages/CoBuilderPage";
 
 export default function App() {
   return (
@@ -46,6 +47,7 @@ export default function App() {
         >
           <Route index element={<CommunitiesPage />} />
           <Route path="account" element={<AccountPage />} />
+          <Route path="co-builder" element={<CoBuilderPage />} />
           <Route path="c/:communityId" element={<CommunityOverviewPage />} />
           <Route path="c/:communityId/tiers" element={<TiersPage />} />
           <Route path="c/:communityId/channels" element={<ChannelsPage />} />

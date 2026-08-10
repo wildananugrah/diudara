@@ -66,6 +66,7 @@ export default defineConfig({
       "/auth": "http://localhost:3000",
       "/communities": "http://localhost:3000",
       "/payment-account": "http://localhost:3000",
+      "/ai": "http://localhost:3000",
     },
   },
 });
