@@ -197,9 +197,7 @@ export class SendAiMessage {
  * all 49 messages before it, so spend inside one capped day grows with the
  * SQUARE of turn count: a `dailyLimit` of 50 is nearer 50×49/2 ≈ 1225 "units"
  * of provider spend than 50 (finding from review). This keeps it linear: the
- * most recent messages within `HISTORY_CHARACTER_BUDGET` characters, walked
- * from the newest backwards so the messages kept are always the most
- * RECENT ones, not the oldest.
+ * most recent messages within `HISTORY_CHARACTER_BUDGET` characters.
  *
  * The conversation's FIRST user message is always retained regardless of
  * age or budget — it carries the niche/business the creator opened with,
@@ -209,30 +207,103 @@ export class SendAiMessage {
  * It is not counted against the budget: it is bounded elsewhere already
  * (`MAX_MESSAGE_LENGTH` in routes/ai.ts caps any single message at 4000
  * characters), so keeping it unconditionally cannot itself blow the budget.
+ *
+ * INVARIANT THIS FUNCTION MUST NEVER BREAK: the result strictly alternates
+ * `user`/`assistant` and starts with `user`. Several models proxied through
+ * OpenRouter (Anthropic's among them) enforce strict role alternation and
+ * reject a request outright otherwise — and since this adapter is
+ * unverified against a live API, a shape error like that is exactly the
+ * class of failure nobody would catch before a creator hit it (finding from
+ * review round 2). A naive "always prepend `first`" implementation breaks
+ * this: whether the recency window's own leading message happens to be
+ * `user` or `assistant` depends only on where the character budget runs
+ * out, so prepending `first` unconditionally can and did produce
+ * `["user","user","assistant","user","assistant",…]` on a realistic
+ * alternating transcript. The fix:
+ *
+ *  1. Select the recency window on a TURN BOUNDARY — it may only start at a
+ *     `user` message, so a user turn and the assistant reply to it travel
+ *     together. If the raw character-budget cutoff lands on an orphaned
+ *     `assistant` (its `user` fell just outside the budget), that stranded
+ *     assistant is dropped too — this only SHRINKS the window, never grows
+ *     it past budget.
+ *  2. If `first` already IS the window's own start (a short conversation
+ *     that fits in full), nothing is prepended — nothing would need to be.
+ *  3. If `first` falls OUTSIDE the window, prepending it verbatim would put
+ *     two `user` messages back to back. Instead, the window's OWN leading
+ *     `user` message is dropped (the oldest thing in the window, and the
+ *     cheapest to lose) and `first` takes its place — what follows it (its
+ *     assistant reply) becomes the new second element, so the result still
+ *     alternates.
+ *
+ * Deliberately NOT solved by folding the creator's opening message into the
+ * system prompt: creator text must never acquire system-level authority,
+ * which is exactly the prompt-injection vector this phase's design is built
+ * to avoid (design spec §5.2).
  */
 export function boundHistory(history: HistoryMessage[]): HistoryMessage[] {
   if (history.length === 0) {
     return history;
   }
 
-  const first = history.find((message) => message.role === "user");
+  const rawStart = recencyWindowStart(history);
 
-  const recent: HistoryMessage[] = [];
+  const firstIndex = history.findIndex((message) => message.role === "user");
+  if (firstIndex === -1) {
+    // No user message at all — should not happen in practice (every
+    // conversation opens with one, and `SendAiMessage` always appends a
+    // user turn before an assistant one). With no `user` to anchor
+    // alternation on, there is nothing more principled to do than the plain
+    // recency trim.
+    return history.slice(rawStart);
+  }
+
+  // Snap the window to the nearest `user`-role message at or after
+  // `rawStart` — see point 1 above. `windowStart` only ever moves FORWARD
+  // (later), so this can shrink the window but never grow it past budget.
+  let windowStart = rawStart;
+  while (windowStart < history.length && history[windowStart].role !== "user") {
+    windowStart++;
+  }
+
+  const first = history[firstIndex];
+  if (windowStart === firstIndex) {
+    // `first` IS the window's own start (point 2) — return it unmodified.
+    return history.slice(windowStart);
+  }
+
+  // `first` falls outside the window (point 3): prepend it, and drop the
+  // window's own leading `user` message so the result keeps alternating
+  // instead of running two `user` turns back to back.
+  return [first, ...history.slice(windowStart + 1)];
+}
+
+/**
+ * The raw character-budget cutoff: the earliest index such that
+ * `history[index..]`'s content lengths sum to at most
+ * `HISTORY_CHARACTER_BUDGET`, walked from the newest message backwards so
+ * the messages kept are always the most RECENT ones. Returns
+ * `history.length` (an empty window) if even the single most recent message
+ * does not fit — defensive only; every message is already bounded well
+ * under the budget by `MAX_MESSAGE_LENGTH`/`MAX_REPLY_LENGTH` elsewhere.
+ *
+ * Deliberately unaware of roles or turn boundaries — `boundHistory` is what
+ * snaps this raw cutoff to a `user`-starting turn boundary; keeping that
+ * concern out of this function is what makes each piece independently
+ * checkable.
+ */
+function recencyWindowStart(history: HistoryMessage[]): number {
+  let windowStart = history.length;
   let used = 0;
   for (let i = history.length - 1; i >= 0; i--) {
-    const message = history[i];
-    if (message === first) {
-      continue; // handled separately, retained unconditionally below
-    }
-    const cost = message.content.length;
+    const cost = history[i].content.length;
     if (used + cost > HISTORY_CHARACTER_BUDGET) {
       break;
     }
-    recent.unshift(message);
     used += cost;
+    windowStart = i;
   }
-
-  return first ? [first, ...recent] : recent;
+  return windowStart;
 }
 
 /** The UTC calendar day of `date`, as `AiUsageRepositoryPort.consumeOne` expects it. */

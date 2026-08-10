@@ -480,6 +480,38 @@ describe("boundHistory", () => {
   const user = (content: string): HistoryMessage => ({ role: "user", content });
   const assistant = (content: string): HistoryMessage => ({ role: "assistant", content });
 
+  /**
+   * THE INVARIANT review round 2 found broken: the result must strictly
+   * alternate `user`/`assistant` and start with `user`. A naive "always
+   * prepend the first user message" implementation can produce
+   * `["user","user","assistant","user","assistant",…]` — several models
+   * proxied through OpenRouter (Anthropic's among them) enforce strict
+   * alternation and reject a request shaped like that outright.
+   */
+  function assertAlternatesStartingWithUser(messages: HistoryMessage[]) {
+    expect(messages.length).toBeGreaterThan(0);
+    expect(messages[0].role).toBe("user");
+    for (let i = 1; i < messages.length; i++) {
+      expect(messages[i].role).not.toBe(messages[i - 1].role);
+    }
+  }
+
+  /**
+   * A REALISTIC transcript: strictly alternating user/assistant turns, the
+   * shape `SendAiMessage.execute` actually persists (it always appends
+   * `user` then `assistant`, in that order, every successful turn). `turns`
+   * pairs, each message `contentLength` characters, so the caller controls
+   * exactly where the character-budget cutoff lands.
+   */
+  function alternatingTranscript(turns: number, contentLength: number): HistoryMessage[] {
+    const messages: HistoryMessage[] = [];
+    for (let i = 0; i < turns; i++) {
+      messages.push(user(`turn-${i}-user-` + "u".repeat(contentLength)));
+      messages.push(assistant(`turn-${i}-assistant-` + "a".repeat(contentLength)));
+    }
+    return messages;
+  }
+
   it("returns the history unchanged when it already fits within the budget", () => {
     const history = [user("halo"), assistant("hai, ceritakan tentang komunitasmu")];
     expect(boundHistory(history)).toEqual(history);
@@ -489,40 +521,76 @@ describe("boundHistory", () => {
     expect(boundHistory([])).toEqual([]);
   });
 
-  // THE FIRST HALF the review asked to be tested: an over-long transcript is
-  // trimmed, and the total kept (excluding the always-retained first user
-  // message) stays within the character budget.
-  it("keeps the total character count — excluding the first user message — within the 24 000 budget", () => {
-    const first = user("PESAN_PERTAMA");
-    const rest = Array.from({ length: 20 }, () => assistant("x".repeat(2000))); // 40 000 chars
-    const history = [first, ...rest];
+  // BOTH HALVES the review asked to be tested, case 1: the first user
+  // message is INSIDE the window — a short, genuinely alternating
+  // conversation that fits under budget in full, so nothing is trimmed.
+  it("case: first message INSIDE the window — a short conversation is returned whole, alternating, starting with user", () => {
+    const history = alternatingTranscript(3, 200); // 6 messages, well under budget
+    const bounded = boundHistory(history);
+
+    expect(bounded).toEqual(history);
+    assertAlternatesStartingWithUser(bounded);
+  });
+
+  // BOTH HALVES the review asked to be tested, case 2: the first user
+  // message is OUTSIDE the window — a long, genuinely alternating
+  // conversation where the 24 000-character budget forces a cutoff
+  // somewhere in the middle. This is the exact shape (alternating turns,
+  // long assistant replies) the reviewer used to reproduce the bug against
+  // the old implementation.
+  it("case: first message OUTSIDE the window — trims a long alternating transcript while staying alternating and starting with user", () => {
+    // 20 turns x 2 messages x ~1030 chars each = ~41 000 chars, well past
+    // the 24 000 budget, so the cutoff lands mid-transcript. 1030 is not
+    // arbitrary: at 1500 (round 2's first attempt at this fixture) the
+    // budget cutoff happened to land on an odd/assistant-shaped boundary by
+    // coincidence and never actually exercised the bug this test exists to
+    // catch — 1030 was chosen by brute-force search specifically because it
+    // lands the cutoff on the boundary that DOES reproduce it (verified by
+    // temporarily reverting to the pre-fix implementation and confirming
+    // this test fails against it — see the task report).
+    const history = alternatingTranscript(20, 1030);
+    const first = history[0];
 
     const bounded = boundHistory(history);
-    const total = bounded
-      .filter((m) => m !== first)
-      .reduce((sum, m) => sum + m.content.length, 0);
 
-    expect(total).toBeLessThanOrEqual(24_000);
-    // And it actually dropped something — this is not a no-op.
+    assertAlternatesStartingWithUser(bounded);
+    // The trim actually happened (this is not accidentally the "fits
+    // whole" case), and the always-retained first message survived it.
     expect(bounded.length).toBeLessThan(history.length);
+    expect(bounded[0]).toEqual(first);
+    // The character budget — excluding the unconditionally-retained first
+    // message — is still respected.
+    const total = bounded.slice(1).reduce((sum, m) => sum + m.content.length, 0);
+    expect(total).toBeLessThanOrEqual(24_000);
   });
 
-  it("drops an old message from the MIDDLE of a long transcript, keeping only the most recent ones", () => {
-    const first = user("PESAN_PERTAMA");
-    const middle = user("PESAN_TENGAH_YANG_HARUS_HILANG");
-    const padding = (n: number) => assistant("x".repeat(n));
-    // first, then a message that should be dropped, then 30 000 chars of
-    // padding that alone exceeds the budget and should push `middle` out.
-    const history = [first, middle, padding(10_000), padding(10_000), padding(10_000)];
-
+  it("drops the OLDEST turn inside the window (not the newest) when trimming", () => {
+    const contentLength = 1030;
+    const history = alternatingTranscript(20, contentLength);
     const bounded = boundHistory(history);
 
-    expect(bounded).not.toContainEqual(middle);
+    // The most recent turn must always survive a trim; an implementation
+    // that trimmed from the wrong end would drop this instead.
+    const lastTurnIndex = 19;
+    expect(
+      bounded.some(
+        (m) => m.content === `turn-${lastTurnIndex}-assistant-` + "a".repeat(contentLength)
+      )
+    ).toBe(true);
+    // Some turn strictly between the first (always retained) and the most
+    // recent ones must have been dropped — proving this is a real trim,
+    // not a no-op that happened to keep everything.
+    const droppedSomeMiddleTurn = Array.from({ length: 19 }, (_, i) => i + 1).some(
+      (turn) => !bounded.some((m) => m.content === `turn-${turn}-user-` + "u".repeat(contentLength))
+    );
+    expect(droppedSomeMiddleTurn).toBe(true);
   });
 
-  // THE SECOND HALF the review asked to be tested: the first user message
-  // survives the trim, regardless of how far outside the recency window it
-  // falls.
+  // THE SECOND HALF the review round 1 asked to be tested: the first user
+  // message survives the trim, regardless of how far outside the recency
+  // window it falls. Kept alongside the new alternation-focused cases
+  // above because it pins a slightly different property (survival, not
+  // shape) on a fixture shaped like round 1's.
   it("always retains the first user message, however far outside the recency window it is", () => {
     const first = user("PESAN_PERTAMA_TENTANG_NICHE");
     // 20 messages of 2000 chars = 40 000 chars, several times the budget —
@@ -535,6 +603,7 @@ describe("boundHistory", () => {
     const bounded = boundHistory(history);
 
     expect(bounded[0]).toEqual(first);
+    assertAlternatesStartingWithUser(bounded);
   });
 
   it("only retains the FIRST user message, not a later one, when there are several", () => {

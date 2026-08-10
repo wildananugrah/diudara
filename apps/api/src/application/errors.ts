@@ -53,11 +53,19 @@ export class RateLimitedError extends AppError {
 }
 
 /**
- * The AI co-builder is not configured on this box — `Dependencies.
- * sendAiMessage` is `undefined` (see `selectAiProvider` in bootstrap.ts).
- * Unlike a 404/409/etc, this is never the caller's fault: the same request
- * would succeed on a fully configured box. `GET /ai/status` lets the
- * dashboard avoid ever reaching this by hiding the chat screen instead.
+ * "The AI co-builder is not available RIGHT NOW" — two distinct triggers,
+ * both legitimately a 503:
+ *
+ *  1. Not configured on this box at all — `Dependencies.sendAiMessage` is
+ *     `undefined` (see `selectAiProvider` in bootstrap.ts). Unlike a
+ *     404/409/etc, this is never the caller's fault: the same request would
+ *     succeed on a fully configured box. `GET /ai/status` lets the
+ *     dashboard avoid ever reaching this by hiding the chat screen instead.
+ *  2. `AiProviderError.kind === "unavailable"` — the provider answered with
+ *     a transport-level failure (network error, timeout, non-2xx) and
+ *     `SendAiMessage` deliberately did NOT retry it (see
+ *     `converseWithRetry`'s docstring in send-ai-message.ts for why an
+ *     immediate retry there would be worse, not better).
  */
 export class ServiceUnavailableError extends AppError {
   constructor(message = "service unavailable") {
@@ -66,11 +74,15 @@ export class ServiceUnavailableError extends AppError {
 }
 
 /**
- * The AI provider failed twice in a row — the malformed-output or
- * timeout/5xx `AiProviderError` SendAiMessage's retry-once policy could not
- * recover from (see send-ai-message.ts). 502, not 500: this box is fine, the
- * upstream model provider is what failed. The conversation is left exactly
- * as it was before the call — the creator's message is saved, no assistant
+ * A `"malformed"` `AiProviderError` survived one retry — the provider
+ * answered both times, but what came back could not be turned into a valid
+ * turn (prose/truncated/invalid JSON, a schema mismatch, an over-length
+ * reply). 502, not 500: this box is fine, the upstream model's OUTPUT is
+ * what failed. NOT used for a transport-level failure (network error,
+ * timeout, non-2xx) — that is `ServiceUnavailableError` (503), and is never
+ * retried at all; see `AiProviderError.kind`'s docstring in
+ * `ai-provider.port.ts` for the split. The conversation is left exactly as
+ * it was before the call — the creator's message is saved, no assistant
  * reply is appended — so retrying is just sending another message.
  */
 export class AiUpstreamError extends AppError {
