@@ -158,6 +158,113 @@ export function mediamtxWebhookRoutes(
   });
 
   /**
+   * `GET /webhooks/mediamtx/auth-request` — Task 9. NOT called by MediaMTX.
+   * Called by nginx's `auth_request` directive, once per HTTP request nginx
+   * proxies to MediaMTX's HLS port, closing the gap the rest of this
+   * docstring explains.
+   *
+   * THE PROBLEM THIS EXISTS TO FIX: MediaMTX's own `authHTTPAddress`
+   * mechanism (the `/auth` route above) authorises a READ only ONCE per
+   * viewer — confirmed empirically for Task 9 (see task-9-report.md): the
+   * FIRST request for a stream mints an internal, MediaMTX-issued session
+   * identifier (returned as `hlsSession`/`cookieCheck` cookies for
+   * cookie-capable clients, AND rewritten directly into every sub-manifest
+   * URI as a `?session=` query parameter for clients that never send
+   * cookies at all — which is what `hls.js`'s default, credential-less
+   * cross-origin XHR loader is, confirmed with a real browser). EVERY
+   * subsequent request carrying that session identifier is let through
+   * WITHOUT calling `/auth` again — `AuthoriseStream.authoriseRead`'s live
+   * entitlement re-check never re-runs for the rest of that viewer's
+   * session, which for an open tab is the rest of the broadcast. A member
+   * who churns mid-stream keeps receiving segments until they close the tab
+   * or the underlying MediaMTX session times out — directly contradicting
+   * design spec §5.2 and this file's own `AuthoriseStream` docstring
+   * ("lose access on their very next segment request").
+   *
+   * THE FIX: put nginx in front of MediaMTX's (already non-public) HLS
+   * port, with `auth_request` pointing here for every proxied request —
+   * see CONTRIBUTING.md's "Live streaming (MediaMTX)" section and
+   * `infra/nginx/live-hls.conf.template` for the actual config. nginx's
+   * `auth_request` has NO caching of its own: every single HTTP request
+   * (master playlist, every sub-playlist reload, every init segment, every
+   * media segment, every LL-HLS part) triggers a fresh subrequest here,
+   * which calls the SAME `AuthoriseStream.authoriseRead` the `/auth` route
+   * calls — the SAME live database re-check, every time, regardless of
+   * whatever MediaMTX itself would have cached. This does not change
+   * `AuthoriseStream` at all; it changes how often it gets asked.
+   *
+   * WHY A SEPARATE ROUTE, NOT A REUSED `/auth`: nginx's `auth_request`
+   * subrequest has no built-in way to construct MediaMTX's POST-JSON-body
+   * contract (it mirrors the original request, normally a bodyless GET) —
+   * so this route accepts the two inputs `AuthoriseStream.authoriseRead`
+   * actually needs as HEADERS instead: `X-Mtx-Path` (built by nginx from
+   * the request URL as exactly `live/<key>` — see the nginx config; the
+   * specific FILE being requested carries no additional
+   * authorisation-relevant information, matching what MediaMTX's own
+   * `authHTTPAddress` call already sends) and `X-Watch-Token` (the SAME
+   * watch token `hls.js`'s `xhrSetup` re-attaches to every request, per
+   * Task 8). `action` is hard-coded to `"read"`: nginx only ever proxies
+   * HLS reads here — RTMP publish (port 1935) is never proxied through
+   * nginx at all (see CONTRIBUTING.md's port-asymmetry note), so this
+   * route has no publish case to handle.
+   *
+   * HEADERS, NOT QUERY PARAMETERS — found running this for real, not from
+   * documentation. The obvious design reuses `?mtxPath=...&token=...` on
+   * this route's own URL, exactly like `/auth`'s `secret` query parameter.
+   * It does not work: nginx's `auth_request` subrequest does NOT inherit
+   * `$args`/`$arg_*` from the request it is authorising — confirmed with a
+   * probe upstream that echoed back what the subrequest actually received.
+   * `$arg_token`, read directly inside the internal `auth_request` location,
+   * came back EMPTY every time, while `$request_uri` and a location's own
+   * regex-captured variable (`$mtx_key` in the nginx config) both came back
+   * correct. The working pattern (see `infra/nginx/live-hls.conf.template`):
+   * capture the token into a plain nginx variable with `set $watch_token
+   * $arg_token;` in the OUTER location, BEFORE `auth_request` fires — a
+   * `set` variable persists into the subrequest the same way a regex
+   * capture does, even though `$arg_token` itself does not — then forward
+   * that variable as a header. See task-9-report.md for the full trace.
+   *
+   * SECRET, VIA HEADER: unlike `authHTTPAddress`, nginx has no limitation
+   * on custom headers (`proxy_set_header` in the internal location), so
+   * there is no reason to also accept a query parameter here the way
+   * `/auth` and `/lifecycle` must for MediaMTX's sake.
+   *
+   * nginx's `auth_request` module only inspects the STATUS CODE (2xx =
+   * allow, 401/403 = deny) — same rule as MediaMTX's own `authHTTPAddress`
+   * — so this reuses `ALLOWED_BODY`/`REFUSED_BODY` for consistency, though
+   * nginx never reads either body.
+   *
+   * MUST NOT be reachable from the public internet, same as `/auth` and
+   * `/lifecycle` above: it is called ONLY by nginx's internal `auth_request`
+   * subrequest (see the `internal;` directive in the nginx config), over the
+   * same private `host.docker.internal` path MediaMTX itself reaches this
+   * API over — never proxied to the public origin.
+   */
+  app.get("/auth-request", async (c) => {
+    const secret = c.req.header(MEDIAMTX_SECRET_HEADER);
+    if (!verifyCallbackToken(secret, deps.mediamtxWebhookSecret)) {
+      throw new UnauthorizedError("invalid mediamtx webhook secret");
+    }
+
+    if (!deps.authoriseStream) {
+      return c.json(REFUSED_BODY, 403);
+    }
+
+    const mtxPath = c.req.header("X-Mtx-Path") ?? "";
+    const token = c.req.header("X-Watch-Token");
+    const query = token ? `token=${encodeURIComponent(token)}` : "";
+
+    const { allowed } = await deps.authoriseStream.execute({
+      action: "read",
+      path: mtxPath,
+      query,
+      now: Date.now(),
+    });
+
+    return allowed ? c.json(ALLOWED_BODY, 200) : c.json(REFUSED_BODY, 403);
+  });
+
+  /**
    * `POST /webhooks/mediamtx/lifecycle` — Task 5's `runOnOnline`/`runOnOffline`
    * hooks, in `infra/mediamtx.yml`'s planned shape:
    * `curl -X POST .../lifecycle -H "X-Mediamtx-Secret: $MEDIAMTX_WEBHOOK_SECRET"

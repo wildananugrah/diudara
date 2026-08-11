@@ -242,19 +242,98 @@ below deliberately proxies `/live/` (MediaMTX's HLS output) and nothing under
   directly, with no read authorisation at all — that authorisation is the *entire*
   mechanism deciding who gets to watch a paid stream.
 
-### The nginx location block the real VPS needs
+### The nginx location block the real VPS needs — now with `auth_request` (Task 9)
+
+**MediaMTX's own HLS read-authorisation is per-VIEWER-SESSION, not per-request — confirmed
+empirically, not assumed.** `authHTTPAddress` is called once, on the first request for a
+stream; MediaMTX then mints an internal session identifier — returned as `hlsSession`/
+`cookieCheck` cookies for cookie-capable clients, AND rewritten directly into every
+sub-manifest URI as a `?session=` query parameter for clients that never send cookies at
+all (confirmed with a real browser: `hls.js`'s default, credential-less cross-origin XHR
+loader never sends a `Cookie` header, over hundreds of real requests) — and every
+subsequent request carrying that identifier is let through **without calling
+`authHTTPAddress` again**. A member who churns mid-stream keeps receiving segments in an
+already-open tab for as long as that MediaMTX-internal session lives, which for a real
+broadcast is the rest of it — directly contradicting design spec §5.2 and
+`authorise-stream.ts`'s own docstring. See `task-9-report.md` for the full empirical trace
+(including how the finding was obtained: a raw-socket test proving portability across
+connections, then a real Chromium/`hls.js` session with request-header interception).
+
+**The fix**: nginx's `auth_request` directive, re-authorising **every single proxied HLS
+request** — the master playlist, every sub-playlist reload, every init segment, every media
+segment, every LL-HLS part — against `apps/api` fresh, regardless of what MediaMTX itself
+would have cached. `auth_request` has no caching of its own.
 
 ```nginx
-location /live/ {
-    proxy_pass http://127.0.0.1:8888;
-    proxy_set_header Host $host;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
+server {
+    listen 443 ssl;  # the real public origin — this block is illustrative of WHERE
+                      # the /live/ location lives, not a full TLS/vhost config
+
+    location ~ ^/live/(?<mtx_key>[^/]+)/ {
+        # MUST be set BEFORE auth_request, in THIS (parent) location — found
+        # running this for real, not from documentation. nginx's auth_request
+        # subrequest does NOT inherit $args/$arg_* from the request it is
+        # authorising (confirmed with a probe upstream: $arg_token read back
+        # EMPTY inside the internal location below, while $request_uri and a
+        # location's own regex capture — $mtx_key here — both read back
+        # correctly). A plain `set` variable, evaluated HERE, persists into
+        # the subrequest the same way $mtx_key does; $arg_token itself does
+        # not. See task-9-report.md for the config that does NOT work.
+        set $watch_token $arg_token;
+        auth_request /_internal/mediamtx-auth-request;
+
+        # nginx's default access log format includes the full request
+        # line — the watch token would otherwise be written to disk on
+        # every single request, a new exposure this proxy would introduce.
+        access_log off;
+
+        proxy_pass http://127.0.0.1:8888;
+        proxy_set_header Host $host;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+    }
+
+    # internal; — reachable only via auth_request above, never directly.
+    # Both authorisation inputs travel as HEADERS, not query parameters — the
+    # obvious ?mtxPath=...&token=... on THIS subrequest's own URL does not
+    # work, for the same $args-is-empty-in-subrequests reason `$watch_token`
+    # above exists.
+    location = /_internal/mediamtx-auth-request {
+        internal;
+        proxy_pass http://127.0.0.1:3000/webhooks/mediamtx/auth-request;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Mediamtx-Secret "${MEDIAMTX_WEBHOOK_SECRET}";
+        proxy_set_header X-Mtx-Path "live/$mtx_key";
+        proxy_set_header X-Watch-Token "$watch_token";
+    }
 }
 ```
 
-Nothing under `/webhooks/mediamtx/` is proxied here — see the security note above for why
-that route stays off the public surface entirely.
+The full, canonical version of this config (with the complete reasoning inline as comments)
+is committed at `infra/nginx/live-hls.conf.template` — copy it in rather than retyping the
+block above by hand. `${MEDIAMTX_WEBHOOK_SECRET}` is a literal placeholder in that file,
+meant for whatever secrets-injection mechanism the real deploy uses (plain
+`envsubst 'MEDIAMTX_WEBHOOK_SECRET'` if this nginx runs bare on the VPS; nginx's own
+`docker-entrypoint.d` templating with `NGINX_ENVSUBST_FILTER=MEDIAMTX_WEBHOOK_SECRET` if it
+runs in Docker — see the template file's own header comment for why the filter must be set
+to exactly that one name and not left unset).
+
+**`/webhooks/mediamtx/auth-request` — the new endpoint this calls — must stay off the public
+surface exactly like `/webhooks/mediamtx/auth` and `/webhooks/mediamtx/lifecycle` above.**
+Nothing under `/webhooks/mediamtx/` is proxied by this (or any) public-facing nginx location;
+this new route is reached only by the `internal;`-marked location's own subrequest, over the
+same private path (`127.0.0.1` on the VPS; `host.docker.internal` from inside a container)
+MediaMTX's own webhook calls already use.
+
+**Neither the stream key nor the watch token appears in an nginx access log line by this
+design**: the token travels as a header (`X-Watch-Token`) into the internal auth subrequest,
+not a query parameter — the ONE thing `authHTTPAddress`'s own secret could not avoid (see the
+security note above), this route does not repeat for the token. The token DOES still appear
+in the *client-facing* HLS URLs themselves (`?token=...` on every playlist/segment request),
+exactly as before Task 9 — that was always true and is unrelated to this change; see
+`apps/web/src/pages/WatchPage.tsx`'s own docstring for why the token, not a header, is the
+only mechanism `hls.js` and Safari's native player both have available.
 
 ### `host.docker.internal` needs an explicit mapping on Linux, not macOS
 
