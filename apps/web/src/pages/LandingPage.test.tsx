@@ -47,17 +47,27 @@ describe("LandingPage", () => {
     expect(document.body.textContent).not.toContain("tidak ditemukan");
   });
 
-  it("never says WhatsApp groups are gated — WhatsApp is notification-only", () => {
+  // Tests the RULE, not two spellings: no sentence that mentions WhatsApp may
+  // also talk about access, joining, or invites. A prior version of this test
+  // only forbade the two literal phrases "grup whatsapp otomatis" and "akses
+  // grup whatsapp" — it missed "akses anggota ... untuk grup Telegram dan
+  // WhatsApp", which reads as WhatsApp access being automated when it is not:
+  // Meta's API has no add-participant endpoint and caps groups at 8 members.
+  // Sentences are read per <p>/<li> (not the whole page as one blob) so two
+  // unrelated sentences in different elements are never spuriously merged.
+  it("never puts access, joining, or invite language in the same sentence as WhatsApp", () => {
     render(
       <MemoryRouter>
         <LandingPage />
       </MemoryRouter>
     );
-    const text = document.body.textContent ?? "";
-    expect(/whatsapp/i.test(text)).toBe(true);
-    // The forbidden claim, in the shapes it would plausibly take.
-    expect(/grup whatsapp otomatis/i.test(text)).toBe(false);
-    expect(/akses grup whatsapp/i.test(text)).toBe(false);
+    const blocks = Array.from(document.querySelectorAll("p, li"));
+    const sentences = blocks.flatMap((block) => (block.textContent ?? "").split(/(?<=[.!?])\s+/));
+    const mentionsWhatsapp = sentences.filter((s) => /whatsapp/i.test(s));
+    // WhatsApp must still appear somewhere — the page cannot pass by omitting it.
+    expect(mentionsWhatsapp.length).toBeGreaterThan(0);
+    const gatedSounding = mentionsWhatsapp.filter((s) => /akses|gabung|undangan/i.test(s));
+    expect(gatedSounding.length).toBe(0);
   });
 
   // The page renders only static copy, so this is true by construction today.

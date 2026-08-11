@@ -7,8 +7,9 @@ export default function LandingPage() {
         <p className="landing-eyebrow">DIUDARA</p>
         <h1>Ubah grup Anda jadi komunitas berbayar</h1>
         <p className="landing-lede">
-          DIUDARA menangani pembayaran, akses anggota, dan perpanjangan otomatis untuk grup
-          Telegram dan WhatsApp yang sudah Anda kelola. Anda tetap fokus ke konten.
+          DIUDARA menangani pembayaran, akses Telegram, dan perpanjangan otomatis untuk komunitas
+          berbayar yang sudah Anda kelola. Anggota diberi tahu lewat WhatsApp, dan Anda tetap fokus
+          ke konten.
         </p>
         <Link className="button-primary landing-cta" to="/dashboard/login">
           Mulai sekarang
