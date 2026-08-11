@@ -1,4 +1,4 @@
-import { and, desc, eq, ne } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { communities, events } from "../../db/schema";
 import type { EventRecord, EventRepositoryPort } from "../../application/ports/event-repository.port";
@@ -11,6 +11,17 @@ const LIVE_STATUS = "live";
 
 /** `event.status` once MediaMTX's `runOnOffline` hook fires (Task 5). */
 const ENDED_STATUS = "ended";
+
+/**
+ * `markEnded`'s predicate — an ALLOWLIST, not `ne(events.status, ENDED_STATUS)`. This
+ * codebase's own rule (see `REVOCABLE_COMMUNITY_STATUSES` in `process-churn.ts`): a
+ * denylist fails OPEN on a status nobody anticipated — a future third-party
+ * integration state, a typo written by hand — silently allowing `offline` to end a row
+ * that was never meant to be endable. An allowlist fails CLOSED on the same case: an
+ * unrecognised status simply does not match, and `markEnded` returns `null` rather
+ * than transitioning something it was never told about.
+ */
+const ENDABLE_STATUSES = [SCHEDULED_STATUS, LIVE_STATUS] as const;
 
 /**
  * `event` has no `creator_id` of its own — only `community_id` — so every
@@ -111,14 +122,15 @@ export class DrizzleEventRepository implements EventRepositoryPort {
   }
 
   async markEnded(id: string): Promise<EventRecord | null> {
-    // `status <> ENDED_STATUS`, not `= LIVE_STATUS`: MediaMTX can fire `runOnOffline`
-    // for a session the API never saw go online (the API restarted mid-stream), so
-    // `scheduled -> ended` is a real, legitimate transition here — only `ended ->
-    // ended` is refused, which is what makes a repeated `offline` idempotent.
+    // `status IN (scheduled, live)`, an ALLOWLIST — see `ENDABLE_STATUSES`. Both are
+    // real, legitimate starting points: MediaMTX can fire `runOnOffline` for a
+    // session the API never saw go online (the API restarted mid-stream), so
+    // `scheduled -> ended` must be allowed too. `ended -> ended` is refused, which is
+    // what makes a repeated `offline` idempotent.
     const [row] = await this.db
       .update(events)
       .set({ status: ENDED_STATUS })
-      .where(and(eq(events.id, id), ne(events.status, ENDED_STATUS)))
+      .where(and(eq(events.id, id), inArray(events.status, ENDABLE_STATUSES)))
       .returning();
     return row ?? null;
   }

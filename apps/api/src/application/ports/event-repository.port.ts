@@ -105,6 +105,11 @@ export interface EventRepositoryPort {
    * never saw go `online` (the API restarted mid-stream), so `scheduled` is
    * a legitimate starting point, not just `live`.
    *
+   * The predicate is an ALLOWLIST of starting statuses (`{scheduled, live}`),
+   * not a denylist of `ended` alone — this codebase's own rule (see
+   * `REVOCABLE_COMMUNITY_STATUSES` in `process-churn.ts`): a denylist fails
+   * OPEN on a status nobody anticipated; an allowlist fails CLOSED on it.
+   *
    * Returns `null` when `id` does not exist or the event is already `ended`
    * — a repeated `offline` from a flapping publisher is a no-op, not an
    * error. See this port's docstring for why the method itself is unscoped.

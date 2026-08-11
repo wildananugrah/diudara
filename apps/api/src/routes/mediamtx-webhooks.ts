@@ -211,7 +211,6 @@ export function mediamtxWebhookRoutes(
     await deps.handleStreamLifecycle.execute({
       hook: body.hook,
       streamKey: body.streamKey,
-      now: Date.now(),
     });
 
     return c.json(ACKNOWLEDGED_BODY, 200);

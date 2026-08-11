@@ -51,6 +51,7 @@ import { SendAiMessage } from "./application/use-cases/send-ai-message";
 import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
 import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
 import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
+import { DrizzleStreamLifecycleUnitOfWork } from "./infrastructure/repositories/drizzle-stream-lifecycle.unit-of-work";
 import { ScheduleLiveSession, ListLiveSessions } from "./application/use-cases/schedule-live-session";
 import { AuthoriseStream } from "./application/use-cases/authorise-stream";
 import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lifecycle";
@@ -1426,14 +1427,12 @@ export function bootstrap(): Dependencies {
   // Task 5's `POST /webhooks/mediamtx/lifecycle`. Gated on `mediamtxWebhookSecret`
   // rather than constructed unconditionally — see the `handleStreamLifecycle`
   // field's own docstring for why that is a symmetry choice, not a real
-  // dependency of the class. The POOLED client, same as `authoriseStream`: both
-  // are called from an HTTP handler, never inside another use-case's transaction.
+  // dependency of the class. Takes the unit-of-work, not the three
+  // repositories directly: the transition, its activity_log row, and every
+  // per-member notify_stream_live row must commit or roll back together — see
+  // `StreamLifecycleUnitOfWorkPort`'s own docstring for why.
   const handleStreamLifecycle = mediamtxWebhookSecret
-    ? new HandleStreamLifecycle(
-        eventRepository,
-        new DrizzleActivityLogRepository(db),
-        new DrizzleOutboxRepository(db)
-      )
+    ? new HandleStreamLifecycle(new DrizzleStreamLifecycleUnitOfWork(db))
     : undefined;
 
   return {

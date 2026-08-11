@@ -20,9 +20,8 @@ import { AuthoriseStream } from "../application/use-cases/authorise-stream";
 import { HandleStreamLifecycle } from "../application/use-cases/handle-stream-lifecycle";
 import { OUTBOX_NOTIFY_STREAM_LIVE } from "../application/ports/outbox-repository.port";
 import { mintWatchToken, WATCH_TOKEN_TTL_MS } from "../domain/watch-token";
-import { DrizzleActivityLogRepository } from "../infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleEventRepository } from "../infrastructure/repositories/drizzle-event.repository";
-import { DrizzleOutboxRepository } from "../infrastructure/repositories/drizzle-outbox.repository";
+import { DrizzleStreamLifecycleUnitOfWork } from "../infrastructure/repositories/drizzle-stream-lifecycle.unit-of-work";
 import { DrizzleSubscriptionRepository } from "../infrastructure/repositories/drizzle-subscription.repository";
 import { mediamtxWebhookRoutes } from "./mediamtx-webhooks";
 
@@ -36,11 +35,7 @@ const subscriptionRepository = new DrizzleSubscriptionRepository(db);
 const authoriseStream = new AuthoriseStream(eventRepository, subscriptionRepository, {
   streamTokenSecret: SECRET,
 });
-const handleStreamLifecycle = new HandleStreamLifecycle(
-  eventRepository,
-  new DrizzleActivityLogRepository(db),
-  new DrizzleOutboxRepository(db)
-);
+const handleStreamLifecycle = new HandleStreamLifecycle(new DrizzleStreamLifecycleUnitOfWork(db));
 
 /**
  * A REAL `AuthoriseStream`, subclassed only to make `execute` throw. Used
@@ -65,7 +60,7 @@ class ThrowingAuthoriseStream extends AuthoriseStream {
 /** Same purpose as `ThrowingAuthoriseStream`, for the `/lifecycle` route's own tests. */
 class ThrowingHandleStreamLifecycle extends HandleStreamLifecycle {
   constructor() {
-    super(eventRepository, new DrizzleActivityLogRepository(db), new DrizzleOutboxRepository(db));
+    super(new DrizzleStreamLifecycleUnitOfWork(db));
   }
   override async execute(): Promise<void> {
     throw new Error(
@@ -534,9 +529,11 @@ describe("POST /webhooks/mediamtx/lifecycle — online", () => {
     expect(reloaded!.status).toBe("live");
   });
 
-  it("a second online still leaves exactly one notify_stream_live row enqueued", async () => {
+  it("enqueues one notify_stream_live row per active member — a second online enqueues no more", async () => {
     const community = await seedCommunity();
     const { event, streamKey } = await seedEvent(community.id, "scheduled");
+    await seedActiveSubscription(community.id);
+    await seedActiveSubscription(community.id);
     const a = app();
 
     await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
@@ -547,7 +544,12 @@ describe("POST /webhooks/mediamtx/lifecycle — online", () => {
     const forThisEvent = rows.filter(
       (row) => (row.payload as { eventId?: string } | null)?.eventId === event.id
     );
-    expect(forThisEvent).toHaveLength(1);
+    // Two active members at go-live time, ONE row each — not one row for the
+    // whole community — and the repeated `online` enqueues nothing further.
+    expect(forThisEvent).toHaveLength(2);
+    for (const row of forThisEvent) {
+      expect(typeof (row.payload as { subscriptionId?: string }).subscriptionId).toBe("string");
+    }
   });
 
   it("answers 200 for an unknown stream key, and writes nothing — a hook that 500s retries forever", async () => {

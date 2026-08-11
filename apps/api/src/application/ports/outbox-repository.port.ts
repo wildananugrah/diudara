@@ -59,20 +59,43 @@ export const OUTBOX_SEND_RENEWAL_REMINDER = "send_renewal_reminder";
 export const OUTBOX_REVOKE_SUBSCRIPTION_ACCESS = "revoke_subscription_access";
 
 /**
- * The `event_type` of the row `HandleStreamLifecycle` (Task 5) queues the moment an
- * event goes `live`: "tell this community's active members the stream is up, with a
- * watch link each".
+ * The `event_type` of ONE ROW `HandleStreamLifecycle` (Task 5) queues PER MEMBER the
+ * moment an event goes `live`: "tell this one member the stream is up, with a watch
+ * link".
  *
- * Written exactly once per go-live — `markLive`'s atomic status predicate is what
- * guarantees that, not this constant — and enqueued in the SAME breath as the
- * `activity_log` row, both after the transition has already committed (see
- * `HandleStreamLifecycle`). The payload carries only `eventId`: no member list, no
- * community id, no stream key. `NotifyStreamLive` re-resolves everything from the
- * event at delivery time — the roster of active subscriptions, deliberately, because
- * membership at enqueue time is not membership at delivery time (a member can churn
- * in between), and whether the event is STILL `live`, because MediaMTX can fire
- * `runOnOffline` before the row is ever claimed. Sending a watch link to a session
- * that has already ended is worse than sending nothing.
+ * ONE ROW PER MEMBER, not one row for the whole community — a single row fanning out
+ * to an unbounded roster breaks `ProcessOutbox`'s staleness model (`touchProcessing`
+ * fires once at dequeue, and the reclaim window is sized around "one row is one or two
+ * provider calls"), and a reclaimed fan-out row means a second worker re-sends to the
+ * ENTIRE community concurrently — the exact double-claim `FOR UPDATE SKIP LOCKED`
+ * exists to prevent. Per-member rows keep every row's cost bounded and let one bad send
+ * retry independently, without re-messaging everybody else.
+ *
+ * Written exactly once per (event, member) pair per go-live — `markLive`'s atomic
+ * status predicate is what guarantees the go-live happens at most once, and every row
+ * for it is enqueued INSIDE THE SAME TRANSACTION as that transition and its
+ * `activity_log` row (`StreamLifecycleUnitOfWorkPort`, `HandleStreamLifecycle`), not
+ * after it commits. That ordering is load-bearing: once `status='live'` commits, no
+ * later hook can ever re-open the opportunity to queue these rows, so a crash or a
+ * thrown error between the transition and an enqueue that happened afterwards would
+ * leave the event permanently `live` with nobody ever told and nothing able to fix it.
+ *
+ * The payload carries `eventId` and `subscriptionId` — ids only, never a community id
+ * and never the stream key. `NotifyStreamLive` re-resolves everything else fresh, at
+ * delivery time: whether the event is STILL `live` (MediaMTX can fire `runOnOffline`
+ * before the row is ever claimed — sending a watch link to a finished session is worse
+ * than sending nothing), and whether THIS subscription is STILL active (a member can
+ * churn between go-live and delivery). Both are re-read, never trusted from the
+ * enqueue-time snapshot the roster was built from.
+ *
+ * A retry of one row can duplicate a "we're live" WhatsApp message to a member already
+ * notified successfully — `(eventId, subscriptionId)` would be exactly as natural an
+ * idempotency key as `renewal_reminder`'s `(subscription_id, stage)` claim table, and
+ * this codebase already ships that shape once. No claim table was added for this event
+ * type because a watch token is a stateless HMAC (`domain/watch-token.ts`): re-minting
+ * one for a retry creates no provider-side artifact, categorically unlike Phase 4's
+ * Telegram invite link, where a re-mint produced a second live, unkillable credential.
+ * A duplicate message is a nuisance; a duplicate invite link was a security bug.
  */
 export const OUTBOX_NOTIFY_STREAM_LIVE = "notify_stream_live";
 
