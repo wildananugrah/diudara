@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import LandingPage from "./pages/LandingPage";
+import NotFoundPage from "./pages/NotFoundPage";
 import CheckoutPage from "./pages/CheckoutPage";
 import StatusPage from "./pages/StatusPage";
 import DashboardLayout from "./dashboard/DashboardLayout";
@@ -60,7 +61,11 @@ export function AppRoutes() {
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>
 
-      <Route path="*" element={<Navigate to="/c/tidak-ada" replace />} />
+      {/* Rendered IN PLACE, never redirected: the URL the visitor typed has to stay
+          in the address bar or the message cannot be acted on. This used to send
+          every unknown path to /c/tidak-ada, which reported that a specific
+          community was missing when none had been named. */}
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   );
 }
