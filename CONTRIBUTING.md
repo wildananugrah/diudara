@@ -168,6 +168,122 @@ connect time, while you can still go and find the right one (`getChat`, or any g
 bot). WhatsApp ids (`120363…@g.us`) are unconstrained, because nothing inbound depends on
 them.
 
+## Live streaming (MediaMTX)
+
+Task 6 brings up a real MediaMTX instance in `infra/docker-compose.yml`, running from
+`infra/mediamtx.yml`. Like Postgres, it needs `apps/api/.env`'s four `MEDIAMTX_*`/
+`STREAM_TOKEN_SECRET` variables (see `.env.example`) AND `infra/.env`'s own copy of
+`MEDIAMTX_WEBHOOK_SECRET` — the two must match exactly, the same rule as
+`POSTGRES_PASSWORD`/`DATABASE_URL` above.
+
+```bash
+cp infra/.env.example infra/.env               # if you haven't already; add MEDIAMTX_WEBHOOK_SECRET
+# apps/api/.env: set MEDIAMTX_RTMP_HOST, MEDIAMTX_HLS_BASE_URL, MEDIAMTX_WEBHOOK_SECRET
+# (same value as infra/.env), STREAM_TOKEN_SECRET (a DIFFERENT secret)
+docker compose -f infra/docker-compose.yml up -d mediamtx
+```
+
+A creator publishes with OBS (or, to prove it locally, `ffmpeg`) to the `rtmpUrl` that
+`POST /communities/:communityId/events` returns, and a member watches the `hlsPlaybackPath`
+it also returns, with a `?token=<watch token>` query parameter. Every publish and every
+read is authorised against `apps/api`'s `/webhooks/mediamtx/auth` — MediaMTX has no other
+access-control mechanism, and without it a stream key is just "a path that's hard to
+guess."
+
+### The image must be the `-ffmpeg` tag, not the plain one — found running this for real
+
+`bluenviron/mediamtx:<version>` (no suffix) is built `FROM scratch`: no shell, no `curl`,
+nothing but the `mediamtx` binary. `runOnOnline`/`runOnOffline` in `mediamtx.yml` are shell
+commands (there is no `runOnPublish`/`runOnUnpublish` — these are the real hook names), and
+a `FROM scratch` container cannot run one at all. Pointed at the plain tag, MediaMTX logs
+exactly this the moment a publish starts:
+
+```
+runOnOnline command exited: exec: "curl": executable file not found in $PATH
+```
+
+`docker-compose.yml` therefore uses `bluenviron/mediamtx:1.20.0-ffmpeg`, which is
+Alpine-based and ships BusyBox — but Alpine does not install `curl` by default either, only
+BusyBox's `wget`. `mediamtx.yml`'s hooks use `wget --header=... --post-data=...`, not the
+`curl -H ... -d ...` an earlier draft of this spec assumed. Verified against a live
+container: `wget` reaches `apps/api` and the hook fires correctly (see below).
+
+### `authHTTPAddress` cannot send a header — the secret travels as a query parameter instead
+
+MediaMTX's `authHTTPAddress` mechanism has no configuration option to attach a custom
+header to the POST it makes (its entire surface is `authMethod`/`authHTTPAddress`/
+`authHTTPExclude`/`authHTTPFingerprint`/`authInternalUsers`/`authJWT*` — verified against
+mediamtx.org's authentication docs). A config that put the shared secret in that URL
+directly would also put it in this repository's git history, since `infra/mediamtx.yml` is
+committed — so `authHTTPAddress` is not set in that file at all. It is injected purely as
+the `MTX_AUTHHTTPADDRESS` environment override (MediaMTX's own rule: any config key can be
+overridden by `MTX_<UPPERCASE_KEY_NAME>`) in `docker-compose.yml`, built from
+`infra/.env`'s `MEDIAMTX_WEBHOOK_SECRET` at container start — so the real value exists only
+as a container environment variable, never as text in a committed file.
+`apps/api/src/routes/mediamtx-webhooks.ts` accepts the secret either as that query
+parameter OR as the `X-Mediamtx-Secret` header the `runOnOnline`/`runOnOffline` hooks send
+— those genuinely are shell commands and can attach one, `authHTTPAddress` genuinely
+cannot.
+
+**This is also why `POST /webhooks/mediamtx/auth` must never be reachable from the public
+nginx surface.** A query-string secret lands in access logs and sits in plain text as part
+of a request URL — exposure a header does not have. MediaMTX reaches `apps/api` over the
+container/host boundary (`host.docker.internal`), never through nginx, so publishing that
+route publicly would only leak the secret for no functional gain. The nginx location block
+below deliberately proxies `/live/` (MediaMTX's HLS output) and nothing under
+`/webhooks/mediamtx/`.
+
+### The port asymmetry is deliberate
+
+- **RTMP `1935` is published publicly** (`"1935:1935"`) — a creator's OBS connects from
+  outside this host, and publish authorisation (`authHTTPAddress`) is what protects it.
+- **HLS `8888` is bound to `127.0.0.1` only** (`"127.0.0.1:8888:8888"`, the same pattern
+  Postgres already uses above). Exposing it publicly would let anyone fetch segments
+  directly, with no read authorisation at all — that authorisation is the *entire*
+  mechanism deciding who gets to watch a paid stream.
+
+### The nginx location block the real VPS needs
+
+```nginx
+location /live/ {
+    proxy_pass http://127.0.0.1:8888;
+    proxy_set_header Host $host;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+```
+
+Nothing under `/webhooks/mediamtx/` is proxied here — see the security note above for why
+that route stays off the public surface entirely.
+
+### `host.docker.internal` needs an explicit mapping on Linux, not macOS
+
+`docker-compose.yml`'s `mediamtx` service sets:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+Docker Desktop on macOS (what local development uses) provides this hostname
+automatically, so the line is a no-op here. The production VPS is Linux, where plain
+`dockerd` does **not** provide it without `extra_hosts` — omitting this line would make
+every `runOnOnline`/`runOnOffline` hook and every `authHTTPAddress` call fail to resolve
+the API's host on that box specifically, while working the entire time in local
+development, which is exactly the shape of bug that survives review.
+
+### `$MTX_PATH`'s runtime shape, confirmed
+
+`apps/api/src/application/use-cases/authorise-stream.ts`'s `streamKeyFromPath` and
+`handle-stream-lifecycle.ts` both require `$MTX_PATH`/the auth webhook's `path` field to be
+exactly `live/<key>`, reasoned from MediaMTX's docs ("MTX_PATH: path name") rather than a
+running instance. Confirmed against a real publish: publishing to
+`rtmp://localhost:1935/live/<key>` makes `$MTX_PATH` arrive as `live/<key>`, matching what
+both use-cases assume, and the event correctly transitions `scheduled` → `live` → `ended`.
+If a future MediaMTX version ever changes this, `handle-stream-lifecycle.ts` logs a
+`console.warn` on the branch where parsing fails — watch for it, since the alternative is
+every session silently staying `scheduled` forever with no error anywhere.
+
 ## Running the test suite
 
 ```bash

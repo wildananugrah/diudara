@@ -2402,10 +2402,26 @@ describe("selectStreamingProvider", () => {
 
 describe("bootstrap() streaming provider wiring", () => {
   it("wires FakeStreamingAdapter under NODE_ENV=test with no streaming config", () => {
-    withJwtSecret("x".repeat(32), () => {
-      const deps = bootstrap();
-      expect(deps.streamingProvider).toBeInstanceOf(FakeStreamingAdapter);
-    });
+    // Explicitly cleared, not merely assumed absent — Task 6 put real values
+    // for all four of these into apps/api/.env so a developer can drive a
+    // live MediaMTX locally, and `bun test` auto-loads that file. Without
+    // this, "no streaming config" is only true on a machine that happens
+    // not to have set them, exactly the trap CONTRIBUTING.md's "Writing
+    // tests" section already warns about for other env vars.
+    withEnv(
+      {
+        MEDIAMTX_RTMP_HOST: undefined,
+        MEDIAMTX_HLS_BASE_URL: undefined,
+        MEDIAMTX_WEBHOOK_SECRET: undefined,
+        STREAM_TOKEN_SECRET: undefined,
+      },
+      () => {
+        withJwtSecret("x".repeat(32), () => {
+          const deps = bootstrap();
+          expect(deps.streamingProvider).toBeInstanceOf(FakeStreamingAdapter);
+        });
+      }
+    );
   });
 
   it("wires MediaMtxAdapter when all four streaming env vars are configured", () => {
