@@ -1330,10 +1330,18 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
 
   it("refuses to boot a production process with no callback token", () => {
     withJwtSecret("x".repeat(32), () => {
-      // APP_BASE_URL is set explicitly, not inherited. These assertions are about a
-      // specific guard; without it, bootstrap()'s APP_BASE_URL guard throws FIRST and
-      // the expected message never appears. That made these tests pass only on a
-      // machine with apps/api/.env — a fresh clone and CI both fail without this.
+      // APP_BASE_URL is set explicitly, not inherited. Durable rule: a test must
+      // set every environment variable its assertion depends on — inheriting one
+      // from apps/api/.env instead makes the test pass only on a machine that has
+      // that file; a fresh clone and CI both fail without this override.
+      //
+      // Concretely here: bootstrap()'s guards run assertUsableJwtSecret (first) ->
+      // selectPaymentProvider -> resolveCallbackToken -> resolveAppBaseUrl ->
+      // selectMessagingProviders (last), so APP_BASE_URL is the FOURTH guard, not
+      // the first. Without it, resolveAppBaseUrl throws before this fully-configured
+      // block ever reaches selectMessagingProviders — and `expect(() =>
+      // bootstrap()).not.toThrow()` below fails, because bootstrap() throws when it
+      // must not.
       withEnv(
         {
           NODE_ENV: "production",
@@ -1382,6 +1390,11 @@ describe("bootstrap() messaging provider selection", () => {
     // Reached through bootstrap(), not just the selector in isolation: the API
     // process performs REVOCATION, and a fake adapter there would report a
     // removal it never performed.
+    //
+    // APP_BASE_URL is set explicitly, not inherited, for the same reason as the
+    // callback-token tests above: resolveAppBaseUrl is the guard immediately
+    // before selectMessagingProviders, so without it bootstrap() would throw
+    // there instead of reaching the messaging guard this test targets.
     withJwtSecret("x".repeat(32), () => {
       withEnv(
         {
@@ -2081,6 +2094,12 @@ describe("bootstrap() AI provider wiring", () => {
     // above) so the only thing under test is the AI wiring: a fat-fingered
     // AI_DAILY_MESSAGE_LIMIT must not even be READ, let alone thrown on,
     // once the feature it belongs to is off.
+    //
+    // APP_BASE_URL is set explicitly, not inherited, same as every other
+    // fully-configured production block in this file: resolveAppBaseUrl sits
+    // between resolveCallbackToken and selectMessagingProviders in bootstrap()'s
+    // guard order, so without it bootstrap() throws before it ever reaches the
+    // AI wiring this test is actually about.
     withJwtSecret("x".repeat(32), () => {
       withEnv(
         {
