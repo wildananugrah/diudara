@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testi
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import EventsPage from "./EventsPage";
 import { setSession } from "../auth";
+import { formatDateTime } from "../format";
 import { resetPaymentAccountCacheForTesting } from "../paymentAccount";
 import { renderPage, stubFetch, TEST_COMMUNITY, type StubRoute } from "../testing";
 
@@ -153,6 +154,33 @@ describe("EventsPage", () => {
 
     const post = stub.calls.find((c) => c.method === "POST")!;
     expect(post.body).toEqual({ title: "Q&A langsung" });
+  });
+
+  it("shows the time the creator scheduled, not 'Langsung', right after creating a session for later", async () => {
+    // The POST response genuinely carries no `scheduledAt` (see
+    // `CreatedLiveSession`'s docstring) — this pins that the page uses the
+    // value the creator TYPED rather than defaulting to "immediate" until
+    // the next refetch, which used to show "Langsung" for a session
+    // deliberately scheduled for tomorrow.
+    stubFetch([
+      COMMUNITY,
+      ENABLED,
+      { path: EVENTS_PATH, body: [] },
+      { method: "POST", path: EVENTS_PATH, status: 201, body: CREATED_SESSION },
+    ]);
+
+    render();
+    await screen.findByText(/Belum ada sesi/);
+
+    fireEvent.change(screen.getByLabelText("Judul sesi"), { target: { value: "Q&A langsung" } });
+    fireEvent.change(screen.getByLabelText(/Waktu/), { target: { value: "2026-09-01T10:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "Jadwalkan sesi" }));
+
+    await screen.findByText(CREATED_SESSION.rtmpUrl);
+
+    const expectedIso = new Date("2026-09-01T10:00").toISOString();
+    expect(await screen.findByText(formatDateTime(expectedIso))).toBeTruthy();
+    expect(screen.queryAllByText("Langsung").length).toBe(0);
   });
 
   it("shows a friendly Indonesian message rather than the raw 503 if creation is attempted while disabled", async () => {

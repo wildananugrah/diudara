@@ -94,14 +94,22 @@ export default function EventsPage() {
       {streamingEnabled && sessionsLoad.kind === "ready" ? (
         <ScheduleSessionForm
           communityId={communityId!}
-          onCreated={(created) => {
+          onCreated={(created, scheduledAtIso) => {
             setJustCreated(created);
             sessionsHandle.update([
               {
                 id: created.id,
                 communityId: communityId!,
                 title: created.title,
-                scheduledAt: null,
+                // The POST response genuinely has no `scheduledAt` field
+                // (see `CreatedLiveSession`'s docstring) — but the creator
+                // just typed this value into the form below, so it is used
+                // here rather than hardcoded to `null`. A hardcoded `null`
+                // rendered as "Langsung" for a session scheduled for
+                // tomorrow, which corrected itself only on the NEXT list
+                // refetch — misleading at exactly the moment a creator is
+                // deciding whether to open OBS now or later.
+                scheduledAt: scheduledAtIso,
                 streamKey: created.streamKey,
                 status: created.status,
                 hlsPlaybackPath: created.hlsPlaybackPath,
@@ -214,7 +222,10 @@ function ScheduleSessionForm({
   onCreated,
 }: {
   communityId: string;
-  onCreated: (session: CreatedLiveSession) => void;
+  /** `scheduledAtIso` is `null` for an immediate ("Langsung") session — the
+   * SAME value just sent to the server, not re-derived from the response
+   * (which does not carry it). */
+  onCreated: (session: CreatedLiveSession, scheduledAtIso: string | null) => void;
 }) {
   const [title, setTitle] = useState("");
   const [scheduledAt, setScheduledAt] = useState("");
@@ -228,13 +239,15 @@ function ScheduleSessionForm({
     setFieldErrors({});
 
     const body: Record<string, unknown> = { title };
+    let scheduledAtIso: string | null = null;
     if (scheduledAt.trim() !== "") {
       const parsed = new Date(scheduledAt);
       if (Number.isNaN(parsed.getTime())) {
         setFieldErrors({ scheduledAt: "Waktu tidak valid." });
         return;
       }
-      body.scheduledAt = parsed.toISOString();
+      scheduledAtIso = parsed.toISOString();
+      body.scheduledAt = scheduledAtIso;
     }
 
     setSubmitting(true);
@@ -245,7 +258,7 @@ function ScheduleSessionForm({
       });
       setTitle("");
       setScheduledAt("");
-      onCreated(created);
+      onCreated(created, scheduledAtIso);
     } catch (err) {
       if (err instanceof DashboardApiError) {
         if (err.status === 503) {
