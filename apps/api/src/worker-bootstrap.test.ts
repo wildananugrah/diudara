@@ -448,10 +448,10 @@ describe("bootstrapWorker", () => {
    * environment.
    */
   it("dispatches a real notify_stream_live row to NotifyStreamLive, not to nothing", async () => {
-    const { event, member } = await seedLiveEventWithActiveMember();
+    const { event, member, subscription } = await seedLiveEventWithActiveMember();
     const { id } = await new DrizzleOutboxRepository(db).enqueue({
       eventType: OUTBOX_NOTIFY_STREAM_LIVE,
-      payload: { eventId: event.id },
+      payload: { eventId: event.id, subscriptionId: subscription.id },
     });
 
     const original = process.env.STREAM_TOKEN_SECRET;
@@ -470,6 +470,26 @@ describe("bootstrapWorker", () => {
       // The member was actually messaged, over WhatsApp, by THIS process.
       expect(notifier.notifications).toHaveLength(1);
       expect(notifier.notifications[0].toWhatsappNumber).toBe(member.whatsappNumber);
+    } finally {
+      if (original === undefined) delete process.env.STREAM_TOKEN_SECRET;
+      else process.env.STREAM_TOKEN_SECRET = original;
+    }
+  });
+
+  /**
+   * Review round 2. `selectStreamingProvider` on the API side enforces
+   * `MIN_STREAMING_SECRET_LENGTH` on `STREAM_TOKEN_SECRET` at boot — but until now
+   * this root read the SAME variable raw, with no such check. A worker box whose
+   * secret is merely present, but weak or truncated relative to the API's, would
+   * boot silently and mint watch tokens the API's `AuthoriseStream` then rejects
+   * at read time: every member gets a link that 403s on every segment, with
+   * nothing here ever failing loud enough to say why.
+   */
+  it("refuses to boot when STREAM_TOKEN_SECRET is set but too short", async () => {
+    const original = process.env.STREAM_TOKEN_SECRET;
+    process.env.STREAM_TOKEN_SECRET = "too-short";
+    try {
+      expect(() => bootstrapWorker()).toThrow(/STREAM_TOKEN_SECRET is too short/);
     } finally {
       if (original === undefined) delete process.env.STREAM_TOKEN_SECRET;
       else process.env.STREAM_TOKEN_SECRET = original;

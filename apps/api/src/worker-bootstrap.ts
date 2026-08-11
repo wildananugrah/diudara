@@ -1,5 +1,6 @@
 import { db } from "./db/client";
 import {
+  assertUsableStreamingSecret,
   resolveAppBaseUrl,
   selectMessagingProviders,
   type MessagingProviders,
@@ -227,10 +228,20 @@ export function bootstrapWorker(): WorkerDependencies {
   // re-derived from anything else — see `WorkerDependencies.notifyStreamLive`'s own
   // docstring for why `undefined` here can only happen alongside the API root's own
   // `authoriseStream`/`handleStreamLifecycle` being `undefined` too.
+  //
+  // Run through `assertUsableStreamingSecret` — the SAME length floor
+  // `selectStreamingProvider` enforces on the API side, not a bare presence check.
+  // Without it, a worker box whose `STREAM_TOKEN_SECRET` diverges from (or is merely
+  // shorter/weaker than) the API's own would happily mint watch tokens the API's
+  // `AuthoriseStream` rejects at read time — every member gets a link that 403s on
+  // every segment, and nothing here would ever fail to surface it.
   const streamTokenSecret =
     typeof process.env.STREAM_TOKEN_SECRET === "string" && process.env.STREAM_TOKEN_SECRET.length > 0
       ? process.env.STREAM_TOKEN_SECRET
       : undefined;
+  if (streamTokenSecret) {
+    assertUsableStreamingSecret("STREAM_TOKEN_SECRET", streamTokenSecret);
+  }
   const notifyStreamLive = streamTokenSecret
     ? new NotifyStreamLive(
         new DrizzleEventRepository(db),
@@ -241,6 +252,10 @@ export function bootstrapWorker(): WorkerDependencies {
         // `grantChannelAccess`/`sendRenewalReminder` above:
         // `TelegramBotAdapter.notify` throws.
         messaging.notifier,
+        // The SAME clock instance every other pass in this root shares — see
+        // `WorkerDependencies.clock`'s own docstring for why a second clock
+        // constructed here would be a bug, not a style choice.
+        clock,
         {
           appBaseUrl: resolveAppBaseUrl({
             appBaseUrl: process.env.APP_BASE_URL,

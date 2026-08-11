@@ -797,7 +797,7 @@ const STREAMING_ENV_VAR_NAMES = {
  * streaming variables are known to be set — see `selectStreamingProvider`.
  * Mirrors `assertUsableJwtSecret` above in shape.
  */
-function assertUsableStreamingSecret(name: string, secret: string): void {
+export function assertUsableStreamingSecret(name: string, secret: string): void {
   if (secret.length < MIN_STREAMING_SECRET_LENGTH) {
     throw new Error(
       `${name} is too short (${secret.length} characters; ${MIN_STREAMING_SECRET_LENGTH} ` +
