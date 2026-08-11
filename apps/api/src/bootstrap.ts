@@ -48,11 +48,14 @@ import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
 import { DrizzleAiConversationRepository } from "./infrastructure/repositories/drizzle-ai-conversation.repository";
 import { DrizzleAiUsageRepository } from "./infrastructure/repositories/drizzle-ai-usage.repository";
 import { SendAiMessage } from "./application/use-cases/send-ai-message";
+import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
+import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 import type { AiProviderPort } from "./application/ports/ai-provider.port";
+import type { StreamingProviderPort } from "./application/ports/streaming-provider.port";
 
 /** Values that may be interpolated into a `DatabasePing` tagged template. */
 type PingValue = string | number | boolean | Date | null;
@@ -227,6 +230,17 @@ export interface Dependencies {
    * without a co-builder.
    */
   sendAiMessage: SendAiMessage | undefined;
+  /**
+   * Task 2's live-streaming provider — the SECOND feature in this codebase
+   * (after `aiProvider`) that boots DISABLED rather than refusing to start
+   * when unconfigured. See `selectStreamingProvider` for the full four-way
+   * decision; `undefined` means MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/
+   * MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET are not set and (per the
+   * design spec §7) the creator's streaming UI stays hidden rather than
+   * offering a "go live" button that always fails, exactly the way
+   * `aiProvider: undefined` hides the co-builder chat screen.
+   */
+  streamingProvider: StreamingProviderPort | undefined;
 }
 
 /**
@@ -677,6 +691,151 @@ export function resolveAiDailyMessageLimit(env: { value: string | undefined }): 
     );
   }
   return parsed;
+}
+
+/**
+ * Minimum `MEDIAMTX_WEBHOOK_SECRET`/`STREAM_TOKEN_SECRET` length, the same
+ * floor as `JWT_SECRET`/`XENDIT_CALLBACK_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`
+ * above and for the same reason: `MEDIAMTX_WEBHOOK_SECRET` is the ONLY
+ * authentication on both MediaMTX webhooks (Task 4), and
+ * `STREAM_TOKEN_SECRET` signs every watch token
+ * (`apps/api/src/domain/watch-token.ts`) — a short one is
+ * offline-brute-forceable from a single leaked token or webhook payload, and
+ * either lets an attacker reach a paid stream they never paid for.
+ */
+const MIN_STREAMING_SECRET_LENGTH = 32;
+
+/** The four env vars that make up streaming configuration, for error text. */
+const STREAMING_ENV_VAR_NAMES = {
+  rtmpHost: "MEDIAMTX_RTMP_HOST",
+  hlsBaseUrl: "MEDIAMTX_HLS_BASE_URL",
+  webhookSecret: "MEDIAMTX_WEBHOOK_SECRET",
+  streamTokenSecret: "STREAM_TOKEN_SECRET",
+} as const;
+
+/**
+ * Length floor for a present streaming secret, checked only once all four
+ * streaming variables are known to be set — see `selectStreamingProvider`.
+ * Mirrors `assertUsableJwtSecret` above in shape.
+ */
+function assertUsableStreamingSecret(name: string, secret: string): void {
+  if (secret.length < MIN_STREAMING_SECRET_LENGTH) {
+    throw new Error(
+      `${name} is too short (${secret.length} characters; ${MIN_STREAMING_SECRET_LENGTH} ` +
+        `required). It is load-bearing for access to paid streams. Generate one: ` +
+        "openssl rand -hex 32"
+    );
+  }
+}
+
+/**
+ * Chooses the live-streaming provider adapter — the SECOND selector in this
+ * file (after `selectAiProvider`) that boots DISABLED rather than refusing
+ * to start when unconfigured, and deliberately so (design spec §7, plan
+ * Global Constraints): a community with no live streaming still charges
+ * members and gates its Telegram/WhatsApp channels exactly as before, so
+ * refusing to boot over a missing MediaMTX host would let an OPTIONAL
+ * feature take down a REQUIRED one.
+ *
+ * Same shape as `selectAiProvider`, generalised from two variables to four
+ * because a live session needs all of them or none:
+ *
+ *   1. All four set -> `MediaMtxAdapter`, in EVERY environment, once the two
+ *      secrets clear `MIN_STREAMING_SECRET_LENGTH` (checked here, at BOOT,
+ *      rather than deferred to whatever later reads them — a short secret
+ *      must fail loudly now, not as a webhook that silently never
+ *      authenticates or a token nobody can forge protection against).
+ *   2. PARTIAL configuration (1-3 of the four set) throws in EVERY
+ *      environment — the same rule `selectPaymentProvider` and
+ *      `selectMessagingProviders` apply to their own pairs, extended to
+ *      four: a host with no webhook secret is a webhook nothing can
+ *      authenticate, and a webhook secret with no host is a signing key
+ *      naming a stream nobody can reach.
+ *   3. NONE set, INSIDE `RELAXED_NODE_ENVS` -> `FakeStreamingAdapter`, the
+ *      SAME allowlist reused from `isRelaxedNodeEnv` (see `selectAiProvider`
+ *      above for why this is not a second gate).
+ *   4. NONE set, OUTSIDE `RELAXED_NODE_ENVS` -> `undefined`. THE FEATURE IS
+ *      DISABLED, NOT THE BOOT — same divergence `selectAiProvider` makes
+ *      from `selectPaymentProvider`/`selectMessagingProviders`, and for the
+ *      same reason: nothing is on the line if streaming is simply
+ *      unavailable.
+ *
+ * Case 4 is the one this project has paid for twice already (Phase 3,
+ * `RELAXED_NODE_ENVS`'s own docstring): a guard that is correct in isolation
+ * but whose trigger point — an unrecognised or unset `NODE_ENV` — is never
+ * actually exercised by a test is no guard at all. `bootstrap.test.ts` pins
+ * this for `production`, a plausible misspelling (`"Development"`, which
+ * `RELAXED_NODE_ENVS` — a `Set`, not a case-insensitive check — correctly
+ * treats as unrecognised), and unset, crossed with streaming configuration
+ * that is genuinely absent and with configuration that is present but
+ * blank/whitespace-only (which `presentOrUndefined` normalises to the same
+ * "absent" state) — none of those combinations may throw.
+ */
+export function selectStreamingProvider(env: {
+  rtmpHost: string | undefined;
+  hlsBaseUrl: string | undefined;
+  webhookSecret: string | undefined;
+  streamTokenSecret: string | undefined;
+  nodeEnv: string | undefined;
+}): StreamingProviderPort | undefined {
+  const values = {
+    rtmpHost: presentOrUndefined(env.rtmpHost),
+    hlsBaseUrl: presentOrUndefined(env.hlsBaseUrl),
+    webhookSecret: presentOrUndefined(env.webhookSecret),
+    streamTokenSecret: presentOrUndefined(env.streamTokenSecret),
+  };
+  const entries = Object.entries(values) as [keyof typeof values, string | undefined][];
+  const setCount = entries.filter(([, value]) => value !== undefined).length;
+
+  if (setCount === entries.length) {
+    assertUsableStreamingSecret("MEDIAMTX_WEBHOOK_SECRET", values.webhookSecret as string);
+    assertUsableStreamingSecret("STREAM_TOKEN_SECRET", values.streamTokenSecret as string);
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] streaming provider: MediaMtxAdapter " +
+        "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET " +
+        "are all set — live streaming is available)"
+    );
+    return new MediaMtxAdapter({
+      rtmpHost: values.rtmpHost as string,
+      hlsBaseUrl: values.hlsBaseUrl as string,
+    });
+  }
+
+  if (setCount > 0) {
+    const present = entries
+      .filter(([, value]) => value !== undefined)
+      .map(([key]) => STREAMING_ENV_VAR_NAMES[key]);
+    const missing = entries
+      .filter(([, value]) => value === undefined)
+      .map(([key]) => STREAMING_ENV_VAR_NAMES[key]);
+    throw new Error(
+      `Streaming is half-configured: ${present.join(", ")} set but ${missing.join(", ")} not. ` +
+        "Set MEDIAMTX_RTMP_HOST, MEDIAMTX_HLS_BASE_URL, MEDIAMTX_WEBHOOK_SECRET and " +
+        "STREAM_TOKEN_SECRET together or not at all — see apps/api/.env.example. Refusing to " +
+        "start rather than boot with streaming half-wired."
+    );
+  }
+
+  if (isRelaxedNodeEnv(env.nodeEnv)) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] streaming provider: FakeStreamingAdapter " +
+        "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET " +
+        "not set — no real MediaMTX will be used; set all four to switch to MediaMtxAdapter)"
+    );
+    return new FakeStreamingAdapter();
+  }
+
+  logProviderChoice(
+    env.nodeEnv,
+    "[bootstrap] streaming provider: none — live streaming is DISABLED " +
+      "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET not " +
+      `set, and NODE_ENV is ${describeNodeEnv(env.nodeEnv)}, outside ${RELAXED_NODE_ENVS_LIST}). ` +
+      "Unlike payments/messaging this does NOT block boot: the creator's streaming UI stays " +
+      "hidden. Set all four env vars to enable it."
+  );
+  return undefined;
 }
 
 /**
@@ -1145,6 +1304,17 @@ export function bootstrap(): Dependencies {
       )
     : undefined;
 
+  // Task 2's live-streaming provider. The SECOND feature in this codebase
+  // that boots disabled rather than refusing to start — see
+  // selectStreamingProvider.
+  const streamingProvider = selectStreamingProvider({
+    rtmpHost: process.env.MEDIAMTX_RTMP_HOST,
+    hlsBaseUrl: process.env.MEDIAMTX_HLS_BASE_URL,
+    webhookSecret: process.env.MEDIAMTX_WEBHOOK_SECRET,
+    streamTokenSecret: process.env.STREAM_TOKEN_SECRET,
+    nodeEnv: process.env.NODE_ENV,
+  });
+
   return {
     creatorRepository,
     tokenIssuer,
@@ -1180,5 +1350,6 @@ export function bootstrap(): Dependencies {
     sql,
     aiProvider,
     sendAiMessage,
+    streamingProvider,
   };
 }

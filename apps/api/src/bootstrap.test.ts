@@ -14,6 +14,7 @@ import {
   selectAiProvider,
   selectMessagingProviders,
   selectPaymentProvider,
+  selectStreamingProvider,
   TEST_CALLBACK_TOKEN,
   TEST_TELEGRAM_WEBHOOK_SECRET,
   type Dependencies,
@@ -24,6 +25,8 @@ import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adap
 import { FAKE_AI_BEHAVIOURS, FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
 import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
 import { SendAiMessage } from "./application/use-cases/send-ai-message";
+import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
+import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
 import { createApp } from "./app";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
@@ -472,6 +475,10 @@ describe("Dependencies (composition root contract)", () => {
       // type — these two tests are not about the AI path.
       aiProvider: undefined,
       sendAiMessage: undefined,
+      // Task 2's streaming provider. Same reasoning: `undefined` (disabled)
+      // needs no fake adapter to satisfy the type, and these tests are not
+      // about the streaming path.
+      streamingProvider: undefined,
     };
 
     const created = await deps.creatorRepository.create({
@@ -589,6 +596,10 @@ describe("Dependencies (composition root contract)", () => {
       // type — these two tests are not about the AI path.
       aiProvider: undefined,
       sendAiMessage: undefined,
+      // Task 2's streaming provider. Same reasoning: `undefined` (disabled)
+      // needs no fake adapter to satisfy the type, and these tests are not
+      // about the streaming path.
+      streamingProvider: undefined,
     };
 
     const res = await createApp(deps).request("/health");
@@ -836,6 +847,39 @@ describe(".env.example", () => {
     expect(example).toContain("secret_token=");
     expect(example).toContain("allowed_updates");
     expect(example).toContain("chat_member");
+  });
+
+  /**
+   * Same shape as the messaging-tokens test above, extended to four
+   * variables: all four ship as commented placeholders with no committed
+   * value, and the file names both the fallback adapter and the allowlist
+   * that permits it, so a reader relying on this file alone (not the source)
+   * can still find out what an absent value does.
+   */
+  it("documents the four streaming variables as commented placeholders, set together or not at all", () => {
+    const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
+    const lines = example.split("\n");
+
+    for (const name of [
+      "MEDIAMTX_RTMP_HOST",
+      "MEDIAMTX_HLS_BASE_URL",
+      "MEDIAMTX_WEBHOOK_SECRET",
+      "STREAM_TOKEN_SECRET",
+    ]) {
+      const line = lines.find((l) => l.trim().startsWith(`# ${name}=`));
+      expect(line).toBeDefined();
+      expect(line!.trim()).toBe(`# ${name}=`);
+      expect(lines.some((l) => l.startsWith(`${name}=`))).toBe(false);
+    }
+
+    expect(example).toContain("FakeStreamingAdapter");
+    for (const nodeEnv of [...RELAXED_NODE_ENVS]) {
+      expect(example).toContain(nodeEnv);
+    }
+    // STREAM_TOKEN_SECRET must never be confused with JWT_SECRET — the two
+    // secrets protect different things and a compromise of one must not be
+    // a compromise of the other (watch-token.ts's own docstring).
+    expect(example).toContain("JWT_SECRET");
   });
 });
 
@@ -2123,6 +2167,232 @@ describe("bootstrap() AI provider wiring", () => {
             }).not.toThrow();
             expect(deps!.aiProvider).toBeUndefined();
             expect(deps!.sendAiMessage).toBeUndefined();
+          });
+        }
+      );
+    });
+  });
+});
+
+const FULL_STREAMING_CONFIG = {
+  rtmpHost: "stream.example.com",
+  hlsBaseUrl: "https://stream.example.com/hls",
+  webhookSecret: "wh_".padEnd(32, "s"),
+  streamTokenSecret: "tok_".padEnd(32, "t"),
+};
+
+describe("selectStreamingProvider", () => {
+  it("selects MediaMtxAdapter when all four env vars are set", () => {
+    captureConsoleLog(() => {
+      const provider = selectStreamingProvider({ ...FULL_STREAMING_CONFIG, nodeEnv: "test" });
+      expect(provider).toBeInstanceOf(MediaMtxAdapter);
+    });
+  });
+
+  // Mirrors selectAiProvider's "still starts on the allowlist ... whatever
+  // nodeEnv says": a FULLY configured streaming setup is real infrastructure
+  // an operator deliberately stood up, so it must work in production, and it
+  // must not be defeated by a NODE_ENV that is merely unrecognised — that
+  // would make a correctly-configured production box silently disable a
+  // feature it paid to configure.
+  it("still selects MediaMtxAdapter regardless of NODE_ENV when fully configured", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [undefined, "staging", "prod", "production", "Development"]) {
+        expect(
+          selectStreamingProvider({ ...FULL_STREAMING_CONFIG, nodeEnv })
+        ).toBeInstanceOf(MediaMtxAdapter);
+      }
+    });
+  });
+
+  it("selects FakeStreamingAdapter when all four env vars are unset in development or test", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of ["test", "development"]) {
+        expect(
+          selectStreamingProvider({
+            rtmpHost: undefined,
+            hlsBaseUrl: undefined,
+            webhookSecret: undefined,
+            streamTokenSecret: undefined,
+            nodeEnv,
+          })
+        ).toBeInstanceOf(FakeStreamingAdapter);
+      }
+    });
+  });
+
+  // THE TEST THAT MATTERS MOST (plan Task 2): this project shipped a
+  // Critical TWICE in Phase 3 from a guard that was correct in isolation but
+  // whose trigger point — an unrecognised or unset NODE_ENV — was never
+  // exercised by any test, so nobody noticed it was dead code until a real
+  // box hit it. RELAXED_NODE_ENVS replaced a denylist with an allowlist for
+  // exactly this reason (see its own docstring). This proves the allowlist
+  // gate here is actually REACHED, not dead code, for:
+  //   - "production": a real, recognised NODE_ENV value that simply is not
+  //     on the allowlist — the shape that bit Phase 3.
+  //   - "Development": a plausible misspelling of the allowed
+  //     "development" — RELAXED_NODE_ENVS is a Set, not a case-insensitive
+  //     check, so this MUST be treated as unrecognised.
+  //   - undefined: NODE_ENV simply never set, which is what actually
+  //     happened in Phase 3 (nothing in this repo sets NODE_ENV outside
+  //     apps/api/.env.example).
+  // crossed with streaming configuration that is genuinely ABSENT
+  // (undefined) and configuration that arrives as GARBAGE whitespace — the
+  // shape `presentOrUndefined` treats identically to absent, so a stray
+  // `MEDIAMTX_RTMP_HOST= ` (trailing space, no value) must disable exactly
+  // like an unset one, never throw, and never silently activate. In every
+  // one of these twelve combinations the selector must return `undefined`
+  // and must NOT throw.
+  it("is inert outside RELAXED_NODE_ENVS — production, a misspelling, and unset all disable rather than throw, whether streaming config is absent or garbage whitespace", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of ["production", "Development", undefined]) {
+        for (const blank of [undefined, "", "   "]) {
+          expect(
+            selectStreamingProvider({
+              rtmpHost: blank,
+              hlsBaseUrl: blank,
+              webhookSecret: blank,
+              streamTokenSecret: blank,
+              nodeEnv,
+            })
+          ).toBeUndefined();
+        }
+      }
+    });
+  });
+
+  it("says out loud that streaming is disabled, outside the allowlist with no configuration", () => {
+    const logs = captureConsoleLog(() => {
+      selectStreamingProvider({
+        rtmpHost: undefined,
+        hlsBaseUrl: undefined,
+        webhookSecret: undefined,
+        streamTokenSecret: undefined,
+        nodeEnv: "production",
+      });
+    });
+    expect(logs.some((line) => /live streaming is DISABLED/.test(line))).toBe(true);
+  });
+
+  it("refuses to start on PARTIAL configuration in EVERY environment", () => {
+    for (const nodeEnv of ["test", "development", "production", undefined]) {
+      for (const missingKey of Object.keys(FULL_STREAMING_CONFIG) as Array<
+        keyof typeof FULL_STREAMING_CONFIG
+      >) {
+        const partial = { ...FULL_STREAMING_CONFIG, [missingKey]: undefined, nodeEnv };
+        expect(() => selectStreamingProvider(partial)).toThrow(/half-configured/);
+      }
+    }
+  });
+
+  it("names which variables are set and which are missing", () => {
+    expect(() =>
+      selectStreamingProvider({
+        ...FULL_STREAMING_CONFIG,
+        streamTokenSecret: undefined,
+        nodeEnv: "test",
+      })
+    ).toThrow(/MEDIAMTX_RTMP_HOST.*STREAM_TOKEN_SECRET not/s);
+  });
+
+  // A short secret must fail LOUDLY at boot even under the allowlist — the
+  // length floor is a hard security property (MIN_STREAMING_SECRET_LENGTH),
+  // not a production-only concern, exactly like JWT_SECRET's own floor.
+  it("refuses a MEDIAMTX_WEBHOOK_SECRET shorter than 32 characters, even under NODE_ENV=test", () => {
+    expect(() =>
+      selectStreamingProvider({ ...FULL_STREAMING_CONFIG, webhookSecret: "short", nodeEnv: "test" })
+    ).toThrow(/MEDIAMTX_WEBHOOK_SECRET is too short/);
+  });
+
+  it("refuses a STREAM_TOKEN_SECRET shorter than 32 characters, even under NODE_ENV=test", () => {
+    expect(() =>
+      selectStreamingProvider({
+        ...FULL_STREAMING_CONFIG,
+        streamTokenSecret: "short",
+        nodeEnv: "test",
+      })
+    ).toThrow(/STREAM_TOKEN_SECRET is too short/);
+  });
+
+  it("stays silent under NODE_ENV=test and speaks up everywhere else", () => {
+    const quiet = captureConsoleLog(() => {
+      selectStreamingProvider({
+        rtmpHost: undefined,
+        hlsBaseUrl: undefined,
+        webhookSecret: undefined,
+        streamTokenSecret: undefined,
+        nodeEnv: "test",
+      });
+    });
+    expect(quiet).toEqual([]);
+
+    const loud = captureConsoleLog(() => {
+      selectStreamingProvider({
+        rtmpHost: undefined,
+        hlsBaseUrl: undefined,
+        webhookSecret: undefined,
+        streamTokenSecret: undefined,
+        nodeEnv: "development",
+      });
+    });
+    expect(loud.length).toBeGreaterThan(0);
+  });
+});
+
+describe("bootstrap() streaming provider wiring", () => {
+  it("wires FakeStreamingAdapter under NODE_ENV=test with no streaming config", () => {
+    withJwtSecret("x".repeat(32), () => {
+      const deps = bootstrap();
+      expect(deps.streamingProvider).toBeInstanceOf(FakeStreamingAdapter);
+    });
+  });
+
+  it("wires MediaMtxAdapter when all four streaming env vars are configured", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          MEDIAMTX_RTMP_HOST: FULL_STREAMING_CONFIG.rtmpHost,
+          MEDIAMTX_HLS_BASE_URL: FULL_STREAMING_CONFIG.hlsBaseUrl,
+          MEDIAMTX_WEBHOOK_SECRET: FULL_STREAMING_CONFIG.webhookSecret,
+          STREAM_TOKEN_SECRET: FULL_STREAMING_CONFIG.streamTokenSecret,
+        },
+        () => {
+          const deps = bootstrap();
+          expect(deps.streamingProvider).toBeInstanceOf(MediaMtxAdapter);
+        }
+      );
+    });
+  });
+
+  // Mirrors the AI provider's own "boots with the co-builder disabled even
+  // when [irrelevant config] is garbage" test: a fully-configured
+  // production box (payments and messaging both real) with NO streaming
+  // configuration must still boot, and streamingProvider must be undefined
+  // rather than throwing or silently activating a fake.
+  it("boots with streaming disabled on an otherwise fully-configured production box with no MediaMTX config", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "production",
+          APP_BASE_URL: "http://localhost:5173",
+          XENDIT_SECRET_KEY: "sk_live_x",
+          XENDIT_SPLIT_RULE_ID: "splitrule_1",
+          XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
+          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+          FONNTE_API_TOKEN: "real-fonnte-token",
+          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
+          MEDIAMTX_RTMP_HOST: undefined,
+          MEDIAMTX_HLS_BASE_URL: undefined,
+          MEDIAMTX_WEBHOOK_SECRET: undefined,
+          STREAM_TOKEN_SECRET: undefined,
+        },
+        () => {
+          captureConsoleLog(() => {
+            let deps: Dependencies;
+            expect(() => {
+              deps = bootstrap();
+            }).not.toThrow();
+            expect(deps!.streamingProvider).toBeUndefined();
           });
         }
       );
