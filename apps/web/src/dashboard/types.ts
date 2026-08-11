@@ -117,6 +117,50 @@ export interface AiStatus {
   enabled: boolean;
 }
 
+/** `GET /streaming/status` — apps/api/src/routes/streaming.ts. Mirrors `AiStatus` exactly. */
+export interface StreamingStatus {
+  enabled: boolean;
+}
+
+/**
+ * `EventRecord`, as `GET /communities/:communityId/events` returns each row —
+ * apps/api/src/application/ports/event-repository.port.ts.
+ *
+ * `streamKey` IS A SECRET, exactly like `Tier.priceAmount` is money: the API
+ * returns it only to the creator who owns the community (a stranger's
+ * request 404s before any row is read — see events.ts's own tests), and
+ * EventsPage.tsx must never cache one across a community switch or put one
+ * in a URL. It appears here (not just on the create response) so a creator
+ * who lost their OBS settings can recover it.
+ */
+export interface LiveSession {
+  id: string;
+  communityId: string;
+  title: string;
+  /** ISO 8601, or null — a session created with no explicit time. */
+  scheduledAt: string | null;
+  streamKey: string | null;
+  /** `scheduled` | `live` | `ended`. */
+  status: string;
+  hlsPlaybackPath: string | null;
+  recordingUrl: string | null;
+}
+
+/**
+ * `ScheduledSession` — apps/api/src/application/use-cases/schedule-live-session.ts
+ * — `POST /communities/:communityId/events`'s response. `rtmpUrl` appears
+ * ONLY here: it is never persisted, so it never appears in `LiveSession`
+ * (the list response) again after this call returns.
+ */
+export interface CreatedLiveSession {
+  id: string;
+  title: string;
+  status: string;
+  rtmpUrl: string;
+  streamKey: string;
+  hlsPlaybackPath: string;
+}
+
 /**
  * `POST /ai/messages` — apps/api/src/routes/ai.ts, backed by
  * `SendAiMessage.execute` (apps/api/src/application/use-cases/send-ai-message.ts).

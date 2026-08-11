@@ -4,7 +4,7 @@ import { apiFetch } from "./apiClient";
 import { subscribeToAuth } from "./auth";
 import { communityStatusExplanation, communityStatusLabel, publicCheckoutUrl } from "./format";
 import { ensurePaymentAccountStatusLoaded, getPaymentAccountState } from "./paymentAccount";
-import type { AiStatus, Community } from "./types";
+import type { AiStatus, Community, StreamingStatus } from "./types";
 
 /** A label, its input, and that field's own error message. Shared by every form. */
 export function Field({
@@ -194,6 +194,7 @@ export function CommunityHeader({ community }: { community: Community }) {
         <NavLink to={`${base}/channels`}>Grup</NavLink>
         <NavLink to={`${base}/members`}>Anggota</NavLink>
         <NavLink to={`${base}/activity`}>Aktivitas</NavLink>
+        <LiveStreamingNavLink communityId={community.id} />
       </nav>
     </header>
   );
@@ -250,6 +251,47 @@ export function AiCoBuilderNavLink() {
 
   if (status !== "enabled") return null;
   return <NavLink to="/dashboard/co-builder">AI Co-Builder</NavLink>;
+}
+
+/**
+ * The "Siaran langsung" community tab — hidden until `GET /streaming/status`
+ * confirms live streaming is configured on this server. SAME PATTERN as
+ * `AiCoBuilderNavLink` immediately above (fetch once on mount, fail toward
+ * HIDING on any error, no cross-session cache — see that component's own
+ * docstring for why each of those choices is made), reused rather than
+ * reinvented per Task 7's brief.
+ *
+ * `GET /streaming/status` exists FOR this — Task 3 deliberately left "how
+ * does the dashboard learn this without a side effect" to whichever task
+ * built this screen (see events.ts's own history): the only alternative
+ * signal, `POST /communities/:communityId/events`'s 503, cannot be probed
+ * for without actually scheduling a real session on success, which is the
+ * exact reason `paymentAccount.ts` refuses to probe `POST /payment-account`.
+ *
+ * Takes `communityId` (unlike `AiCoBuilderNavLink`, which has no props)
+ * because this tab lives inside a specific community's own navigation, not
+ * the top-level one — `EventsPage` is mounted at
+ * `/dashboard/c/:communityId/streaming`.
+ */
+export function LiveStreamingNavLink({ communityId }: { communityId: string }) {
+  const [status, setStatus] = useState<"loading" | "enabled" | "disabled">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch<StreamingStatus>("/streaming/status")
+      .then((result) => {
+        if (!cancelled) setStatus(result.enabled ? "enabled" : "disabled");
+      })
+      .catch(() => {
+        if (!cancelled) setStatus("disabled");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (status !== "enabled") return null;
+  return <NavLink to={`/dashboard/c/${communityId}/streaming`}>Siaran langsung</NavLink>;
 }
 
 export function CheckoutLink({ community }: { community: Community }) {

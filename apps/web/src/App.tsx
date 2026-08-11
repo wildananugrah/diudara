@@ -14,6 +14,7 @@ import AccountPage from "./dashboard/pages/AccountPage";
 import MembersPage from "./dashboard/pages/MembersPage";
 import ActivityPage from "./dashboard/pages/ActivityPage";
 import CoBuilderPage from "./dashboard/pages/CoBuilderPage";
+import EventsPage from "./dashboard/pages/EventsPage";
 
 export function AppRoutes() {
   return (
@@ -56,6 +57,7 @@ export function AppRoutes() {
         <Route path="c/:communityId/channels" element={<ChannelsPage />} />
         <Route path="c/:communityId/members" element={<MembersPage />} />
         <Route path="c/:communityId/activity" element={<ActivityPage />} />
+        <Route path="c/:communityId/streaming" element={<EventsPage />} />
         {/* An unknown /dashboard/... path goes to the dashboard's own home, not
             to the public checkout 404 the catch-all below serves. */}
         <Route path="*" element={<Navigate to="/dashboard" replace />} />

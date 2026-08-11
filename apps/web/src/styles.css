@@ -495,6 +495,33 @@ button:disabled {
   color: #1e40af;
 }
 
+/*
+ * A live session's own three statuses (EventsPage.tsx) — deliberately
+ * reusing the exact literal values already defined above rather than
+ * inventing new ones. `badge-scheduled` borrows `.badge-paused`'s blue
+ * ("not happening yet, nothing wrong"), `badge-live` borrows
+ * `.button-danger`'s red ("this is happening RIGHT NOW, pay attention" —
+ * the one status that should not read as calm), and `badge-ended` borrows
+ * `.badge-churned`'s grey ("finished, no longer actionable").
+ */
+.badge-scheduled {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1e40af;
+}
+
+.badge-live {
+  background: var(--red-bg);
+  border-color: #fca5a5;
+  color: var(--red);
+}
+
+.badge-ended {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+  color: #4b5563;
+}
+
 /* ---------- metric tiles ---------- */
 
 .metrics {

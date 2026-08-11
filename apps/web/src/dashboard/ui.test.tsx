@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { setSession } from "./auth";
 import { recordPaymentAccountState, resetPaymentAccountCacheForTesting } from "./paymentAccount";
 import { stubFetch } from "./testing";
-import { AiCoBuilderNavLink, PaymentAccountNotice } from "./ui";
+import { AiCoBuilderNavLink, LiveStreamingNavLink, PaymentAccountNotice } from "./ui";
 
 const CREATOR = { id: "creator-1", name: "Budi", email: "budi@example.com" };
 
@@ -146,5 +146,50 @@ describe("AiCoBuilderNavLink", () => {
       await Promise.resolve();
     });
     expect(screen.queryAllByText("AI Co-Builder").length).toBe(0);
+  });
+});
+
+describe("LiveStreamingNavLink", () => {
+  function mountNav() {
+    return render(
+      <MemoryRouter>
+        <LiveStreamingNavLink communityId="community-1" />
+      </MemoryRouter>
+    );
+  }
+
+  it("renders nothing while GET /streaming/status has not answered yet", () => {
+    stubFetch([{ path: "/streaming/status", body: { enabled: true } }]);
+    mountNav();
+    // Fails toward HIDING: before the fetch resolves, there is nothing to click.
+    expect(screen.queryAllByText("Siaran langsung").length).toBe(0);
+  });
+
+  it("shows the link once the server confirms live streaming is configured", async () => {
+    stubFetch([{ path: "/streaming/status", body: { enabled: true } }]);
+    mountNav();
+    expect(await screen.findByText("Siaran langsung")).toBeTruthy();
+  });
+
+  it("stays hidden when the server reports streaming disabled", async () => {
+    stubFetch([{ path: "/streaming/status", body: { enabled: false } }]);
+    mountNav();
+    await waitFor(() => expect(screen.queryAllByText("Siaran langsung").length).toBe(0));
+  });
+
+  it("fails toward hiding rather than showing a link that can only ever 503", async () => {
+    stubFetch([{ path: "/streaming/status", status: 500, body: { error: "internal server error" } }]);
+    mountNav();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryAllByText("Siaran langsung").length).toBe(0);
+  });
+
+  it("links to this specific community's streaming tab, not a fixed top-level path", async () => {
+    stubFetch([{ path: "/streaming/status", body: { enabled: true } }]);
+    mountNav();
+    const link = (await screen.findByText("Siaran langsung")) as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("/dashboard/c/community-1/streaming");
   });
 });

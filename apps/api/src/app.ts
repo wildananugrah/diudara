@@ -13,6 +13,7 @@ import { webhookRoutes } from "./routes/webhooks";
 import { mediamtxWebhookRoutes } from "./routes/mediamtx-webhooks";
 import { aiRoutes } from "./routes/ai";
 import { eventRoutes } from "./routes/events";
+import { streamingRoutes } from "./routes/streaming";
 import { errorHandler } from "./http/error-handler";
 import type { AuthVariables } from "./http/auth.middleware";
 import type { Dependencies } from "./bootstrap";
@@ -64,5 +65,9 @@ export function createApp(deps: Dependencies) {
   // Phase 7's AI co-builder chat. A distinct top-level path, so mount order
   // relative to /communities does not matter.
   app.route("/ai", aiRoutes(deps));
+  // Task 7's "is live streaming configured" flag — GET /streaming/status,
+  // the same shape as /ai/status above. A distinct top-level path (the flag
+  // is not community-scoped), so mount order does not matter here either.
+  app.route("/streaming", streamingRoutes(deps));
   return app;
 }
