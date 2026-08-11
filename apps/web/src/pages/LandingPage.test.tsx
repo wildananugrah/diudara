@@ -61,12 +61,18 @@ describe("LandingPage", () => {
         <LandingPage />
       </MemoryRouter>
     );
-    const blocks = Array.from(document.querySelectorAll("p, li"));
+    const blocks = Array.from(document.querySelectorAll("p, li, h1, h2, h3"));
     const sentences = blocks.flatMap((block) => (block.textContent ?? "").split(/(?<=[.!?])\s+/));
     const mentionsWhatsapp = sentences.filter((s) => /whatsapp/i.test(s));
     // WhatsApp must still appear somewhere — the page cannot pass by omitting it.
     expect(mentionsWhatsapp.length).toBeGreaterThan(0);
-    const gatedSounding = mentionsWhatsapp.filter((s) => /akses|gabung|undangan/i.test(s));
+    // Nouns (akses/gabung/undangan) alone miss the plainest Indonesian phrasing,
+    // which is verbal: "masuk ke" (getting into the group), "tambahkan"/"keluarkan"
+    // (added/removed — also matches the "di-...-kan" passive forms "ditambahkan"/
+    // "dikeluarkan" as substrings).
+    const gatedSounding = mentionsWhatsapp.filter((s) =>
+      /akses|gabung|undangan|masuk ke|tambahkan|keluarkan/i.test(s)
+    );
     expect(gatedSounding.length).toBe(0);
   });
 
@@ -87,7 +93,11 @@ describe("LandingPage", () => {
       </MemoryRouter>
     );
     const text = document.body.textContent ?? "";
-    expect(/rp\s?\d/i.test(text)).toBe(false);
-    expect(/\d+\s?%/.test(text)).toBe(false);
+    // [.\s]* rather than \s? — ordinary Indonesian spelling puts a period after
+    // "Rp" ("Rp. 0"), which a single optional space never matches.
+    expect(/rp[.\s]*\d/i.test(text)).toBe(false);
+    // "persen" is the more idiomatic written-out form in this copy's register,
+    // and quoting a rate that way is just as much a public commitment as "%".
+    expect(/(\d+\s?%|persen)/i.test(text)).toBe(false);
   });
 });
