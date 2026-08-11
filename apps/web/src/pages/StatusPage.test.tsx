@@ -90,4 +90,39 @@ describe("StatusPage", () => {
 
     expect(await screen.findByText(/tidak ditemukan/i)).toBeTruthy();
   });
+
+  describe("the 'Tonton sekarang' link (Task 8)", () => {
+    it("shows a watch link once active, when the API supplies a watchUrl", async () => {
+      global.fetch = mock(async () =>
+        jsonResponse({ status: "active", watchUrl: "/watch/abc123" })
+      ) as unknown as typeof fetch;
+
+      renderAt("sub-1");
+
+      const link = await screen.findByRole("link", { name: /tonton sekarang/i });
+      expect(link.getAttribute("href")).toBe("/watch/abc123");
+    });
+
+    it("shows no watch link when active but the API supplies no watchUrl", async () => {
+      global.fetch = mock(async () => jsonResponse({ status: "active" })) as unknown as typeof fetch;
+
+      renderAt("sub-1");
+
+      await screen.findByText(/berhasil/i);
+      // Counted, not asserted with `.toBeNull()` — see
+      // src/test/no-hanging-dom-assertions.test.ts for why a failing
+      // `toBeNull()` on a DOM element hangs the whole suite instead of
+      // failing it.
+      expect(screen.queryAllByRole("link", { name: /tonton sekarang/i }).length).toBe(0);
+    });
+
+    it("shows no watch link while still pending, even if a watchUrl were ever present", async () => {
+      global.fetch = mock(async () => jsonResponse({ status: "pending" })) as unknown as typeof fetch;
+
+      renderAt("sub-1", { pollIntervalMs: 10, timeoutMs: 50 });
+
+      await screen.findByText(/menunggu pembayaran/i);
+      expect(screen.queryAllByRole("link", { name: /tonton sekarang/i }).length).toBe(0);
+    });
+  });
 });

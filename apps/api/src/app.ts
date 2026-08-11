@@ -25,9 +25,12 @@ export function createApp(deps: Dependencies) {
   app.route("/auth", authRoutes(deps));
   app.route("/payment-account", paymentAccountRoutes(deps));
   // Mounted before publicCommunityRoutes: /c/:slug is a single path segment,
-  // while this route's literal "subscription" prefix and its 3-segment shape
-  // never collide with it — but ordering it first makes that reasoning
-  // visible instead of relying on segment-count math staying true forever.
+  // while this route's literal "subscription"/"watch" prefixes and their
+  // multi-segment shapes never collide with it — but ordering it first makes
+  // that reasoning visible instead of relying on segment-count math staying
+  // true forever. A community whose slug is literally "watch" or
+  // "subscription" would be shadowed by this route; slug allocation has no
+  // reserved-word list today, and this is one more reason it should.
   app.route("/c", publicSubscriptionRoutes(deps));
   app.route("/c", publicCommunityRoutes(deps));
   // Public by design and authenticated by X-CALLBACK-TOKEN instead of a bearer

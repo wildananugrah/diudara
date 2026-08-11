@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { ApiError, fetchSubscriptionStatus } from "../api";
 
 /** How often to re-check the subscription's status. */
@@ -17,7 +17,7 @@ const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
 type Phase =
   | { name: "checking" }
-  | { name: "active" }
+  | { name: "active"; watchUrl?: string }
   | { name: "timed-out" }
   | { name: "not-found" }
   | { name: "error"; message: string };
@@ -55,7 +55,7 @@ export default function StatusPage({
         if (cancelled) return;
 
         if (result.status === "active") {
-          setPhase({ name: "active" });
+          setPhase({ name: "active", watchUrl: result.watchUrl });
           stop();
           return;
         }
@@ -116,6 +116,13 @@ export default function StatusPage({
         <>
           <h1 style={styles.heading}>Pembayaran berhasil!</h1>
           <p>Keanggotaan Anda sudah aktif. Anda akan segera menerima akses melalui WhatsApp.</p>
+          {phase.watchUrl ? (
+            <p>
+              <Link to={phase.watchUrl} style={styles.watchLink}>
+                Tonton sekarang
+              </Link>
+            </p>
+          ) : null}
         </>
       ) : null}
 
@@ -182,5 +189,15 @@ const styles: Record<string, React.CSSProperties> = {
     border: "3px solid #ddd",
     borderTopColor: "#16a34a",
     animation: "diudara-spin 0.8s linear infinite",
+  },
+  watchLink: {
+    display: "inline-block",
+    marginTop: 8,
+    padding: "10px 20px",
+    borderRadius: 8,
+    backgroundColor: "#16a34a",
+    color: "#fff",
+    textDecoration: "none",
+    fontWeight: 600,
   },
 };

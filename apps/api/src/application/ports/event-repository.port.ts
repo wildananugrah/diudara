@@ -137,4 +137,29 @@ export interface EventRepositoryPort {
    * authenticated creator-facing route.
    */
   findById(id: string): Promise<EventRecord | null>;
+
+  /**
+   * The `live` event for a community, or `null` when none is currently live —
+   * the THIRD sanctioned unscoped exception, alongside `findByStreamKey` and
+   * `findById`. `GetSubscriptionStatus` (Task 8) backs the public, unauthenticated
+   * `GET /c/subscription/:id/status` route: a member landed there off a redirect
+   * URL, not an authenticated creator session, so there is no `creatorId` to scope
+   * by — the same reason `findByStreamKey`/`findById` are unscoped, restated for a
+   * third caller.
+   *
+   * This is deliberately NOT the entitlement check — `GetSubscriptionStatus` still
+   * has to decide separately whether the CALLER'S subscription is `active` before
+   * minting anything off what this returns. It only answers "does this community
+   * have something to watch right now", which is what decides whether the
+   * "Tonton sekarang" link appears at all.
+   *
+   * `LIMIT 1` with no explicit order: this codebase's own lifecycle (Task 5,
+   * `markLive`'s atomic `WHERE status = 'scheduled'` predicate) makes at most one
+   * `live` row per community the steady-state invariant, not merely the common
+   * case — nothing transitions a second `scheduled` event to `live` while an
+   * existing one already holds that status, and nothing un-ends an `ended` one.
+   * If that invariant is ever violated by a bug, returning *some* live event beats
+   * refusing to show a watch link for one that is genuinely live.
+   */
+  findLiveByCommunityId(communityId: string): Promise<EventRecord | null>;
 }

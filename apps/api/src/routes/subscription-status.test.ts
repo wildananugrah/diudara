@@ -4,7 +4,8 @@ import { bootstrap } from "../bootstrap";
 import { resetDatabase } from "../db/test-helpers";
 import { eq } from "drizzle-orm";
 import { db } from "../db/client";
-import { transactions } from "../db/schema";
+import { events, subscriptions, transactions } from "../db/schema";
+import { verifyWatchToken } from "../domain/watch-token";
 import { bearer, signupAndGetToken } from "./test-support";
 
 beforeEach(resetDatabase);
@@ -59,7 +60,57 @@ async function checkout(a: ReturnType<typeof app>) {
     subscriptionId: result.subscriptionId as string,
     externalId: result.transactionId as string,
     invoiceId: tx.gatewayReferenceId!,
+    communityId: community.id as string,
   };
+}
+
+/**
+ * All four streaming env vars, restored afterwards — the same pattern
+ * `mediamtx-webhooks.test.ts`'s own end-to-end tests use to exercise the
+ * REAL `bootstrap()` with streaming enabled, rather than a hand-built
+ * `deps` object. `selectStreamingProvider` throws on anything less than
+ * all four, so `getSubscriptionStatus`'s `watchUrl` field cannot be
+ * observed through the real app without all four present.
+ */
+async function withStreamingConfigured<T>(fn: () => Promise<T>): Promise<T> {
+  const STREAM_SECRET = "d".repeat(32);
+  const originals = {
+    MEDIAMTX_RTMP_HOST: process.env.MEDIAMTX_RTMP_HOST,
+    MEDIAMTX_HLS_BASE_URL: process.env.MEDIAMTX_HLS_BASE_URL,
+    MEDIAMTX_WEBHOOK_SECRET: process.env.MEDIAMTX_WEBHOOK_SECRET,
+    STREAM_TOKEN_SECRET: process.env.STREAM_TOKEN_SECRET,
+  };
+  process.env.MEDIAMTX_RTMP_HOST = "mediamtx.internal";
+  process.env.MEDIAMTX_HLS_BASE_URL = "https://hls.diudara.test";
+  process.env.MEDIAMTX_WEBHOOK_SECRET = STREAM_SECRET;
+  process.env.STREAM_TOKEN_SECRET = STREAM_SECRET;
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(originals)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+let seedCounter = 0;
+
+/** One event in `communityId`, at the given `status`, with a fresh stream key. */
+async function seedEvent(communityId: string, status: string) {
+  seedCounter += 1;
+  const streamKey = `status-key-${seedCounter}`;
+  const [event] = await db
+    .insert(events)
+    .values({
+      communityId,
+      title: "Live Q&A",
+      streamKey,
+      status,
+      hlsPlaybackPath: `https://fake-mediamtx.local/live/${streamKey}/index.m3u8`,
+    })
+    .returning();
+  return event!;
 }
 
 function postWebhook(a: ReturnType<typeof app>, externalId: string, invoiceId: string) {
@@ -153,5 +204,97 @@ describe("GET /c/subscription/:subscriptionId/status", () => {
 
     const text = await (await a.request(`/c/subscription/${subscriptionId}/status`)).text();
     expect(text).toBe(JSON.stringify({ status: "active" }));
+  });
+});
+
+describe("GET /c/subscription/:subscriptionId/status — the watchUrl field (Task 8)", () => {
+  it("carries no watchUrl at all while streaming is not configured on this box", async () => {
+    const a = app();
+    const { subscriptionId, externalId, invoiceId, communityId } = await checkout(a);
+    await postWebhook(a, externalId, invoiceId);
+    await seedEvent(communityId, "live");
+
+    const text = await (await a.request(`/c/subscription/${subscriptionId}/status`)).text();
+
+    // Byte-identical to the pre-Task-8 shape: streaming being off must not
+    // change this endpoint's response even when the member's community IS
+    // live, because there is nothing to mint a token WITH.
+    expect(text).toBe(JSON.stringify({ status: "active" }));
+  });
+
+  it("adds a watchUrl once the member's community goes live, and it resolves through the read-auth path for real", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId, communityId } = await checkout(a);
+      await postWebhook(a, externalId, invoiceId);
+      await seedEvent(communityId, "live");
+
+      const body = await (await a.request(`/c/subscription/${subscriptionId}/status`)).json();
+
+      expect(typeof body.watchUrl).toBe("string");
+      expect(body.watchUrl.startsWith("/watch/")).toBe(true);
+
+      // Proves the minted token is not merely well-shaped, but genuinely
+      // authorises a read: it resolves through the SAME public route
+      // WatchPage will call.
+      const token = body.watchUrl.slice("/watch/".length);
+      const resolved = await (await a.request(`/c/watch/${token}`)).json();
+      expect(typeof resolved.hlsUrl).toBe("string");
+    });
+  });
+
+  it("omits watchUrl when streaming is configured but the community has nothing live", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId } = await checkout(a);
+      await postWebhook(a, externalId, invoiceId);
+
+      const text = await (await a.request(`/c/subscription/${subscriptionId}/status`)).text();
+
+      expect(text).toBe(JSON.stringify({ status: "active" }));
+    });
+  });
+
+  it("omits watchUrl for a pending subscription, even with a live event in its community", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { subscriptionId, communityId } = await checkout(a);
+      await seedEvent(communityId, "live");
+
+      const text = await (await a.request(`/c/subscription/${subscriptionId}/status`)).text();
+
+      expect(text).toBe(JSON.stringify({ status: "pending" }));
+    });
+  });
+
+  it("mints a FRESH token on every visit, rather than reusing one", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId, communityId } = await checkout(a);
+      await postWebhook(a, externalId, invoiceId);
+      await seedEvent(communityId, "live");
+
+      const first = await (await a.request(`/c/subscription/${subscriptionId}/status`)).json();
+      const second = await (await a.request(`/c/subscription/${subscriptionId}/status`)).json();
+
+      expect(first.watchUrl).not.toBe(second.watchUrl);
+    });
+  });
+
+  it("stops appearing once the subscription is cancelled, even though the community is still live", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { subscriptionId, externalId, invoiceId, communityId } = await checkout(a);
+      await postWebhook(a, externalId, invoiceId);
+      await seedEvent(communityId, "live");
+      await db
+        .update(subscriptions)
+        .set({ status: "cancelled" })
+        .where(eq(subscriptions.id, subscriptionId));
+
+      const text = await (await a.request(`/c/subscription/${subscriptionId}/status`)).text();
+
+      expect(text).toBe(JSON.stringify({ status: "cancelled" }));
+    });
   });
 });

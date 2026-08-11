@@ -177,6 +177,9 @@ const fakeEventRepository: EventRepositoryPort = {
   async findById() {
     return null;
   },
+  async findLiveByCommunityId() {
+    return null;
+  },
 };
 
 const fakeMemberRepository: MemberRepositoryPort = {
@@ -467,7 +470,9 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
-      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
+      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
+        streamTokenSecret: undefined,
+      }),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
@@ -526,6 +531,8 @@ describe("Dependencies (composition root contract)", () => {
       mediamtxWebhookSecret: undefined,
       // Task 5's lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
       handleStreamLifecycle: undefined,
+      // Task 8's `GET /c/watch/:token`. Same undefined-ness reasoning as `authoriseStream`.
+      resolveWatchToken: undefined,
     };
 
     const created = await deps.creatorRepository.create({
@@ -602,7 +609,9 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
-      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
+      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
+        streamTokenSecret: undefined,
+      }),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
@@ -661,6 +670,8 @@ describe("Dependencies (composition root contract)", () => {
       mediamtxWebhookSecret: undefined,
       // Task 5's lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
       handleStreamLifecycle: undefined,
+      // Task 8's `GET /c/watch/:token`. Same undefined-ness reasoning as `authoriseStream`.
+      resolveWatchToken: undefined,
     };
 
     const res = await createApp(deps).request("/health");

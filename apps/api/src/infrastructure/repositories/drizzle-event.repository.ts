@@ -153,6 +153,20 @@ export class DrizzleEventRepository implements EventRepositoryPort {
     const [row] = await this.db.select().from(events).where(eq(events.id, id)).limit(1);
     return row ?? null;
   }
+
+  async findLiveByCommunityId(communityId: string): Promise<EventRecord | null> {
+    // No UUID guard here, unlike `findById`/`findByStreamKey`: `communityId`
+    // never arrives as raw user input at this port — `GetSubscriptionStatus`
+    // resolves it itself via `SubscriptionRepositoryPort.findByIdWithCommunity`,
+    // which already validates the SUBSCRIPTION id and returns a real column
+    // value, not a client-supplied string.
+    const [row] = await this.db
+      .select()
+      .from(events)
+      .where(and(eq(events.communityId, communityId), eq(events.status, LIVE_STATUS)))
+      .limit(1);
+    return row ?? null;
+  }
 }
 
 /**

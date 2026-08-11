@@ -67,6 +67,9 @@ function fakeEventRepository(ownerByCommunity: Record<string, string>) {
     async findByStreamKey(streamKey) {
       return rows.find((r) => r.streamKey === streamKey) ?? null;
     },
+    async findLiveByCommunityId(communityId) {
+      return rows.find((r) => r.communityId === communityId && r.status === "live") ?? null;
+    },
     async findById(id) {
       return rows.find((r) => r.id === id) ?? null;
     },

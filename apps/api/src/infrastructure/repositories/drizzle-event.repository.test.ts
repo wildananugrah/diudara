@@ -338,3 +338,74 @@ describe("DrizzleEventRepository.findByStreamKey", () => {
     expect(await repo.findByStreamKey("no-such-key")).toBeNull();
   });
 });
+
+describe("DrizzleEventRepository.findLiveByCommunityId", () => {
+  it("finds the live event for a community, with no creator in scope", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const created = await repo.createForCreator({
+      communityId: community.id,
+      creatorId: creator.id,
+      title: "Live Q&A",
+      scheduledAt: null,
+      streamKey: streamKey("key"),
+      hlsPlaybackPath: "https://fake-mediamtx.local/hls/live/key/index.m3u8",
+    });
+    await repo.markLive(created!.id);
+
+    const found = await repo.findLiveByCommunityId(community.id);
+
+    expect(found!.id).toBe(created!.id);
+  });
+
+  it("returns null for a community with no events at all", async () => {
+    const { community } = await seedCreatorWithCommunity();
+
+    expect(await repo.findLiveByCommunityId(community.id)).toBeNull();
+  });
+
+  it("returns null for a community whose event is only scheduled, not live", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    await repo.createForCreator({
+      communityId: community.id,
+      creatorId: creator.id,
+      title: "Live Q&A",
+      scheduledAt: null,
+      streamKey: streamKey("key"),
+      hlsPlaybackPath: "https://fake-mediamtx.local/hls/live/key/index.m3u8",
+    });
+
+    expect(await repo.findLiveByCommunityId(community.id)).toBeNull();
+  });
+
+  it("returns null once the event has ended", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const created = await repo.createForCreator({
+      communityId: community.id,
+      creatorId: creator.id,
+      title: "Live Q&A",
+      scheduledAt: null,
+      streamKey: streamKey("key"),
+      hlsPlaybackPath: "https://fake-mediamtx.local/hls/live/key/index.m3u8",
+    });
+    await repo.markLive(created!.id);
+    await repo.markEnded(created!.id);
+
+    expect(await repo.findLiveByCommunityId(community.id)).toBeNull();
+  });
+
+  it("never returns another community's live event", async () => {
+    const mine = await seedCreatorWithCommunity("Rina");
+    const theirs = await seedCreatorWithCommunity("Budi");
+    const theirEvent = await repo.createForCreator({
+      communityId: theirs.community.id,
+      creatorId: theirs.creator.id,
+      title: "Their Live Q&A",
+      scheduledAt: null,
+      streamKey: streamKey("key"),
+      hlsPlaybackPath: "https://fake-mediamtx.local/hls/live/key/index.m3u8",
+    });
+    await repo.markLive(theirEvent!.id);
+
+    expect(await repo.findLiveByCommunityId(mine.community.id)).toBeNull();
+  });
+});

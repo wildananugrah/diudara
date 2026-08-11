@@ -55,6 +55,7 @@ import { DrizzleStreamLifecycleUnitOfWork } from "./infrastructure/repositories/
 import { ScheduleLiveSession, ListLiveSessions } from "./application/use-cases/schedule-live-session";
 import { AuthoriseStream } from "./application/use-cases/authorise-stream";
 import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lifecycle";
+import { ResolveWatchToken } from "./application/use-cases/resolve-watch-token";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
@@ -320,6 +321,15 @@ export interface Dependencies {
    * the class itself.
    */
   handleStreamLifecycle: HandleStreamLifecycle | undefined;
+  /**
+   * Task 8's `GET /c/watch/:token` decision logic — `undefined` in lockstep
+   * with `authoriseStream` (both are read off `STREAM_TOKEN_SECRET`; see
+   * that field for what "in lockstep" does and does not imply). A member
+   * opening a `/watch/<token>` URL on a box with streaming disabled sees the
+   * SAME "link is not valid" message as an expired token — see
+   * `routes/public-subscription.ts`'s `WATCH_REFUSED_BODY`.
+   */
+  resolveWatchToken: ResolveWatchToken | undefined;
 }
 
 /**
@@ -1267,6 +1277,12 @@ export function bootstrap(): Dependencies {
 
   const memberRepository = new DrizzleMemberRepository(db);
   const subscriptionRepository = new DrizzleSubscriptionRepository(db);
+  // Task 3's event repository, constructed here (rather than down by
+  // `scheduleLiveSession`/`listLiveSessions`, where it used to live alone)
+  // because `getSubscriptionStatus` below needs it too — one shared instance,
+  // same rule `subscriptionRepository` already follows for its own many
+  // consumers.
+  const eventRepository = new DrizzleEventRepository(db);
   const appBaseUrl = resolveAppBaseUrl({
     appBaseUrl: process.env.APP_BASE_URL,
     nodeEnv: process.env.NODE_ENV,
@@ -1285,7 +1301,21 @@ export function bootstrap(): Dependencies {
     clock,
     { appBaseUrl }
   );
-  const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository);
+  // Task 8's watch link. Read directly off `process.env` here (rather than
+  // derived from `streamingProvider`'s truthiness) for the exact reason
+  // `authoriseStream`/`mediamtxWebhookSecret` do this further down: by the
+  // time `selectStreamingProvider` (below) has run without throwing, either
+  // all four streaming vars are set and length-valid or all four are
+  // genuinely absent — so a plain `presentOrUndefined` read here is exactly
+  // as strict, without this file's several selectors needing to agree about
+  // what "configured" means. Declared before `selectStreamingProvider` is
+  // even called is safe: a half-configured box makes that call throw before
+  // this function ever returns anything, so nothing constructed off this
+  // value here is ever handed to a caller in that case.
+  const streamTokenSecret = presentOrUndefined(process.env.STREAM_TOKEN_SECRET);
+  const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
+    streamTokenSecret,
+  });
 
   // The webhook's three writes commit together or not at all — see
   // PaymentActivationUnitOfWorkPort. The read that precedes them uses the
@@ -1394,34 +1424,43 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
-  // Task 3's scheduling endpoints. `eventRepository` is shared by both
-  // use-cases below but not itself exposed on `Dependencies` — same rule the
-  // tier/channel repositories follow, since nothing outside this module needs
-  // to see it. `scheduleLiveSession` mirrors `sendAiMessage`'s undefined-ness
-  // exactly: constructed only when `streamingProvider` is, because its
-  // constructor requires a real `StreamingProviderPort` rather than accepting
+  // Task 3's scheduling endpoints. `eventRepository` is constructed earlier
+  // now (Task 8 needs it for `getSubscriptionStatus` too) and shared, not
+  // itself exposed on `Dependencies` — same rule the tier/channel
+  // repositories follow, since nothing outside this module needs to see it.
+  // `scheduleLiveSession` mirrors `sendAiMessage`'s undefined-ness exactly:
+  // constructed only when `streamingProvider` is, because its constructor
+  // requires a real `StreamingProviderPort` rather than accepting
   // `| undefined` and checking internally — see `ScheduleLiveSession`'s
   // docstring for why that decision belongs here and not there.
-  const eventRepository = new DrizzleEventRepository(db);
   const scheduleLiveSession = streamingProvider
     ? new ScheduleLiveSession(eventRepository, streamingProvider)
     : undefined;
   const listLiveSessions = new ListLiveSessions(eventRepository);
 
-  // Task 4's publish/read authorisation. Both secrets are read directly
-  // here rather than re-derived from `streamingProvider`'s truthiness,
-  // because `selectStreamingProvider` has ALREADY enforced the invariant
-  // that matters: by the time execution reaches this line, either both
-  // MEDIAMTX_WEBHOOK_SECRET and STREAM_TOKEN_SECRET are set and
-  // length-valid (the four-vars-together branch), or both are genuinely
-  // absent (partial configuration threw already) — so a plain
-  // `presentOrUndefined` read is exactly as strict as re-checking
-  // `streamingProvider`, without depending on this file's two selectors
-  // agreeing forever about what "configured" means.
+  // Task 4's publish/read authorisation. The webhook secret is read directly
+  // here rather than re-derived from `streamingProvider`'s truthiness, and
+  // `streamTokenSecret` itself was already resolved earlier (alongside
+  // `getSubscriptionStatus`) — see that declaration for why reading it before
+  // `selectStreamingProvider` runs is still safe. Both secrets rely on the
+  // SAME invariant `selectStreamingProvider` enforces: by the time execution
+  // reaches this line, either both MEDIAMTX_WEBHOOK_SECRET and
+  // STREAM_TOKEN_SECRET are set and length-valid (the four-vars-together
+  // branch), or both are genuinely absent (partial configuration threw
+  // already) — so a plain `presentOrUndefined` read is exactly as strict as
+  // re-checking `streamingProvider`, without depending on this file's several
+  // selectors agreeing forever about what "configured" means.
   const mediamtxWebhookSecret = presentOrUndefined(process.env.MEDIAMTX_WEBHOOK_SECRET);
-  const streamTokenSecret = presentOrUndefined(process.env.STREAM_TOKEN_SECRET);
   const authoriseStream = streamTokenSecret
     ? new AuthoriseStream(eventRepository, subscriptionRepository, { streamTokenSecret })
+    : undefined;
+
+  // Task 8's `GET /c/watch/:token`. `undefined` in lockstep with
+  // `authoriseStream` — both need nothing but `STREAM_TOKEN_SECRET`, and
+  // both refuse everything (this route's ONE generic body; that webhook's
+  // `{ allowed: false }`) when it is absent.
+  const resolveWatchToken = streamTokenSecret
+    ? new ResolveWatchToken(eventRepository, subscriptionRepository, { streamTokenSecret })
     : undefined;
 
   // Task 5's `POST /webhooks/mediamtx/lifecycle`. Gated on `mediamtxWebhookSecret`
@@ -1476,6 +1515,7 @@ export function bootstrap(): Dependencies {
     scheduleLiveSession,
     listLiveSessions,
     authoriseStream,
+    resolveWatchToken,
     mediamtxWebhookSecret,
     handleStreamLifecycle,
   };
