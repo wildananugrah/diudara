@@ -35,7 +35,10 @@ const subscriptionRepository = new DrizzleSubscriptionRepository(db);
 const authoriseStream = new AuthoriseStream(eventRepository, subscriptionRepository, {
   streamTokenSecret: SECRET,
 });
-const handleStreamLifecycle = new HandleStreamLifecycle(new DrizzleStreamLifecycleUnitOfWork(db));
+const handleStreamLifecycle = new HandleStreamLifecycle(
+  eventRepository,
+  new DrizzleStreamLifecycleUnitOfWork(db)
+);
 
 /**
  * A REAL `AuthoriseStream`, subclassed only to make `execute` throw. Used
@@ -60,7 +63,7 @@ class ThrowingAuthoriseStream extends AuthoriseStream {
 /** Same purpose as `ThrowingAuthoriseStream`, for the `/lifecycle` route's own tests. */
 class ThrowingHandleStreamLifecycle extends HandleStreamLifecycle {
   constructor() {
-    super(new DrizzleStreamLifecycleUnitOfWork(db));
+    super(eventRepository, new DrizzleStreamLifecycleUnitOfWork(db));
   }
   override async execute(): Promise<void> {
     throw new Error(

@@ -283,6 +283,9 @@ const fakeOutboxRepository: OutboxRepositoryPort = {
   async enqueue() {
     return { id: "fake-outbox-1" };
   },
+  async enqueueMany(inputs) {
+    return inputs.map((_, index) => ({ id: `fake-outbox-${index + 1}` }));
+  },
   async claimBatch() {
     return [];
   },

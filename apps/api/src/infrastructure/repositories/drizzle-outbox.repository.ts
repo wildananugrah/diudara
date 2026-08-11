@@ -27,6 +27,22 @@ export class DrizzleOutboxRepository implements OutboxRepositoryPort {
     return { id: row.id };
   }
 
+  async enqueueMany(
+    inputs: { eventType: string; payload: unknown }[]
+  ): Promise<{ id: string }[]> {
+    // No round trip for an empty batch — `HandleStreamLifecycle` already guards
+    // this, but a multi-row `.values([])` is not a statement Drizzle should be
+    // asked to build in the first place.
+    if (inputs.length === 0) {
+      return [];
+    }
+    const rows = await this.db
+      .insert(outbox)
+      .values(inputs.map((input) => ({ eventType: input.eventType, payload: input.payload })))
+      .returning({ id: outbox.id });
+    return rows;
+  }
+
   /**
    * Claims up to `limit` due rows in ONE statement.
    *

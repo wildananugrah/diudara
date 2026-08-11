@@ -131,6 +131,20 @@ export interface ClaimedOutboxRow {
  */
 export interface OutboxRepositoryPort {
   enqueue(input: { eventType: string; payload: unknown }): Promise<{ id: string }>;
+  /**
+   * The same write as `enqueue`, `inputs.length` times, as ONE round trip — review
+   * round 2 on `HandleStreamLifecycle`. A per-member `enqueue` in a loop is
+   * `inputs.length` serial `await`s, each one held open inside the enqueuer's
+   * transaction (which is holding a row lock and one of postgres.js's ten pool
+   * connections for the whole loop) while whatever triggered the write — here,
+   * MediaMTX's fire-and-forget `curl` — waits on the response. `enqueueMany` turns
+   * that into a single multi-row `INSERT ... RETURNING`, with no change to the
+   * atomicity guarantee `enqueue` already has: called from inside a unit of work,
+   * every row it inserts still commits or rolls back with everything else in it.
+   *
+   * Returns `[]` for an empty `inputs` rather than issuing a no-op statement.
+   */
+  enqueueMany(inputs: { eventType: string; payload: unknown }[]): Promise<{ id: string }[]>;
   claimBatch(limit: number): Promise<ClaimedOutboxRow[]>;
   /** Terminal success. The row is never claimed again. */
   /**

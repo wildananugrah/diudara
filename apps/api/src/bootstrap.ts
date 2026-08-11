@@ -1427,12 +1427,14 @@ export function bootstrap(): Dependencies {
   // Task 5's `POST /webhooks/mediamtx/lifecycle`. Gated on `mediamtxWebhookSecret`
   // rather than constructed unconditionally — see the `handleStreamLifecycle`
   // field's own docstring for why that is a symmetry choice, not a real
-  // dependency of the class. Takes the unit-of-work, not the three
-  // repositories directly: the transition, its activity_log row, and every
-  // per-member notify_stream_live row must commit or roll back together — see
-  // `StreamLifecycleUnitOfWorkPort`'s own docstring for why.
+  // dependency of the class. Takes BOTH the pooled `eventRepository` (the
+  // stream-key lookup, kept outside any transaction — review round 2, mirroring
+  // `HandlePaymentWebhook`'s own split) AND the unit-of-work (the transition, its
+  // activity_log row, and every per-member notify_stream_live row, which must
+  // commit or roll back together — see `StreamLifecycleUnitOfWorkPort`'s own
+  // docstring for why).
   const handleStreamLifecycle = mediamtxWebhookSecret
-    ? new HandleStreamLifecycle(new DrizzleStreamLifecycleUnitOfWork(db))
+    ? new HandleStreamLifecycle(eventRepository, new DrizzleStreamLifecycleUnitOfWork(db))
     : undefined;
 
   return {

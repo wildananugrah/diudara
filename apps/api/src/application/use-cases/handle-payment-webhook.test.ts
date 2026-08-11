@@ -230,6 +230,9 @@ function harness(
       order.push("outbox");
       return { id: `outbox-${calls.enqueued.length}` };
     },
+    async enqueueMany() {
+      throw new Error("not used");
+    },
     async claimBatch() {
       throw new Error("not used");
     },

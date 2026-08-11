@@ -1,4 +1,5 @@
 import { streamKeyFromPath } from "./authorise-stream";
+import type { EventRepositoryPort } from "../ports/event-repository.port";
 import { OUTBOX_NOTIFY_STREAM_LIVE } from "../ports/outbox-repository.port";
 import type {
   StreamLifecycleRepositories,
@@ -85,9 +86,32 @@ export type StreamLifecycleHook = "online" | "offline";
  * `EventRepositoryPort`'s own docstring for why a stream key is a SECRET that must never
  * reach a log line, and a value that failed to parse as `live/<key>` may still, in the
  * unparsed case, BE the real secret (e.g. `$MTX_PATH` sent bare, with no prefix).
+ *
+ * ==========================================================================
+ * THE STREAM-KEY LOOKUP HAPPENS OUTSIDE THE UNIT OF WORK — review round 2
+ *
+ * Mirrors `HandlePaymentWebhook`'s own split exactly: its steps 1-2 (find the
+ * transaction, compare the amount) are reads against the POOLED repository, outside
+ * `PaymentActivationUnitOfWorkPort.run`, and only once both hold does it open the unit
+ * of work at all. `findByStreamKey` here follows the same rule and for the same reason
+ * — "a lookup that fails should not open a transaction at all". Every probe, stale
+ * session, or malformed path that does not resolve to a real event now never opens a
+ * Postgres transaction; the unit of work opens only once there is a real event to act
+ * on, and `markLive`/`markEnded`'s own atomic predicate — which still has to run INSIDE
+ * it, because that is the only place "did this actually transition" can be decided
+ * under concurrency — is what decides from there whether anything is written.
+ * ==========================================================================
  */
 export class HandleStreamLifecycle {
-  constructor(private readonly unitOfWork: StreamLifecycleUnitOfWorkPort) {}
+  constructor(
+    /**
+     * The POOLED repository, used ONLY for the lookup below — never for a write, and
+     * never passed into `unitOfWork.run`. See the class docstring's third banner for
+     * why this read stays outside any transaction.
+     */
+    private readonly events: EventRepositoryPort,
+    private readonly unitOfWork: StreamLifecycleUnitOfWorkPort
+  ) {}
 
   async execute(input: { hook: StreamLifecycleHook; streamKey: string }): Promise<void> {
     const key = streamKeyFromPath(input.streamKey);
@@ -104,17 +128,20 @@ export class HandleStreamLifecycle {
       return;
     }
 
-    await this.unitOfWork.run(async (repositories) => {
-      const event = await repositories.events.findByStreamKey(key);
-      if (!event) {
-        // Unknown key. See the class docstring for why this logs and returns quietly
-        // rather than throwing — and why the key itself is never in the message.
-        console.warn(
-          `[lifecycle] ignoring a "${input.hook}" hook: no event matches this stream key`
-        );
-        return;
-      }
+    // OUTSIDE the unit of work — see the class docstring's third banner. A malformed
+    // path never reaches here at all (returned above); this is the "does the key
+    // resolve to a real event" gate for everything else that doesn't.
+    const event = await this.events.findByStreamKey(key);
+    if (!event) {
+      // Unknown key. See the class docstring for why this logs and returns quietly
+      // rather than throwing — and why the key itself is never in the message.
+      console.warn(
+        `[lifecycle] ignoring a "${input.hook}" hook: no event matches this stream key`
+      );
+      return;
+    }
 
+    await this.unitOfWork.run(async (repositories) => {
       if (input.hook === "online") {
         await this.handleOnline(repositories, event.id);
         return;
@@ -151,15 +178,27 @@ export class HandleStreamLifecycle {
     const activeSubscriptions = await repositories.subscriptions.listActiveForCommunity(
       updated.communityId
     );
-    for (const subscription of activeSubscriptions) {
-      await repositories.outbox.enqueue({
+    if (activeSubscriptions.length === 0) {
+      return;
+    }
+
+    // ONE multi-row INSERT, not one round trip per member — review round 2. Each
+    // `await` in a loop is a serial round trip held open while this transaction
+    // holds the `events` row lock `markLive` took and one of postgres.js's ten pool
+    // connections, with MediaMTX's fire-and-forget `curl` waiting on the response
+    // the whole time. An N-member community turned that into N round trips before
+    // the webhook could answer; `enqueueMany` turns it back into one, without
+    // touching the atomicity this transaction exists for — every row is still
+    // written inside it, still all-or-nothing with the transition above.
+    await repositories.outbox.enqueueMany(
+      activeSubscriptions.map((subscription) => ({
         eventType: OUTBOX_NOTIFY_STREAM_LIVE,
         // Ids only — no member list beyond this one id, no community id, no stream
         // key. `NotifyStreamLive` re-resolves everything else fresh, at delivery
         // time, from `eventId` and `subscriptionId` alone.
         payload: { eventId: updated.id, subscriptionId: subscription.id },
-      });
-    }
+      }))
+    );
   }
 
   private async handleOffline(

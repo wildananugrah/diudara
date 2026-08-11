@@ -26,8 +26,9 @@ import { HandleStreamLifecycle, STREAM_ENDED_EVENT, STREAM_LIVE_EVENT } from "./
 
 beforeEach(resetDatabase);
 
+const eventRepository = new DrizzleEventRepository(db);
 const unitOfWork = new DrizzleStreamLifecycleUnitOfWork(db);
-const useCase = new HandleStreamLifecycle(unitOfWork);
+const useCase = new HandleStreamLifecycle(eventRepository, unitOfWork);
 
 let seedCounter = 0;
 
@@ -201,16 +202,27 @@ describe("HandleStreamLifecycle — online", () => {
    * Critical review finding: the transition, its activity_log row, and every
    * notify_stream_live row must commit or roll back as ONE unit — never the
    * transition first and the notify intents afterwards. `markLive`'s status
-   * predicate makes the transition happen AT MOST ONCE, so if the enqueue step
-   * were a separate statement and it failed, the event would be stuck `live`
-   * forever with no notify row and nothing able to create one.
+   * predicate makes the transition happen AT MOST ONCE, so if the fan-out's
+   * write were a separate statement and it failed, the event would be stuck
+   * `live` forever with no notify row and nothing able to create one.
    *
    * Proven here by swapping in a `StreamLifecycleUnitOfWorkPort` that opens the
    * SAME real transaction `DrizzleStreamLifecycleUnitOfWork` does, but whose
-   * outbox repository throws once the second member's row would be enqueued.
-   * If the transition and the enqueues were not atomic, the first member's row
-   * (and the `live` status, and the activity_log row) would already be
-   * committed by the time the throw happens. They must not be.
+   * outbox repository's `enqueueMany` throws instead of writing. (Review round
+   * 2 turned the per-member fan-out into one batched `enqueueMany` call rather
+   * than N `enqueue` calls — see `HandleStreamLifecycle.handleOnline` — so
+   * there is only one write to make fail, not a "second of N" to target.) If
+   * the transition and the fan-out were not atomic, the `live` status and the
+   * activity_log row would already be committed by the time the throw happens.
+   * They must not be.
+   *
+   * This test proves the USE-CASE performs every write inside one `run()`
+   * call. It does NOT by itself prove the shipped `DrizzleStreamLifecycleUnitOfWork`
+   * adapter opens a real transaction — a `run` that silently stopped doing so
+   * would still pass this test, since the fake unit of work below opens its
+   * own `db.transaction` regardless of what the adapter does. That adapter
+   * property is pinned separately, against the real adapter and the real
+   * database, in `drizzle-stream-lifecycle.unit-of-work.test.ts`.
    */
   it("a failure partway through the per-member fan-out rolls back the ENTIRE transition — no partial commit", async () => {
     const community = await seedCommunity();
@@ -218,18 +230,15 @@ describe("HandleStreamLifecycle — online", () => {
     await seedActiveSubscription(community.id);
     await seedActiveSubscription(community.id);
 
-    let enqueueCalls = 0;
-    /** Delegates every method to a real `DrizzleOutboxRepository`, except `enqueue`
-     * — which throws on the second call, simulating a crash partway through the
-     * per-member fan-out. */
+    /** Delegates every method to a real `DrizzleOutboxRepository`, except
+     * `enqueueMany` — which throws instead of writing, simulating a crash
+     * during the batched per-member fan-out write. */
     class ExplodingOutboxRepository implements OutboxRepositoryPort {
       constructor(private readonly real: OutboxRepositoryPort) {}
-      async enqueue(input: { eventType: string; payload: unknown }): Promise<{ id: string }> {
-        enqueueCalls += 1;
-        if (enqueueCalls === 2) {
-          throw new Error("simulated failure enqueueing the second member's row");
-        }
-        return this.real.enqueue(input);
+      enqueue = (...args: Parameters<OutboxRepositoryPort["enqueue"]>) =>
+        this.real.enqueue(...args);
+      async enqueueMany(): Promise<{ id: string }[]> {
+        throw new Error("simulated failure writing the per-member fan-out");
       }
       claimBatch = (...args: Parameters<OutboxRepositoryPort["claimBatch"]>) =>
         this.real.claimBatch(...args);
@@ -249,7 +258,7 @@ describe("HandleStreamLifecycle — online", () => {
       ) => this.real.reclaimStaleProcessing(...args);
     }
 
-    class ExplodingOnSecondEnqueueUnitOfWork implements StreamLifecycleUnitOfWorkPort {
+    class ExplodingOnFanOutUnitOfWork implements StreamLifecycleUnitOfWorkPort {
       async run<T>(work: (repositories: StreamLifecycleRepositories) => Promise<T>): Promise<T> {
         return db.transaction(async (tx) =>
           work({
@@ -262,16 +271,19 @@ describe("HandleStreamLifecycle — online", () => {
       }
     }
 
-    const explodingUseCase = new HandleStreamLifecycle(new ExplodingOnSecondEnqueueUnitOfWork());
+    const explodingUseCase = new HandleStreamLifecycle(
+      eventRepository,
+      new ExplodingOnFanOutUnitOfWork()
+    );
 
     await expect(
       explodingUseCase.execute({ hook: "online", streamKey: livePath(streamKey) })
     ).rejects.toThrow();
 
     // The whole unit rolled back: the event is still `scheduled`, not `live`,
-    // there is no activity_log row, and NOT EVEN the first member's outbox row
-    // survived — proving the transition and the fan-out truly share one
-    // transaction rather than the first enqueue call having already committed.
+    // there is no activity_log row, and no outbox row survived — proving the
+    // transition and the fan-out truly share one transaction rather than the
+    // transition having already committed before the fan-out's write ran.
     const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
     expect(reloaded!.status).toBe("scheduled");
 
@@ -280,6 +292,46 @@ describe("HandleStreamLifecycle — online", () => {
 
     const enqueued = await outboxRowsFor(event.id);
     expect(enqueued).toHaveLength(0);
+  });
+
+  /**
+   * Review round 2, important #3. `HandlePaymentWebhook`'s own lookup reads
+   * stay outside its unit of work — "a body that fails them should not open a
+   * transaction at all" — and `findByStreamKey` now follows the same rule.
+   * Proven here with a `StreamLifecycleUnitOfWorkPort` spy that records
+   * whether `run()` was ever called: an unknown key must never open one, and
+   * a real event must.
+   */
+  it("never opens the unit of work for a stream key that resolves to no event", async () => {
+    let runWasCalled = false;
+    class SpyUnitOfWork implements StreamLifecycleUnitOfWorkPort {
+      async run<T>(work: (repositories: StreamLifecycleRepositories) => Promise<T>): Promise<T> {
+        runWasCalled = true;
+        return unitOfWork.run(work);
+      }
+    }
+    const spiedUseCase = new HandleStreamLifecycle(eventRepository, new SpyUnitOfWork());
+
+    await spiedUseCase.execute({ hook: "online", streamKey: livePath("no-such-key") });
+
+    expect(runWasCalled).toBe(false);
+  });
+
+  it("opens the unit of work once the key resolves to a real event", async () => {
+    const community = await seedCommunity();
+    const { streamKey } = await seedEvent(community.id, "scheduled");
+    let runWasCalled = false;
+    class SpyUnitOfWork implements StreamLifecycleUnitOfWorkPort {
+      async run<T>(work: (repositories: StreamLifecycleRepositories) => Promise<T>): Promise<T> {
+        runWasCalled = true;
+        return unitOfWork.run(work);
+      }
+    }
+    const spiedUseCase = new HandleStreamLifecycle(eventRepository, new SpyUnitOfWork());
+
+    await spiedUseCase.execute({ hook: "online", streamKey: livePath(streamKey) });
+
+    expect(runWasCalled).toBe(true);
   });
 });
 
