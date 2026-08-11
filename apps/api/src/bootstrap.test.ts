@@ -1330,9 +1330,14 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
 
   it("refuses to boot a production process with no callback token", () => {
     withJwtSecret("x".repeat(32), () => {
+      // APP_BASE_URL is set explicitly, not inherited. These assertions are about a
+      // specific guard; without it, bootstrap()'s APP_BASE_URL guard throws FIRST and
+      // the expected message never appears. That made these tests pass only on a
+      // machine with apps/api/.env — a fresh clone and CI both fail without this.
       withEnv(
         {
           NODE_ENV: "production",
+          APP_BASE_URL: "http://localhost:5173",
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
@@ -1356,6 +1361,7 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
       withEnv(
         {
           NODE_ENV: "production",
+          APP_BASE_URL: "http://localhost:5173",
           XENDIT_SECRET_KEY: undefined,
           XENDIT_SPLIT_RULE_ID: undefined,
           XENDIT_CALLBACK_TOKEN: undefined,
@@ -1380,6 +1386,7 @@ describe("bootstrap() messaging provider selection", () => {
       withEnv(
         {
           NODE_ENV: "production",
+          APP_BASE_URL: "http://localhost:5173",
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
@@ -2078,6 +2085,7 @@ describe("bootstrap() AI provider wiring", () => {
       withEnv(
         {
           NODE_ENV: "production",
+          APP_BASE_URL: "http://localhost:5173",
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
