@@ -16,6 +16,7 @@ import {
   notifyStreamLiveOutboxHandler,
   STREAM_LIVE_NOTIFIED_EVENT,
   STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
+  SUBSCRIPTION_WRONG_COMMUNITY_REASON,
 } from "./notify-stream-live";
 
 beforeEach(resetDatabase);
@@ -198,6 +199,34 @@ describe("NotifyStreamLive", () => {
     const result = await useCase.execute({ eventId: event.id, subscriptionId: subscription.id });
 
     expect(result).toEqual({ notified: false, skippedReason: "subscription_not_active" });
+    expect(notifier.notifications).toHaveLength(0);
+  });
+
+  /**
+   * Review round 2, important #4. Before the fix, a subscription that is
+   * `active` but belongs to a DIFFERENT community than the event fell into the
+   * same `subscription_not_active` branch, so the creator-facing label read
+   * "anggota sudah tidak aktif" for a member who is, in fact, fully active.
+   * Should be unreachable in production (the id comes from a roster
+   * `HandleStreamLifecycle` built by querying this event's own community), but
+   * manufactured directly here to prove it now gets its own reason.
+   */
+  it("gives a cross-community entitlement its own skip reason, distinct from subscription_not_active", async () => {
+    const eventCommunity = await seedCommunity("EventCommunity");
+    const otherCommunity = await seedCommunity("OtherCommunity");
+    const event = await seedEvent(eventCommunity.id, "live");
+    // Active, but for a community the event does not belong to.
+    const { subscription } = await seedSubscription(otherCommunity.id, "active");
+    const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+    const useCase = buildUseCase(notifier);
+
+    const result = await useCase.execute({ eventId: event.id, subscriptionId: subscription.id });
+
+    expect(result).toEqual({
+      notified: false,
+      skippedReason: SUBSCRIPTION_WRONG_COMMUNITY_REASON,
+    });
+    expect(result.skippedReason).not.toBe("subscription_not_active");
     expect(notifier.notifications).toHaveLength(0);
   });
 

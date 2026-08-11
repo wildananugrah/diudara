@@ -220,6 +220,20 @@ describe("describeActivityEvent", () => {
     ).toContain("anggota sudah tidak aktif");
   });
 
+  /**
+   * Review round 2, important #4. A cross-community entitlement mismatch is NOT
+   * the same fact as an inactive subscription — collapsing them would render
+   * "anggota sudah tidak aktif" for a member who is, in fact, active. Its own
+   * reason needs its own label, and that label must not read as "inactive".
+   */
+  it("gives a cross-community skip its own label, distinct from 'inactive'", () => {
+    const label = describeActivityEvent(STREAM_LIVE_NOTIFY_SKIPPED_EVENT, {
+      reason: "subscription_wrong_community",
+    })!.label;
+    expect(label).toContain("bukan bagian dari komunitas ini");
+    expect(label).not.toContain("anggota sudah tidak aktif");
+  });
+
   it("falls back to the plain label for a stream-skip reason it does not recognise", () => {
     const described = describeActivityEvent(STREAM_LIVE_NOTIFY_SKIPPED_EVENT, {
       reason: "some_future_reason",

@@ -104,6 +104,10 @@ const PLATFORM_LABELS: Record<string, string> = {
 const STREAM_NOTIFY_SKIP_REASON_LABELS: Record<string, string> = {
   event_not_live: "siaran sudah berakhir",
   subscription_not_active: "anggota sudah tidak aktif",
+  // Review round 2: this member IS active — just not for this event's own
+  // community — so it must not share `subscription_not_active`'s label, which
+  // would tell a creator an active member is inactive.
+  subscription_wrong_community: "anggota bukan bagian dari komunitas ini",
 };
 
 /** Appends ` (detail)` when there is a detail, and nothing otherwise. */

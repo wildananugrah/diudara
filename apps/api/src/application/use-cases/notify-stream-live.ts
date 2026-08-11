@@ -24,6 +24,24 @@ export const STREAM_LIVE_NOTIFIED_EVENT = "stream_live_notified";
 /** `activity_log.event_type` for one member deliberately NOT notified, and why. */
 export const STREAM_LIVE_NOTIFY_SKIPPED_EVENT = "stream_live_notify_skipped";
 
+/**
+ * `skippedReason`/`activity_log.metadata.reason` for a subscription that is
+ * simply not `active` (churned, past_due, cancelled, pending). The common case.
+ */
+export const SUBSCRIPTION_NOT_ACTIVE_REASON = "subscription_not_active";
+
+/**
+ * A SEPARATE reason from `SUBSCRIPTION_NOT_ACTIVE_REASON` — review round 2. The
+ * subscription IS `active`; it simply belongs to a different community than the
+ * event does. This should be unreachable (the id came out of a roster
+ * `HandleStreamLifecycle` built by querying subscriptions FOR this event's own
+ * community), but a defensive check earns its own label: collapsing it into
+ * `subscription_not_active` would render "anggota sudah tidak aktif" for a
+ * member who is, in fact, perfectly active — just not entitled to THIS stream —
+ * which is a wrong answer to give a creator asking why someone wasn't told.
+ */
+export const SUBSCRIPTION_WRONG_COMMUNITY_REASON = "subscription_wrong_community";
+
 export interface NotifyStreamLiveInput {
   eventId: string;
   subscriptionId: string;
@@ -130,15 +148,24 @@ export class NotifyStreamLive {
       // STATUS change on a row that still exists, which is the branch just below.
       throw new NotFoundError(`subscription ${input.subscriptionId} not found`);
     }
-    if (
-      entitlement.subscription.status !== ENTITLED_STATUS ||
-      entitlement.communityId !== event.communityId
-    ) {
+    if (entitlement.subscription.status !== ENTITLED_STATUS) {
       return this.skip(
         event.communityId,
         input,
         entitlement.subscription.memberId,
-        "subscription_not_active",
+        SUBSCRIPTION_NOT_ACTIVE_REASON,
+        { subscriptionStatus: entitlement.subscription.status }
+      );
+    }
+    if (entitlement.communityId !== event.communityId) {
+      // See `SUBSCRIPTION_WRONG_COMMUNITY_REASON`'s own docstring: should be
+      // unreachable, but a distinct reason rather than folding into the branch
+      // above — this member IS active, just not for this event's community.
+      return this.skip(
+        event.communityId,
+        input,
+        entitlement.subscription.memberId,
+        SUBSCRIPTION_WRONG_COMMUNITY_REASON,
         { subscriptionStatus: entitlement.subscription.status }
       );
     }
