@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, beforeEach } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -377,6 +377,49 @@ const fakePaymentProvider: PaymentProviderPort = {
     throw new Error("not used");
   },
 };
+
+/**
+ * The four env vars `selectStreamingProvider` (bootstrap.ts) reasons about as
+ * one unit: all four set (and the two secrets long enough) wires
+ * `MediaMtxAdapter`; ONE to THREE set throws `Streaming is half-configured`;
+ * none set wires the fake or disables the feature. Every bare `bootstrap()`
+ * call in this file that is NOT itself testing the streaming path — which is
+ * most of them — needs these to be reliably absent, or a developer whose
+ * `apps/api/.env` carries partial streaming config (or a short secret) would
+ * watch AI-provider, messaging-provider, Telegram-webhook and every other
+ * unrelated `bootstrap()` test in this file fail with a streaming
+ * configuration error that has nothing to do with what that test asserts.
+ *
+ * CLEARED HERE, GLOBALLY, RATHER THAN PER-TEST — Task 6 (live streaming,
+ * infra) is what first put REAL values for all four into `apps/api/.env`
+ * (needed to actually drive a local MediaMTX), and `bun test` auto-loads
+ * that file. Hermeticising the one test that broke was not enough: every
+ * OTHER bare `bootstrap()` call below was equally exposed, just untested
+ * against that combination — the exact "passes only because of ambient
+ * environment state" defect a whole earlier task in this project's history
+ * already existed to close for `DATABASE_URL`/`JWT_SECRET` (see
+ * CONTRIBUTING.md's "Writing tests" section). A `beforeEach` here, rather
+ * than four `withEnv` lines threaded through dozens of call sites, is what
+ * makes EVERY bare `bootstrap()` — present and future — independent of
+ * whatever a developer's `.env` happens to contain, without asking every
+ * test author in this file to remember to do it themselves. Any test that
+ * DOES want one or more of these set does so explicitly via `withEnv`,
+ * which runs after this and is what that test's assertion actually depends
+ * on — see e.g. "wires MediaMtxAdapter when all four streaming env vars are
+ * configured" below.
+ */
+const STREAMING_ENV_VARS = [
+  "MEDIAMTX_RTMP_HOST",
+  "MEDIAMTX_HLS_BASE_URL",
+  "MEDIAMTX_WEBHOOK_SECRET",
+  "STREAM_TOKEN_SECRET",
+] as const;
+
+beforeEach(() => {
+  for (const key of STREAMING_ENV_VARS) {
+    delete process.env[key];
+  }
+});
 
 describe("Dependencies (composition root contract)", () => {
   it("accepts a hand-written fake CreatorRepositoryPort with no casts", async () => {
@@ -2402,26 +2445,16 @@ describe("selectStreamingProvider", () => {
 
 describe("bootstrap() streaming provider wiring", () => {
   it("wires FakeStreamingAdapter under NODE_ENV=test with no streaming config", () => {
-    // Explicitly cleared, not merely assumed absent — Task 6 put real values
-    // for all four of these into apps/api/.env so a developer can drive a
-    // live MediaMTX locally, and `bun test` auto-loads that file. Without
-    // this, "no streaming config" is only true on a machine that happens
-    // not to have set them, exactly the trap CONTRIBUTING.md's "Writing
-    // tests" section already warns about for other env vars.
-    withEnv(
-      {
-        MEDIAMTX_RTMP_HOST: undefined,
-        MEDIAMTX_HLS_BASE_URL: undefined,
-        MEDIAMTX_WEBHOOK_SECRET: undefined,
-        STREAM_TOKEN_SECRET: undefined,
-      },
-      () => {
-        withJwtSecret("x".repeat(32), () => {
-          const deps = bootstrap();
-          expect(deps.streamingProvider).toBeInstanceOf(FakeStreamingAdapter);
-        });
-      }
-    );
+    // "No streaming config" relies on the module-level `beforeEach` above
+    // (which clears all four streaming env vars before every test in this
+    // file), not on this machine's `apps/api/.env` happening not to set
+    // them — see that `beforeEach`'s own docstring for why a per-test
+    // `withEnv` here would only re-fix the one symptom this test originally
+    // hit, not the pattern.
+    withJwtSecret("x".repeat(32), () => {
+      const deps = bootstrap();
+      expect(deps.streamingProvider).toBeInstanceOf(FakeStreamingAdapter);
+    });
   });
 
   it("wires MediaMtxAdapter when all four streaming env vars are configured", () => {
@@ -2445,7 +2478,11 @@ describe("bootstrap() streaming provider wiring", () => {
   // when [irrelevant config] is garbage" test: a fully-configured
   // production box (payments and messaging both real) with NO streaming
   // configuration must still boot, and streamingProvider must be undefined
-  // rather than throwing or silently activating a fake.
+  // rather than throwing or silently activating a fake. The four streaming
+  // vars are left OUT of the `withEnv` below deliberately — the
+  // module-level `beforeEach` already guarantees they are absent, and
+  // repeating them here would only be the per-test workaround this file no
+  // longer needs.
   it("boots with streaming disabled on an otherwise fully-configured production box with no MediaMTX config", () => {
     withJwtSecret("x".repeat(32), () => {
       withEnv(
@@ -2458,10 +2495,6 @@ describe("bootstrap() streaming provider wiring", () => {
           TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
           TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
-          MEDIAMTX_RTMP_HOST: undefined,
-          MEDIAMTX_HLS_BASE_URL: undefined,
-          MEDIAMTX_WEBHOOK_SECRET: undefined,
-          STREAM_TOKEN_SECRET: undefined,
         },
         () => {
           captureConsoleLog(() => {

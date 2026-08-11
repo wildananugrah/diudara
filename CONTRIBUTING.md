@@ -284,6 +284,25 @@ If a future MediaMTX version ever changes this, `handle-stream-lifecycle.ts` log
 `console.warn` on the branch where parsing fails — watch for it, since the alternative is
 every session silently staying `scheduled` forever with no error anywhere.
 
+### A failing hook is not silent, but it is easy to miss — where to look
+
+If `runOnOnline`/`runOnOffline` ever fail (wrong secret, `apps/api` unreachable, a
+malformed URL after a future edit), MediaMTX does **not** treat it as an error and does
+**not** retry — it just prints the failing command's own output as a plain log line, with
+no `ERR`/`WAR` tag and nothing that greps for "error" would reliably catch. A wrong-secret
+failure looks like this in `docker logs infra-mediamtx-1`:
+
+```
+wget: server returned error: HTTP/1.0 401 Unauthorized
+```
+
+No surrounding context, no indication of which hook or which stream it came from beyond
+its position in the log relative to `runOnOnline command started`/`command exited` lines
+just above it. If a session's `event.status` is stuck at `scheduled` after a real publish
+started (MediaMTX itself says `stream is available and online`, but the database
+disagrees), this — not `apps/api`'s own logs, which never see the request at all — is the
+first place to look: `docker logs infra-mediamtx-1 | grep -A2 -B2 runOnOnline`.
+
 ## Running the test suite
 
 ```bash

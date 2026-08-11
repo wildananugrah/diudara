@@ -36,10 +36,18 @@ authMethod: http
 
 # Every publish and every read is authorised against our own API — without
 # this, access control is "the RTMP path is hard to guess", which is not
-# access control (design spec §5). MediaMTX's own default authHTTPExclude
-# (api/metrics/pprof) is left as-is: those actions are unrelated to streams
-# and this deployment never turns their servers on anyway (api/metrics/pprof
-# all default to false).
+# access control (design spec §5).
+#
+# TASK 6 REVIEW NOTE: the brief called for `authHTTPExclude: []` — excluding
+# NOTHING, so even api/metrics/pprof would be authorised against our API.
+# What's written below is a DELIBERATE restoration of MediaMTX's own default
+# (api/metrics/pprof excluded from HTTP-based auth entirely), not an
+# oversight of that line. It is functionally inert either way on this
+# deployment: `api`, `metrics` and `pprof` all default to `false` and are
+# never turned on here, so no request of any of those three `action` values
+# can ever reach this server for `authHTTPExclude` to have an opinion about.
+# Restoring the default costs nothing and reads as intentional rather than
+# as a value nobody looked at, which an explicit `[]` would not.
 authHTTPExclude:
   - action: api
   - action: metrics
