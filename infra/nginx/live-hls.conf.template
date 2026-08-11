@@ -1,99 +1,155 @@
-# Task 9: the real VPS nginx's `/live/` location, re-authorising EVERY HLS
-# request against apps/api instead of trusting MediaMTX's own read-auth
-# cache (which authorises once per viewer session, not once per request —
-# see mediamtx-webhooks.ts's `/auth-request` docstring and
-# task-9-report.md for the empirical finding this responds to).
+# Task 9: the two `location` blocks the real VPS's PUBLIC nginx needs for
+# `/live/`, re-authorising EVERY HLS request against apps/api instead of
+# trusting MediaMTX's own read-auth cache (which authorises once per viewer
+# session, not once per request — see mediamtx-webhooks.ts's
+# `/auth-request` docstring and task-9-report.md for the empirical finding
+# this responds to).
 #
-# THIS IS A TEMPLATE, not a config nginx reads directly: `${MEDIAMTX_WEBHOOK_SECRET}`
-# is substituted by nginx's own official docker-entrypoint envsubst step
-# (any `*.template` file under /etc/nginx/templates/ is envsubst'd to
-# /etc/nginx/conf.d/ on container start) — see infra/docker-compose.yml's
-# comment (if this is run in docker) or CONTRIBUTING.md for the plain-VPS
-# equivalent (systemd + a real secrets file, no docker involved).
+# THIS IS A FRAGMENT, NOT A STANDALONE nginx SERVER — it is two `location`
+# blocks, meant to be pasted (or `include`d, after rendering the one
+# templated value below) INSIDE the real public HTTPS server block that
+# already serves this app's SPA and API paths on :443. It is NOT its own
+# `server { listen ...; }` — the real deployment has exactly one public
+# nginx front door, not a second listener on a second port. (An earlier
+# version of this file WAS a standalone `server { listen 8443; }` — that
+# was this task's own local Docker-based proof harness, committed by
+# mistake as if it were the deployable artifact. Fixed: this file is now
+# the thing meant to actually ship.)
 #
-# `NGINX_ENVSUBST_FILTER` MUST be set to exactly `MEDIAMTX_WEBHOOK_SECRET`
-# wherever this template is rendered — envsubst with no filter replaces
-# EVERY `$name`-shaped token in the file from the process environment,
+# THE ONE TEMPLATED VALUE: `${MEDIAMTX_WEBHOOK_SECRET}`. Render it with
+# whatever secrets-injection mechanism the real deploy uses before
+# `include`ing this file — plain `envsubst 'MEDIAMTX_WEBHOOK_SECRET' <
+# live-hls.conf.template > /etc/nginx/snippets/live-hls.conf` is enough for
+# a bare-VPS nginx (the documented deployment — see below). If this nginx
+# is ever run inside a container instead (NOT how this project documents
+# it today), the official nginx image's own `docker-entrypoint.d`
+# templating works too, but ONLY with `NGINX_ENVSUBST_FILTER=
+# MEDIAMTX_WEBHOOK_SECRET` explicitly set — an unfiltered envsubst replaces
+# every `$name`-shaped token in this file from the process environment,
 # which would silently blank out nginx's OWN variables below
 # (`$request_uri`, `$host`, `$arg_token`, `$mtx_key`, ...) the moment any of
-# those names ALSO happened to match an environment variable. Restricting
-# the filter to this one name is not optional hardening; it is what makes
-# this file mean what it says.
+# those names ALSO happened to match an environment variable.
 #
-# WHERE THIS FITS: MediaMTX's HLS port (8888) stays bound to 127.0.0.1 only,
-# exactly as Task 6 set it up — nothing changes there. This nginx location
-# is what the public origin actually proxies `/live/` to; it was a plain
-# `proxy_pass` before Task 9 (see CONTRIBUTING.md's git history for that
-# version) and gained the `auth_request` directive here, nothing else.
-server {
-    listen 8443;
+# THE DOCUMENTED DEPLOYMENT IS BARE-METAL, NOT CONTAINERISED — this is why
+# both `proxy_pass` targets below are `127.0.0.1`, not a Docker hostname.
+# nginx itself is not a service in `infra/docker-compose.yml` at all (that
+# file only runs Postgres and MediaMTX); it runs directly on the VPS host,
+# same as `apps/api`. From there, `127.0.0.1:8888` correctly reaches
+# MediaMTX's HLS port (docker-compose maps it to the HOST's own loopback,
+# not to a container-network address), and `127.0.0.1:3000` correctly
+# reaches `apps/api` (also running directly on the host, not containerised
+# — there is no `api` service in docker-compose.yml to be one).
+#
+# IF YOU EVER CONTAINERISE THIS nginx INSTEAD (not the documented path,
+# but worth recording since it changes both proxy_pass targets): a
+# container's own loopback is not the host's. This task's own local proof
+# needed nginx running as a Docker container (there is no other way to
+# stand up nginx in this project's sandboxed dev environment), and BOTH
+# `127.0.0.1` targets below had to become the container's view of the host
+# — `host.docker.internal`'s resolved IPv4 address specifically, because a
+# `resolver`-dependent hostname lookup for `host.docker.internal` failed
+# without one, and the container used was not on a Docker-managed network
+# with the embedded DNS server that resolver needs (see task-9-report.md
+# for the exact failure and the working substitution). This is a real,
+# tested variant, but it is NOT what ships — recorded here only so a future
+# change to a containerised nginx does not have to rediscover it.
+#
+# OPERATIONAL COUPLING THIS INTRODUCES, WORTH KNOWING BEFORE DEPLOYING:
+# every single HLS request now blocks on a live round trip to `apps/api`.
+# An `apps/api` restart (a deploy, a crash, `bun --hot` picking up a file
+# change) now stalls every in-flight viewer for as long as the timeouts
+# below allow, where before Task 9 an API restart had NO effect on
+# already-playing viewers at all (MediaMTX's own cache kept serving them).
+# This is the intended trade — see task-9-report.md §1 for why the
+# alternative (MediaMTX's own per-session cache) is a real security gap —
+# but it is a genuine new coupling, not a free change.
 
-    # The stream key, captured once per real client request and reused
-    # below by BOTH the auth subrequest and (implicitly) proxy_pass — nginx
-    # variables captured by a location's own regex are visible inside that
-    # location's `auth_request` subrequest, since the subrequest runs in the
-    # same request context. Matches MediaMTX's own authHTTPAddress call,
-    # which also only ever sends "live/<key>", never a filename: the FILE
-    # being requested (index.m3u8, a sub-playlist, an init segment, a media
-    # segment, an LL-HLS part) carries no additional authorisation-relevant
-    # information beyond which stream it belongs to.
-    location ~ ^/live/(?<mtx_key>[^/]+)/ {
-        # Found running this for real, not from documentation: nginx's
-        # DEFAULT access log format includes the full request line —
-        # `GET /live/<key>/index.m3u8?token=<...> HTTP/1.1` — which would
-        # write both the stream key AND the watch token to disk on every
-        # single request, a brand new exposure this proxy would otherwise
-        # introduce (MediaMTX's own HLS port was loopback-only with no
-        # public-facing access log at all before Task 9). Off, for the same
-        # reason `/webhooks/mediamtx/auth`'s query-string secret is kept out
-        # of apps/api's own request logging — see that route's docstring.
-        access_log off;
+location ~ ^/live/(?<mtx_key>[^/]+)(?:/|$) {
+    # The regex REQUIRES the trailing-slash-or-end alternation, not just a
+    # trailing slash — found running this for real: `[^/]+/` alone matches
+    # `/live/<key>/anything` (every real HLS request MediaMTX ever serves)
+    # but NOT the bare `/live/<key>` with nothing after it, which then falls
+    # through this location entirely and 404s outside `auth_request`'s
+    # reach — not a security hole (fail-closed), but not a deliberate,
+    # explained refusal either. `(?:/|$)` matches both shapes the same way.
+    set $watch_token $arg_token;
+    auth_request /_internal/mediamtx-auth-request;
 
-        # MUST be set BEFORE auth_request, in THIS (parent) location —
-        # found running this for real, not from documentation. nginx's
-        # `auth_request` subrequest does NOT inherit `$args`/`$arg_*` from
-        # the request it is authorising: a probe upstream confirmed
-        # `$arg_token`, read directly inside the internal location below,
-        # comes back EMPTY every time, while `$request_uri` and a location's
-        # own regex capture (`$mtx_key` above) both come back correct. A
-        # plain `set` variable, evaluated HERE in the parent context,
-        # persists into the subrequest the same way `$mtx_key` does — even
-        # though `$arg_token` itself does not. See task-9-report.md for the
-        # full empirical trace, including the config that does NOT work.
-        set $watch_token $arg_token;
-        auth_request /_internal/mediamtx-auth-request;
-
-        proxy_pass http://127.0.0.1:8888;
-        proxy_set_header Host $host;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-    }
-
-    # `internal;` — reachable only via `auth_request` above, never directly
-    # from outside this nginx (matching apps/api's own security note: the
-    # actual /webhooks/mediamtx/auth-request endpoint this calls must never
-    # be on the public surface either, and isn't — this subrequest reaches
-    # it over 127.0.0.1, the same private path MediaMTX's own webhook calls
-    # already use).
+    # nginx's default access log format includes the full request line —
+    # `GET /live/<key>/index.m3u8?token=<...> HTTP/1.1` — which would write
+    # both the stream key AND the watch token to disk on every single
+    # request, a brand new exposure this proxy would otherwise introduce
+    # (MediaMTX's own HLS port was loopback-only with no public-facing
+    # access log at all before Task 9). Off, for the same reason
+    # `/webhooks/mediamtx/auth`'s query-string secret is kept out of
+    # apps/api's own request logging — see that route's docstring.
     #
-    # Both authorisation inputs travel as HEADERS, not query parameters —
-    # the obvious `?mtxPath=...&token=...` on this subrequest's own URL
-    # does NOT work, for the same reason `$watch_token` above exists: the
-    # subrequest's own query string is empty regardless of what the outer
-    # request's was. `X-Mtx-Path` is built from `$mtx_key`, which (unlike
-    # `$arg_*`) DOES propagate correctly; `X-Watch-Token` carries the
-    # `$watch_token` variable captured above rather than `$arg_token`
-    # directly. This codebase's watch tokens are base64url (RFC 4648 §5)
-    # with a literal "." separator — no character in that alphabet needs
-    # escaping in a header value.
-    location = /_internal/mediamtx-auth-request {
-        internal;
-        access_log off;
-        proxy_pass http://127.0.0.1:3000/webhooks/mediamtx/auth-request;
-        proxy_pass_request_body off;
-        proxy_set_header Content-Length "";
-        proxy_set_header X-Mediamtx-Secret "${MEDIAMTX_WEBHOOK_SECRET}";
-        proxy_set_header X-Mtx-Path "live/$mtx_key";
-        proxy_set_header X-Watch-Token "$watch_token";
-    }
+    # NOT A COMPLETE FIX BY ITSELF — found running this for real, not
+    # assumed: `auth_request` logs "auth request unexpected status" at
+    # ERROR level for any subrequest status outside 2xx/401/403 (an API
+    # 500, a route drift, an upstream timeout), and nginx's error-log
+    # handler independently appends the FULL request line — including
+    # `?token=...` — regardless of this `access_log off`. Reproduced
+    # directly: pointing the internal location at a stub that always
+    # returns 500 produces exactly
+    #   "auth request unexpected status: 500 ... request: \"GET
+    #    /live/<key>/index.m3u8?token=<TOKEN> HTTP/1.1\""
+    # in nginx's ERROR log. DELIBERATE CHOICE, not an oversight: this
+    # project keeps nginx's error log at its default level rather than
+    # raising the threshold to suppress it, because that log is exactly
+    # what an operator needs when many viewers break at once (an unhealthy
+    # apps/api, a resolver failure, an upstream timeout) — losing it to
+    # protect one query parameter is the wrong trade. Consequence, stated
+    # plainly rather than left implicit: **nginx's error log for this
+    # server must be treated as a secret-bearing file** — the same
+    # handling `apps/api/.env` already gets (restricted permissions, never
+    # shipped to a less-trusted log aggregator without stripping query
+    # strings first, not just "another log file").
+    access_log off;
+
+    proxy_pass http://127.0.0.1:8888;
+    proxy_set_header Host $host;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+
+# `internal;` — reachable only via `auth_request` above, never directly
+# from outside this nginx (matching apps/api's own security note: the
+# actual /webhooks/mediamtx/auth-request endpoint this calls must never be
+# on the public surface either, and isn't — this subrequest reaches it over
+# 127.0.0.1, the same private path MediaMTX's own webhook calls already
+# use).
+#
+# Both authorisation inputs travel as HEADERS, not query parameters — the
+# obvious `?mtxPath=...&token=...` on this subrequest's own URL does not
+# work: nginx's `auth_request` subrequest does NOT inherit `$args`/`$arg_*`
+# from the request it is authorising. Confirmed with a probe upstream that
+# echoed back exactly what the subrequest received: `$arg_token`, read
+# directly inside THIS location, came back EMPTY every time, while
+# `$request_uri` and a location's own regex capture (`$mtx_key` above) both
+# came back correct. The working pattern: capture the token into a plain
+# `set $watch_token $arg_token;` in the OUTER location, BEFORE
+# `auth_request` fires — a `set` variable persists into the subrequest the
+# same way a regex capture does, even though `$arg_token` itself does not.
+# See task-9-report.md for the full empirical trace, including the config
+# that does not work.
+location = /_internal/mediamtx-auth-request {
+    internal;
+    access_log off;
+
+    # Bounded, rather than nginx's 60s defaults — an unhealthy apps/api
+    # should fail THIS request fast (denying the segment) rather than
+    # holding every in-flight viewer's connection open for a minute each.
+    # Not tuned against real traffic; picked to be clearly faster than a
+    # human notices a stall as "broken" without being so tight that an
+    # ordinary GC pause or a briefly slow query becomes a false refusal.
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 3s;
+
+    proxy_pass http://127.0.0.1:3000/webhooks/mediamtx/auth-request;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header X-Mediamtx-Secret "${MEDIAMTX_WEBHOOK_SECRET}";
+    proxy_set_header X-Mtx-Path "live/$mtx_key";
+    proxy_set_header X-Watch-Token "$watch_token";
 }
