@@ -25,6 +25,7 @@ import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adap
 import { FAKE_AI_BEHAVIOURS, FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
 import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
 import { SendAiMessage } from "./application/use-cases/send-ai-message";
+import { ListLiveSessions } from "./application/use-cases/schedule-live-session";
 import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
 import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
 import { createApp } from "./app";
@@ -72,6 +73,7 @@ import type { AnalyticsRepositoryPort } from "./application/ports/analytics-repo
 import type { ChannelMembershipRepositoryPort } from "./application/ports/channel-membership-repository.port";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
+import type { EventRepositoryPort } from "./application/ports/event-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
@@ -150,6 +152,27 @@ const fakeChannelRepository: ChannelRepositoryPort = {
   },
   async listByCommunity() {
     return [];
+  },
+};
+
+const fakeEventRepository: EventRepositoryPort = {
+  async createForCreator() {
+    throw new Error("not used");
+  },
+  async findByIdForCreator() {
+    return null;
+  },
+  async listForCommunityForCreator() {
+    return [];
+  },
+  async markLive() {
+    return null;
+  },
+  async markEnded() {
+    return null;
+  },
+  async findByStreamKey() {
+    return null;
   },
 };
 
@@ -479,6 +502,12 @@ describe("Dependencies (composition root contract)", () => {
       // needs no fake adapter to satisfy the type, and these tests are not
       // about the streaming path.
       streamingProvider: undefined,
+      // Task 3's scheduling endpoints. `scheduleLiveSession` mirrors
+      // `streamingProvider`'s undefined-ness for the same reason;
+      // `listLiveSessions` is never undefined, so it needs a fake here even
+      // though these tests are not about the streaming path either.
+      scheduleLiveSession: undefined,
+      listLiveSessions: new ListLiveSessions(fakeEventRepository),
     };
 
     const created = await deps.creatorRepository.create({
@@ -600,6 +629,12 @@ describe("Dependencies (composition root contract)", () => {
       // needs no fake adapter to satisfy the type, and these tests are not
       // about the streaming path.
       streamingProvider: undefined,
+      // Task 3's scheduling endpoints. `scheduleLiveSession` mirrors
+      // `streamingProvider`'s undefined-ness for the same reason;
+      // `listLiveSessions` is never undefined, so it needs a fake here even
+      // though these tests are not about the streaming path either.
+      scheduleLiveSession: undefined,
+      listLiveSessions: new ListLiveSessions(fakeEventRepository),
     };
 
     const res = await createApp(deps).request("/health");

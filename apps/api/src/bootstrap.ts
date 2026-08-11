@@ -50,6 +50,8 @@ import { DrizzleAiUsageRepository } from "./infrastructure/repositories/drizzle-
 import { SendAiMessage } from "./application/use-cases/send-ai-message";
 import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
 import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
+import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
+import { ScheduleLiveSession, ListLiveSessions } from "./application/use-cases/schedule-live-session";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
@@ -241,6 +243,23 @@ export interface Dependencies {
    * `aiProvider: undefined` hides the co-builder chat screen.
    */
   streamingProvider: StreamingProviderPort | undefined;
+  /**
+   * Task 3's `POST /communities/:communityId/events` — scheduling a live
+   * session. `undefined` EXACTLY when `streamingProvider` is: this use-case
+   * requires a real `StreamingProviderPort` (see `ScheduleLiveSession`'s own
+   * docstring for why the "is streaming configured" decision is made once,
+   * here, rather than inside the use-case), so there is nothing to construct
+   * it against when streaming is disabled. `routes/events.ts` checks this
+   * exactly the way `routes/ai.ts` checks `sendAiMessage` and answers 503.
+   */
+  scheduleLiveSession: ScheduleLiveSession | undefined;
+  /**
+   * Task 3's `GET /communities/:communityId/events`. Unlike
+   * `scheduleLiveSession`, this is NEVER `undefined` — listing depends on no
+   * provider (see `ListLiveSessions`'s docstring) and works identically
+   * whether streaming is configured on this box or not.
+   */
+  listLiveSessions: ListLiveSessions;
 }
 
 /**
@@ -1315,6 +1334,20 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
+  // Task 3's scheduling endpoints. `eventRepository` is shared by both
+  // use-cases below but not itself exposed on `Dependencies` — same rule the
+  // tier/channel repositories follow, since nothing outside this module needs
+  // to see it. `scheduleLiveSession` mirrors `sendAiMessage`'s undefined-ness
+  // exactly: constructed only when `streamingProvider` is, because its
+  // constructor requires a real `StreamingProviderPort` rather than accepting
+  // `| undefined` and checking internally — see `ScheduleLiveSession`'s
+  // docstring for why that decision belongs here and not there.
+  const eventRepository = new DrizzleEventRepository(db);
+  const scheduleLiveSession = streamingProvider
+    ? new ScheduleLiveSession(eventRepository, streamingProvider)
+    : undefined;
+  const listLiveSessions = new ListLiveSessions(eventRepository);
+
   return {
     creatorRepository,
     tokenIssuer,
@@ -1351,5 +1384,7 @@ export function bootstrap(): Dependencies {
     aiProvider,
     sendAiMessage,
     streamingProvider,
+    scheduleLiveSession,
+    listLiveSessions,
   };
 }

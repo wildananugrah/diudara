@@ -11,6 +11,7 @@ import { publicCommunityRoutes } from "./routes/public-community";
 import { publicSubscriptionRoutes } from "./routes/public-subscription";
 import { webhookRoutes } from "./routes/webhooks";
 import { aiRoutes } from "./routes/ai";
+import { eventRoutes } from "./routes/events";
 import { errorHandler } from "./http/error-handler";
 import type { AuthVariables } from "./http/auth.middleware";
 import type { Dependencies } from "./bootstrap";
@@ -37,6 +38,10 @@ export function createApp(deps: Dependencies) {
   app.route("/communities/:communityId/tiers", tierRoutes(deps));
   app.route("/communities/:communityId/channels", channelRoutes(deps));
   app.route("/communities/:communityId/members", membershipRoutes(deps));
+  // Task 3's scheduling endpoint. Same reason as tiers/channels above: it must
+  // be registered before the catch-all /communities mount so this more
+  // specific path matches first.
+  app.route("/communities/:communityId/events", eventRoutes(deps));
   // Phase 6's dashboard reads: /communities/:communityId/metrics, /activity,
   // /members and /members.csv. Mounted at /communities rather than at
   // /communities/:communityId because `members.csv` is a SIBLING path segment of
