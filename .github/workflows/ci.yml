@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same ref makes the first run irrelevant on a PR branch,
+# so cancel it rather than paying for both. Not on main: two merges landing
+# close together must not cancel the first main run, because that run is the
+# one that answers "is the released state good?" — leaving it uncancelled is
+# worth the extra minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+
+    services:
+      # Matches infra/docker-compose.yml. The suite creates a database per run
+      # (diudara_test_<ms>_<pid>_<rand>), migrates it with the generated Drizzle
+      # migrations and drops it afterwards, so it needs `create database`
+      # permission and the `postgres` maintenance database — both of which this
+      # container's superuser has.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: diudara
+          POSTGRES_PASSWORD: ci_postgres_password
+          POSTGRES_DB: diudara
+        ports:
+          - 5432:5432
+        # Without this the suite can start against a server still booting.
+        options: >-
+          --health-cmd "pg_isready -U diudara -d diudara"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://diudara:ci_postgres_password@localhost:5432/diudara
+      # Deliberately a literal, not a repository secret. It signs tokens that are
+      # created and verified inside this run and nowhere else, and the database
+      # above dies with the job. Storing either as a secret would imply they
+      # protect something. A credential that reaches a real external service —
+      # a Xendit key, a bot token, a deploy key — IS a secret. These are not.
+      # Must be >= 32 chars and must not be .env.example's placeholder;
+      # bootstrap() rejects both.
+      JWT_SECRET: ci_only_jwt_secret_at_least_32_characters_long
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned, not `latest`: an unpinned runtime turns an upstream Bun release
+      # into a red build on a commit that changed nothing.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+
+      # --frozen-lockfile so drift fails the build instead of resolving
+      # something different from what a developer has.
+      - run: bun install --frozen-lockfile
+
+      # Before the tests: faster, and its failures are unambiguous.
+      - run: bun run typecheck
+
+      # `bun run test`, never bare `bun test` — the root command runs each
+      # workspace's suite from its own directory, which is the only way
+      # apps/web's bunfig preload (happy-dom) applies.
+      - run: bun run test
