@@ -69,6 +69,25 @@ function post(a: Hono<any>, body: unknown, secret: string | null = SECRET) {
   });
 }
 
+/**
+ * The mechanism a REAL MediaMTX instance actually has available — a query
+ * parameter on `authHTTPAddress`'s own URL, since MediaMTX has no way to
+ * attach a custom header to that POST (see `mediamtx-webhooks.ts`'s
+ * docstring). `post()` above exercises the header, which only Task 5's
+ * shell-command hooks can send.
+ */
+function postWithQuerySecret(a: Hono<any>, body: unknown, secret: string | null = SECRET) {
+  const path =
+    secret === null
+      ? "/webhooks/mediamtx/auth"
+      : `/webhooks/mediamtx/auth?secret=${encodeURIComponent(secret)}`;
+  return a.request(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 let seedCounter = 0;
 
 async function seedCommunity(name = "Rina") {
@@ -164,6 +183,61 @@ describe("POST /webhooks/mediamtx/auth — secret verification", () => {
     });
 
     expect(res.status).toBe(401);
+  });
+
+  /**
+   * Review round 2, important #1. A real MediaMTX's `authHTTPAddress` has
+   * no way to send a custom header (mediamtx.org's docs enumerate its
+   * whole config surface and none of it does this) — so accepting the
+   * secret ONLY via a header, as an earlier version of this route did,
+   * would 401 every genuine publish and every genuine read once wired to
+   * a real MediaMTX. The query parameter is what `authHTTPAddress`'s own
+   * URL can actually carry.
+   */
+  it("authorises via a `secret` query parameter — the mechanism a real MediaMTX can actually send", async () => {
+    const community = await seedCommunity();
+    const { streamKey } = await seedEvent(community.id, "live");
+    const a = app();
+
+    const res = await postWithQuerySecret(a, { action: "publish", path: `live/${streamKey}`, query: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+  });
+
+  it("401s a wrong `secret` query parameter, and never calls AuthoriseStream at all", async () => {
+    const a = app(new ThrowingAuthoriseStream());
+
+    const res = await postWithQuerySecret(
+      a,
+      { action: "publish", path: "live/anything", query: "" },
+      "wrong-secret"
+    );
+
+    expect(res.status).toBe(401);
+  });
+
+  it("401s when neither the header nor the query parameter carries the secret", async () => {
+    const a = app(new ThrowingAuthoriseStream());
+
+    const res = await postWithQuerySecret(
+      a,
+      { action: "publish", path: "live/anything", query: "" },
+      null
+    );
+
+    expect(res.status).toBe(401);
+  });
+
+  it("still authorises via the X-Mediamtx-Secret header when no query parameter is present — Task 5's lifecycle hooks depend on this", async () => {
+    const community = await seedCommunity();
+    const { streamKey } = await seedEvent(community.id, "live");
+    const a = app();
+
+    // post() (header-only) — proves the header path was not removed while
+    // adding the query-param path.
+    const res = await post(a, { action: "publish", path: `live/${streamKey}`, query: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
   });
 });
 

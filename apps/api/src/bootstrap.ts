@@ -263,28 +263,45 @@ export interface Dependencies {
   listLiveSessions: ListLiveSessions;
   /**
    * Task 4's `POST /webhooks/mediamtx/auth` decision logic — `undefined`
-   * EXACTLY when `streamTokenSecret` is (which is exactly when
-   * `streamingProvider` is: `selectStreamingProvider`'s all-four-or-nothing
-   * rule means `MEDIAMTX_WEBHOOK_SECRET`/`STREAM_TOKEN_SECRET` are always
-   * set or unset TOGETHER). Mirrors `scheduleLiveSession`'s undefined-ness
-   * rather than `listLiveSessions`'s: unlike listing, authorising a read
-   * needs `STREAM_TOKEN_SECRET` to verify a watch token's signature, so
-   * there is nothing to construct it against when streaming is disabled.
-   * In practice `routes/mediamtx-webhooks.ts` never reaches this
-   * `undefined` case in production, because `mediamtxWebhookSecret` being
-   * `undefined` too makes `verifyCallbackToken` refuse every delivery
-   * first — but the route still checks it, rather than assuming the
-   * pairing, exactly as `routes/events.ts` checks `scheduleLiveSession`.
+   * EXACTLY when `streamTokenSecret` is. Mirrors `scheduleLiveSession`'s
+   * undefined-ness rather than `listLiveSessions`'s: unlike listing,
+   * authorising a read needs `STREAM_TOKEN_SECRET` to verify a watch
+   * token's signature, so there is nothing to construct it against when
+   * streaming is disabled.
+   *
+   * NOT the same condition as `streamingProvider` being `undefined` — a
+   * docstring here once claimed it was, and that was wrong: under a
+   * `RELAXED_NODE_ENVS` box (`development`/`test`) with NO streaming
+   * variables set at all, `selectStreamingProvider` returns a real,
+   * truthy `FakeStreamingAdapter` (see that function's case 3), so
+   * `streamingProvider` is defined while `MEDIAMTX_WEBHOOK_SECRET` /
+   * `STREAM_TOKEN_SECRET` are genuinely absent and `authoriseStream` stays
+   * `undefined`. Concretely: a relaxed dev box has "schedule a session"
+   * enabled (`scheduleLiveSession` is set) while every call to
+   * `POST /webhooks/mediamtx/auth` 401s (see `mediamtxWebhookSecret`
+   * below) — a real, if confusing-looking, combination, and the correct
+   * one: fail-closed on authorisation is the right default even when
+   * scheduling itself is happily faked. Do not "fix" the route's
+   * `!deps.authoriseStream` guard as dead code on the strength of the old
+   * (wrong) claim that it can never be reached — this is exactly the case
+   * that reaches it.
    */
   authoriseStream: AuthoriseStream | undefined;
   /**
-   * The shared secret `POST /webhooks/mediamtx/auth` requires on
-   * `X-Mediamtx-Secret` — the ONLY authentication on that route, exactly
-   * like `xenditCallbackToken`/`telegramWebhookSecret` above.
-   * `undefined` in lockstep with `authoriseStream` (see that field), in
-   * which case `verifyCallbackToken` rejects every delivery. Deliberately
-   * NOT narrowed to `string`, for the same reason `xenditCallbackToken`
-   * is not: that would force a `?? ""` at the call site, and an empty
+   * The shared secret `POST /webhooks/mediamtx/auth` requires, checked
+   * against EITHER `X-Mediamtx-Secret` (a header — what Task 5's
+   * `runOnOnline`/`runOnOffline` shell `curl` commands can send) OR a
+   * `secret` query parameter (what MediaMTX's own `authHTTPAddress` POST
+   * can carry, since it has no way to attach a custom header — see
+   * `routes/mediamtx-webhooks.ts`'s docstring). It is the ONLY
+   * authentication on that route either way, exactly like
+   * `xenditCallbackToken`/`telegramWebhookSecret` above. `undefined` in
+   * lockstep with `authoriseStream` (see that field — and see that field
+   * for why "in lockstep with `authoriseStream`" is NOT the same thing as
+   * "in lockstep with `streamingProvider`"), in which case
+   * `verifyCallbackToken` rejects every delivery. Deliberately NOT
+   * narrowed to `string`, for the same reason `xenditCallbackToken` is
+   * not: that would force a `?? ""` at the call site, and an empty
    * expected token used to match an empty header.
    */
   mediamtxWebhookSecret: string | undefined;

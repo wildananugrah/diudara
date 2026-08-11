@@ -4,32 +4,39 @@ import { verifyCallbackToken } from "../infrastructure/webhooks/webhook-token";
 import type { Dependencies } from "../bootstrap";
 
 /**
- * The header MediaMTX's `authHTTPAddress` POST must carry the shared secret
- * in, mirroring `X-CALLBACK-TOKEN` (Xendit) and
- * `X-Telegram-Bot-Api-Secret-Token` (Telegram) — and the SAME name the
- * design's Task 5 lifecycle hooks (`runOnOnline`/`runOnOffline`, which ARE
- * shell `curl` commands this codebase writes) already use, for one
- * endpoint's secret to be spelled one way across this codebase.
+ * The header a caller MAY carry the shared secret in, mirroring
+ * `X-CALLBACK-TOKEN` (Xendit) and `X-Telegram-Bot-Api-Secret-Token`
+ * (Telegram) — and the SAME name Task 5's lifecycle hooks
+ * (`runOnOnline`/`runOnOffline`) use, since those ARE shell `curl`
+ * commands this codebase writes and so genuinely CAN send a header.
  *
- * WORTH FLAGGING, not silently worked around: MediaMTX's own
- * `authHTTPAddress` mechanism is NOT a shell command we control — it is
- * MediaMTX's internal HTTP client, and mediamtx.org's authentication docs
- * enumerate its configuration surface (`authMethod`, `authHTTPAddress`,
- * `authHTTPExclude`, `authHTTPFingerprint`, `authInternalUsers`, the
- * `authJWT*` keys) with NO option to attach a custom static header. So while
- * `runOnOnline`'s `curl -H "X-Mediamtx-Secret: ..."` can send this header
- * because we wrote the command, MediaMTX itself has no built-in way to send
- * it on the POST this route authenticates. Task 6 (the real `infra/
- * mediamtx.yml`) will need to reconcile that — most plausibly by baking the
- * secret into `authHTTPAddress`'s own URL as a query parameter
- * (`?secret=...`, read via `c.req.query`, independent of this route's own
- * `X-Mediamtx-Secret` check) rather than a header MediaMTX cannot send. This
- * route still enforces the header today, exactly as briefed, so it is
- * secure-by-default and the test suite below proves the 401 path holds; a
- * later task adding a second, query-based check alongside this one is a
- * strict widening, not a change to what already passes.
+ * This is now one of TWO accepted mechanisms — see the `secret` query
+ * parameter this route also checks, and the docstring on
+ * `mediamtxWebhookRoutes` below for why both exist. Kept, rather than
+ * replaced by the query parameter: it is real (Task 5's hooks use it) and
+ * removing it would silently break the code Task 5 already wrote against
+ * this name.
  */
 const MEDIAMTX_SECRET_HEADER = "X-Mediamtx-Secret";
+
+/**
+ * The query parameter MediaMTX's `authHTTPAddress` POST can be made to
+ * carry the shared secret in. THIS ONE, not the header above, is the
+ * mechanism a real MediaMTX instance actually reaches this route through
+ * — see `mediamtxWebhookRoutes`'s docstring for the full reasoning.
+ *
+ * SECURITY NOTE FOR TASK 6 (`infra/mediamtx.yml`): a query-string secret
+ * is not confidential the way a header is — it lands in this process's
+ * HTTP access logs (if any are ever added) and sits in plaintext inside
+ * `authHTTPAddress`'s own config value in `mediamtx.yml` on disk. Neither
+ * of those is new exposure THIS route creates (the secret already lives
+ * in `mediamtx.yml` as plaintext either way, and this app does not log
+ * request URLs today), but Task 6 MUST NOT put this route on the public
+ * nginx surface — it belongs on the same private path MediaMTX itself
+ * reaches the API over (`host.docker.internal`), never proxied to the
+ * internet, exactly like the HLS port it authorises reads for.
+ */
+const MEDIAMTX_SECRET_QUERY_PARAM = "secret";
 
 /**
  * The fixed body every REFUSED decision returns — not just the same fields,
@@ -65,6 +72,25 @@ const ALLOWED_BODY = { ok: true } as const;
  * is REUSED rather than re-implemented — see that module's own docstring for
  * why a second constant-time comparison must not be hand-rolled.
  *
+ * TWO WAYS TO PRESENT THE SECRET, checked at the same guard: the
+ * `X-Mediamtx-Secret` header, and a `secret` query parameter. This is not
+ * redundancy for its own sake — mediamtx.org's authentication docs
+ * enumerate `authHTTPAddress`'s ENTIRE configuration surface (`authMethod`,
+ * `authHTTPAddress`, `authHTTPExclude`, `authHTTPFingerprint`,
+ * `authInternalUsers`, the `authJWT*` keys) and none of it lets MediaMTX
+ * attach a custom header to the POST this route authenticates. A real
+ * MediaMTX can only reach this endpoint at all via the query parameter
+ * (baked into `authHTTPAddress`'s own URL, e.g.
+ * `.../webhooks/mediamtx/auth?secret=...`, in Task 6's `infra/mediamtx.yml`)
+ * — checking the header ALONE, as an earlier version of this route did,
+ * would 401 every single publish and every single read in production, since
+ * nothing MediaMTX sends could ever satisfy it. The header path stays for
+ * Task 5's lifecycle hooks, which ARE shell `curl` commands and genuinely
+ * can send one. The query parameter is read via `c.req.query`, which is
+ * THIS request's own URL — completely independent of `query` inside the
+ * JSON BODY below, which is the query string of the publish/read request
+ * MediaMTX is asking about. Do not conflate the two.
+ *
  * Every response after the secret check is one of exactly two literal
  * bodies (`ALLOWED_BODY` / `REFUSED_BODY`) — MediaMTX only inspects the
  * STATUS CODE (2xx vs. not) per its own docs, but the body is deliberately
@@ -77,7 +103,12 @@ export function mediamtxWebhookRoutes(
   const app = new Hono();
 
   app.post("/auth", async (c) => {
-    if (!verifyCallbackToken(c.req.header(MEDIAMTX_SECRET_HEADER), deps.mediamtxWebhookSecret)) {
+    // `c.req.query(...)` here is THIS request's own URL query string — the
+    // one `authHTTPAddress`'s own address can be configured with — and has
+    // nothing to do with the `query` field inside the JSON body below,
+    // which describes the publish/read MediaMTX is asking about.
+    const secret = c.req.query(MEDIAMTX_SECRET_QUERY_PARAM) ?? c.req.header(MEDIAMTX_SECRET_HEADER);
+    if (!verifyCallbackToken(secret, deps.mediamtxWebhookSecret)) {
       throw new UnauthorizedError("invalid mediamtx webhook secret");
     }
 

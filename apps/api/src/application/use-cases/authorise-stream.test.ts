@@ -136,6 +136,30 @@ describe("AuthoriseStream — publish", () => {
 
     expect(result.allowed).toBe(false);
   });
+
+  /**
+   * Review round 2, minor #2: `streamKeyFromPath` used to take the LAST
+   * path segment regardless of what came before it, so `foo/bar/<key>`
+   * authorised a publish exactly as `live/<key>` did — even though
+   * `MediaMtxAdapter.createSession` never constructs anything but
+   * `live/<key>`. Not itself an access-control hole (the key still has to
+   * be real), but Task 5's `runOnOnline` would then fire with
+   * `MTX_PATH=foo/bar/<key>`, marking the event `live` while every
+   * member's HLS URL (built from `live/<key>`) points at nothing.
+   */
+  it("refuses a publish whose path is not under the live/ prefix, even with a real key", async () => {
+    const community = await seedCommunity();
+    const { streamKey } = await seedEvent(community.id, "scheduled");
+
+    const result = await useCase.execute({
+      action: "publish",
+      path: `foo/bar/${streamKey}`,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result.allowed).toBe(false);
+  });
 });
 
 describe("AuthoriseStream — read", () => {

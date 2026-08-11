@@ -20,20 +20,37 @@ const PUBLISHABLE_STATUSES: ReadonlySet<string> = new Set(["scheduled", "live"])
 const ENTITLED_STATUS = "active";
 
 /**
- * MediaMTX's own stream-path convention is `live/<streamKey>` (see
- * `MediaMtxAdapter.createSession` and `ScheduleLiveSession`) — the key is
- * always the LAST path segment. Reading it this way, rather than assuming a
- * fixed `live/` prefix or a fixed depth, means this function does not care
- * whether MediaMTX's `path` field carries a leading slash, a trailing one,
- * neither, or a differently-named top-level path — all of which are
- * observed variations across MediaMTX versions and none of which this
- * codebase controls. An empty or slash-only path yields `""`, which
- * `findByStreamKey` will simply fail to resolve (event.stream_key is never
- * empty), so no special-casing is needed here.
+ * The one top-level path segment MediaMTX's stream paths are ever built
+ * under in this codebase — see `MediaMtxAdapter.createSession`, which
+ * constructs both `rtmp://<host>:1935/live/<streamKey>` and
+ * `<hlsBaseUrl>/live/<streamKey>/index.m3u8`. Every real publish and every
+ * real read this route will ever see therefore has `path = "live/<key>"`,
+ * nothing else.
+ */
+const LIVE_PATH_SEGMENT = "live";
+
+/**
+ * Extracts the stream key from `path`, requiring EXACTLY `live/<key>` (a
+ * leading/trailing slash tolerated, an empty key or extra segments not).
+ *
+ * REQUIRING the `live/` prefix, rather than just taking the last segment
+ * regardless of what came before it, is load-bearing and not merely tidy:
+ * without it, `foo/bar/<key>` authorised a publish exactly as `live/<key>`
+ * did, for any real key — an attacker (or a misconfigured MediaMTX) could
+ * publish to a path our own adapter never constructs, and Task 5's
+ * `runOnOnline` would then fire with `MTX_PATH=foo/bar/<key>`, mark the
+ * event `live`, and notify every member with an HLS URL under
+ * `live/<key>` that nothing is actually publishing to. An unknown or
+ * wrongly-shaped path now refuses outright (`""`, which never resolves via
+ * `findByStreamKey`), matching the ONE shape this codebase's own adapter
+ * ever produces.
  */
 function streamKeyFromPath(path: string): string {
   const segments = path.split("/").filter((segment) => segment.length > 0);
-  return segments[segments.length - 1] ?? "";
+  if (segments.length !== 2 || segments[0] !== LIVE_PATH_SEGMENT) {
+    return "";
+  }
+  return segments[1]!;
 }
 
 /**
