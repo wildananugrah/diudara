@@ -47,9 +47,7 @@ export default function LandingPage() {
         <div className="landing-features">
           <article className="card landing-feature">
             <h3>Pembayaran QRIS &amp; e-wallet</h3>
-            <p>
-              Lewat Xendit. Dana anggota masuk ke sub-akun Anda sendiri, bukan ke rekening kami.
-            </p>
+            <p>Lewat Xendit. Dana anggota masuk ke sub-akun Anda sendiri.</p>
           </article>
           <article className="card landing-feature">
             <h3>Akses Telegram otomatis</h3>
@@ -73,7 +71,8 @@ export default function LandingPage() {
             <h3>AI co-builder</h3>
             <p>
               Ceritakan komunitas Anda dalam Bahasa Indonesia, dan AI menyiapkan draf paket serta
-              pesan sambutan yang tinggal Anda sunting.
+              draf pesan sambutan untuk Anda sunting dan salin sendiri — hanya paket yang
+              tersimpan otomatis.
             </p>
           </article>
         </div>

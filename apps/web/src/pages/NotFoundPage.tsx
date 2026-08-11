@@ -7,7 +7,7 @@ export default function NotFoundPage() {
       <p className="landing-lede">
         Tautan yang Anda buka mungkin salah ketik atau sudah tidak berlaku.
       </p>
-      <Link className="landing-cta" to="/">
+      <Link className="button-primary landing-cta" to="/">
         Kembali ke beranda
       </Link>
     </main>
