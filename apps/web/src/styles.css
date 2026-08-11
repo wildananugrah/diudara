@@ -716,3 +716,95 @@ tbody tr:last-child td {
     font-size: 1.3rem;
   }
 }
+
+/* ---------------------------------------------------------------
+   Landing page (/). Prefixed .landing- so these cannot collide with
+   the dashboard's rules — this file is one unscoped 700+ line sheet,
+   a known carry-forward, and this addition stays self-contained for
+   whoever splits it.
+   Mobile-first, unlike the dashboard: this is the page a creator
+   opens from a link on their phone.
+   --------------------------------------------------------------- */
+.landing {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+.landing-eyebrow {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  margin: 0 0 0.5rem;
+  color: var(--ink-faint);
+}
+
+.landing-hero h1 {
+  font-size: 2rem;
+  line-height: 1.2;
+  margin: 0 0 0.75rem;
+}
+
+.landing-lede {
+  font-size: 1.05rem;
+  line-height: 1.6;
+  margin: 0 0 1.5rem;
+  color: var(--ink-soft);
+}
+
+.landing-cta {
+  display: inline-block;
+  text-decoration: none;
+}
+
+.landing-section,
+.landing-closing {
+  margin-top: 3rem;
+}
+
+.landing-section h2,
+.landing-closing h2 {
+  font-size: 1.35rem;
+  margin: 0 0 1rem;
+}
+
+.landing-list,
+.landing-steps {
+  margin: 0;
+  padding-left: 1.25rem;
+  line-height: 1.7;
+}
+
+.landing-steps li + li {
+  margin-top: 0.75rem;
+}
+
+.landing-features {
+  display: grid;
+  gap: 1rem;
+}
+
+.landing-feature h3 {
+  font-size: 1rem;
+  margin: 0 0 0.35rem;
+}
+
+.landing-feature p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+@media (min-width: 720px) {
+  .landing {
+    padding-top: 4rem;
+  }
+
+  .landing-hero h1 {
+    font-size: 2.75rem;
+  }
+
+  .landing-features {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
