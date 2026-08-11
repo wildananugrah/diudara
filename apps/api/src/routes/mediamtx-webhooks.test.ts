@@ -4,12 +4,25 @@ import { Hono } from "hono";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { db } from "../db/client";
-import { communities, creators, events, members, membershipTiers, subscriptions } from "../db/schema";
+import {
+  activityLogs,
+  communities,
+  creators,
+  events,
+  members,
+  membershipTiers,
+  outbox,
+  subscriptions,
+} from "../db/schema";
 import { resetDatabase } from "../db/test-helpers";
 import { errorHandler } from "../http/error-handler";
 import { AuthoriseStream } from "../application/use-cases/authorise-stream";
+import { HandleStreamLifecycle } from "../application/use-cases/handle-stream-lifecycle";
+import { OUTBOX_NOTIFY_STREAM_LIVE } from "../application/ports/outbox-repository.port";
 import { mintWatchToken, WATCH_TOKEN_TTL_MS } from "../domain/watch-token";
+import { DrizzleActivityLogRepository } from "../infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleEventRepository } from "../infrastructure/repositories/drizzle-event.repository";
+import { DrizzleOutboxRepository } from "../infrastructure/repositories/drizzle-outbox.repository";
 import { DrizzleSubscriptionRepository } from "../infrastructure/repositories/drizzle-subscription.repository";
 import { mediamtxWebhookRoutes } from "./mediamtx-webhooks";
 
@@ -23,6 +36,11 @@ const subscriptionRepository = new DrizzleSubscriptionRepository(db);
 const authoriseStream = new AuthoriseStream(eventRepository, subscriptionRepository, {
   streamTokenSecret: SECRET,
 });
+const handleStreamLifecycle = new HandleStreamLifecycle(
+  eventRepository,
+  new DrizzleActivityLogRepository(db),
+  new DrizzleOutboxRepository(db)
+);
 
 /**
  * A REAL `AuthoriseStream`, subclassed only to make `execute` throw. Used
@@ -44,12 +62,31 @@ class ThrowingAuthoriseStream extends AuthoriseStream {
   }
 }
 
-function app(authorise: AuthoriseStream = authoriseStream) {
+/** Same purpose as `ThrowingAuthoriseStream`, for the `/lifecycle` route's own tests. */
+class ThrowingHandleStreamLifecycle extends HandleStreamLifecycle {
+  constructor() {
+    super(eventRepository, new DrizzleActivityLogRepository(db), new DrizzleOutboxRepository(db));
+  }
+  override async execute(): Promise<void> {
+    throw new Error(
+      "HandleStreamLifecycle.execute must not run before the secret header is verified"
+    );
+  }
+}
+
+function app(
+  authorise: AuthoriseStream = authoriseStream,
+  lifecycle: HandleStreamLifecycle = handleStreamLifecycle
+) {
   const a = new Hono();
   a.onError(errorHandler);
   a.route(
     "/webhooks/mediamtx",
-    mediamtxWebhookRoutes({ authoriseStream: authorise, mediamtxWebhookSecret: SECRET })
+    mediamtxWebhookRoutes({
+      authoriseStream: authorise,
+      mediamtxWebhookSecret: SECRET,
+      handleStreamLifecycle: lifecycle,
+    })
   );
   return a;
 }
@@ -63,6 +100,22 @@ function post(a: Hono<any>, body: unknown, secret: string | null = SECRET) {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (secret !== null) headers[HEADER] = secret;
   return a.request("/webhooks/mediamtx/auth", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Posts to `/lifecycle`, the way `infra/mediamtx.yml`'s planned `runOnOnline`/
+ * `runOnOffline` `curl` commands do — a header, since these ARE shell commands
+ * this codebase writes and can freely attach one to (unlike `authHTTPAddress`,
+ * which `/auth`'s own tests cover separately).
+ */
+function postLifecycle(a: Hono<any>, body: unknown, secret: string | null = SECRET) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (secret !== null) headers[HEADER] = secret;
+  return a.request("/webhooks/mediamtx/lifecycle", {
     method: "POST",
     headers,
     body: JSON.stringify(body),
@@ -411,6 +464,182 @@ describe("POST /webhooks/mediamtx/auth — end-to-end wiring", () => {
     const wrongSecret = await post(
       a,
       { action: "publish", path: `live/${streamKey}`, query: "" },
+      "wrong-secret"
+    );
+    expect(wrongSecret.status).toBe(401);
+  });
+});
+
+describe("POST /webhooks/mediamtx/lifecycle — secret verification", () => {
+  it("401s a missing secret header, and never calls HandleStreamLifecycle at all", async () => {
+    const a = app(authoriseStream, new ThrowingHandleStreamLifecycle());
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: "live/anything" }, null);
+
+    expect(res.status).toBe(401);
+  });
+
+  it("401s a wrong secret header, and never calls HandleStreamLifecycle at all", async () => {
+    const a = app(authoriseStream, new ThrowingHandleStreamLifecycle());
+
+    const res = await postLifecycle(
+      a,
+      { hook: "online", streamKey: "live/anything" },
+      "wrong-secret"
+    );
+
+    expect(res.status).toBe(401);
+  });
+
+  it("checks the secret BEFORE parsing the body — an unauthenticated garbage body is 401, not 200", async () => {
+    const a = app(authoriseStream, new ThrowingHandleStreamLifecycle());
+
+    const res = await a.request("/webhooks/mediamtx/lifecycle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{not json",
+    });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("authorises via a `secret` query parameter too, exactly like /auth", async () => {
+    const community = await seedCommunity();
+    const { streamKey } = await seedEvent(community.id, "scheduled");
+    const a = app();
+
+    const res = await a.request(
+      `/webhooks/mediamtx/lifecycle?secret=${encodeURIComponent(SECRET)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hook: "online", streamKey: `live/${streamKey}` }),
+      }
+    );
+
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /webhooks/mediamtx/lifecycle — online", () => {
+  it("moves a scheduled event to live, and answers 200", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "scheduled");
+    const a = app();
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
+
+    expect(res.status).toBe(200);
+    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
+    expect(reloaded!.status).toBe("live");
+  });
+
+  it("a second online still leaves exactly one notify_stream_live row enqueued", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "scheduled");
+    const a = app();
+
+    await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
+    const second = await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
+
+    expect(second.status).toBe(200);
+    const rows = await db.select().from(outbox).where(eq(outbox.eventType, OUTBOX_NOTIFY_STREAM_LIVE));
+    const forThisEvent = rows.filter(
+      (row) => (row.payload as { eventId?: string } | null)?.eventId === event.id
+    );
+    expect(forThisEvent).toHaveLength(1);
+  });
+
+  it("answers 200 for an unknown stream key, and writes nothing — a hook that 500s retries forever", async () => {
+    const a = app();
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: "live/no-such-key" });
+
+    expect(res.status).toBe(200);
+    const activity = await db.select().from(activityLogs);
+    expect(activity).toHaveLength(0);
+  });
+
+  it("answers 200 for a malformed hook value, and writes nothing", async () => {
+    const community = await seedCommunity();
+    const { streamKey } = await seedEvent(community.id, "scheduled");
+    const a = app();
+
+    const res = await postLifecycle(a, { hook: "publishing", streamKey: `live/${streamKey}` });
+
+    expect(res.status).toBe(200);
+    const activity = await db.select().from(activityLogs);
+    expect(activity).toHaveLength(0);
+  });
+});
+
+describe("POST /webhooks/mediamtx/lifecycle — offline", () => {
+  it("ends an event that was never live, and answers 200", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "scheduled");
+    const a = app();
+
+    const res = await postLifecycle(a, { hook: "offline", streamKey: `live/${streamKey}` });
+
+    expect(res.status).toBe(200);
+    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
+    expect(reloaded!.status).toBe("ended");
+  });
+
+  it("offline then a late online leaves the event ended", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "live");
+    const a = app();
+
+    await postLifecycle(a, { hook: "offline", streamKey: `live/${streamKey}` });
+    await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
+
+    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
+    expect(reloaded!.status).toBe("ended");
+  });
+});
+
+describe("POST /webhooks/mediamtx/lifecycle — end-to-end wiring", () => {
+  /**
+   * Same purpose as `/auth`'s own end-to-end test: proves `app.ts` mounts this
+   * route where `infra/mediamtx.yml`'s planned hooks will reach it, and that
+   * `bootstrap()` really does wire `HandleStreamLifecycle` off
+   * `MEDIAMTX_WEBHOOK_SECRET`.
+   */
+  it("marks an event live through the real bootstrap() when streaming is fully configured", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "scheduled");
+
+    const originals = {
+      MEDIAMTX_RTMP_HOST: process.env.MEDIAMTX_RTMP_HOST,
+      MEDIAMTX_HLS_BASE_URL: process.env.MEDIAMTX_HLS_BASE_URL,
+      MEDIAMTX_WEBHOOK_SECRET: process.env.MEDIAMTX_WEBHOOK_SECRET,
+      STREAM_TOKEN_SECRET: process.env.STREAM_TOKEN_SECRET,
+    };
+    process.env.MEDIAMTX_RTMP_HOST = "mediamtx.internal";
+    process.env.MEDIAMTX_HLS_BASE_URL = "https://hls.diudara.test";
+    process.env.MEDIAMTX_WEBHOOK_SECRET = SECRET;
+    process.env.STREAM_TOKEN_SECRET = SECRET;
+
+    let a: ReturnType<typeof createApp>;
+    try {
+      a = createApp(bootstrap());
+    } finally {
+      for (const [key, value] of Object.entries(originals)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
+    expect(res.status).toBe(200);
+
+    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
+    expect(reloaded!.status).toBe("live");
+
+    const wrongSecret = await postLifecycle(
+      a,
+      { hook: "online", streamKey: `live/${streamKey}` },
       "wrong-secret"
     );
     expect(wrongSecret.status).toBe(401);

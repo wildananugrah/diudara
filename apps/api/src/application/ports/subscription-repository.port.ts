@@ -438,4 +438,23 @@ export interface SubscriptionRepositoryPort {
    * than a driver error carrying bound parameters into the worker's log.
    */
   findRenewalContext(subscriptionId: string): Promise<RenewalReminderContext | null>;
+  /**
+   * Every subscription CURRENTLY `active` in this community, resolved through
+   * `subscription → membership_tier → community` like the other community-scoped
+   * reads on this port — the set `NotifyStreamLive` (Task 5) messages when a
+   * creator goes live.
+   *
+   * DELIBERATELY NARROWER than `RENEWABLE_STATUSES` (`active` only, not
+   * `past_due`): a grace-period member keeps their Telegram access, but
+   * `AuthoriseStream`'s read entitlement re-check requires `active` for the
+   * SAME reason a watch token must — see `ENTITLED_STATUS` in
+   * `authorise-stream.ts`. Sending a `past_due` member a watch link whose
+   * every segment request then 403s would be worse than not sending one.
+   *
+   * READ FRESH, at delivery time, by design — see the port docstring's note
+   * on `findDueForRenewal` for the general shape, and `NotifyStreamLive`'s own
+   * docstring for why THIS particular read is the one that answers "did this
+   * member churn between go-live and delivery".
+   */
+  listActiveForCommunity(communityId: string): Promise<{ id: string; memberId: string }[]>;
 }

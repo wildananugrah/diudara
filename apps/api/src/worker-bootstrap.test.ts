@@ -6,6 +6,7 @@ import {
   channels,
   communities,
   creators,
+  events,
   members,
   membershipTiers,
   outbox,
@@ -17,6 +18,7 @@ import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import {
   OUTBOX_GRANT_ACCESS,
+  OUTBOX_NOTIFY_STREAM_LIVE,
   OUTBOX_REVOKE_ACCESS,
   OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
   OUTBOX_SEND_RENEWAL_REMINDER,
@@ -209,6 +211,46 @@ async function seedMemberPastGrace() {
 }
 
 /**
+ * A `live` event with one `active` subscriber — the minimum `NotifyStreamLive`
+ * (Task 5) needs to send exactly one WhatsApp message.
+ */
+async function seedLiveEventWithActiveMember() {
+  const [creator] = await db.insert(creators).values({ name: "Rina" }).returning();
+  const [community] = await db
+    .insert(communities)
+    .values({ creatorId: creator.id, name: "Kelas Rina", slug: `kelas-live-${Date.now()}` })
+    .returning();
+  const [event] = await db
+    .insert(events)
+    .values({
+      communityId: community.id,
+      title: "Live Q&A",
+      streamKey: `worker-key-${Date.now()}`,
+      status: "live",
+      hlsPlaybackPath: "https://fake-mediamtx.local/live/worker-key/index.m3u8",
+    })
+    .returning();
+  const [tier] = await db
+    .insert(membershipTiers)
+    .values({
+      communityId: community.id,
+      name: "Basic",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    })
+    .returning();
+  const [member] = await db
+    .insert(members)
+    .values({ whatsappNumber: `+6281394${Date.now() % 100000}`, name: "Siti" })
+    .returning();
+  const [subscription] = await db
+    .insert(subscriptions)
+    .values({ memberId: member.id, tierId: tier.id, status: "active" })
+    .returning();
+  return { event, member, subscription };
+}
+
+/**
  * A gating adapter this root selected, narrowed to the fake. An `instanceof` check
  * rather than a cast, for the same reason as `fakeNotifierOf`.
  */
@@ -391,6 +433,69 @@ describe("bootstrapWorker", () => {
     ]);
     const [membership] = await db.select().from(channelMemberships);
     expect(membership.status).toBe("revoked");
+  });
+
+  /**
+   * Task 5. `HandleStreamLifecycle` (in `apps/api`'s own webhook route) enqueues
+   * these; an unregistered handler here would mean a `notify_stream_live` row
+   * failing five times and then permanently, with every active member of the
+   * community never told the creator went live.
+   *
+   * `STREAM_TOKEN_SECRET` is set for the duration of this test, exactly like the
+   * `APP_BASE_URL` test above: `notifyStreamLive` (and the handler for its event
+   * type) is `undefined` — by design, mirroring `authoriseStream` in the API root
+   * — on a box with no streaming secret configured, which is this file's default
+   * environment.
+   */
+  it("dispatches a real notify_stream_live row to NotifyStreamLive, not to nothing", async () => {
+    const { event, member } = await seedLiveEventWithActiveMember();
+    const { id } = await new DrizzleOutboxRepository(db).enqueue({
+      eventType: OUTBOX_NOTIFY_STREAM_LIVE,
+      payload: { eventId: event.id },
+    });
+
+    const original = process.env.STREAM_TOKEN_SECRET;
+    process.env.STREAM_TOKEN_SECRET = "e".repeat(32);
+    try {
+      const worker = bootstrapWorker();
+      const notifier = fakeNotifierOf(worker);
+
+      const result = await worker.processOutbox.execute();
+
+      expect(result.claimed).toBe(1);
+      expect(result.sent).toBe(1);
+      const row = await rowById(id);
+      expect(row.status).toBe("sent");
+      expect(row.lastError).toBeNull();
+      // The member was actually messaged, over WhatsApp, by THIS process.
+      expect(notifier.notifications).toHaveLength(1);
+      expect(notifier.notifications[0].toWhatsappNumber).toBe(member.whatsappNumber);
+    } finally {
+      if (original === undefined) delete process.env.STREAM_TOKEN_SECRET;
+      else process.env.STREAM_TOKEN_SECRET = original;
+    }
+  });
+
+  it("does not register a notify_stream_live handler when STREAM_TOKEN_SECRET is unset", async () => {
+    const { event } = await seedLiveEventWithActiveMember();
+    const { id } = await new DrizzleOutboxRepository(db).enqueue({
+      eventType: OUTBOX_NOTIFY_STREAM_LIVE,
+      payload: { eventId: event.id },
+    });
+    const original = process.env.STREAM_TOKEN_SECRET;
+    delete process.env.STREAM_TOKEN_SECRET;
+
+    try {
+      const worker = bootstrapWorker();
+      expect(worker.notifyStreamLive).toBeUndefined();
+
+      await worker.processOutbox.execute();
+
+      expect((await rowById(id)).lastError).toContain("no handler is registered");
+    } finally {
+      if (original === undefined) delete process.env.STREAM_TOKEN_SECRET;
+      else process.env.STREAM_TOKEN_SECRET = original;
+    }
   });
 
   it("wires exactly the event types it knows about, and no more", async () => {

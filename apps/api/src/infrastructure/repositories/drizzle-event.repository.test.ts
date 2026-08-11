@@ -222,6 +222,99 @@ describe("DrizzleEventRepository lifecycle transitions", () => {
   it("markLive returns null for an id that does not exist", async () => {
     expect(await repo.markLive("00000000-0000-4000-8000-000000000000")).toBeNull();
   });
+
+  it("markLive returns null, and does not touch status, once the event is already live", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const created = await repo.createForCreator({
+      communityId: community.id,
+      creatorId: creator.id,
+      title: "Live Q&A",
+      scheduledAt: null,
+      streamKey: streamKey("key"),
+      hlsPlaybackPath: "https://fake-mediamtx.local/hls/live/key/index.m3u8",
+    });
+    await repo.markLive(created!.id);
+
+    const second = await repo.markLive(created!.id);
+
+    expect(second).toBeNull();
+  });
+
+  it("markLive refuses to resurrect an ended event", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const created = await repo.createForCreator({
+      communityId: community.id,
+      creatorId: creator.id,
+      title: "Live Q&A",
+      scheduledAt: null,
+      streamKey: streamKey("key"),
+      hlsPlaybackPath: "https://fake-mediamtx.local/hls/live/key/index.m3u8",
+    });
+    await repo.markEnded(created!.id);
+
+    const late = await repo.markLive(created!.id);
+
+    expect(late).toBeNull();
+  });
+
+  it("markEnded returns null once the event is already ended", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const created = await repo.createForCreator({
+      communityId: community.id,
+      creatorId: creator.id,
+      title: "Live Q&A",
+      scheduledAt: null,
+      streamKey: streamKey("key"),
+      hlsPlaybackPath: "https://fake-mediamtx.local/hls/live/key/index.m3u8",
+    });
+    await repo.markEnded(created!.id);
+
+    const second = await repo.markEnded(created!.id);
+
+    expect(second).toBeNull();
+  });
+
+  it("markEnded transitions straight from scheduled — offline for a session that never went live", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const created = await repo.createForCreator({
+      communityId: community.id,
+      creatorId: creator.id,
+      title: "Live Q&A",
+      scheduledAt: null,
+      streamKey: streamKey("key"),
+      hlsPlaybackPath: "https://fake-mediamtx.local/hls/live/key/index.m3u8",
+    });
+
+    const ended = await repo.markEnded(created!.id);
+
+    expect(ended!.status).toBe("ended");
+  });
+});
+
+describe("DrizzleEventRepository.findById", () => {
+  it("resolves an event by id alone, with no creator in scope", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const created = await repo.createForCreator({
+      communityId: community.id,
+      creatorId: creator.id,
+      title: "Live Q&A",
+      scheduledAt: null,
+      streamKey: streamKey("key"),
+      hlsPlaybackPath: "https://fake-mediamtx.local/hls/live/key/index.m3u8",
+    });
+
+    const found = await repo.findById(created!.id);
+
+    expect(found!.id).toBe(created!.id);
+  });
+
+  it("returns null for an id that does not exist", async () => {
+    expect(await repo.findById("00000000-0000-4000-8000-000000000000")).toBeNull();
+  });
+
+  it("returns null rather than throwing for a value that cannot be a uuid", async () => {
+    expect(await repo.findById("not-a-uuid")).toBeNull();
+  });
 });
 
 describe("DrizzleEventRepository.findByStreamKey", () => {

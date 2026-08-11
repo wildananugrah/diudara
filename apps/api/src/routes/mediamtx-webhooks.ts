@@ -51,6 +51,18 @@ const REFUSED_BODY = { ok: false } as const;
 const ALLOWED_BODY = { ok: true } as const;
 
 /**
+ * The literal body `/lifecycle` always answers with, once the shared secret has
+ * checked out — success OR a no-op both read as "acknowledged". Unlike `/auth`,
+ * this route has nothing to refuse: it is a fire-and-forget notification from a
+ * shell `curl` command, not a decision MediaMTX branches on. See the route's own
+ * docstring for why an unknown key or a malformed body still answer 200.
+ */
+const ACKNOWLEDGED_BODY = { ok: true } as const;
+
+/** The two `hook` values `POST /lifecycle`'s body may legitimately carry. */
+const LIFECYCLE_HOOKS: ReadonlySet<string> = new Set(["online", "offline"]);
+
+/**
  * `POST /webhooks/mediamtx/auth` — MediaMTX's `authHTTPAddress` target, the
  * single gate every publish and every read passes through (design spec §5).
  *
@@ -98,7 +110,10 @@ const ALLOWED_BODY = { ok: true } as const;
  * event" from "not entitled" from "expired token".
  */
 export function mediamtxWebhookRoutes(
-  deps: Pick<Dependencies, "authoriseStream" | "mediamtxWebhookSecret">
+  deps: Pick<
+    Dependencies,
+    "authoriseStream" | "mediamtxWebhookSecret" | "handleStreamLifecycle"
+  >
 ) {
   const app = new Hono();
 
@@ -142,6 +157,66 @@ export function mediamtxWebhookRoutes(
     return allowed ? c.json(ALLOWED_BODY, 200) : c.json(REFUSED_BODY, 403);
   });
 
+  /**
+   * `POST /webhooks/mediamtx/lifecycle` — Task 5's `runOnOnline`/`runOnOffline`
+   * hooks, in `infra/mediamtx.yml`'s planned shape:
+   * `curl -X POST .../lifecycle -H "X-Mediamtx-Secret: $MEDIAMTX_WEBHOOK_SECRET"
+   * -d '{"hook":"online","streamKey":"$MTX_PATH"}'`. These hooks are shell
+   * commands, not a mechanism with `authHTTPAddress`'s configuration surface, so
+   * (unlike `/auth`) they CAN and DO send the secret as a header — but this route
+   * still checks the query parameter first, for the one reason that matters: the
+   * secret-verification CODE must be the exact same call as `/auth`'s, not a
+   * second hand-rolled comparison that could silently diverge.
+   *
+   * THE SECRET CHECK IS STILL THE FIRST STATEMENT, before the body is parsed and
+   * before `HandleStreamLifecycle` is ever reached — identical ordering to
+   * `/auth`, for the identical reason.
+   *
+   * ALWAYS 200 ONCE THE SECRET CHECKS OUT, whatever `HandleStreamLifecycle.execute`
+   * did or did not do: an unknown stream key, a malformed body, an out-of-order
+   * hook that turned out to be a no-op — none of these are failures MediaMTX
+   * should retry over. `runOnOnline`/`runOnOffline` are fire-and-forget; a 500
+   * here would make MediaMTX (or whatever wraps the curl call) retry forever for
+   * a condition retrying can never fix. A genuine database error is NOT caught
+   * here and is allowed to become the process's normal 500, exactly as `/auth`
+   * lets `AuthoriseStream.execute` propagate — the two failure modes are
+   * different (one is "this input teaches us nothing new", the other is "the
+   * database is unreachable") and only the first is swallowed to 200.
+   */
+  app.post("/lifecycle", async (c) => {
+    const secret = c.req.query(MEDIAMTX_SECRET_QUERY_PARAM) ?? c.req.header(MEDIAMTX_SECRET_HEADER);
+    if (!verifyCallbackToken(secret, deps.mediamtxWebhookSecret)) {
+      throw new UnauthorizedError("invalid mediamtx webhook secret");
+    }
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(ACKNOWLEDGED_BODY, 200);
+    }
+
+    if (!isLifecycleRequestBody(body)) {
+      return c.json(ACKNOWLEDGED_BODY, 200);
+    }
+
+    // Streaming not configured on this box — nothing to react to. Unreachable
+    // in practice once the secret check above holds (same pairing as
+    // `authoriseStream`/`mediamtxWebhookSecret` — see bootstrap.ts); kept for
+    // type-safety and so this route never assumes the pairing without checking.
+    if (!deps.handleStreamLifecycle) {
+      return c.json(ACKNOWLEDGED_BODY, 200);
+    }
+
+    await deps.handleStreamLifecycle.execute({
+      hook: body.hook,
+      streamKey: body.streamKey,
+      now: Date.now(),
+    });
+
+    return c.json(ACKNOWLEDGED_BODY, 200);
+  });
+
   return app;
 }
 
@@ -154,5 +229,25 @@ function isAuthRequestBody(
     body !== null &&
     typeof (body as Record<string, unknown>).action === "string" &&
     typeof (body as Record<string, unknown>).path === "string"
+  );
+}
+
+/**
+ * The minimum shape `HandleStreamLifecycle.execute` needs out of the lifecycle
+ * hook's own `curl -d` body. `hook` is checked against `LIFECYCLE_HOOKS` here,
+ * not merely typeof-string, so a value neither the shell templates in
+ * `infra/mediamtx.yml` nor `HandleStreamLifecycle`'s own union ever produces is
+ * treated the same as a malformed body — acknowledged and dropped — rather than
+ * reaching the use-case with a hook value it was never typed to accept.
+ */
+function isLifecycleRequestBody(
+  body: unknown
+): body is { hook: "online" | "offline"; streamKey: string } {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    typeof (body as Record<string, unknown>).hook === "string" &&
+    LIFECYCLE_HOOKS.has((body as Record<string, unknown>).hook as string) &&
+    typeof (body as Record<string, unknown>).streamKey === "string"
   );
 }

@@ -53,6 +53,7 @@ import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.
 import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
 import { ScheduleLiveSession, ListLiveSessions } from "./application/use-cases/schedule-live-session";
 import { AuthoriseStream } from "./application/use-cases/authorise-stream";
+import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lifecycle";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
@@ -305,6 +306,19 @@ export interface Dependencies {
    * expected token used to match an empty header.
    */
   mediamtxWebhookSecret: string | undefined;
+  /**
+   * Task 5's `POST /webhooks/mediamtx/lifecycle` decision logic — `undefined`
+   * in lockstep with `mediamtxWebhookSecret` (both are read off the same
+   * `MEDIAMTX_WEBHOOK_SECRET`; see that field for what "in lockstep" does and
+   * does not imply). Unlike `authoriseStream`, this class needs no secret of
+   * its own to do its job — it only reads and writes `event`, `activity_log`
+   * and `outbox` — so gating its construction on the secret is a choice made
+   * for symmetry with the route it serves (there is no reachable path to
+   * `POST /lifecycle` on a box where the secret is unset, so wiring the
+   * use-case anyway would only be dead weight) rather than a requirement of
+   * the class itself.
+   */
+  handleStreamLifecycle: HandleStreamLifecycle | undefined;
 }
 
 /**
@@ -1409,6 +1423,19 @@ export function bootstrap(): Dependencies {
     ? new AuthoriseStream(eventRepository, subscriptionRepository, { streamTokenSecret })
     : undefined;
 
+  // Task 5's `POST /webhooks/mediamtx/lifecycle`. Gated on `mediamtxWebhookSecret`
+  // rather than constructed unconditionally — see the `handleStreamLifecycle`
+  // field's own docstring for why that is a symmetry choice, not a real
+  // dependency of the class. The POOLED client, same as `authoriseStream`: both
+  // are called from an HTTP handler, never inside another use-case's transaction.
+  const handleStreamLifecycle = mediamtxWebhookSecret
+    ? new HandleStreamLifecycle(
+        eventRepository,
+        new DrizzleActivityLogRepository(db),
+        new DrizzleOutboxRepository(db)
+      )
+    : undefined;
+
   return {
     creatorRepository,
     tokenIssuer,
@@ -1449,5 +1476,6 @@ export function bootstrap(): Dependencies {
     listLiveSessions,
     authoriseStream,
     mediamtxWebhookSecret,
+    handleStreamLifecycle,
   };
 }

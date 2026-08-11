@@ -1,12 +1,15 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { communities, events } from "../../db/schema";
 import type { EventRecord, EventRepositoryPort } from "../../application/ports/event-repository.port";
 
-/** `event.status` once MediaMTX's `runOnOnline` hook fires (Task 4). */
+/** `event.status` from the moment `ScheduleLiveSession` creates the row. */
+const SCHEDULED_STATUS = "scheduled";
+
+/** `event.status` once MediaMTX's `runOnOnline` hook fires (Task 5). */
 const LIVE_STATUS = "live";
 
-/** `event.status` once MediaMTX's `runOnOffline` hook fires (Task 4). */
+/** `event.status` once MediaMTX's `runOnOffline` hook fires (Task 5). */
 const ENDED_STATUS = "ended";
 
 /**
@@ -94,19 +97,28 @@ export class DrizzleEventRepository implements EventRepositoryPort {
   }
 
   async markLive(id: string): Promise<EventRecord | null> {
+    // `status = SCHEDULED_STATUS` is IN the predicate, not read first — see the port
+    // docstring. That is what makes a second `online` hook, or two overlapping
+    // deliveries of the same one, a no-op instead of a second `activity_log` row
+    // and a second outbox row: the row that actually flips the status is the only
+    // one that gets a non-null result back.
     const [row] = await this.db
       .update(events)
       .set({ status: LIVE_STATUS })
-      .where(eq(events.id, id))
+      .where(and(eq(events.id, id), eq(events.status, SCHEDULED_STATUS)))
       .returning();
     return row ?? null;
   }
 
   async markEnded(id: string): Promise<EventRecord | null> {
+    // `status <> ENDED_STATUS`, not `= LIVE_STATUS`: MediaMTX can fire `runOnOffline`
+    // for a session the API never saw go online (the API restarted mid-stream), so
+    // `scheduled -> ended` is a real, legitimate transition here — only `ended ->
+    // ended` is refused, which is what makes a repeated `offline` idempotent.
     const [row] = await this.db
       .update(events)
       .set({ status: ENDED_STATUS })
-      .where(eq(events.id, id))
+      .where(and(eq(events.id, id), ne(events.status, ENDED_STATUS)))
       .returning();
     return row ?? null;
   }
@@ -119,4 +131,22 @@ export class DrizzleEventRepository implements EventRepositoryPort {
       .limit(1);
     return row ?? null;
   }
+
+  async findById(id: string): Promise<EventRecord | null> {
+    if (!UUID_PATTERN.test(id)) {
+      // A MISS, not a driver error — same rule as `MemberRepositoryPort.findById`.
+      // `id` comes out of an outbox payload, a jsonb column that can outlive a deploy.
+      return null;
+    }
+    const [row] = await this.db.select().from(events).where(eq(events.id, id)).limit(1);
+    return row ?? null;
+  }
 }
+
+/**
+ * Matches a well-formed UUID. `findById` guards on this before ever reaching
+ * Postgres, exactly like `DrizzleSubscriptionRepository`'s own copy — see
+ * that file's for the full reasoning. Duplicated rather than shared because
+ * neither repository imports the other and the pattern is a one-liner.
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

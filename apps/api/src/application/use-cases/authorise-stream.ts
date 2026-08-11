@@ -44,8 +44,21 @@ const LIVE_PATH_SEGMENT = "live";
  * wrongly-shaped path now refuses outright (`""`, which never resolves via
  * `findByStreamKey`), matching the ONE shape this codebase's own adapter
  * ever produces.
+ *
+ * EXPORTED for `HandleStreamLifecycle` (Task 5): MediaMTX hands
+ * `runOnOnline`/`runOnOffline` the SAME `$MTX_PATH` value — confirmed
+ * against mediamtx.org's hooks documentation ("MTX_PATH: path name"),
+ * which is the runtime path a client actually published to, i.e.
+ * `live/<key>` under this codebase's catch-all path config, not the bare
+ * key. Re-parsing it here rather than duplicating the two-segment check a
+ * second time is what keeps "what path shape is legitimate" answered in
+ * exactly one place; see this task's carry-forward note in
+ * `progress.md` for the failure mode a second, looser parser would
+ * reopen (an event marked `live` from a path this codebase's own adapter
+ * never constructs, whose members are then sent an HLS URL that points
+ * nowhere).
  */
-function streamKeyFromPath(path: string): string {
+export function streamKeyFromPath(path: string): string {
   const segments = path.split("/").filter((segment) => segment.length > 0);
   if (segments.length !== 2 || segments[0] !== LIVE_PATH_SEGMENT) {
     return "";

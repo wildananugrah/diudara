@@ -174,6 +174,9 @@ const fakeEventRepository: EventRepositoryPort = {
   async findByStreamKey() {
     return null;
   },
+  async findById() {
+    return null;
+  },
 };
 
 const fakeMemberRepository: MemberRepositoryPort = {
@@ -237,6 +240,10 @@ const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   async hasLiveSubscriptionInCommunity() {
     // Read only by the churn revoke, which runs in the worker.
     return false;
+  },
+  async listActiveForCommunity() {
+    // Read only by NotifyStreamLive, which runs in the worker.
+    return [];
   },
   async markPaid() {
     throw new Error("not used");
@@ -514,6 +521,8 @@ describe("Dependencies (composition root contract)", () => {
       // about the streaming path.
       authoriseStream: undefined,
       mediamtxWebhookSecret: undefined,
+      // Task 5's lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
+      handleStreamLifecycle: undefined,
     };
 
     const created = await deps.creatorRepository.create({
@@ -647,6 +656,8 @@ describe("Dependencies (composition root contract)", () => {
       // about the streaming path.
       authoriseStream: undefined,
       mediamtxWebhookSecret: undefined,
+      // Task 5's lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
+      handleStreamLifecycle: undefined,
     };
 
     const res = await createApp(deps).request("/health");

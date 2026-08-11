@@ -165,6 +165,9 @@ function harness(
     async hasLiveSubscriptionInCommunity() {
       throw new Error("not used");
     },
+    async listActiveForCommunity() {
+      throw new Error("not used");
+    },
     async markPaid(input): Promise<MarkPaidOutcome> {
       calls.markPaid.push(input.transactionId);
       order.push("markPaid");

@@ -58,6 +58,24 @@ export const OUTBOX_SEND_RENEWAL_REMINDER = "send_renewal_reminder";
  */
 export const OUTBOX_REVOKE_SUBSCRIPTION_ACCESS = "revoke_subscription_access";
 
+/**
+ * The `event_type` of the row `HandleStreamLifecycle` (Task 5) queues the moment an
+ * event goes `live`: "tell this community's active members the stream is up, with a
+ * watch link each".
+ *
+ * Written exactly once per go-live — `markLive`'s atomic status predicate is what
+ * guarantees that, not this constant — and enqueued in the SAME breath as the
+ * `activity_log` row, both after the transition has already committed (see
+ * `HandleStreamLifecycle`). The payload carries only `eventId`: no member list, no
+ * community id, no stream key. `NotifyStreamLive` re-resolves everything from the
+ * event at delivery time — the roster of active subscriptions, deliberately, because
+ * membership at enqueue time is not membership at delivery time (a member can churn
+ * in between), and whether the event is STILL `live`, because MediaMTX can fire
+ * `runOnOffline` before the row is ever claimed. Sending a watch link to a session
+ * that has already ended is worse than sending nothing.
+ */
+export const OUTBOX_NOTIFY_STREAM_LIVE = "notify_stream_live";
+
 /** A row handed to a worker by `claimBatch`, already marked as being processed. */
 export interface ClaimedOutboxRow {
   id: string;

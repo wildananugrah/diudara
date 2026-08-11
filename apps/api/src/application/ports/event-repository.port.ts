@@ -44,9 +44,13 @@ export interface EventRecord {
  * scoped: Task 4's MediaMTX webhook resolves the one event a stream key
  * identifies via `findByStreamKey` below, and by the time either is called
  * ownership is not the question being asked — the key already picked exactly
- * one row. The single sanctioned unscoped LOOKUP is `findByStreamKey` itself,
- * documented at its own declaration in the shape `CommunityRepositoryPort.findBySlug`
- * already uses for its own exception.
+ * one row. There are now TWO sanctioned unscoped lookups, each documented at
+ * its own declaration in the shape `CommunityRepositoryPort.findBySlug`
+ * already uses for its own exception: `findByStreamKey` (MediaMTX knows only
+ * the key baked into the RTMP path) and `findById` (Task 5's
+ * `notify_stream_live` outbox consumer knows only the id `HandleStreamLifecycle`
+ * wrote into the row's payload, and runs with no authenticated creator at
+ * all — the same reason `MemberRepositoryPort.findById` is unscoped).
  */
 export interface EventRepositoryPort {
   /**
@@ -77,19 +81,55 @@ export interface EventRepositoryPort {
    */
   listForCommunityForCreator(communityId: string, creatorId: string): Promise<EventRecord[] | null>;
 
-  /** Transitions an event to `live`. See this port's docstring for why it is unscoped. */
+  /**
+   * Transitions an event to `live`, but ONLY from `scheduled` — the status
+   * check is part of the UPDATE's predicate, not a preceding read, for the
+   * same reason `SubscriptionRepositoryPort.markPastDue`'s is: it is what
+   * makes the transition atomic under a flapping publisher that fires
+   * `runOnOnline` twice, or two overlapping deliveries of the same hook.
+   *
+   * Returns `null` — not an error — both when `id` does not exist and when
+   * the event was not `scheduled` (already `live`, or `ended`). Both are
+   * "nothing to do" to the caller (`HandleStreamLifecycle`): a second
+   * `online` must not enqueue a second `notify_stream_live` row, and a late
+   * `online` after `runOnOffline` has already fired must not resurrect an
+   * `ended` event. See this port's docstring for why the method itself is
+   * unscoped.
+   */
   markLive(id: string): Promise<EventRecord | null>;
 
-  /** Transitions an event to `ended`. See this port's docstring for why it is unscoped. */
+  /**
+   * Transitions an event to `ended`, from EITHER `scheduled` or `live` — but
+   * not from `ended` again. Same atomic-predicate shape as `markLive`, for
+   * the same reason: MediaMTX can fire `runOnOffline` for a session the API
+   * never saw go `online` (the API restarted mid-stream), so `scheduled` is
+   * a legitimate starting point, not just `live`.
+   *
+   * Returns `null` when `id` does not exist or the event is already `ended`
+   * — a repeated `offline` from a flapping publisher is a no-op, not an
+   * error. See this port's docstring for why the method itself is unscoped.
+   */
   markEnded(id: string): Promise<EventRecord | null>;
 
   /**
    * Unscoped by creator ON PURPOSE — MediaMTX's publish/read authorisation
    * webhook (Task 4) knows only the stream key baked into the RTMP path and
-   * has no creator identity to scope by. This is the ONLY unscoped lookup
-   * that returns a record. Never call this to serve an authenticated
-   * creator-facing route; every one of those has a creator-scoped method
-   * above instead.
+   * has no creator identity to scope by. Never call this to serve an
+   * authenticated creator-facing route; every one of those has a
+   * creator-scoped method above instead.
    */
   findByStreamKey(streamKey: string): Promise<EventRecord | null>;
+
+  /**
+   * One event by id, unscoped — the second sanctioned exception, alongside
+   * `findByStreamKey`. Task 5's `notify_stream_live` outbox consumer starts
+   * from the `eventId` `HandleStreamLifecycle` wrote into the row's payload
+   * and has to re-read the event FRESH at delivery time (never trust what
+   * was true at enqueue — the stream may already have ended), and it runs in
+   * the worker, with no authenticated creator to scope by. A value that
+   * cannot be an id — a jsonb payload can outlive a deploy — is a MISS
+   * (`null`), never a driver error. Never call this to serve an
+   * authenticated creator-facing route.
+   */
+  findById(id: string): Promise<EventRecord | null>;
 }
