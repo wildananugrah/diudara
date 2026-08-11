@@ -52,6 +52,7 @@ import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
 import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
 import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
 import { ScheduleLiveSession, ListLiveSessions } from "./application/use-cases/schedule-live-session";
+import { AuthoriseStream } from "./application/use-cases/authorise-stream";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
@@ -260,6 +261,33 @@ export interface Dependencies {
    * whether streaming is configured on this box or not.
    */
   listLiveSessions: ListLiveSessions;
+  /**
+   * Task 4's `POST /webhooks/mediamtx/auth` decision logic — `undefined`
+   * EXACTLY when `streamTokenSecret` is (which is exactly when
+   * `streamingProvider` is: `selectStreamingProvider`'s all-four-or-nothing
+   * rule means `MEDIAMTX_WEBHOOK_SECRET`/`STREAM_TOKEN_SECRET` are always
+   * set or unset TOGETHER). Mirrors `scheduleLiveSession`'s undefined-ness
+   * rather than `listLiveSessions`'s: unlike listing, authorising a read
+   * needs `STREAM_TOKEN_SECRET` to verify a watch token's signature, so
+   * there is nothing to construct it against when streaming is disabled.
+   * In practice `routes/mediamtx-webhooks.ts` never reaches this
+   * `undefined` case in production, because `mediamtxWebhookSecret` being
+   * `undefined` too makes `verifyCallbackToken` refuse every delivery
+   * first — but the route still checks it, rather than assuming the
+   * pairing, exactly as `routes/events.ts` checks `scheduleLiveSession`.
+   */
+  authoriseStream: AuthoriseStream | undefined;
+  /**
+   * The shared secret `POST /webhooks/mediamtx/auth` requires on
+   * `X-Mediamtx-Secret` — the ONLY authentication on that route, exactly
+   * like `xenditCallbackToken`/`telegramWebhookSecret` above.
+   * `undefined` in lockstep with `authoriseStream` (see that field), in
+   * which case `verifyCallbackToken` rejects every delivery. Deliberately
+   * NOT narrowed to `string`, for the same reason `xenditCallbackToken`
+   * is not: that would force a `?? ""` at the call site, and an empty
+   * expected token used to match an empty header.
+   */
+  mediamtxWebhookSecret: string | undefined;
 }
 
 /**
@@ -1348,6 +1376,22 @@ export function bootstrap(): Dependencies {
     : undefined;
   const listLiveSessions = new ListLiveSessions(eventRepository);
 
+  // Task 4's publish/read authorisation. Both secrets are read directly
+  // here rather than re-derived from `streamingProvider`'s truthiness,
+  // because `selectStreamingProvider` has ALREADY enforced the invariant
+  // that matters: by the time execution reaches this line, either both
+  // MEDIAMTX_WEBHOOK_SECRET and STREAM_TOKEN_SECRET are set and
+  // length-valid (the four-vars-together branch), or both are genuinely
+  // absent (partial configuration threw already) — so a plain
+  // `presentOrUndefined` read is exactly as strict as re-checking
+  // `streamingProvider`, without depending on this file's two selectors
+  // agreeing forever about what "configured" means.
+  const mediamtxWebhookSecret = presentOrUndefined(process.env.MEDIAMTX_WEBHOOK_SECRET);
+  const streamTokenSecret = presentOrUndefined(process.env.STREAM_TOKEN_SECRET);
+  const authoriseStream = streamTokenSecret
+    ? new AuthoriseStream(eventRepository, subscriptionRepository, { streamTokenSecret })
+    : undefined;
+
   return {
     creatorRepository,
     tokenIssuer,
@@ -1386,5 +1430,7 @@ export function bootstrap(): Dependencies {
     streamingProvider,
     scheduleLiveSession,
     listLiveSessions,
+    authoriseStream,
+    mediamtxWebhookSecret,
   };
 }

@@ -1,0 +1,197 @@
+import { verifyWatchToken } from "../../domain/watch-token";
+import type { EventRepositoryPort } from "../ports/event-repository.port";
+import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
+
+/**
+ * `event.status` values a publish is allowed against. `ended` is
+ * deliberately excluded — see the class docstring below.
+ */
+const PUBLISHABLE_STATUSES: ReadonlySet<string> = new Set(["scheduled", "live"]);
+
+/**
+ * The one status a watch token's subscription must hold for a read to be
+ * allowed. Deliberately narrower than `hasLiveSubscriptionInCommunity`
+ * (which also accepts `past_due`, for channel-gating purposes elsewhere):
+ * the design spec's own error table (§8) says "the subscription is no
+ * longer active" refuses a read, and the brief for this task says the same
+ * thing in the same word. A grace-period member keeps their Telegram
+ * access; this task does not extend that grace to the live stream.
+ */
+const ENTITLED_STATUS = "active";
+
+/**
+ * MediaMTX's own stream-path convention is `live/<streamKey>` (see
+ * `MediaMtxAdapter.createSession` and `ScheduleLiveSession`) — the key is
+ * always the LAST path segment. Reading it this way, rather than assuming a
+ * fixed `live/` prefix or a fixed depth, means this function does not care
+ * whether MediaMTX's `path` field carries a leading slash, a trailing one,
+ * neither, or a differently-named top-level path — all of which are
+ * observed variations across MediaMTX versions and none of which this
+ * codebase controls. An empty or slash-only path yields `""`, which
+ * `findByStreamKey` will simply fail to resolve (event.stream_key is never
+ * empty), so no special-casing is needed here.
+ */
+function streamKeyFromPath(path: string): string {
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+  return segments[segments.length - 1] ?? "";
+}
+
+/**
+ * MediaMTX's `query` field is the raw query string of the request it is
+ * authorising (per mediamtx.org's authentication docs — see this class's
+ * own docstring for the citation), which may or may not carry a leading
+ * `?` depending on version. Stripping it defensively costs nothing and
+ * `URLSearchParams` tolerates an already-bare string unchanged.
+ */
+function watchTokenFromQuery(query: string): string | null {
+  const params = new URLSearchParams(query.replace(/^\?/, ""));
+  return params.get("token");
+}
+
+/**
+ * `POST /webhooks/mediamtx/auth`'s decision logic — the security core of
+ * the live-streaming phase. MediaMTX's `authHTTPAddress` mechanism (see
+ * `routes/mediamtx-webhooks.ts` for the exact wire contract) asks this,
+ * through the route, to authorise EVERY publish and EVERY read: there is no
+ * other gate. A stream key is not a secret the moment MediaMTX's public
+ * RTMP port is up, and a watch token is not a secret to the person it names
+ * — this class is what stands between either of those and someone who
+ * should not have them.
+ *
+ * PAYLOAD SHAPE, verified against MediaMTX's own docs (mediamtx.org/docs/
+ * features/authentication) rather than assumed: MediaMTX POSTs
+ * `{ user, password, token, ip, action, path, protocol, id, query,
+ * userAgent }`, where `action` is one of `publish|read|playback|api|
+ * metrics|pprof`. This class only ever receives `action`, `path`, `query`
+ * and `now` (the route extracts the first three from that body) — the
+ * remaining fields (`user`, `password`, `token`, `ip`, `protocol`, `id`,
+ * `userAgent`) carry nothing either publish or read authorisation depends
+ * on here, so the route does not forward them and this class has no
+ * parameter for them.
+ *
+ * TWO DECISIONS, and the read decision is the one this task exists to get
+ * right:
+ *
+ *   - `publish`: allowed only if `path` resolves, via
+ *     `EventRepositoryPort.findByStreamKey` — the ONE sanctioned unscoped
+ *     lookup, because MediaMTX knows only the key baked into the RTMP path
+ *     — to an event whose `status` is `scheduled` or `live`. `ended`
+ *     refuses: a finished session must not be republishable, because
+ *     nothing else stops someone who captured the RTMP URL from restarting
+ *     it after the creator has moved on.
+ *   - `read`: FOUR things must ALL hold, and any one failing refuses:
+ *       1. `path` resolves to a real event via `findByStreamKey`.
+ *       2. `query` carries a `token` that `verifyWatchToken` accepts —
+ *          correctly signed, well-formed, not expired.
+ *       3. The token's `eventId` is the SAME event `path` resolved to. A
+ *          token proves "this subscription may watch event X"; without this
+ *          check it would prove "this subscription may watch ANY event",
+ *          because the signature never mentions which stream is being
+ *          requested.
+ *       4. THE ENTITLEMENT RE-CHECK: the token's `subscriptionId` still
+ *          resolves (`SubscriptionRepositoryPort.findByIdWithCommunity`) to
+ *          a subscription that is `active` AND belongs to the SAME
+ *          community the event belongs to. This is not redundant with (2) —
+ *          a token proves who a request was minted FOR, at MINT time, and
+ *          says nothing about whether they are still entitled NOW.
+ *          Phase 5 shipped a Critical from exactly this omission in
+ *          `RevokeChannelAccessForSystem`; `watch-token.ts`'s own docstring
+ *          carries the same warning. A member who churns mid-stream must
+ *          lose access on their very next segment request, not at the end
+ *          of the token's 6-hour lifetime.
+ *
+ * EVERY refusal — no such event, ended event, bad signature, expired token,
+ * wrong event, wrong community, cancelled subscription — returns the same
+ * `{ allowed: false }`. Nothing here, or in the route that calls this,
+ * distinguishes one refusal reason from another: doing so would let a
+ * prober learn whether a stream key exists, or whether a given subscription
+ * id is real, from the SHAPE of a rejection.
+ *
+ * Any `action` other than `publish` or `read` (`playback`, `api`,
+ * `metrics`, `pprof`, or a value a future MediaMTX version invents) is
+ * refused. `playback` in particular is NOT what live HLS viewing sends —
+ * per mediamtx.org, "the read action is specifically used for consuming
+ * HLS streams"; `playback` belongs to MediaMTX's separate dedicated
+ * recordings/VOD HTTP server, which this design does not use (recordings
+ * are served from `StoragePort`/S3, per the design spec's scope), so it
+ * should never legitimately reach this route at all. This webhook was
+ * built to reason about the two actions the design spec names; failing
+ * OPEN on an action nobody has reviewed would be the wrong default for the
+ * one endpoint standing between a paid stream and
+ * the public internet.
+ */
+export class AuthoriseStream {
+  constructor(
+    private readonly events: EventRepositoryPort,
+    private readonly subscriptions: SubscriptionRepositoryPort,
+    private readonly config: { streamTokenSecret: string }
+  ) {}
+
+  async execute(input: {
+    action: string;
+    path: string;
+    query: string;
+    now: number;
+  }): Promise<{ allowed: boolean }> {
+    const streamKey = streamKeyFromPath(input.path);
+    if (streamKey === "") {
+      return { allowed: false };
+    }
+
+    if (input.action === "publish") {
+      return this.authorisePublish(streamKey);
+    }
+    if (input.action === "read") {
+      return this.authoriseRead(streamKey, input.query, input.now);
+    }
+    return { allowed: false };
+  }
+
+  private async authorisePublish(streamKey: string): Promise<{ allowed: boolean }> {
+    const event = await this.events.findByStreamKey(streamKey);
+    if (!event) {
+      return { allowed: false };
+    }
+    return { allowed: PUBLISHABLE_STATUSES.has(event.status) };
+  }
+
+  private async authoriseRead(
+    streamKey: string,
+    query: string,
+    now: number
+  ): Promise<{ allowed: boolean }> {
+    const event = await this.events.findByStreamKey(streamKey);
+    if (!event) {
+      return { allowed: false };
+    }
+
+    const token = watchTokenFromQuery(query);
+    if (!token) {
+      return { allowed: false };
+    }
+
+    const claims = verifyWatchToken({ token, now, secret: this.config.streamTokenSecret });
+    if (!claims) {
+      return { allowed: false };
+    }
+    if (claims.eventId !== event.id) {
+      return { allowed: false };
+    }
+
+    // THE ENTITLEMENT RE-CHECK. Not redundant with the signature check
+    // above — see this class's docstring. Read fresh, on every single
+    // request; never cached, never trusted from the token.
+    const entitlement = await this.subscriptions.findByIdWithCommunity(claims.subscriptionId);
+    if (!entitlement) {
+      return { allowed: false };
+    }
+    if (entitlement.subscription.status !== ENTITLED_STATUS) {
+      return { allowed: false };
+    }
+    if (entitlement.communityId !== event.communityId) {
+      return { allowed: false };
+    }
+
+    return { allowed: true };
+  }
+}

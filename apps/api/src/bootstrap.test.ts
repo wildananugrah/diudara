@@ -508,6 +508,12 @@ describe("Dependencies (composition root contract)", () => {
       // though these tests are not about the streaming path either.
       scheduleLiveSession: undefined,
       listLiveSessions: new ListLiveSessions(fakeEventRepository),
+      // Task 4's authorisation webhook. `authoriseStream` mirrors
+      // `scheduleLiveSession`'s undefined-ness for the same reason (needs
+      // STREAM_TOKEN_SECRET, which is absent here); these tests are not
+      // about the streaming path.
+      authoriseStream: undefined,
+      mediamtxWebhookSecret: undefined,
     };
 
     const created = await deps.creatorRepository.create({
@@ -635,6 +641,12 @@ describe("Dependencies (composition root contract)", () => {
       // though these tests are not about the streaming path either.
       scheduleLiveSession: undefined,
       listLiveSessions: new ListLiveSessions(fakeEventRepository),
+      // Task 4's authorisation webhook. `authoriseStream` mirrors
+      // `scheduleLiveSession`'s undefined-ness for the same reason (needs
+      // STREAM_TOKEN_SECRET, which is absent here); these tests are not
+      // about the streaming path.
+      authoriseStream: undefined,
+      mediamtxWebhookSecret: undefined,
     };
 
     const res = await createApp(deps).request("/health");

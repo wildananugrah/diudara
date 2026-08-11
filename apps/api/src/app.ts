@@ -10,6 +10,7 @@ import { paymentAccountRoutes } from "./routes/payment-account";
 import { publicCommunityRoutes } from "./routes/public-community";
 import { publicSubscriptionRoutes } from "./routes/public-subscription";
 import { webhookRoutes } from "./routes/webhooks";
+import { mediamtxWebhookRoutes } from "./routes/mediamtx-webhooks";
 import { aiRoutes } from "./routes/ai";
 import { eventRoutes } from "./routes/events";
 import { errorHandler } from "./http/error-handler";
@@ -31,6 +32,12 @@ export function createApp(deps: Dependencies) {
   // Public by design and authenticated by X-CALLBACK-TOKEN instead of a bearer
   // token — see routes/webhooks.ts. Never put this behind requireAuth.
   app.route("/webhooks", webhookRoutes(deps));
+  // Task 4's MediaMTX authorisation webhook. Public by design and
+  // authenticated the same way as the routes above — X-Mediamtx-Secret
+  // rather than a bearer token — so never put it behind requireAuth either.
+  // A distinct path prefix from /webhooks/xendit and /webhooks/telegram, so
+  // mount order relative to webhookRoutes above does not matter.
+  app.route("/webhooks/mediamtx", mediamtxWebhookRoutes(deps));
   // Nested routes for tiers/channels (Tasks 10, 11) mount at
   // /communities/:communityId/tiers and /communities/:communityId/channels.
   // They must be registered BEFORE this line so the more specific path
