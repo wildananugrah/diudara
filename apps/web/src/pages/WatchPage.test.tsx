@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import WatchPage, { buildXhrSetup, withToken, type AttachPlayer } from "./WatchPage";
+import WatchPage, {
+  buildXhrSetup,
+  choosePlaybackStrategy,
+  withToken,
+  type AttachPlayer,
+} from "./WatchPage";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -76,7 +81,15 @@ describe("WatchPage — the happy path", () => {
 });
 
 describe("WatchPage — the player lifecycle", () => {
-  it("shows 'siaran telah berakhir' when the attached player reports a fatal error", async () => {
+  /**
+   * Review finding: this used to say "Siaran telah berakhir" ("the
+   * broadcast has ended") unconditionally — but nothing available to this
+   * page can tell a transient network drop apart from the creator actually
+   * stopping, so claiming "ended" was often simply false. The terminal
+   * phase is now "disconnected", with a retry affordance rather than a
+   * dead end.
+   */
+  it("shows a 'disconnected, with a retry button' state — never 'ended' — when the attached player reports a fatal error", async () => {
     global.fetch = mock(async () =>
       jsonResponse({ hlsUrl: "https://hls.diudara.test/live/key/index.m3u8" })
     ) as unknown as typeof fetch;
@@ -92,7 +105,35 @@ describe("WatchPage — the player lifecycle", () => {
 
     reportFatal!();
 
-    expect(await screen.findByText(/telah berakhir/i)).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: /terputus dari siaran/i })).toBeTruthy();
+    expect(screen.queryAllByText(/berakhir/i).length).toBe(0);
+    expect(await screen.findByRole("button", { name: /coba lagi/i })).toBeTruthy();
+  });
+
+  it("retrying after a disconnect re-fetches the watch session and can reach 'playing' again", async () => {
+    let fetchCount = 0;
+    global.fetch = mock(async () => {
+      fetchCount += 1;
+      return jsonResponse({ hlsUrl: "https://hls.diudara.test/live/key/index.m3u8" });
+    }) as unknown as typeof fetch;
+
+    let reportFatal: (() => void) | undefined;
+    const fakeAttach: AttachPlayer = (input) => {
+      reportFatal = input.onFatalError;
+      return { destroy() {} };
+    };
+
+    renderAt("tok-abc", fakeAttach);
+    await screen.findByText(/tayang langsung/i);
+    expect(fetchCount).toBe(1);
+
+    reportFatal!();
+    const retryButton = await screen.findByRole("button", { name: /coba lagi/i });
+
+    fireEvent.click(retryButton);
+
+    await waitFor(() => expect(fetchCount).toBe(2));
+    expect(await screen.findByText(/tayang langsung/i)).toBeTruthy();
   });
 
   it("shows the unsupported-browser message when attachPlayer cannot attach anything", async () => {
@@ -175,10 +216,37 @@ describe("WatchPage — one message for every failure mode", () => {
     // "never call attachPlayer for anything that didn't genuinely resolve"
     // property the other tests in this block pin, so this is folded into
     // the same generic outcome.
-    await waitFor(() => {
-      const playingHeading = screen.queryAllByText(/tayang langsung/i).length;
-      expect(playingHeading).toBe(0);
-    });
+    //
+    // Review finding: asserting only the ABSENCE of "tayang langsung" would
+    // still pass if the page hung on "Memuat siaran..." forever — pin the
+    // actual outcome, the way the three sibling tests above do.
+    expect(await screen.findByRole("heading", { name: /tautan sudah tidak berlaku/i })).toBeTruthy();
+  });
+});
+
+describe("choosePlaybackStrategy — hls.js vs. native Safari ordering", () => {
+  /** `canPlayType` truthy for HLS is what desktop AND iOS Safari both answer. */
+  function safariLikeVideo(): HTMLVideoElement {
+    return { canPlayType: () => "maybe" } as unknown as HTMLVideoElement;
+  }
+
+  /**
+   * THE regression this task's review caught: desktop Safari answers `true`
+   * to `canPlayType("application/vnd.apple.mpegurl")` just as readily as it
+   * answers `true` to `Hls.isSupported()`. If `hls.js` is usable at all, it
+   * must win — that is the fully instrumented, fully tested path.
+   */
+  it("prefers hls.js over native Safari when both are available (desktop Safari)", () => {
+    expect(choosePlaybackStrategy(safariLikeVideo(), () => true)).toBe("hls.js");
+  });
+
+  it("falls back to native only when hls.js is genuinely unsupported (iOS Safari)", () => {
+    expect(choosePlaybackStrategy(safariLikeVideo(), () => false)).toBe("native");
+  });
+
+  it("is unsupported when neither mechanism is available", () => {
+    const video = { canPlayType: () => "" } as unknown as HTMLVideoElement;
+    expect(choosePlaybackStrategy(video, () => false)).toBe("unsupported");
   });
 });
 

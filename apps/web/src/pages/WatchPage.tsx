@@ -79,10 +79,61 @@ export type AttachPlayer = (input: {
 }) => WatchPlayerHandle | null;
 
 /**
- * The real player wiring: native HLS on Safari (which never runs `hls.js`'s
- * XHR loader at all, so `withToken`/`buildXhrSetup` do not apply there —
- * see this project's Task 8 report for the known gap that leaves), `hls.js`
- * everywhere else, and `null` when neither is available.
+ * How many times to attempt hls.js's own documented recovery calls
+ * (`startLoad()` for a fatal `NETWORK_ERROR`, `recoverMediaError()` for a
+ * fatal `MEDIA_ERROR`) before giving up on THIS attach and calling
+ * `onFatalError`. Bounded so a persistently broken stream cannot retry
+ * forever, but present at all so the ordinary case for this audience —
+ * mobile, an Indonesian network dropping out for a few seconds — recovers
+ * silently instead of ending the session. Not tuned against real traffic;
+ * a round number chosen for "clearly more than one blip, clearly not
+ * infinite."
+ */
+const MAX_FATAL_ERROR_RECOVERY_ATTEMPTS = 3;
+
+/**
+ * Which playback mechanism `defaultAttachPlayer` should use.
+ *
+ * ORDER IS LOAD-BEARING, and that is exactly what this function exists to
+ * make directly testable without constructing a real `Hls` instance or
+ * mocking the `hls.js` module. Review finding: an earlier version checked
+ * `video.canPlayType("application/vnd.apple.mpegurl")` BEFORE `Hls.
+ * isSupported()`. Desktop Safari answers `true` to both (it plays HLS
+ * natively there too), so that ordering routed desktop Safari onto the
+ * native path — the one with no `xhrSetup` hook, no token re-attachment,
+ * and (at the time) no test coverage — even though `hls.js` (fully
+ * instrumented, fully tested) works fine on desktop Safari. Checking
+ * `isHlsSupported()` FIRST means only a browser where `hls.js` genuinely
+ * cannot run (iOS Safari, for lack of MediaSource Extensions) ever reaches
+ * the native branch.
+ *
+ * `isHlsSupported` is an injected function (default: `Hls.isSupported`)
+ * purely so a test can force each branch without needing a real `Hls`
+ * class or a real MediaSource-capable environment — see
+ * `WatchPage.test.tsx`'s "prefers hls.js over native Safari" test, which
+ * would have failed against the old ordering.
+ */
+export function choosePlaybackStrategy(
+  video: HTMLVideoElement,
+  isHlsSupported: () => boolean = () => Hls.isSupported()
+): "hls.js" | "native" | "unsupported" {
+  if (isHlsSupported()) return "hls.js";
+  if (video.canPlayType("application/vnd.apple.mpegurl")) return "native";
+  return "unsupported";
+}
+
+/**
+ * The real player wiring: `hls.js` wherever it can run, native HLS only
+ * where it genuinely cannot (iOS Safari, which has no MediaSource
+ * Extensions support at all), and `null` when neither is available — see
+ * `choosePlaybackStrategy` for the ordering this depends on.
+ *
+ * `choosePlaybackStrategy`'s native branch remains a genuine, disclosed
+ * gap (see this project's Task 8 report): iOS Safari's native engine has no
+ * hook equivalent to `xhrSetup`, so a segment URL's token cannot be
+ * re-attached there if MediaMTX's query-propagation gap applies to it the
+ * same way it does to `hls.js`'s XHR loader. Untested, for the same reason
+ * — no iOS Safari was available to verify against.
  *
  * Kept as a plain, exported function — not a class, not a hook — so
  * `WatchPage` can accept a fake in tests via the `attachPlayer` prop and
@@ -99,30 +150,48 @@ export function defaultAttachPlayer({
   token: string;
   onFatalError: () => void;
 }): WatchPlayerHandle | null {
-  // Safari plays HLS natively and has no `hls.js`-style hook to re-attach
-  // the token to a relative segment URL — this is the ONE new dependency
-  // this plan adds existing in the first place. Checked first because a
-  // browser that says yes here has no MediaSource path worth preferring.
-  if (video.canPlayType("application/vnd.apple.mpegurl")) {
-    video.src = withToken(hlsUrl, token);
-    video.addEventListener("error", onFatalError);
-    void video.play().catch(() => {
-      // Autoplay can be refused by the browser; the member still has visible
-      // controls to press play themselves. Not a fatal stream error.
-    });
-    return {
-      destroy() {
-        video.removeEventListener("error", onFatalError);
-        video.removeAttribute("src");
-        video.load();
-      },
-    };
-  }
+  const strategy = choosePlaybackStrategy(video);
 
-  if (Hls.isSupported()) {
+  if (strategy === "hls.js") {
+    // WARNING FOR ANY FUTURE CONFIG CHANGE HERE: `xhrSetup` only applies to
+    // hls.js's DEFAULT (XHR-based) loader. Setting `config.progressive: true`
+    // (or otherwise supplying a custom loader) swaps in hls.js's `FetchLoader`,
+    // which honours a DIFFERENT hook — `fetchSetup` — and would silently stop
+    // calling `xhrSetup` at all, dropping the token from every request with
+    // no error of any kind. Do not add `progressive` or a custom `loader`
+    // here without carrying `buildXhrSetup`'s rewrite over to whatever hook
+    // the new loader actually uses.
     const hls = new Hls({ xhrSetup: buildXhrSetup(token) });
+
+    let networkErrorRecoveries = 0;
+    let mediaErrorRecoveries = 0;
+
     hls.on(Hls.Events.ERROR, (_event, data) => {
-      if (data.fatal) onFatalError();
+      if (!data.fatal) return;
+
+      // hls.js's own documented recovery path — attempt it before treating
+      // a fatal error as the end of the session. A dropped connection on a
+      // mobile network is the NORMAL case for this audience, and it must
+      // not look identical to the creator actually stopping.
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        if (networkErrorRecoveries < MAX_FATAL_ERROR_RECOVERY_ATTEMPTS) {
+          networkErrorRecoveries += 1;
+          hls.startLoad();
+          return;
+        }
+      } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        if (mediaErrorRecoveries < MAX_FATAL_ERROR_RECOVERY_ATTEMPTS) {
+          mediaErrorRecoveries += 1;
+          hls.recoverMediaError();
+          return;
+        }
+      }
+
+      // Recovery exhausted, or a fatal error type hls.js has no documented
+      // recovery call for at all. `onFatalError` does NOT mean "the stream
+      // ended" — see `WatchPage`'s "disconnected" phase, which offers a
+      // retry rather than claiming something this code cannot actually know.
+      onFatalError();
     });
     hls.loadSource(hlsUrl);
     hls.attachMedia(video);
@@ -134,13 +203,55 @@ export function defaultAttachPlayer({
     };
   }
 
+  // Only reached on a browser with no MSE support at all (iOS Safari is
+  // the real-world case) — see this function's own docstring for the gap
+  // that leaves.
+  if (strategy === "native") {
+    let reloadAttempts = 0;
+
+    function handleNativeError() {
+      if (reloadAttempts < MAX_FATAL_ERROR_RECOVERY_ATTEMPTS) {
+        reloadAttempts += 1;
+        // Native `<video>` exposes no equivalent to hls.js's typed
+        // NETWORK_ERROR/MEDIA_ERROR recovery calls — the closest analogue is
+        // reloading the same (token-bearing) source and trying to resume.
+        video.load();
+        void video.play().catch(() => {});
+        return;
+      }
+      onFatalError();
+    }
+
+    video.src = withToken(hlsUrl, token);
+    video.addEventListener("error", handleNativeError);
+    void video.play().catch(() => {
+      // Autoplay can be refused by the browser; the member still has visible
+      // controls to press play themselves. Not a fatal stream error.
+    });
+    return {
+      destroy() {
+        video.removeEventListener("error", handleNativeError);
+        video.removeAttribute("src");
+        video.load();
+      },
+    };
+  }
+
   return null;
 }
 
 type Phase =
   | { name: "loading" }
   | { name: "playing"; hlsUrl: string }
-  | { name: "ended" }
+  /**
+   * Reached only after `attachPlayer`'s own recovery attempts (hls.js's
+   * `startLoad()`/`recoverMediaError()`, or the native path's reload) are
+   * exhausted — see `defaultAttachPlayer`. Deliberately NOT named "ended":
+   * nothing available to this page can distinguish "the creator stopped"
+   * from "this connection dropped and could not recover", so the copy says
+   * neither, and offers a retry rather than a dead end.
+   */
+  | { name: "disconnected" }
   | { name: "unsupported" }
   | { name: "unavailable" };
 
@@ -165,6 +276,11 @@ export default function WatchPage({
   const { token } = useParams<{ token: string }>();
   const [phase, setPhase] = useState<Phase>({ name: "loading" });
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  // Bumped by the "Coba lagi" button to force the fetch effect below to
+  // re-run against the SAME token — a watch token is a stateless HMAC valid
+  // for six hours, so re-resolving it (rather than reloading the whole page)
+  // is a legitimate, cheap retry, and it re-checks entitlement fresh too.
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
     if (!token) {
@@ -173,6 +289,7 @@ export default function WatchPage({
     }
 
     let cancelled = false;
+    setPhase({ name: "loading" });
     (async () => {
       try {
         const session = await fetchWatchSession(token);
@@ -197,7 +314,7 @@ export default function WatchPage({
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, retryCount]);
 
   useEffect(() => {
     if (phase.name !== "playing") return;
@@ -208,7 +325,7 @@ export default function WatchPage({
       video,
       hlsUrl: phase.hlsUrl,
       token,
-      onFatalError: () => setPhase({ name: "ended" }),
+      onFatalError: () => setPhase({ name: "disconnected" }),
     });
 
     if (!handle) {
@@ -221,6 +338,10 @@ export default function WatchPage({
     // re-runs — and re-attaches — every time the phase transitions INTO
     // "playing", not only on the first mount.
   }, [phase, attachPlayer, token]);
+
+  function retry() {
+    setRetryCount((c) => c + 1);
+  }
 
   return (
     <main style={styles.page}>
@@ -238,10 +359,16 @@ export default function WatchPage({
         </>
       ) : null}
 
-      {phase.name === "ended" ? (
+      {phase.name === "disconnected" ? (
         <>
-          <h1 style={styles.heading}>Siaran telah berakhir</h1>
-          <p>Sesi ini sudah selesai. Tayangan ulang akan tersedia setelah rekaman diunggah.</p>
+          <h1 style={styles.heading}>Terputus dari siaran</h1>
+          <p>
+            Koneksi ke siaran terputus. Siaran mungkin masih berlangsung — coba sambungkan
+            kembali, atau kembali ke halaman status keanggotaan Anda untuk tautan yang baru.
+          </p>
+          <button type="button" onClick={retry} style={styles.retryButton}>
+            Coba lagi
+          </button>
         </>
       ) : null}
 
@@ -285,5 +412,16 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 16,
     borderRadius: 8,
     backgroundColor: "#000",
+  },
+  retryButton: {
+    marginTop: 8,
+    padding: "10px 20px",
+    borderRadius: 8,
+    border: "none",
+    backgroundColor: "#16a34a",
+    color: "#fff",
+    fontWeight: 600,
+    fontSize: "1rem",
+    cursor: "pointer",
   },
 };

@@ -408,4 +408,44 @@ describe("DrizzleEventRepository.findLiveByCommunityId", () => {
 
     expect(await repo.findLiveByCommunityId(mine.community.id)).toBeNull();
   });
+
+  /**
+   * Review finding: `markLive`'s atomic predicate is scoped to ONE event
+   * (`WHERE id = ? AND status = 'scheduled'`), not to the community — so a
+   * creator who schedules two sessions and publishes to both stream keys
+   * genuinely produces two `live` rows in the same community. This pins
+   * that `findLiveByCommunityId` is at least DETERMINISTIC in that state
+   * (same call, same row every time) rather than returning whichever row
+   * Postgres happened to return first.
+   */
+  it("is deterministic when a community somehow has more than one live event", async () => {
+    const { creator, community } = await seedCreatorWithCommunity();
+    const first = await repo.createForCreator({
+      communityId: community.id,
+      creatorId: creator.id,
+      title: "First session",
+      scheduledAt: null,
+      streamKey: streamKey("key"),
+      hlsPlaybackPath: "https://fake-mediamtx.local/hls/live/key/index.m3u8",
+    });
+    const second = await repo.createForCreator({
+      communityId: community.id,
+      creatorId: creator.id,
+      title: "Second session",
+      scheduledAt: null,
+      streamKey: streamKey("key"),
+      hlsPlaybackPath: "https://fake-mediamtx.local/hls/live/key/index.m3u8",
+    });
+    await repo.markLive(first!.id);
+    await repo.markLive(second!.id);
+
+    const results = await Promise.all([
+      repo.findLiveByCommunityId(community.id),
+      repo.findLiveByCommunityId(community.id),
+      repo.findLiveByCommunityId(community.id),
+    ]);
+
+    expect(results.every((r) => r!.id === results[0]!.id)).toBe(true);
+    expect([first!.id, second!.id]).toContain(results[0]!.id);
+  });
 });

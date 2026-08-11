@@ -153,13 +153,17 @@ export interface EventRepositoryPort {
    * have something to watch right now", which is what decides whether the
    * "Tonton sekarang" link appears at all.
    *
-   * `LIMIT 1` with no explicit order: this codebase's own lifecycle (Task 5,
-   * `markLive`'s atomic `WHERE status = 'scheduled'` predicate) makes at most one
-   * `live` row per community the steady-state invariant, not merely the common
-   * case — nothing transitions a second `scheduled` event to `live` while an
-   * existing one already holds that status, and nothing un-ends an `ended` one.
-   * If that invariant is ever violated by a bug, returning *some* live event beats
-   * refusing to show a watch link for one that is genuinely live.
+   * MORE THAN ONE `live` ROW PER COMMUNITY IS A REAL, REACHABLE STATE, NOT A BUG —
+   * an earlier version of this docstring claimed `markLive`'s atomic predicate
+   * made one-live-event-per-community a steady-state invariant, which review
+   * caught as false: that predicate is `WHERE id = ? AND status = 'scheduled'`,
+   * scoped to ONE event, not to the community. A creator who schedules two
+   * sessions and publishes to BOTH stream keys gets two `live` rows for the same
+   * community, and this method has to answer something anyway. It ORDERS BY `id`
+   * so the choice is at least DETERMINISTIC (the same call always returns the
+   * same row) rather than whatever order Postgres happens to return — `id` is not
+   * a meaningful ordering (not "most recently gone live"), only a tie-break that
+   * makes the method's own behaviour reproducible and testable.
    */
   findLiveByCommunityId(communityId: string): Promise<EventRecord | null>;
 }

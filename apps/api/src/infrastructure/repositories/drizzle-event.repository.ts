@@ -160,10 +160,18 @@ export class DrizzleEventRepository implements EventRepositoryPort {
     // resolves it itself via `SubscriptionRepositoryPort.findByIdWithCommunity`,
     // which already validates the SUBSCRIPTION id and returns a real column
     // value, not a client-supplied string.
+    //
+    // `ORDER BY id` — review finding: more than one `live` row per community
+    // IS reachable (see the port docstring; `markLive`'s predicate is scoped
+    // to one EVENT, not to the community), so `LIMIT 1` with no order picked
+    // whatever row Postgres happened to return first. Ordering by `id` makes
+    // the choice deterministic and testable, not "correct" in any semantic
+    // sense — `id` says nothing about which session went live more recently.
     const [row] = await this.db
       .select()
       .from(events)
       .where(and(eq(events.communityId, communityId), eq(events.status, LIVE_STATUS)))
+      .orderBy(events.id)
       .limit(1);
     return row ?? null;
   }
