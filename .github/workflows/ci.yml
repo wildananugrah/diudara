@@ -5,15 +5,22 @@ on:
     branches: [main]
   pull_request:
 
-# A second push to the same ref makes the first run irrelevant. Cancel it
-# rather than paying for both.
+# A second push to the same ref makes the first run irrelevant on a PR branch,
+# so cancel it rather than paying for both. Not on main: two merges landing
+# close together must not cancel the first main run, because that run is the
+# one that answers "is the released state good?" — leaving it uncancelled is
+# worth the extra minutes.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
 
     services:
       # Matches infra/docker-compose.yml. The suite creates a database per run
