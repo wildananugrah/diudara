@@ -1,5 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { RENEWED } from "../application/use-cases/handle-payment-webhook";
+import {
+  STREAM_ENDED_EVENT,
+  STREAM_LIVE_EVENT,
+} from "../application/use-cases/handle-stream-lifecycle";
+import {
+  STREAM_LIVE_NOTIFIED_EVENT,
+  STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
+} from "../application/use-cases/notify-stream-live";
 import { CHURNED, CHURN_REVOKE_SKIPPED } from "../application/use-cases/process-churn";
 import {
   RENEWAL_REMINDER_QUEUED,
@@ -37,6 +45,10 @@ const ALL_EVENT_TYPES = [
   ACCESS_NOT_REVOKED,
   CHURN_REVOKE_SKIPPED,
   "revocation_manual_required",
+  STREAM_LIVE_EVENT,
+  STREAM_ENDED_EVENT,
+  STREAM_LIVE_NOTIFIED_EVENT,
+  STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
 ] as const;
 
 /** Internal diagnostics. A creator reading these learns nothing and worries anyway. */
@@ -50,11 +62,11 @@ const HIDDEN_EVENT_TYPES = [
 ] as const;
 
 describe("CREATOR_VISIBLE_EVENTS", () => {
-  it("covers all 14 event types, with every one either shown or hidden", () => {
+  it("covers all 18 event types, with every one either shown or hidden", () => {
     // The point is that there is no third category. A new event type must be
     // classified, not defaulted — a default of "show" puts diagnostics in front of
     // creators, and a default of "hide" loses a real event silently.
-    expect(ALL_EVENT_TYPES).toHaveLength(14);
+    expect(ALL_EVENT_TYPES).toHaveLength(18);
 
     const visible = new Set<string>(CREATOR_VISIBLE_EVENTS);
     const hidden = new Set<string>(HIDDEN_EVENT_TYPES);
@@ -67,7 +79,7 @@ describe("CREATOR_VISIBLE_EVENTS", () => {
     expect(both).toEqual([]);
   });
 
-  it("shows exactly the six ordinary events and the two warnings", () => {
+  it("shows exactly the ten ordinary events and the two warnings", () => {
     expect([...CREATOR_VISIBLE_EVENTS].sort()).toEqual(
       [
         "access_manual_required",
@@ -78,6 +90,10 @@ describe("CREATOR_VISIBLE_EVENTS", () => {
         "renewal_reminder_sent",
         "renewed",
         "revocation_manual_required",
+        STREAM_ENDED_EVENT,
+        STREAM_LIVE_EVENT,
+        STREAM_LIVE_NOTIFIED_EVENT,
+        STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
       ].sort()
     );
   });
@@ -184,9 +200,32 @@ describe("describeActivityEvent", () => {
       RENEWAL_REMINDER_SENT,
       "channel_access_granted",
       "channel_access_revoked",
+      STREAM_LIVE_EVENT,
+      STREAM_ENDED_EVENT,
+      STREAM_LIVE_NOTIFIED_EVENT,
+      STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
     ]) {
       expect(describeActivityEvent(eventType, null)!.severity).toBe("info");
     }
+  });
+
+  it("names why a member was not told the stream is live", () => {
+    expect(
+      describeActivityEvent(STREAM_LIVE_NOTIFY_SKIPPED_EVENT, { reason: "event_not_live" })!.label
+    ).toContain("siaran sudah berakhir");
+    expect(
+      describeActivityEvent(STREAM_LIVE_NOTIFY_SKIPPED_EVENT, {
+        reason: "subscription_not_active",
+      })!.label
+    ).toContain("anggota sudah tidak aktif");
+  });
+
+  it("falls back to the plain label for a stream-skip reason it does not recognise", () => {
+    const described = describeActivityEvent(STREAM_LIVE_NOTIFY_SKIPPED_EVENT, {
+      reason: "some_future_reason",
+    })!;
+    expect(described.label).toContain("Anggota tidak diberi tahu tentang siaran langsung");
+    expect(described.label).not.toContain("some_future_reason");
   });
 
   it("survives metadata that is missing, null, or not an object at all", () => {
