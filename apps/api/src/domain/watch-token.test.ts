@@ -49,7 +49,18 @@ describe("watch tokens", () => {
   });
 
   it("rejects malformed input without throwing", () => {
-    for (const token of ["", ".", "not-a-token", "a.b.c", "€.€"]) {
+    // "€.€" has a signature half that is 1 JS character long, rejected by a
+    // naive length guard for an unrelated reason — it says nothing about
+    // whether that guard compares BYTE length or JS STRING length. The last
+    // case below does: a signature exactly 43 JS characters long (matching
+    // the real signature's JS length) but containing a multi-byte character,
+    // so its UTF-8 byte length (44) differs from its JS string length (43).
+    // `Buffer.from` on a string this shape used to reach `timingSafeEqual`
+    // with mismatched buffer byte-lengths, which throws `RangeError` straight
+    // out of a function whose entire contract is that it never throws.
+    const [encoded] = mint().split(".");
+    const multiByteSameJsLength = `${encoded}.é${"a".repeat(42)}`;
+    for (const token of ["", ".", "not-a-token", "a.b.c", "€.€", multiByteSameJsLength]) {
       expect(verifyWatchToken({ token, now: NOW, secret: SECRET })).toBeNull();
     }
   });

@@ -80,11 +80,32 @@ export function verifyWatchToken(input: {
   if (!encoded || !signature) return null;
 
   const expected = sign(encoded, input.secret);
-  // Both are base64url of a 32-byte HMAC digest, so lengths match unless the
-  // input is junk — in which case this guard rejects it before
-  // timingSafeEqual, which throws on mismatched-length buffers.
-  if (signature.length !== expected.length) return null;
-  if (!timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+  // Compare BYTE length, not JS string length. `signature.length` counts
+  // UTF-16 code units; `Buffer.from(signature)` (default "utf8") counts
+  // bytes, and those diverge for any non-ASCII character — e.g. a 43-code-unit
+  // string containing one "é" is 44 bytes. `expected` is always 43 ASCII
+  // characters (a base64url SHA-256 digest), so comparing `.length` on the
+  // strings let a crafted signature with a multi-byte character slip past
+  // this guard with a matching JS length but a mismatched byte length, then
+  // hand `timingSafeEqual` two differently-sized buffers, which throws
+  // RangeError — straight out of a function whose entire contract is that it
+  // never throws. Building the buffers first and comparing THEIR length is
+  // the fix: it guards on the exact value `timingSafeEqual` receives.
+  const signatureBytes = Buffer.from(signature);
+  const expectedBytes = Buffer.from(expected);
+  if (signatureBytes.length !== expectedBytes.length) return null;
+  // Backstop, not the primary defense: the length check above should make
+  // timingSafeEqual's precondition hold on every path, but "never throws" is
+  // a hard contract stated three times over in this task's materials, and a
+  // crypto function gating access to paid streams should not depend on this
+  // file having enumerated every way timingSafeEqual can reject its inputs.
+  let signaturesMatch: boolean;
+  try {
+    signaturesMatch = timingSafeEqual(signatureBytes, expectedBytes);
+  } catch {
+    return null;
+  }
+  if (!signaturesMatch) return null;
 
   let payload: WatchTokenPayload;
   try {
