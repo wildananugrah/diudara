@@ -1,0 +1,51 @@
+name: Deploy to Production
+
+# THIS WORKFLOW RUNS ON A SELF-HOSTED RUNNER ON THE PRODUCTION VPS, so the
+# trigger list below is a security boundary, not a convenience.
+#
+# This repository is PUBLIC. A self-hosted runner executes whatever a workflow
+# tells it to, on the machine that serves real traffic. `push` to main and a
+# manual dispatch are both safe because a stranger can cause neither — a fork's
+# pull request cannot push to main.
+#
+# NEVER ADD A `pull_request` TRIGGER HERE. That would let anyone who opens a
+# pull request run arbitrary code on the production server. If you want tests on
+# pull requests, they belong in a separate workflow on a GitHub-hosted runner.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, and a queued one WAITS rather than replacing the one in
+# flight. `cancel-in-progress: false` is deliberate: cancelling midway could
+# leave pm2 reloaded against a half-copied web build, or the database migrated
+# for code that never finished deploying.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    timeout-minutes: 30
+
+    # The job reads nothing from the GitHub API and checks nothing out; the
+    # clone on the box pulls itself. Declared anyway so the token's scope is
+    # explicit rather than inherited from a repository default that may change.
+    permissions:
+      contents: read
+
+    steps:
+      # Deliberately NO actions/checkout, and deliberately NO `git pull` step.
+      #
+      # No checkout: the deployment is the clone that already lives on this box,
+      # with its own .env files and its own git remote. A checkout would create a
+      # SECOND clone in the runner's workspace that builds fine and deploys
+      # nothing.
+      #
+      # No pull: scripts/deploy.sh pulls with `--ff-only` and refuses to run
+      # against a dirty working tree. A plain `git pull origin main` here would
+      # run first and defeat both guards — a diverged clone would gain a merge
+      # commit and production would run code that exists on no remote.
+      - name: Run the deploy script
+        run: bash /home/wildandev/repo/diudara/scripts/deploy.sh

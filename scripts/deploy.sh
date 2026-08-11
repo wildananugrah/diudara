@@ -19,6 +19,17 @@ for f in infra/.env apps/api/.env; do
   fi
 done
 
+# The pull lives HERE and not in the deploy workflow, deliberately. Both guards
+# below are the point:
+#
+#   --ff-only        a diverged clone must FAIL, not silently gain a merge commit.
+#                    Without it, production can end up running a commit that
+#                    exists on no remote and that nobody can reproduce.
+#   dirty-tree check somebody edited a file on the box. Pulling over it either
+#                    fails confusingly mid-merge or buries the edit. Stop and say so.
+#
+# A bare `git pull origin main` in the workflow before this point would bypass
+# both, which is exactly why there isn't one.
 echo "==> git pull"
 if [ -n "$(git status --porcelain)" ]; then
   echo "Working tree has uncommitted changes — refusing to pull. Commit, stash, or discard first." >&2

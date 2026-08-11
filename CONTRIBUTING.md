@@ -176,7 +176,8 @@ bun run typecheck   # every workspace
 ```
 
 Both must be green before a commit. Postgres has to be up; only `apps/api`'s tests use it.
-This is now machine-enforced — see Continuous integration below.
+Nothing checks this for you — there is no CI, and a push to `main` deploys (see Deployment
+below), so running these yourself is the only gate there is.
 
 To run one workspace or one file:
 
@@ -241,30 +242,35 @@ exists because the alternative is silently truncating your development database.
   for hides again. Three `bootstrap()` tests shipped exactly this bug before CI existed;
   nothing stops a fourth from re-acquiring it except this check.
 
-## Continuous integration
+## Deployment
 
-GitHub Actions (`.github/workflows/ci.yml`) runs `bun run typecheck` then `bun run test`
-on every push to `main` and on every pull request. A red run blocks the merge — Postgres
-being up and both commands being green are no longer things you have to remember to check
-yourself before committing; a machine now checks them for you, on every branch, not just
-the one you're staring at.
+`.github/workflows/deploy.yml` runs on a **self-hosted** runner on the production VPS. It
+triggers on a push to `main` and on manual dispatch, and its only job is to run
+`scripts/deploy.sh` from the clone that already lives on that box. It does not check the
+repository out — the script pulls, builds, migrates, publishes the web build, and reloads
+pm2 itself.
 
-The workflow brings up its own Postgres as a service container (matching
-`infra/docker-compose.yml`), so the per-run-database mechanism described above applies
-inside CI exactly as it does locally.
+**The trigger list is load-bearing, and this is the one thing not to get wrong.** This
+repository is public, and a self-hosted runner executes whatever a workflow tells it to on
+a real machine that serves real traffic. `push` to `main` and `workflow_dispatch` are safe
+because a stranger can cause neither — a fork's pull request cannot push to `main`.
+**Never add a `pull_request` trigger to this workflow.** Doing so would hand anyone who
+opens a pull request a shell on the production server.
+
+**There is no automated test gate.** CI was removed deliberately, so nothing verifies a
+commit before it reaches production. A push to `main` deploys whether the tests pass or
+not — which is why "Both must be green before a commit" above is a real obligation rather
+than a formality.
 
 ### The secrets boundary
 
-CI's `DATABASE_URL` and `JWT_SECRET` are literals written directly into
-`.github/workflows/ci.yml`, not repository secrets — deliberately, not by oversight.
-Neither protects anything: the database in the job dies with the job, and the JWT secret
-signs and verifies tokens that never leave that same run. Storing either as a repository
-secret would imply they guard something, and they don't.
+A credential that reaches a real external service — a Xendit key, a Telegram bot token, an
+SSH or deploy key — **is** a repository secret, full stop. Nothing that reaches a real
+service belongs in a workflow file, in a script, or in a committed `.env`.
 
-A credential that reaches a real external service — a Xendit key, a Telegram bot token, a
-deploy key — **is** a repository secret, full stop. The next phase is deployment, and
-whoever adds the first one of those should be reading this section, not reverse-engineering
-the rule from `ci.yml`.
+`scripts/deploy.sh` deliberately never touches `infra/.env` or `apps/api/.env`. Those hold
+the real secrets, they are placed on the box once by hand, and a redeploy must never
+overwrite them.
 
 ## Migrations
 
