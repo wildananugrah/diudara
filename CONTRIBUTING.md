@@ -176,6 +176,7 @@ bun run typecheck   # every workspace
 ```
 
 Both must be green before a commit. Postgres has to be up; only `apps/api`'s tests use it.
+This is now machine-enforced — see Continuous integration below.
 
 To run one workspace or one file:
 
@@ -231,6 +232,39 @@ exists because the alternative is silently truncating your development database.
   or assert the emitted SQL.
 - Never put an invite link, a phone number or bound SQL parameters in a log line. Use the
   helpers in `apps/api/src/application/log-safety.ts`; there are tests that check this.
+- **A test must set every environment variable its assertion depends on.** Inheriting one
+  from `apps/api/.env` instead makes the test pass only on a machine that has that
+  file — the suite must pass with no `apps/api/.env` present at all. Check it the way CI
+  runs it: `cd apps/api && DATABASE_URL=<your local Postgres URL> JWT_SECRET=<32+ chars>
+  bun --no-env-file test`, with only those two variables set. `--no-env-file` is
+  load-bearing — without it Bun re-loads `apps/api/.env` and the coupling you're checking
+  for hides again. Three `bootstrap()` tests shipped exactly this bug before CI existed;
+  nothing stops a fourth from re-acquiring it except this check.
+
+## Continuous integration
+
+GitHub Actions (`.github/workflows/ci.yml`) runs `bun run typecheck` then `bun run test`
+on every push to `main` and on every pull request. A red run blocks the merge — Postgres
+being up and both commands being green are no longer things you have to remember to check
+yourself before committing; a machine now checks them for you, on every branch, not just
+the one you're staring at.
+
+The workflow brings up its own Postgres as a service container (matching
+`infra/docker-compose.yml`), so the per-run-database mechanism described above applies
+inside CI exactly as it does locally.
+
+### The secrets boundary
+
+CI's `DATABASE_URL` and `JWT_SECRET` are literals written directly into
+`.github/workflows/ci.yml`, not repository secrets — deliberately, not by oversight.
+Neither protects anything: the database in the job dies with the job, and the JWT secret
+signs and verifies tokens that never leave that same run. Storing either as a repository
+secret would imply they guard something, and they don't.
+
+A credential that reaches a real external service — a Xendit key, a Telegram bot token, a
+deploy key — **is** a repository secret, full stop. The next phase is deployment, and
+whoever adds the first one of those should be reading this section, not reverse-engineering
+the rule from `ci.yml`.
 
 ## Migrations
 
