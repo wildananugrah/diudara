@@ -39,6 +39,34 @@
  * drop (`onDisconnected`) surfaces instead of leaving a live badge over
  * nothing.
  * =======================================================================
+ *
+ * ====================== FIX ROUND 2 — two more real-browser findings ======================
+ * N2: `onDisconnected` used to fire once per QUALIFYING STATE TRANSITION,
+ * not once per drop — a real connection failure was measured going
+ * `"failed"` then `"closed"`, firing the callback TWICE for one drop.
+ * `EventsPage.tsx`'s handler runs `unregisterUnloadWarning()` each time,
+ * which is exactly the double-decrement the ref-COUNTER (not a boolean) was
+ * introduced to survive when TWO ROWS are live at once: two calls from one
+ * row's single drop wrongly decrements the shared counter twice, silencing
+ * the warning for a second row that is still genuinely broadcasting. Fixed
+ * with a `notifiedDisconnected` flag scoped to this one `publishToWhip`
+ * call — `onDisconnected` is now guaranteed at most once per publish,
+ * regardless of how many qualifying events the underlying connection fires,
+ * which is the version of this fix that holds even if some future caller
+ * is not itself idempotent.
+ *
+ * N4: the connect check depended on `connectionState` alone, which some
+ * RTCPeerConnection implementations (older Firefox, Safari) do not expose
+ * at all — on those, `connectionState` reads `undefined` forever, so a
+ * publish that was actually working would wait the full `CONNECT_TIMEOUT_MS`
+ * and then show the UDP/OBS message, a false negative in the OPPOSITE
+ * direction from Fix Round 1's Critical 1. `hasConnected`/`hasFailed` below
+ * now fall back to `iceConnectionState` (`"connected"`/`"completed"` count as
+ * success, matching how `connectionState` unifies them) whenever
+ * `connectionState` is undefined, and both `connectionstatechange` AND
+ * `iceconnectionstatechange` are listened for so the fallback actually
+ * fires on a browser that never dispatches the former.
+ * =======================================================================
  */
 
 /** Matches `XenditPaymentAdapter`'s own `FetchFn` shape exactly. */
@@ -207,12 +235,19 @@ export async function publishToWhip({
     // silent, permanent "live" badge.
     await waitForConnection(pc, connectTimeoutMs);
 
-    pc.addEventListener("connectionstatechange", () => {
-      if (closedByCaller) return;
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+    // See this file's own "Fix Round 2, N2" docstring above: guaranteed at
+    // most one `onDisconnected` call per publish, no matter how many
+    // qualifying state-change events the connection fires for one drop.
+    let notifiedDisconnected = false;
+    const notifyDisconnected = () => {
+      if (closedByCaller || notifiedDisconnected) return;
+      if (hasClosedOrFailed(pc)) {
+        notifiedDisconnected = true;
         onDisconnected?.();
       }
-    });
+    };
+    pc.addEventListener("connectionstatechange", notifyDisconnected);
+    pc.addEventListener("iceconnectionstatechange", notifyDisconnected);
 
     return {
       close() {
@@ -263,32 +298,61 @@ function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
 }
 
 /**
- * Resolves once `pc.connectionState` reaches `"connected"`; rejects on
- * `"failed"` or on timeout. `"disconnected"` is deliberately NOT treated as
- * failure here — per the WebRTC spec it can be transient (a momentary
- * network blip that recovers on its own), so treating it as terminal during
- * the INITIAL connect would fail negotiations that were about to succeed.
+ * `connectionState` is the unified, spec-current signal — but it is
+ * `undefined` on RTCPeerConnection implementations that predate it (older
+ * Firefox, older Safari; see this file's own "Fix Round 2, N4" docstring
+ * above), which otherwise only ever expose `iceConnectionState`. Every
+ * caller of these three goes through them rather than reading either state
+ * field directly, so the fallback cannot be forgotten at a second call site.
+ */
+function hasConnected(pc: RTCPeerConnection): boolean {
+  if (pc.connectionState !== undefined) return pc.connectionState === "connected";
+  return pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed";
+}
+
+function hasFailed(pc: RTCPeerConnection): boolean {
+  if (pc.connectionState !== undefined) return pc.connectionState === "failed";
+  return pc.iceConnectionState === "failed";
+}
+
+function hasClosedOrFailed(pc: RTCPeerConnection): boolean {
+  if (pc.connectionState !== undefined) {
+    return pc.connectionState === "failed" || pc.connectionState === "closed";
+  }
+  return pc.iceConnectionState === "failed" || pc.iceConnectionState === "closed";
+}
+
+/**
+ * Resolves once the connection reaches "connected" (`hasConnected`); rejects
+ * on a failure (`hasFailed`) or on timeout. `"disconnected"` is deliberately
+ * NOT treated as failure here — per the WebRTC spec it can be transient (a
+ * momentary network blip that recovers on its own), so treating it as
+ * terminal during the INITIAL connect would fail negotiations that were
+ * about to succeed. Listens for BOTH `connectionstatechange` and
+ * `iceconnectionstatechange` — a browser without `connectionState` never
+ * fires the former at all, so relying on it alone would silently never
+ * resolve on exactly the browsers `hasConnected`'s own fallback exists for.
  */
 function waitForConnection(pc: RTCPeerConnection, timeoutMs: number): Promise<void> {
-  if (pc.connectionState === "connected") return Promise.resolve();
-  if (pc.connectionState === "failed") {
-    return Promise.reject(new Error("peer connection failed"));
-  }
+  if (hasConnected(pc)) return Promise.resolve();
+  if (hasFailed(pc)) return Promise.reject(new Error("peer connection failed"));
   return new Promise<void>((resolve, reject) => {
     const cleanup = () => {
       pc.removeEventListener("connectionstatechange", onChange);
+      pc.removeEventListener("iceconnectionstatechange", onChange);
       clearTimeout(timer);
     };
     const onChange = () => {
-      if (pc.connectionState === "connected") {
+      if (hasConnected(pc)) {
         cleanup();
         resolve();
-      } else if (pc.connectionState === "failed") {
+      } else if (hasFailed(pc)) {
         cleanup();
         reject(new Error("peer connection failed"));
       }
     };
     pc.addEventListener("connectionstatechange", onChange);
+    pc.addEventListener("iceconnectionstatechange", onChange);
     const timer = setTimeout(() => {
       cleanup();
       reject(new Error("peer connection did not connect in time"));

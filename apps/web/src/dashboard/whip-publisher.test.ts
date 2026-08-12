@@ -80,6 +80,68 @@ class FailingPeerConnection extends FakePeerConnection {
   }
 }
 
+/**
+ * Models a browser whose `RTCPeerConnection` has NO `connectionState` field
+ * at all — older Firefox, older Safari (Fix Round 2, N4). Deliberately does
+ * NOT extend `FakePeerConnection`: that class's own `connectionState: string`
+ * field cannot be narrowed to `string | undefined` in a subclass under
+ * strict TS, and a real legacy browser's object genuinely lacks the
+ * property rather than setting it `undefined`, which is what omitting it
+ * here reproduces. `iceConnectionState`/`iceconnectionstatechange` are what
+ * such a browser exposes instead, and are the ONLY state signal this class
+ * ever fires.
+ */
+class LegacyPeerConnection {
+  localDescription: { type: string; sdp: string } | null = null;
+  remoteDescription: { type: string; sdp: string } | null = null;
+  iceGatheringState = "complete";
+  iceConnectionState = "new";
+  closed = false;
+  private listeners = new Map<string, Set<() => void>>();
+
+  addTrack() {}
+  async createOffer() {
+    return { type: "offer", sdp: "v=0\r\no=- fake-offer\r\n" };
+  }
+  async setLocalDescription(desc: { type: string; sdp: string }) {
+    this.localDescription = desc;
+  }
+  /** Subclasses decide what (if anything) `iceConnectionState` does next. */
+  async setRemoteDescription(desc: { type: string; sdp: string }) {
+    this.remoteDescription = desc;
+  }
+  addEventListener(event: string, callback: () => void) {
+    if (!this.listeners.has(event)) this.listeners.set(event, new Set());
+    this.listeners.get(event)!.add(callback);
+  }
+  removeEventListener(event: string, callback: () => void) {
+    this.listeners.get(event)?.delete(callback);
+  }
+  _setIceConnectionState(state: string) {
+    this.iceConnectionState = state;
+    for (const callback of this.listeners.get("iceconnectionstatechange") ?? []) callback();
+  }
+  close() {
+    this.closed = true;
+  }
+}
+
+/** A legacy connection that reaches "connected" (via iceConnectionState) a tick after the answer is applied. */
+class LegacyConnectingPeerConnection extends LegacyPeerConnection {
+  override async setRemoteDescription(desc: { type: string; sdp: string }) {
+    await super.setRemoteDescription(desc);
+    setTimeout(() => this._setIceConnectionState("connected"), 0);
+  }
+}
+
+/** A legacy connection that reports "failed" (via iceConnectionState) a tick after the answer is applied. */
+class LegacyFailingPeerConnection extends LegacyPeerConnection {
+  override async setRemoteDescription(desc: { type: string; sdp: string }) {
+    await super.setRemoteDescription(desc);
+    setTimeout(() => this._setIceConnectionState("failed"), 0);
+  }
+}
+
 class FakeTrack {
   stopped = false;
   stop() {
@@ -380,6 +442,65 @@ describe("publishToWhip", () => {
       expect(message).toContain("UDP");
       expect(message).toContain("OBS");
     }
+  });
+
+  // FIX ROUND 2, N4: some RTCPeerConnection implementations (older Firefox,
+  // Safari) never expose `connectionState` at all — reading it is always
+  // `undefined`. Without a fallback, `waitForConnection` would wait out the
+  // full timeout and report the UDP/OBS message on a publish that was
+  // actually working, a false negative in the OPPOSITE direction from
+  // Critical 1.
+  it("falls back to iceConnectionState when connectionState is undefined, and still resolves on success", async () => {
+    (globalThis as Record<string, unknown>).RTCPeerConnection = LegacyConnectingPeerConnection;
+
+    const handle = await publishToWhip({ whipUrl: WHIP_URL, stream: fakeStream(), fetchFn: okAnswer() });
+
+    expect(handle.close).toBeInstanceOf(Function);
+  });
+
+  it("falls back to iceConnectionState to detect a failure too, producing the same UDP/OBS message", async () => {
+    (globalThis as Record<string, unknown>).RTCPeerConnection = LegacyFailingPeerConnection;
+
+    try {
+      await publishToWhip({ whipUrl: WHIP_URL, stream: fakeStream(), fetchFn: okAnswer() });
+      throw new Error("expected publishToWhip to reject");
+    } catch (err) {
+      expect(err).toBeInstanceOf(WhipNegotiationError);
+      const message = (err as Error).message;
+      expect(message).toContain("UDP");
+      expect(message).toContain("OBS");
+    }
+  });
+
+  // FIX ROUND 2, N2: a single real drop was measured firing TWO qualifying
+  // transitions ("failed", then "closed") — `onDisconnected` must still
+  // fire only once, because `EventsPage.tsx`'s own handler decrements a
+  // SHARED, ref-counted unload-warning guard each time it runs (Fix Round 1,
+  // Critical 2); a double call would wrongly silence that guard for a
+  // DIFFERENT row that is still genuinely broadcasting.
+  it("calls onDisconnected at most once per drop, even across two qualifying state transitions", async () => {
+    let capturedPc: FakePeerConnection | undefined;
+    (globalThis as Record<string, unknown>).RTCPeerConnection = class extends FakePeerConnection {
+      constructor() {
+        super();
+        capturedPc = this;
+      }
+    };
+    let disconnectedCalls = 0;
+
+    await publishToWhip({
+      whipUrl: WHIP_URL,
+      stream: fakeStream(),
+      fetchFn: okAnswer(),
+      onDisconnected: () => {
+        disconnectedCalls += 1;
+      },
+    });
+
+    capturedPc?._setConnectionState("failed");
+    capturedPc?._setConnectionState("closed");
+
+    expect(disconnectedCalls).toBe(1);
   });
 
   it("closes the peer connection when negotiation fails partway", async () => {
