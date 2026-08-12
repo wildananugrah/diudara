@@ -22,6 +22,10 @@
 #     MEDIAMTX_WHIP_BASE_URL must point at NGINX_ORIGIN_PORT below (it does,
 #     by default: both are 18443) — this script does not rewrite that file.
 #   - jq, for parsing the curl-driven signup/community/session responses.
+#   - envsubst (part of GNU gettext) — NOT on a stock macOS; `brew install
+#     gettext && brew link --force gettext` if `command -v envsubst` fails
+#     below. Used to render live-hls.conf.template, same as this directory's
+#     own run.sh.
 #   - Nothing already listening on :3000, :5173, or NGINX_ORIGIN_PORT.
 #
 # Usage:
@@ -30,6 +34,10 @@ set -euo pipefail
 
 command -v jq >/dev/null 2>&1 || { echo "jq is required — brew install jq" >&2; exit 1; }
 command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
+command -v envsubst >/dev/null 2>&1 || {
+  echo "envsubst is required (part of GNU gettext) — brew install gettext && brew link --force gettext" >&2
+  exit 1
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -178,12 +186,19 @@ echo "==> installing this harness's own playwright (isolated devDependency, see 
 (cd "$SCRIPT_DIR" && bun install --silent)
 
 echo "==> driving the real EventsPage UI: full go-live/stop cycle"
-(cd "$SCRIPT_DIR" && bun drive-dashboard.mjs "$TOKEN" "$COMMUNITY_ID" "$HAPPY_TITLE" "http://localhost:${WEB_PORT}" "http://localhost:${API_PORT}")
-HAPPY_STATUS=$?
+# `set -e` aborts the WHOLE script the instant a command in a simple pipeline
+# fails — `HAPPY_STATUS=$?` on its own next line would therefore never run
+# when the driver itself fails, which is exactly backwards from this
+# script's own point (the denied-permission driver should still run, and the
+# explanatory branch below should still print). `|| HAPPY_STATUS=$?` keeps
+# `set -e` from firing for THIS one command by giving it an explicit
+# failure branch, the standard idiom for capturing an exit code under `-e`.
+HAPPY_STATUS=0
+(cd "$SCRIPT_DIR" && bun drive-dashboard.mjs "$TOKEN" "$COMMUNITY_ID" "$HAPPY_TITLE" "http://localhost:${WEB_PORT}" "http://localhost:${API_PORT}") || HAPPY_STATUS=$?
 
 echo "==> driving the real EventsPage UI: denied camera/microphone permission"
-(cd "$SCRIPT_DIR" && bun drive-dashboard-denied.mjs "$TOKEN" "$COMMUNITY_ID" "$DENIED_TITLE" "http://localhost:${WEB_PORT}")
-DENIED_STATUS=$?
+DENIED_STATUS=0
+(cd "$SCRIPT_DIR" && bun drive-dashboard-denied.mjs "$TOKEN" "$COMMUNITY_ID" "$DENIED_TITLE" "http://localhost:${WEB_PORT}") || DENIED_STATUS=$?
 
 if [ "$HAPPY_STATUS" -eq 0 ] && [ "$DENIED_STATUS" -eq 0 ]; then
   echo "==> ALL REAL-BROWSER CHECKS PASSED"
