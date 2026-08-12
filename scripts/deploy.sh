@@ -55,6 +55,43 @@ if [ "$status" != "healthy" ]; then
   exit 1
 fi
 
+# Fix round 2 (browser-publishing phase, Task 1 review, residual on Important
+# 1): infra/docker-compose.yml's mediamtx entrypoint already prints a WARN to
+# `docker logs infra-mediamtx-1` on every start where
+# MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS is unset (see that file's own comment) —
+# loud INSIDE the container, but this script never surfaced it anywhere, so
+# on a real non-interactive redeploy that WARN sat in a log stream nobody was
+# watching, which is not meaningfully different from the checklist entry it
+# was meant to replace. This terminal is the one place an operator running a
+# real redeploy IS watching synchronously — the postgres health-poll above
+# already earns its keep the same way, gating on its OWN synchronous check
+# rather than trusting a log line to be noticed later.
+#
+# Deliberately CANNOT fail the deploy, unlike the postgres check above: an
+# empty MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS is correct on a box where the
+# publishing browser and this server are the same machine, and a real
+# production redeploy must not break because of it — see
+# infra/mediamtx.yml's own webrtcAdditionalHosts comment. `|| true` on the
+# grep (not just the `docker logs`) means an empty match (nothing to report)
+# and a hard error reading the log (mediamtx not up yet, docker unreachable)
+# are both treated as "nothing to report" rather than aborting under this
+# script's `set -e`.
+echo "==> checking mediamtx logs for the browser-publishing (WebRTC/WHIP) warning"
+# 2>&1, NOT 2>/dev/null — found running this for real: the entrypoint
+# wrapper's WARN/INF lines are `echo ... >&2` INSIDE the container (stderr),
+# and `docker logs` mirrors a container's stdout/stderr onto its OWN
+# matching streams rather than interleaving them into one. `2>/dev/null`
+# here would silently discard exactly the line this check exists to find,
+# passing grep nothing to ever match and making this whole step a no-op
+# that looked correct in every test that didn't check the WARN case against
+# a genuinely fresh container.
+mediamtx_warn="$(docker logs --tail 20 infra-mediamtx-1 2>&1 | grep 'WARN \[mediamtx\]' || true)"
+if [ -n "$mediamtx_warn" ]; then
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo "$mediamtx_warn"
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+fi
+
 echo "==> db migrate"
 (cd apps/api && bun run db:migrate)
 
