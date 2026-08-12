@@ -43,6 +43,9 @@ describe("POST /communities/:communityId/events", () => {
     expect(body.rtmpUrl).toContain("rtmp://");
     expect(body.streamKey).toMatch(/^[0-9a-f]{32}$/);
     expect(body.hlsPlaybackPath).toContain(body.streamKey);
+    // Task 2: the browser-publishing WHIP URL, carrying the same stream key
+    // as rtmpUrl — owner-scoped exactly like every other field here.
+    expect(body.whipUrl).toContain(body.streamKey);
   });
 
   it("mints a different key for a second session in the same community", async () => {
@@ -77,9 +80,12 @@ describe("POST /communities/:communityId/events", () => {
     });
 
     expect(res.status).toBe(404);
-    // Nothing about the stream key ever reaches a stranger's response.
+    // Nothing about the stream key — or the WHIP URL that carries it — ever
+    // reaches a stranger's response. A 404, never a 403: the same shape
+    // would confirm the community exists to a caller who does not own it.
     const body = await res.json();
     expect(JSON.stringify(body)).not.toContain("streamKey");
+    expect(JSON.stringify(body)).not.toContain("whipUrl");
   });
 
   it("accepts an explicit scheduledAt and rejects an unparseable one with 400", async () => {
@@ -172,6 +178,7 @@ describe("GET /communities/:communityId/events", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(JSON.stringify(body)).not.toContain("streamKey");
+    expect(JSON.stringify(body)).not.toContain("whipUrl");
   });
 
   it("rejects an unauthenticated request with 401", async () => {

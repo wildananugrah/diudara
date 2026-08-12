@@ -76,9 +76,9 @@ if (!process.env.DATABASE_URL) {
  * every file, not just one.
  *
  * `selectStreamingProvider` (bootstrap.ts) throws `Streaming is
- * half-configured` when ONE to THREE of these four are set, and throws a
- * "too short" error when all four are set but either secret is under 32
- * characters. Task 6 (live streaming, infra) put real values for all four
+ * half-configured` when ONE to FOUR of these five are set, and throws a
+ * "too short" error when all five are set but either secret is under 32
+ * characters. Task 6 (live streaming, infra) put real values for all five
  * into `apps/api/.env` so a developer can drive a local MediaMTX — and
  * `bun test` auto-loads that file — which means EVERY bare `bootstrap()`
  * call in EVERY test file (not just the ones that test streaming) is
@@ -99,7 +99,7 @@ if (!process.env.DATABASE_URL) {
  * ONCE per process, before the process's own environment (real or
  * `apps/api/.env`-loaded) has been read by anything, and every test in the
  * run shares that one process. There is no "original value" to put back —
- * the whole run simply never has these four set, by design, the same way a
+ * the whole run simply never has these five set, by design, the same way a
  * CI box with no `apps/api/.env` at all never has them set. A test that
  * wants one or more of these DOES set them explicitly (see `withEnv` in
  * `bootstrap.test.ts`), and that is scoped correctly today: it sets, runs,
@@ -109,6 +109,7 @@ if (!process.env.DATABASE_URL) {
 for (const key of [
   "MEDIAMTX_RTMP_HOST",
   "MEDIAMTX_HLS_BASE_URL",
+  "MEDIAMTX_WHIP_BASE_URL",
   "MEDIAMTX_WEBHOOK_SECRET",
   "STREAM_TOKEN_SECRET",
 ]) {

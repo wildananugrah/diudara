@@ -26,14 +26,23 @@ import type { StreamingProviderPort } from "../../application/ports/streaming-pr
  * so the fake matches the real adapter's actual construction rule, not an
  * accidental shape nothing in `infra/nginx/live-hls.conf.template`'s
  * `/live/...` location would ever match.
+ *
+ * `whipUrl` (Task 2) is held to the SAME rule: `MediaMtxAdapter` builds it as
+ * `${whipBaseUrl}/whip/<key>` — a separate nginx prefix, not nested under
+ * `/live/` — so this fake matches that exactly rather than inventing its own
+ * shape. A fake that drifts from its real counterpart is how integration
+ * bugs hide.
  */
 export class FakeStreamingAdapter implements StreamingProviderPort {
   readonly sessions: { streamKey: string }[] = [];
 
-  createSession(input: { streamKey: string }): { rtmpUrl: string; hlsPlaybackPath: string } {
+  createSession(input: {
+    streamKey: string;
+  }): { rtmpUrl: string; whipUrl: string; hlsPlaybackPath: string } {
     this.sessions.push({ streamKey: input.streamKey });
     return {
       rtmpUrl: `rtmp://fake-mediamtx.local:1935/live/${input.streamKey}`,
+      whipUrl: `https://fake-mediamtx.local/whip/${input.streamKey}`,
       hlsPlaybackPath: `https://fake-mediamtx.local/live/${input.streamKey}/index.m3u8`,
     };
   }

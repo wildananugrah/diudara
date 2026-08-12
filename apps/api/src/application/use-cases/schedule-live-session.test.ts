@@ -89,6 +89,7 @@ describe("ScheduleLiveSession", () => {
     });
 
     expect(result.rtmpUrl).toContain("rtmp://");
+    expect(result.whipUrl).toContain(result.streamKey);
     expect(result.streamKey).toMatch(/^[0-9a-f]{32}$/);
     expect(result.hlsPlaybackPath).toContain(result.streamKey);
     expect(result.status).toBe("scheduled");
@@ -111,6 +112,7 @@ describe("ScheduleLiveSession", () => {
 
     expect(second.streamKey).not.toBe(first.streamKey);
     expect(second.rtmpUrl).not.toBe(first.rtmpUrl);
+    expect(second.whipUrl).not.toBe(first.whipUrl);
   });
 
   it("throws NotFoundError for another creator's community, and persists nothing", async () => {

@@ -922,19 +922,20 @@ describe(".env.example", () => {
   });
 
   /**
-   * Same shape as the messaging-tokens test above, extended to four
-   * variables: all four ship as commented placeholders with no committed
+   * Same shape as the messaging-tokens test above, extended to five
+   * variables: all five ship as commented placeholders with no committed
    * value, and the file names both the fallback adapter and the allowlist
    * that permits it, so a reader relying on this file alone (not the source)
    * can still find out what an absent value does.
    */
-  it("documents the four streaming variables as commented placeholders, set together or not at all", () => {
+  it("documents the five streaming variables as commented placeholders, set together or not at all", () => {
     const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
     const lines = example.split("\n");
 
     for (const name of [
       "MEDIAMTX_RTMP_HOST",
       "MEDIAMTX_HLS_BASE_URL",
+      "MEDIAMTX_WHIP_BASE_URL",
       "MEDIAMTX_WEBHOOK_SECRET",
       "STREAM_TOKEN_SECRET",
     ]) {
@@ -2249,12 +2250,13 @@ describe("bootstrap() AI provider wiring", () => {
 const FULL_STREAMING_CONFIG = {
   rtmpHost: "stream.example.com",
   hlsBaseUrl: "https://stream.example.com/hls",
+  whipBaseUrl: "https://stream.example.com",
   webhookSecret: "wh_".padEnd(32, "s"),
   streamTokenSecret: "tok_".padEnd(32, "t"),
 };
 
 describe("selectStreamingProvider", () => {
-  it("selects MediaMtxAdapter when all four env vars are set", () => {
+  it("selects MediaMtxAdapter when all five env vars are set", () => {
     captureConsoleLog(() => {
       const provider = selectStreamingProvider({ ...FULL_STREAMING_CONFIG, nodeEnv: "test" });
       expect(provider).toBeInstanceOf(MediaMtxAdapter);
@@ -2277,13 +2279,14 @@ describe("selectStreamingProvider", () => {
     });
   });
 
-  it("selects FakeStreamingAdapter when all four env vars are unset in development or test", () => {
+  it("selects FakeStreamingAdapter when all five env vars are unset in development or test", () => {
     captureConsoleLog(() => {
       for (const nodeEnv of ["test", "development"]) {
         expect(
           selectStreamingProvider({
             rtmpHost: undefined,
             hlsBaseUrl: undefined,
+            whipBaseUrl: undefined,
             webhookSecret: undefined,
             streamTokenSecret: undefined,
             nodeEnv,
@@ -2323,6 +2326,7 @@ describe("selectStreamingProvider", () => {
             selectStreamingProvider({
               rtmpHost: blank,
               hlsBaseUrl: blank,
+              whipBaseUrl: blank,
               webhookSecret: blank,
               streamTokenSecret: blank,
               nodeEnv,
@@ -2338,6 +2342,7 @@ describe("selectStreamingProvider", () => {
       selectStreamingProvider({
         rtmpHost: undefined,
         hlsBaseUrl: undefined,
+        whipBaseUrl: undefined,
         webhookSecret: undefined,
         streamTokenSecret: undefined,
         nodeEnv: "production",
@@ -2391,6 +2396,7 @@ describe("selectStreamingProvider", () => {
       selectStreamingProvider({
         rtmpHost: undefined,
         hlsBaseUrl: undefined,
+        whipBaseUrl: undefined,
         webhookSecret: undefined,
         streamTokenSecret: undefined,
         nodeEnv: "test",
@@ -2402,6 +2408,7 @@ describe("selectStreamingProvider", () => {
       selectStreamingProvider({
         rtmpHost: undefined,
         hlsBaseUrl: undefined,
+        whipBaseUrl: undefined,
         webhookSecret: undefined,
         streamTokenSecret: undefined,
         nodeEnv: "development",
@@ -2428,18 +2435,42 @@ describe("bootstrap() streaming provider wiring", () => {
     });
   });
 
-  it("wires MediaMtxAdapter when all four streaming env vars are configured", () => {
+  it("wires MediaMtxAdapter when all five streaming env vars are configured", () => {
     withJwtSecret("x".repeat(32), () => {
       withEnv(
         {
           MEDIAMTX_RTMP_HOST: FULL_STREAMING_CONFIG.rtmpHost,
           MEDIAMTX_HLS_BASE_URL: FULL_STREAMING_CONFIG.hlsBaseUrl,
+          MEDIAMTX_WHIP_BASE_URL: FULL_STREAMING_CONFIG.whipBaseUrl,
           MEDIAMTX_WEBHOOK_SECRET: FULL_STREAMING_CONFIG.webhookSecret,
           STREAM_TOKEN_SECRET: FULL_STREAMING_CONFIG.streamTokenSecret,
         },
         () => {
           const deps = bootstrap();
           expect(deps.streamingProvider).toBeInstanceOf(MediaMtxAdapter);
+        }
+      );
+    });
+  });
+
+  // Task 2: proves MEDIAMTX_WHIP_BASE_URL actually reaches the constructed
+  // adapter, not just that SOME MediaMtxAdapter got built — the same
+  // "wiring, not just instantiation" gap `appBaseUrl`'s own docstring on
+  // `Dependencies` warns about.
+  it("wires MEDIAMTX_WHIP_BASE_URL through to a real whipUrl", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          MEDIAMTX_RTMP_HOST: FULL_STREAMING_CONFIG.rtmpHost,
+          MEDIAMTX_HLS_BASE_URL: FULL_STREAMING_CONFIG.hlsBaseUrl,
+          MEDIAMTX_WHIP_BASE_URL: FULL_STREAMING_CONFIG.whipBaseUrl,
+          MEDIAMTX_WEBHOOK_SECRET: FULL_STREAMING_CONFIG.webhookSecret,
+          STREAM_TOKEN_SECRET: FULL_STREAMING_CONFIG.streamTokenSecret,
+        },
+        () => {
+          const deps = bootstrap();
+          const session = deps.streamingProvider!.createSession({ streamKey: "abc123" });
+          expect(session.whipUrl).toBe("https://stream.example.com/whip/abc123");
         }
       );
     });

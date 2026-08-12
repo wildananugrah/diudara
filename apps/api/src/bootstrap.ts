@@ -239,12 +239,13 @@ export interface Dependencies {
   /**
    * Task 2's live-streaming provider — the SECOND feature in this codebase
    * (after `aiProvider`) that boots DISABLED rather than refusing to start
-   * when unconfigured. See `selectStreamingProvider` for the full four-way
-   * decision; `undefined` means MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/
-   * MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET are not set and (per the
-   * design spec §7) the creator's streaming UI stays hidden rather than
-   * offering a "go live" button that always fails, exactly the way
-   * `aiProvider: undefined` hides the co-builder chat screen.
+   * when unconfigured. See `selectStreamingProvider` for the full decision;
+   * `undefined` means MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/
+   * MEDIAMTX_WHIP_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET are
+   * not set and (per the design spec §7) the creator's streaming UI stays
+   * hidden rather than offering a "go live" button that always fails,
+   * exactly the way `aiProvider: undefined` hides the co-builder chat
+   * screen.
    */
   streamingProvider: StreamingProviderPort | undefined;
   /**
@@ -794,16 +795,17 @@ export function resolveAiDailyMessageLimit(env: { value: string | undefined }): 
  */
 const MIN_STREAMING_SECRET_LENGTH = 32;
 
-/** The four env vars that make up streaming configuration, for error text. */
+/** The five env vars that make up streaming configuration, for error text. */
 const STREAMING_ENV_VAR_NAMES = {
   rtmpHost: "MEDIAMTX_RTMP_HOST",
   hlsBaseUrl: "MEDIAMTX_HLS_BASE_URL",
+  whipBaseUrl: "MEDIAMTX_WHIP_BASE_URL",
   webhookSecret: "MEDIAMTX_WEBHOOK_SECRET",
   streamTokenSecret: "STREAM_TOKEN_SECRET",
 } as const;
 
 /**
- * Length floor for a present streaming secret, checked only once all four
+ * Length floor for a present streaming secret, checked only once all five
  * streaming variables are known to be set — see `selectStreamingProvider`.
  * Mirrors `assertUsableJwtSecret` above in shape.
  */
@@ -826,18 +828,20 @@ export function assertUsableStreamingSecret(name: string, secret: string): void 
  * refusing to boot over a missing MediaMTX host would let an OPTIONAL
  * feature take down a REQUIRED one.
  *
- * Same shape as `selectAiProvider`, generalised from two variables to four
- * because a live session needs all of them or none:
+ * Same shape as `selectAiProvider`, generalised from two variables to five
+ * because a live session needs all of them or none. `MEDIAMTX_WHIP_BASE_URL`
+ * (Task 2) joined the other four: the public https:// origin nginx proxies a
+ * creator's BROWSER publish (WHIP) to, alongside RTMP for OBS.
  *
- *   1. All four set -> `MediaMtxAdapter`, in EVERY environment, once the two
+ *   1. All five set -> `MediaMtxAdapter`, in EVERY environment, once the two
  *      secrets clear `MIN_STREAMING_SECRET_LENGTH` (checked here, at BOOT,
  *      rather than deferred to whatever later reads them — a short secret
  *      must fail loudly now, not as a webhook that silently never
  *      authenticates or a token nobody can forge protection against).
- *   2. PARTIAL configuration (1-3 of the four set) throws in EVERY
+ *   2. PARTIAL configuration (1-4 of the five set) throws in EVERY
  *      environment — the same rule `selectPaymentProvider` and
  *      `selectMessagingProviders` apply to their own pairs, extended to
- *      four: a host with no webhook secret is a webhook nothing can
+ *      five: a host with no webhook secret is a webhook nothing can
  *      authenticate, and a webhook secret with no host is a signing key
  *      naming a stream nobody can reach.
  *   3. NONE set, INSIDE `RELAXED_NODE_ENVS` -> `FakeStreamingAdapter`, the
@@ -863,6 +867,7 @@ export function assertUsableStreamingSecret(name: string, secret: string): void 
 export function selectStreamingProvider(env: {
   rtmpHost: string | undefined;
   hlsBaseUrl: string | undefined;
+  whipBaseUrl: string | undefined;
   webhookSecret: string | undefined;
   streamTokenSecret: string | undefined;
   nodeEnv: string | undefined;
@@ -870,6 +875,7 @@ export function selectStreamingProvider(env: {
   const values = {
     rtmpHost: presentOrUndefined(env.rtmpHost),
     hlsBaseUrl: presentOrUndefined(env.hlsBaseUrl),
+    whipBaseUrl: presentOrUndefined(env.whipBaseUrl),
     webhookSecret: presentOrUndefined(env.webhookSecret),
     streamTokenSecret: presentOrUndefined(env.streamTokenSecret),
   };
@@ -882,12 +888,13 @@ export function selectStreamingProvider(env: {
     logProviderChoice(
       env.nodeEnv,
       "[bootstrap] streaming provider: MediaMtxAdapter " +
-        "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET " +
-        "are all set — live streaming is available)"
+        "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WHIP_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/" +
+        "STREAM_TOKEN_SECRET are all set — live streaming is available)"
     );
     return new MediaMtxAdapter({
       rtmpHost: values.rtmpHost as string,
       hlsBaseUrl: values.hlsBaseUrl as string,
+      whipBaseUrl: values.whipBaseUrl as string,
     });
   }
 
@@ -900,9 +907,9 @@ export function selectStreamingProvider(env: {
       .map(([key]) => STREAMING_ENV_VAR_NAMES[key]);
     throw new Error(
       `Streaming is half-configured: ${present.join(", ")} set but ${missing.join(", ")} not. ` +
-        "Set MEDIAMTX_RTMP_HOST, MEDIAMTX_HLS_BASE_URL, MEDIAMTX_WEBHOOK_SECRET and " +
-        "STREAM_TOKEN_SECRET together or not at all — see apps/api/.env.example. Refusing to " +
-        "start rather than boot with streaming half-wired."
+        "Set MEDIAMTX_RTMP_HOST, MEDIAMTX_HLS_BASE_URL, MEDIAMTX_WHIP_BASE_URL, " +
+        "MEDIAMTX_WEBHOOK_SECRET and STREAM_TOKEN_SECRET together or not at all — see " +
+        "apps/api/.env.example. Refusing to start rather than boot with streaming half-wired."
     );
   }
 
@@ -910,8 +917,9 @@ export function selectStreamingProvider(env: {
     logProviderChoice(
       env.nodeEnv,
       "[bootstrap] streaming provider: FakeStreamingAdapter " +
-        "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET " +
-        "not set — no real MediaMTX will be used; set all four to switch to MediaMtxAdapter)"
+        "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WHIP_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/" +
+        "STREAM_TOKEN_SECRET not set — no real MediaMTX will be used; set all five to switch to " +
+        "MediaMtxAdapter)"
     );
     return new FakeStreamingAdapter();
   }
@@ -919,10 +927,10 @@ export function selectStreamingProvider(env: {
   logProviderChoice(
     env.nodeEnv,
     "[bootstrap] streaming provider: none — live streaming is DISABLED " +
-      "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET not " +
-      `set, and NODE_ENV is ${describeNodeEnv(env.nodeEnv)}, outside ${RELAXED_NODE_ENVS_LIST}). ` +
-      "Unlike payments/messaging this does NOT block boot: the creator's streaming UI stays " +
-      "hidden. Set all four env vars to enable it."
+      "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WHIP_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/" +
+      `STREAM_TOKEN_SECRET not set, and NODE_ENV is ${describeNodeEnv(env.nodeEnv)}, outside ` +
+      `${RELAXED_NODE_ENVS_LIST}). Unlike payments/messaging this does NOT block boot: the ` +
+      "creator's streaming UI stays hidden. Set all five env vars to enable it."
   );
   return undefined;
 }
@@ -1305,7 +1313,7 @@ export function bootstrap(): Dependencies {
   // derived from `streamingProvider`'s truthiness) for the exact reason
   // `authoriseStream`/`mediamtxWebhookSecret` do this further down: by the
   // time `selectStreamingProvider` (below) has run without throwing, either
-  // all four streaming vars are set and length-valid or all four are
+  // all five streaming vars are set and length-valid or all five are
   // genuinely absent — so a plain `presentOrUndefined` read here is exactly
   // as strict, without this file's several selectors needing to agree about
   // what "configured" means. Declared before `selectStreamingProvider` is
@@ -1419,6 +1427,7 @@ export function bootstrap(): Dependencies {
   const streamingProvider = selectStreamingProvider({
     rtmpHost: process.env.MEDIAMTX_RTMP_HOST,
     hlsBaseUrl: process.env.MEDIAMTX_HLS_BASE_URL,
+    whipBaseUrl: process.env.MEDIAMTX_WHIP_BASE_URL,
     webhookSecret: process.env.MEDIAMTX_WEBHOOK_SECRET,
     streamTokenSecret: process.env.STREAM_TOKEN_SECRET,
     nodeEnv: process.env.NODE_ENV,
@@ -1445,7 +1454,7 @@ export function bootstrap(): Dependencies {
   // `selectStreamingProvider` runs is still safe. Both secrets rely on the
   // SAME invariant `selectStreamingProvider` enforces: by the time execution
   // reaches this line, either both MEDIAMTX_WEBHOOK_SECRET and
-  // STREAM_TOKEN_SECRET are set and length-valid (the four-vars-together
+  // STREAM_TOKEN_SECRET are set and length-valid (the five-vars-together
   // branch), or both are genuinely absent (partial configuration threw
   // already) — so a plain `presentOrUndefined` read is exactly as strict as
   // re-checking `streamingProvider`, without depending on this file's several
@@ -1468,7 +1477,7 @@ export function bootstrap(): Dependencies {
   // directly here, rather than threading it through from `streamingProvider`,
   // relies on the SAME invariant `mediamtxWebhookSecret` above already does:
   // `selectStreamingProvider` (already run, without throwing, by the time
-  // this line executes) enforces all four streaming env vars together or
+  // this line executes) enforces all five streaming env vars together or
   // none at all, so `streamTokenSecret` present implies
   // `MEDIAMTX_HLS_BASE_URL` is too.
   const resolveWatchToken = streamTokenSecret

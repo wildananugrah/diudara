@@ -4,27 +4,35 @@ import type { EventRecord, EventRepositoryPort } from "../ports/event-repository
 
 /**
  * What `POST /communities/:communityId/events` hands back — the ONLY place
- * `streamKey` and `rtmpUrl` ever appear together, because `rtmpUrl` is never
- * persisted (see `StreamingProviderPort`: it is pure URL construction from
- * the key and the adapter's own configuration, cheap to rebuild and
- * therefore not worth a column). A creator who loses this response has lost
- * the RTMP URL for good; the stream key itself survives on the `event` row
- * for `findByStreamKey` (Task 4), but nothing in this codebase reconstructs
- * `rtmpUrl` from it again after this call returns.
+ * `streamKey`, `rtmpUrl` and (Task 2) `whipUrl` ever appear together, because
+ * neither URL is persisted (see `StreamingProviderPort`: both are pure URL
+ * construction from the key and the adapter's own configuration, cheap to
+ * rebuild and therefore not worth a column). A creator who loses this
+ * response has lost the RTMP and WHIP URLs for good; the stream key itself
+ * survives on the `event` row for `findByStreamKey` (Task 4), but nothing in
+ * this codebase reconstructs either URL from it again after this call
+ * returns.
+ *
+ * `whipUrl` carries the stream key exactly as `rtmpUrl` does, so it is
+ * exactly as sensitive — see this class's own docstring below for the
+ * owner-scoping that keeps it away from a stranger and, by extension, from a
+ * member.
  */
 export interface ScheduledSession {
   id: string;
   title: string;
   status: string;
   rtmpUrl: string;
+  whipUrl: string;
   streamKey: string;
   hlsPlaybackPath: string;
 }
 
 /**
  * `POST /communities/:communityId/events` (design spec §4, step 1): a
- * creator schedules a session and gets back the RTMP URL and stream key
- * their encoder (OBS) needs.
+ * creator schedules a session and gets back the RTMP URL, the WHIP URL
+ * (Task 2 — a browser publish target Task 3's UI uses as an alternative to
+ * OBS), and the stream key both depend on.
  *
  * Mints the key EXACTLY ONCE, via `newStreamKey()` — see that function's
  * docstring for why it lives on the port module rather than on either
@@ -79,6 +87,7 @@ export class ScheduleLiveSession {
       title: event.title,
       status: event.status,
       rtmpUrl: session.rtmpUrl,
+      whipUrl: session.whipUrl,
       streamKey,
       hlsPlaybackPath: session.hlsPlaybackPath,
     };
@@ -92,10 +101,10 @@ export class ScheduleLiveSession {
  * Deliberately NOT dependent on `StreamingProviderPort`: unlike scheduling,
  * listing rebuilds nothing and calls no provider, so it works exactly the
  * same whether streaming is configured on this box or not — a creator can
- * always see the sessions already on the calendar. `rtmpUrl` is absent from
- * every row here (see `ScheduledSession`'s docstring for why it is never
- * persisted); `streamKey` is present, because it is the creator's own secret
- * and this is still their own list.
+ * always see the sessions already on the calendar. `rtmpUrl` and `whipUrl`
+ * are both absent from every row here (see `ScheduledSession`'s docstring for
+ * why neither is ever persisted); `streamKey` is present, because it is the
+ * creator's own secret and this is still their own list.
  */
 export class ListLiveSessions {
   constructor(private readonly events: EventRepositoryPort) {}
