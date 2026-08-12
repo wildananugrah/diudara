@@ -2,6 +2,19 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { publishToWhip, WhipNegotiationError } from "./whip-publisher";
 
 /**
+ * A video transceiver, modelling only what `preferH264` touches. Records
+ * whatever codec list it is handed so a test can assert the ORDER, which is
+ * the entire contract `setCodecPreferences` has.
+ */
+class FakeTransceiver {
+  preferences: { mimeType: string }[] | null = null;
+  constructor(public readonly kind: string) {}
+  setCodecPreferences(codecs: { mimeType: string }[]) {
+    this.preferences = codecs;
+  }
+}
+
+/**
  * A fake `RTCPeerConnection`, installed on `globalThis` before each test —
  * this module's whole point (see its own docstring) is that the negotiation
  * logic is testable WITHOUT a real browser's WebRTC stack, only with
@@ -23,10 +36,16 @@ class FakePeerConnection {
   connectionState = "new";
   closed = false;
   tracks: unknown[] = [];
+  transceivers: FakeTransceiver[] = [];
   protected listeners = new Map<string, Set<() => void>>();
 
   addTrack(track: unknown) {
     this.tracks.push(track);
+    this.transceivers.push(new FakeTransceiver((track as { kind?: string }).kind ?? "video"));
+  }
+
+  getTransceivers() {
+    return this.transceivers;
   }
 
   async createOffer() {
@@ -144,25 +163,43 @@ class LegacyFailingPeerConnection extends LegacyPeerConnection {
 
 class FakeTrack {
   stopped = false;
+  constructor(public readonly kind: string = "video") {}
   stop() {
     this.stopped = true;
   }
 }
 
 function fakeStream(): MediaStream {
-  const tracks = [new FakeTrack(), new FakeTrack()];
+  const tracks = [new FakeTrack("video"), new FakeTrack("audio")];
   return { getTracks: () => tracks } as unknown as MediaStream;
 }
 
+/**
+ * Stands in for `RTCRtpSender.getCapabilities("video")`, in the order a real
+ * Chromium actually reports — VP8 FIRST, which is precisely the problem
+ * `preferH264` exists to solve. Installed/removed per test rather than
+ * globally, because most tests in this file must keep exercising the
+ * "browser has no codec-preference API at all" path.
+ */
+function installVideoCapabilities(mimeTypes: string[]) {
+  (globalThis as Record<string, unknown>).RTCRtpSender = {
+    getCapabilities: (kind: string) =>
+      kind === "video" ? { codecs: mimeTypes.map((mimeType) => ({ mimeType })) } : null,
+  };
+}
+
 let originalRTCPeerConnection: unknown;
+let originalRTCRtpSender: unknown;
 
 beforeEach(() => {
   originalRTCPeerConnection = (globalThis as Record<string, unknown>).RTCPeerConnection;
+  originalRTCRtpSender = (globalThis as Record<string, unknown>).RTCRtpSender;
   (globalThis as Record<string, unknown>).RTCPeerConnection = FakePeerConnection;
 });
 
 afterEach(() => {
   (globalThis as Record<string, unknown>).RTCPeerConnection = originalRTCPeerConnection;
+  (globalThis as Record<string, unknown>).RTCRtpSender = originalRTCRtpSender;
 });
 
 const WHIP_URL = "https://stream.example.com/whip/streamkey123";
@@ -577,5 +614,108 @@ describe("publishToWhip", () => {
     }
 
     expect(called).toBe(true);
+  });
+});
+
+/**
+ * TASK 4 (the phase gate) — THE DEFECT THAT MADE EVERY MEMBER'S PLAYER BLACK.
+ *
+ * Found by actually opening the member watch page against a real browser
+ * publish, which nothing before this task had done. Chromium's default video
+ * codec preference is VP8, so that is what the WHIP offer asked for and what
+ * MediaMTX accepted. MediaMTX's own log for that publish:
+ *
+ *   INF [path live/<key>] stream is available and online, 2 tracks (Opus, VP8)
+ *   WAR [HLS] [muxer live/<key>] skipping track 2 (VP8)
+ *   INF [HLS] [muxer live/<key>] is converting into HLS, 1 track (Opus)
+ *
+ * HLS cannot carry VP8, so MediaMTX silently DROPPED the video and served the
+ * members an audio-only stream. Measured on the member's real `<video>`
+ * element: `readyState: 4`, `paused: false`, `currentTime` genuinely
+ * advancing — and `videoWidth: 0, videoHeight: 0`. Everything looked healthy
+ * from every angle except the one that matters: there was no picture.
+ *
+ * Nothing about this is visible from the publishing side (the creator's own
+ * preview is the local camera, not the round trip), and neither MediaMTX nor
+ * the API reports an error — the `WAR` above is the only signal anywhere.
+ *
+ * RTMP/OBS was never affected: ffmpeg publishes H264, which HLS carries.
+ * That is why this survived the whole live-streaming phase and only surfaced
+ * once browsers became publishers.
+ */
+describe("publishToWhip video codec preference", () => {
+  it("asks for H264 first, so MediaMTX's HLS muxer can carry the video", async () => {
+    // The order a real Chromium reports — VP8 first.
+    installVideoCapabilities(["video/VP8", "video/rtx", "video/H264", "video/AV1", "video/VP9"]);
+    let capturedPc: FakePeerConnection | undefined;
+    (globalThis as Record<string, unknown>).RTCPeerConnection = class extends FakePeerConnection {
+      constructor() {
+        super();
+        capturedPc = this;
+      }
+    };
+
+    await publishToWhip({ whipUrl: WHIP_URL, stream: fakeStream(), fetchFn: okAnswer() });
+
+    const video = capturedPc!.getTransceivers().find((t) => t.kind === "video");
+    expect(video).toBeDefined();
+    expect(video!.preferences).not.toBe(null);
+    expect(video!.preferences![0].mimeType).toBe("video/H264");
+    // Everything else is still offered — H264 is a PREFERENCE, not a
+    // restriction. A server that cannot do H264 must still be able to pick
+    // something rather than failing to negotiate any video at all.
+    expect(video!.preferences!.map((c) => c.mimeType)).toContain("video/VP8");
+    expect(video!.preferences!.length).toBe(5);
+  });
+
+  it("leaves the audio transceiver's codecs alone", async () => {
+    installVideoCapabilities(["video/VP8", "video/H264"]);
+    let capturedPc: FakePeerConnection | undefined;
+    (globalThis as Record<string, unknown>).RTCPeerConnection = class extends FakePeerConnection {
+      constructor() {
+        super();
+        capturedPc = this;
+      }
+    };
+
+    await publishToWhip({ whipUrl: WHIP_URL, stream: fakeStream(), fetchFn: okAnswer() });
+
+    const audio = capturedPc!.getTransceivers().find((t) => t.kind === "audio");
+    expect(audio!.preferences).toBe(null);
+  });
+
+  it("publishes anyway when the browser reports no H264 support at all", async () => {
+    // No H264 in the list — an unusual browser, or one built without it.
+    // Reordering is impossible, and refusing to publish over it would be a
+    // far worse outcome than a video track HLS happens not to carry.
+    installVideoCapabilities(["video/VP8", "video/VP9"]);
+    let capturedPc: FakePeerConnection | undefined;
+    (globalThis as Record<string, unknown>).RTCPeerConnection = class extends FakePeerConnection {
+      constructor() {
+        super();
+        capturedPc = this;
+      }
+    };
+
+    const handle = await publishToWhip({
+      whipUrl: WHIP_URL,
+      stream: fakeStream(),
+      fetchFn: okAnswer(),
+    });
+
+    expect(handle).toBeDefined();
+    expect(capturedPc!.getTransceivers().find((t) => t.kind === "video")!.preferences).toBe(null);
+  });
+
+  it("publishes anyway on a browser with no codec-preference API", async () => {
+    // `RTCRtpSender.getCapabilities` and `setCodecPreferences` are both
+    // absent here (nothing installed by this test) — older Safari/Firefox.
+    // The publish must still work; only the preference is lost.
+    const handle = await publishToWhip({
+      whipUrl: WHIP_URL,
+      stream: fakeStream(),
+      fetchFn: okAnswer(),
+    });
+    expect(handle).toBeDefined();
   });
 });

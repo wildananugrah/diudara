@@ -175,6 +175,9 @@ export async function publishToWhip({
 
   try {
     stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    // BEFORE `createOffer` — `setCodecPreferences` only affects offers built
+    // after it. See `preferH264` for the black-player defect this fixes.
+    preferH264(pc);
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -276,6 +279,75 @@ export async function publishToWhip({
         "kantor/kampus), atau gunakan OBS / Streamlabs sebagai alternatif.",
       { cause: err }
     );
+  }
+}
+
+/**
+ * Reorders this connection's VIDEO codec preferences to put H264 first.
+ *
+ * ====================== TASK 4 (the phase gate): why this exists ======================
+ * Found by opening the MEMBER watch page against a real browser publish —
+ * something no earlier task in this phase had done. Chromium's default video
+ * codec preference is VP8, so that is what the WHIP offer asked for and what
+ * MediaMTX accepted. MediaMTX's own log, captured live:
+ *
+ *   INF [path live/<key>] stream is available and online, 2 tracks (Opus, VP8)
+ *   WAR [HLS] [muxer live/<key>] skipping track 2 (VP8)
+ *   INF [HLS] [muxer live/<key>] is converting into HLS, 1 track (Opus)
+ *
+ * HLS cannot carry VP8. MediaMTX therefore DROPPED the video track and served
+ * every member an audio-only stream. Measured on the member's own `<video>`:
+ * `readyState: 4`, `paused: false`, `currentTime` genuinely advancing, and
+ * `videoWidth: 0, videoHeight: 0`. Healthy by every signal except the only
+ * one that matters — there was no picture.
+ *
+ * Nothing surfaces this to either side. The creator's preview is their LOCAL
+ * camera, not the round trip, so it looks perfect; the API never learns what
+ * codec was negotiated; the `WAR` line above is the only evidence anywhere.
+ * OBS/RTMP was never affected because ffmpeg publishes H264 — which is why
+ * this survived the entire live-streaming phase and only appeared once
+ * browsers became publishers.
+ * =====================================================================
+ *
+ * A PREFERENCE, NOT A RESTRICTION: every codec the browser supports stays in
+ * the list, just with H264 moved to the front. A server that cannot do H264
+ * still negotiates something rather than failing to negotiate video at all —
+ * a worse outcome than a codec HLS happens not to carry.
+ *
+ * Every step is optional-chained or feature-checked because all three pieces
+ * (`RTCRtpSender.getCapabilities`, `getTransceivers`, `setCodecPreferences`)
+ * are absent on older Safari/Firefox — the same browsers `hasConnected`'s own
+ * fallback exists for. On those, publishing must still work; only the
+ * preference is lost.
+ */
+function preferH264(pc: RTCPeerConnection): void {
+  // `typeof` rather than `RTCRtpSender?.` — an ABSENT global is a
+  // `ReferenceError`, not `undefined`, and optional chaining does not save
+  // you from that. The same reason `publishToWhip` above checks
+  // `typeof RTCPeerConnection === "undefined"` instead of testing the value.
+  if (typeof RTCRtpSender === "undefined") return;
+  const capabilities = RTCRtpSender.getCapabilities?.("video");
+  const codecs = capabilities?.codecs;
+  if (!codecs || codecs.length === 0) return;
+
+  const h264 = codecs.filter((codec) => codec.mimeType.toLowerCase() === "video/h264");
+  if (h264.length === 0) return;
+  const reordered = [...h264, ...codecs.filter((codec) => !h264.includes(codec))];
+
+  for (const transceiver of pc.getTransceivers?.() ?? []) {
+    // `kind` is on the transceiver's receiver in the spec; several
+    // implementations also expose it directly. Reading both keeps this from
+    // silently reordering the AUDIO transceiver's codecs with a video list.
+    const kind =
+      (transceiver as { kind?: string }).kind ?? transceiver.receiver?.track?.kind ?? undefined;
+    if (kind !== "video") continue;
+    try {
+      transceiver.setCodecPreferences?.(reordered);
+    } catch {
+      // A browser that rejects the list must not take the publish down with
+      // it — the un-preferred negotiation is still a working publish, just
+      // one whose video HLS may not carry.
+    }
   }
 }
 
