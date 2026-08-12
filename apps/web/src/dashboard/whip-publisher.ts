@@ -2,8 +2,9 @@
  * The WHIP (WebRTC-HTTP Ingestion Protocol) SDP offer/answer exchange, kept
  * OUT of any React component on purpose (Task 3 brief): device permission and
  * the local preview are UI concerns, but "build an offer, POST it, apply the
- * answer, remember the session URL to tear down later" is pure negotiation
- * logic that does not need a DOM to test.
+ * answer, wait for the connection to actually come up, remember the session
+ * URL to tear down later" is pure negotiation logic that does not need a DOM
+ * to test.
  *
  * `fetchFn` is injected exactly the way `XenditPaymentAdapter`
  * (apps/api/src/infrastructure/payments/xendit-payment.adapter.ts) injects
@@ -21,6 +22,23 @@
  * infra/nginx/whip-proxy-test/negotiate.mjs, the harness that proved it
  * against a real nginx + MediaMTX). This module does not construct that URL;
  * it is handed `whipUrl` exactly as the API returns it.
+ *
+ * ====================== FIX ROUND 1 — "success" used to mean "the POST worked" ======================
+ * Review found that this function used to resolve the instant
+ * `setRemoteDescription` returned, which only proves the SIGNALLING
+ * succeeded — the SDP round trip. On a network that blocks the UDP traffic
+ * WebRTC actually needs to move media (a common corporate/campus-network
+ * shape), that HTTPS POST still succeeds, MediaMTX still answers 201, and
+ * `setRemoteDescription` still resolves — while ICE never connects and no
+ * frame ever arrives. The UI would show "live" over a dead stream. Now this
+ * function ALSO awaits the peer connection's own `connectionState` reaching
+ * `"connected"`, bounded by `CONNECT_TIMEOUT_MS`, and treats `"failed"` or a
+ * timeout as a negotiation failure — which is what makes the UDP/OBS message
+ * fire for the case the brief actually named, not just for a fetch that
+ * threw. It also keeps listening after a successful connect, so a mid-stream
+ * drop (`onDisconnected`) surfaces instead of leaving a live badge over
+ * nothing.
+ * =======================================================================
  */
 
 /** Matches `XenditPaymentAdapter`'s own `FetchFn` shape exactly. */
@@ -32,9 +50,12 @@ export interface PublishHandle {
    * browser stops sending media the instant this returns) and best-effort
    * `DELETE`s the WHIP session sub-resource so MediaMTX tears down its side
    * without waiting for the ICE connection to time out. The `DELETE`'s
-   * failure is swallowed — closing the peer connection already stops the
-   * stream; a failed cleanup call only means MediaMTX notices a little later
-   * than it otherwise would have, not that the stream keeps running.
+   * failure is swallowed and NEVER logged (not even to the console) — the
+   * target URL carries the stream key, and `pc.close()` above has already
+   * genuinely stopped the stream, so a failed cleanup call means only that
+   * MediaMTX notices a little later than it otherwise would have, never that
+   * the stream keeps running. Telling the creator anything here would be
+   * both false (the stream DID stop) and unactionable.
    */
   close(): void;
 }
@@ -64,21 +85,65 @@ export class WhipNegotiationError extends Error {
 const ICE_GATHERING_TIMEOUT_MS = 4000;
 
 /**
- * Performs the WHIP offer/answer exchange for one publish, returning a handle
- * to stop it. Every step that can fail is wrapped so the caller only ever
- * sees a `WhipNegotiationError` with an Indonesian message naming the likely
- * cause — a creator meeting this screen has never heard of SDP or ICE.
+ * How long to wait for the peer connection to actually reach `"connected"`
+ * after the SDP answer is applied, before treating this as a failed
+ * negotiation (Fix Round 1, Critical 1). On the order the review asked for
+ * (10-15s): long enough that a slow but working ICE check does not get
+ * cut off, short enough that a creator on a UDP-blocking network is not left
+ * staring at "Menghubungkan..." for a minute before finding out it never
+ * would have worked.
+ */
+const CONNECT_TIMEOUT_MS = 15_000;
+
+/** How long the signalling POST itself may hang before this gives up on it. */
+const SIGNALLING_TIMEOUT_MS = 20_000;
+
+/**
+ * Performs the WHIP offer/answer exchange for one publish AND waits for the
+ * resulting connection to actually come up, returning a handle to stop it.
+ * Every step that can fail is wrapped so the caller only ever sees a
+ * `WhipNegotiationError` with an Indonesian message naming the likely cause —
+ * a creator meeting this screen has never heard of SDP or ICE.
  */
 export async function publishToWhip({
   whipUrl,
   stream,
   fetchFn = (url, init) => fetch(url, init),
+  onDisconnected,
+  connectTimeoutMs = CONNECT_TIMEOUT_MS,
 }: {
   whipUrl: string;
   stream: MediaStream;
   fetchFn?: FetchFn;
+  /**
+   * Called if the connection drops AFTER a successful go-live — a
+   * mid-broadcast failure, distinct from a failed initial negotiation
+   * (which instead rejects this function's own returned promise and never
+   * calls this). Never called for a stop the caller itself initiated via
+   * the returned handle's `close()`.
+   */
+  onDisconnected?: () => void;
+  /**
+   * Overrides `CONNECT_TIMEOUT_MS`. Exists for tests (a "never connects"
+   * fake would otherwise make a test wait out the real 15s production
+   * value) — production callers should not pass this.
+   */
+  connectTimeoutMs?: number;
 }): Promise<PublishHandle> {
+  // `RTCPeerConnection` missing entirely (not every environment has WebRTC)
+  // used to throw a raw, English `ReferenceError` straight out of this
+  // function, breaking the all-Indonesian-message rule. Checked explicitly,
+  // before anything that could throw natively.
+  if (typeof RTCPeerConnection === "undefined") {
+    throw new WhipNegotiationError(
+      "Peramban ini tidak mendukung siaran langsung dari browser (WebRTC tidak tersedia). " +
+        "Gunakan OBS / Streamlabs sebagai alternatif, atau buka dasbor ini dari Chrome, Edge, " +
+        "atau Firefox versi terbaru."
+    );
+  }
+
   const pc = new RTCPeerConnection();
+  let closedByCaller = false;
 
   try {
     stream.getTracks().forEach((track) => pc.addTrack(track, stream));
@@ -99,6 +164,7 @@ export async function publishToWhip({
       method: "POST",
       headers: { "Content-Type": "application/sdp" },
       body: localSdp,
+      signal: AbortSignal.timeout(SIGNALLING_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -116,16 +182,45 @@ export async function publishToWhip({
           "tidak bisa dihentikan dengan rapi nanti. Gunakan OBS / Streamlabs sebagai alternatif."
       );
     }
-    const sessionUrl = new URL(location, whipUrl).toString();
+    // The session sub-resource is ALWAYS same-origin with `whipUrl` by
+    // construction (see infra/nginx/live-hls.conf.template's `/whip/`
+    // location — nginx's own `proxy_redirect` only ever rewrites the PATH of
+    // MediaMTX's Location header, never its origin). `new URL(location,
+    // whipUrl)` alone is not safe here: when `location` is itself absolute
+    // (which nginx's rewrite produces), the `URL` constructor ignores the
+    // base entirely and keeps whatever scheme/host/port the upstream
+    // happened to construct — measured, under one specific Docker
+    // port-remapping arrangement, to be a container-internal port no
+    // external client could reach. Since the stream key travels in the
+    // PATH, keeping only `pathname`+`search` and re-resolving against
+    // `whipUrl` pins the DELETE to the origin the browser actually reached,
+    // regardless of what origin nginx's own redirect happened to construct.
+    const locationPath = new URL(location, whipUrl);
+    const sessionUrl = new URL(locationPath.pathname + locationPath.search, whipUrl).toString();
 
     const answerSdp = await response.text();
     await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
 
+    // Signalling succeeding proves nothing about media actually flowing —
+    // see this file's own "Fix Round 1" docstring above. This is the check
+    // that turns a UDP-blocked network into a reported failure instead of a
+    // silent, permanent "live" badge.
+    await waitForConnection(pc, connectTimeoutMs);
+
+    pc.addEventListener("connectionstatechange", () => {
+      if (closedByCaller) return;
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        onDisconnected?.();
+      }
+    });
+
     return {
       close() {
+        closedByCaller = true;
         pc.close();
         fetchFn(sessionUrl, { method: "DELETE" }).catch(() => {
-          // Best-effort — see this interface's own docstring on `close()`.
+          // Best-effort, and deliberately unlogged — see this interface's
+          // own docstring on `close()`.
         });
       },
     };
@@ -135,7 +230,11 @@ export async function publishToWhip({
     // The one message this brief calls out by name: point at the most likely
     // real-world cause (a network — often a mobile carrier or a restrictive
     // office/campus network — blocking the UDP traffic WebRTC needs) and at
-    // the alternative that does not need it.
+    // the alternative that does not need it. Reached both by the signalling
+    // fetch itself throwing (server unreachable, DNS, CORS) AND by
+    // `waitForConnection` rejecting (signalling succeeded, media never
+    // connected) — both are, from a creator's point of view, "I clicked go
+    // live and it did not work", and the fix is the same for both.
     throw new WhipNegotiationError(
       "Gagal terhubung ke server siaran. Penyebab paling umum adalah jaringan yang " +
         "memblokir lalu lintas UDP (dibutuhkan WebRTC) — coba jaringan lain (mis. bukan WiFi " +
@@ -160,5 +259,39 @@ function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
       pc.removeEventListener("icegatheringstatechange", onChange);
       resolve();
     }, ICE_GATHERING_TIMEOUT_MS);
+  });
+}
+
+/**
+ * Resolves once `pc.connectionState` reaches `"connected"`; rejects on
+ * `"failed"` or on timeout. `"disconnected"` is deliberately NOT treated as
+ * failure here — per the WebRTC spec it can be transient (a momentary
+ * network blip that recovers on its own), so treating it as terminal during
+ * the INITIAL connect would fail negotiations that were about to succeed.
+ */
+function waitForConnection(pc: RTCPeerConnection, timeoutMs: number): Promise<void> {
+  if (pc.connectionState === "connected") return Promise.resolve();
+  if (pc.connectionState === "failed") {
+    return Promise.reject(new Error("peer connection failed"));
+  }
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      pc.removeEventListener("connectionstatechange", onChange);
+      clearTimeout(timer);
+    };
+    const onChange = () => {
+      if (pc.connectionState === "connected") {
+        cleanup();
+        resolve();
+      } else if (pc.connectionState === "failed") {
+        cleanup();
+        reject(new Error("peer connection failed"));
+      }
+    };
+    pc.addEventListener("connectionstatechange", onChange);
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("peer connection did not connect in time"));
+    }, timeoutMs);
   });
 }
