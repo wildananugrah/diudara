@@ -23,14 +23,21 @@ import type { CreatedLiveSession, LiveSession, StreamingStatus } from "../types"
  * below ever has a stream key to accidentally render for a stranger.
  *
  * Two places a key appears, both deliberate:
- *  1. `justCreated` — shown IMMEDIATELY and in full, because that is the one
- *     moment a creator is actually about to go live or paste it into OBS.
+ *  1. `justCreated` — shown IMMEDIATELY and in full (the OBS URL/key, via
+ *     `ObsInstructions`), because that is the one moment a creator is
+ *     actually about to paste it into OBS. It does NOT also render the
+ *     browser-publish panel: that session already sits in the table above
+ *     with its own "Siarkan" toggle, and rendering `BrowserPublishSection`
+ *     in two places at once used to let a creator click "go live" in BOTH,
+ *     opening two independent `RTCPeerConnection`s against the same stream
+ *     key (fix round 1, a review finding) — see `PublishOptions`'s docstring.
  *  2. Each row's own "Siarkan" toggle — collapsed by default, so a screen
  *     with ten past sessions does not print ten secrets at once, but a
  *     creator who wants to go live from a session scheduled yesterday (or
- *     lost their OBS settings) can still reach it. This is exactly why Task 2
- *     rebuilds `rtmpUrl`/`whipUrl` on the LISTING endpoint too, not only on
- *     creation — see `types.ts`'s `LiveSession` docstring.
+ *     lost their OBS settings) can still reach it, including the
+ *     just-created one. This is exactly why Task 2 rebuilds
+ *     `rtmpUrl`/`whipUrl` on the LISTING endpoint too, not only on creation —
+ *     see `types.ts`'s `LiveSession` docstring.
  *
  * `justCreated` is LOCAL STATE, and React Router reuses this exact component
  * instance across a route-param change (switching communities does not
@@ -66,9 +73,68 @@ import type { CreatedLiveSession, LiveSession, StreamingStatus } from "../types"
  * limitation carried over from the RTMP path (see CONTRIBUTING.md's "Deferred,
  * on purpose: an OBS reconnect currently kills the session") — and a browser
  * tab is far easier to close by accident than OBS is to quit. `beforeunload`
- * is wired up for exactly the window this is live, in `BrowserPublishSection`.
+ * is wired up for exactly the window this is live, via the module-scope
+ * `registerUnloadWarning`/`unregisterUnloadWarning` pair below — NOT a
+ * function declared inside `BrowserPublishSection` itself. Fix round 1
+ * (Critical 2, measured by review): a function declared inside a component
+ * body gets a fresh identity every render, so `removeEventListener` was
+ * being called with a function that was never the one `addEventListener`
+ * registered — the listener never actually came off, and every creator who
+ * went live once got a spurious "leave site?" prompt for the rest of the
+ * tab's life. The guard below is ref-counted (not a boolean) because more
+ * than one row can be live at once.
  * =======================================================================
  */
+
+/**
+ * See this file's own docstring above ("CLOSING THE TAB ENDS THE SESSION
+ * PERMANENTLY"). ONE identity for the whole module — never redeclared per
+ * render, per component instance, or per publish — which is what makes
+ * `removeEventListener` actually remove what `addEventListener` added.
+ * Closes over no per-call state; it only ever does the same two things.
+ */
+function beforeUnloadWarning(event: BeforeUnloadEvent): void {
+  // `returnValue` has to be set for Chrome; the message text itself is
+  // ignored by every modern browser, which shows its own generic wording.
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+/**
+ * A COUNTER, not a boolean: more than one `BrowserPublishSection` can be
+ * live at the same time (two different rows, or a row plus a hypothetical
+ * second tab-local instance), and a boolean would let the FIRST one to stop
+ * turn the warning off while the second is still broadcasting.
+ * `register`/`unregister` are the only two places this is touched, and they
+ * are always called in matching pairs from `BrowserPublishSection`.
+ */
+let activeBrowserPublishCount = 0;
+
+function registerUnloadWarning(): void {
+  activeBrowserPublishCount += 1;
+  if (activeBrowserPublishCount === 1) {
+    window.addEventListener("beforeunload", beforeUnloadWarning);
+  }
+}
+
+function unregisterUnloadWarning(): void {
+  activeBrowserPublishCount = Math.max(0, activeBrowserPublishCount - 1);
+  if (activeBrowserPublishCount === 0) {
+    window.removeEventListener("beforeunload", beforeUnloadWarning);
+  }
+}
+
+/**
+ * Test-only: `activeBrowserPublishCount` is module state, so a leftover
+ * count from a test that did not stop what it started would otherwise bleed
+ * into the next test in the same file — the same problem, and the same
+ * fix, as `paymentAccount.ts`'s `resetPaymentAccountCacheForTesting`.
+ */
+export function resetBrowserPublishUnloadGuardForTesting(): void {
+  activeBrowserPublishCount = 0;
+  window.removeEventListener("beforeunload", beforeUnloadWarning);
+}
+
 export default function EventsPage() {
   const { communityId } = useParams<{ communityId: string }>();
   const [communityLoad] = useCommunity(communityId);
@@ -195,6 +261,17 @@ function SessionTable({ sessions }: { sessions: LiveSession[] }) {
 function SessionRow({ session }: { session: LiveSession }) {
   const [revealed, setRevealed] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
+  // Fix round 1, Important 3 (measured by review): collapsing this row's
+  // panel while a browser publish is live unmounted `BrowserPublishSection`
+  // mid-broadcast, silently ending the session with no confirmation — one
+  // click on a quiet button a row up did the same permanent damage the
+  // on-screen "don't close this tab" warning was written to prevent. Kept
+  // simple rather than a confirm() dialog (untestable, and a dialog a
+  // creator can misclick through is not much safer than no confirmation at
+  // all): while `browserPublishing` is true, the toggle is replaced with a
+  // locked indicator instead of being clickable, so the panel cannot be
+  // collapsed — and therefore cannot unmount — while live.
+  const [browserPublishing, setBrowserPublishing] = useState(false);
   const badgeClass = `badge badge-${session.status.replace(/_/g, "-")}`;
   // Both come from the same server-side check and are null together (see
   // `types.ts`'s `LiveSession` docstring) — checking either is enough, but
@@ -225,13 +302,22 @@ function SessionRow({ session }: { session: LiveSession }) {
         </td>
         <td>
           {canPublish ? (
-            <button
-              type="button"
-              className="button-quiet"
-              onClick={() => setPublishOpen((open) => !open)}
-            >
-              {publishOpen ? "Sembunyikan" : "Siarkan"}
-            </button>
+            browserPublishing ? (
+              <span
+                className="muted"
+                title="Sedang live dari browser — sembunyikan dinonaktifkan selama siaran berlangsung"
+              >
+                Sedang live
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="button-quiet"
+                onClick={() => setPublishOpen((open) => !open)}
+              >
+                {publishOpen ? "Sembunyikan" : "Siarkan"}
+              </button>
+            )
           ) : (
             <span className="muted">—</span>
           )}
@@ -245,6 +331,7 @@ function SessionRow({ session }: { session: LiveSession }) {
               rtmpUrl={session.rtmpUrl}
               whipUrl={session.whipUrl}
               streamKey={session.streamKey}
+              onBrowserPublishingChange={setBrowserPublishing}
             />
           </td>
         </tr>
@@ -254,30 +341,34 @@ function SessionRow({ session }: { session: LiveSession }) {
 }
 
 /**
- * WHAT A CREATOR SEES THE MOMENT A SESSION IS CREATED — both ways to
- * publish, plus enough instruction to configure OBS from nothing. This is
+ * WHAT A CREATOR SEES THE MOMENT A SESSION IS CREATED — the RTMP URL and
+ * stream key, with enough instruction to configure OBS from nothing. This is
  * the ONLY place `rtmpUrl` is ever available as a plain field on
  * `CreatedLiveSession` (see `types.ts`'s docstring: it is never persisted,
- * so it can never be recovered from the list once this panel is gone) — the
- * list endpoint rebuilds it per row instead (Task 2), which is what lets
- * `SessionRow`'s own "Siarkan" toggle offer the identical two panels for a
- * session created in an earlier page-load.
+ * so it can never be recovered from the list once this panel is gone).
+ *
+ * DELIBERATELY DOES NOT ALSO RENDER `BrowserPublishSection` — fix round 1,
+ * a review finding: this exact session is ALREADY in the table above (the
+ * `onCreated` handler in `EventsPage` prepends it), with its own "Siarkan"
+ * toggle offering the full `PublishOptions` panel, browser included.
+ * Rendering the browser-publish UI in BOTH places let a creator click "go
+ * live" in each independently — two separate `RTCPeerConnection`s publishing
+ * to the SAME stream key, the second producing an opaque "status 4xx" from
+ * MediaMTX rather than any message this screen controls. One go-live entry
+ * point per session, always the row's own toggle, is what keeps that
+ * impossible rather than merely unlikely.
  */
 function NewSessionPanel({ session }: { session: CreatedLiveSession }) {
   return (
     <div className="card notice notice-info" data-testid="new-session-panel">
       <h3>Sesi “{session.title}” berhasil dibuat</h3>
       <p className="muted">
-        Anda bisa langsung menyiarkan dari browser di bawah, atau memasukkan dua nilai berikut ke
-        perangkat lunak siaran Anda (misalnya OBS Studio). Simpan stream key ini baik-baik — siapa
-        pun yang memilikinya bisa menyiarkan atas nama sesi ini.
+        Sesi ini juga sudah muncul di tabel di atas — gunakan tombol “Siarkan” pada barisnya untuk
+        menyiarkan langsung dari browser. Atau, masukkan dua nilai berikut ke perangkat lunak
+        siaran Anda (misalnya OBS Studio). Simpan stream key ini baik-baik — siapa pun yang
+        memilikinya bisa menyiarkan atas nama sesi ini.
       </p>
-      <PublishOptions
-        status={session.status}
-        rtmpUrl={session.rtmpUrl}
-        whipUrl={session.whipUrl}
-        streamKey={session.streamKey}
-      />
+      <ObsInstructions rtmpUrl={session.rtmpUrl} streamKey={session.streamKey} />
     </div>
   );
 }
@@ -297,11 +388,14 @@ function PublishOptions({
   rtmpUrl,
   whipUrl,
   streamKey,
+  onBrowserPublishingChange,
 }: {
   status: string;
   rtmpUrl: string | null;
   whipUrl: string | null;
   streamKey: string | null;
+  /** Forwarded to `BrowserPublishSection` — see its own docstring on `onPublishingChange`. */
+  onBrowserPublishingChange?: (publishing: boolean) => void;
 }) {
   if (whipUrl === null && rtmpUrl === null) return null;
 
@@ -310,7 +404,11 @@ function PublishOptions({
       {whipUrl !== null ? (
         <div className="card">
           <h4>Siaran dari browser</h4>
-          <BrowserPublishSection whipUrl={whipUrl} status={status} />
+          <BrowserPublishSection
+            whipUrl={whipUrl}
+            status={status}
+            onPublishingChange={onBrowserPublishingChange}
+          />
         </div>
       ) : null}
       {rtmpUrl !== null && streamKey !== null ? (
@@ -417,11 +515,37 @@ function classifyGetUserMediaError(err: unknown): DeviceStatus {
  * `publishToWhip` throws into what is already an Indonesian message (see
  * `WhipNegotiationError`'s own docstring).
  */
-function BrowserPublishSection({ whipUrl, status }: { whipUrl: string; status: string }) {
+function BrowserPublishSection({
+  whipUrl,
+  status,
+  onPublishingChange,
+}: {
+  whipUrl: string;
+  status: string;
+  /**
+   * Told every time THIS panel's own `publishing` state flips, so a parent
+   * (`SessionRow`) can prevent the panel from being collapsed while live —
+   * fix round 1, Important 3. Never called for anything other than this
+   * panel's own go-live/stop/disconnect transitions.
+   */
+  onPublishingChange?: (publishing: boolean) => void;
+}) {
   const fieldId = useId();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const handleRef = useRef<PublishHandle | null>(null);
+  /**
+   * Fix round 1, Important 1 (measured by review): while `publishToWhip` is
+   * in flight, `handleRef.current` is still `null` — so unmounting during
+   * that window (collapsing the row, or navigating away) closed no
+   * connection at all, because there was nothing yet to close. When the
+   * promise later resolved on a dead component, it stored a handle and
+   * registered listeners nobody could ever reach again — an unstoppable
+   * ghost publish, plus a permanently unremovable unload prompt. This flag
+   * is checked the instant the promise settles: if set, the handle is
+   * closed immediately instead of being stored.
+   */
+  const cancelledRef = useRef(false);
 
   const [deviceStatus, setDeviceStatus] = useState<DeviceStatus>("idle");
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
@@ -432,26 +556,53 @@ function BrowserPublishSection({ whipUrl, status }: { whipUrl: string; status: s
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
 
-  // Unmounting (collapsing a row's "Siarkan" panel, or navigating away) must
-  // not leave a camera light on or a publish running with nothing left able
-  // to stop it.
+  // Unmounting (collapsing a row's "Siarkan" panel — though Important 3
+  // above prevents that specific trigger while `publishing` is true — or
+  // navigating away while still `connecting`) must not leave a camera light
+  // on or a publish running with nothing left able to stop it.
+  //
+  // `cancelledRef.current = false` in the SETUP half is not redundant with
+  // `useRef(false)`'s own initial value — found the hard way, in a REAL
+  // browser (fix round 1's real-browser re-verification), not in this
+  // file's own component-test suite: React 18's `<StrictMode>`
+  // (main.tsx), in development only, deliberately double-invokes every
+  // effect once (setup -> cleanup -> setup again) on mount, to surface
+  // exactly this class of bug. Without this reset, StrictMode's SYNTHETIC
+  // cleanup set `cancelledRef.current = true` and nothing ever set it back
+  // — so a REAL later `goLive()` immediately closed the connection it had
+  // just successfully negotiated, believing the component was gone. RTL's
+  // `render` does not wrap components in `StrictMode` by default, so no
+  // test caught this; only driving the actual dev server did.
   useEffect(() => {
+    cancelledRef.current = false;
     return () => {
-      handleRef.current?.close();
+      cancelledRef.current = true;
+      if (handleRef.current) {
+        handleRef.current.close();
+        unregisterUnloadWarning();
+      }
       streamRef.current?.getTracks().forEach((track) => track.stop());
-      window.removeEventListener("beforeunload", beforeUnloadWarning);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function beforeUnloadWarning(event: BeforeUnloadEvent) {
-    // Closing THIS tab ends the session permanently (a deferred limitation
-    // carried over from the RTMP/OBS path — see this file's own docstring),
-    // and a tab is far easier to close by accident than OBS is to quit.
-    // `returnValue` has to be set for Chrome; the message text itself is
-    // ignored by every modern browser, which shows its own generic wording.
-    event.preventDefault();
-    event.returnValue = "";
+  /**
+   * A mid-broadcast drop — the connection was live, then failed — as
+   * opposed to a failed INITIAL negotiation (which instead rejects
+   * `publishToWhip`'s own promise inside `goLive`, below). Never fires for
+   * a stop this panel itself initiated (`whip-publisher.ts`'s own
+   * `closedByCaller` guard).
+   */
+  function handleDisconnected() {
+    if (cancelledRef.current) return;
+    handleRef.current = null;
+    unregisterUnloadWarning();
+    setPublishing(false);
+    onPublishingChange?.(false);
+    setPublishError(
+      "Koneksi siaran terputus di tengah jalan. Coba mulai siaran lagi, atau gunakan OBS / " +
+        "Streamlabs sebagai alternatif."
+    );
   }
 
   async function requestAccess(deviceIds?: { cameraId?: string; microphoneId?: string }) {
@@ -497,18 +648,30 @@ function BrowserPublishSection({ whipUrl, status }: { whipUrl: string; status: s
     setConnecting(true);
     setPublishError(null);
     try {
-      const handle = await publishToWhip({ whipUrl, stream: streamRef.current });
+      const handle = await publishToWhip({
+        whipUrl,
+        stream: streamRef.current,
+        onDisconnected: handleDisconnected,
+      });
+      if (cancelledRef.current) {
+        // See `cancelledRef`'s own docstring above — this component is gone,
+        // nothing will ever call `close()` on this handle otherwise.
+        handle.close();
+        return;
+      }
       handleRef.current = handle;
       setPublishing(true);
-      window.addEventListener("beforeunload", beforeUnloadWarning);
+      onPublishingChange?.(true);
+      registerUnloadWarning();
     } catch (err) {
+      if (cancelledRef.current) return; // nothing left to show this to
       // `WhipNegotiationError` already carries an Indonesian message naming
       // the likely cause (see whip-publisher.ts) — shown verbatim.
       setPublishError(
         err instanceof Error ? err.message : "Gagal memulai siaran dari browser. Coba lagi."
       );
     } finally {
-      setConnecting(false);
+      if (!cancelledRef.current) setConnecting(false);
     }
   }
 
@@ -516,7 +679,8 @@ function BrowserPublishSection({ whipUrl, status }: { whipUrl: string; status: s
     handleRef.current?.close();
     handleRef.current = null;
     setPublishing(false);
-    window.removeEventListener("beforeunload", beforeUnloadWarning);
+    onPublishingChange?.(false);
+    unregisterUnloadWarning();
   }
 
   if (status === "ended") {
@@ -537,9 +701,14 @@ function BrowserPublishSection({ whipUrl, status }: { whipUrl: string; status: s
   // button and explain)" — per the Task 3 brief. `publishing` is THIS
   // panel's own local state (it becomes true only once THIS browser's own
   // `publishToWhip` call succeeds), so a `live` status this panel did not
-  // itself cause can only mean an encoder (OBS/Streamlabs) is the one
-  // sending video right now.
-  const liveViaObs = status === "live" && !publishing;
+  // itself cause means SOMETHING ELSE is currently sending video — but not
+  // necessarily OBS specifically: it could just as well be this same
+  // browser's OWN publish from another tab, or another device the creator
+  // is using. The message below admits that rather than naming OBS as fact
+  // (fix round 1, a minor review finding: a stale `status` after reloading
+  // mid-broadcast from another tab would otherwise wrongly tell the creator
+  // "OBS is streaming" when it is their own browser).
+  const liveElsewhere = status === "live" && !publishing;
 
   return (
     <div className="stack">
@@ -573,7 +742,7 @@ function BrowserPublishSection({ whipUrl, status }: { whipUrl: string; status: s
               <select
                 id={`field-${fieldId}-camera`}
                 value={cameraId}
-                disabled={publishing}
+                disabled={publishing || connecting}
                 onChange={(e) => {
                   setCameraId(e.target.value);
                   void requestAccess({ cameraId: e.target.value, microphoneId });
@@ -590,7 +759,7 @@ function BrowserPublishSection({ whipUrl, status }: { whipUrl: string; status: s
               <select
                 id={`field-${fieldId}-microphone`}
                 value={microphoneId}
-                disabled={publishing}
+                disabled={publishing || connecting}
                 onChange={(e) => {
                   setMicrophoneId(e.target.value);
                   void requestAccess({ cameraId, microphoneId: e.target.value });
@@ -605,10 +774,11 @@ function BrowserPublishSection({ whipUrl, status }: { whipUrl: string; status: s
             </Field>
           </div>
 
-          {liveViaObs ? (
+          {liveElsewhere ? (
             <p className="form-error" role="alert">
-              Sesi ini sedang live lewat OBS / Streamlabs saat ini. Hentikan siaran itu terlebih
-              dahulu sebelum menyiarkan dari browser.
+              Sesi ini sudah berstatus live saat ini — kemungkinan besar sedang disiarkan lewat
+              OBS / Streamlabs, atau dari tab maupun perangkat lain. Hentikan siaran itu terlebih
+              dahulu sebelum menyiarkan dari sini.
             </p>
           ) : null}
 
@@ -634,7 +804,7 @@ function BrowserPublishSection({ whipUrl, status }: { whipUrl: string; status: s
               type="button"
               className="button-primary"
               onClick={goLive}
-              disabled={connecting || liveViaObs}
+              disabled={connecting || liveElsewhere}
             >
               {connecting ? "Menghubungkan..." : "Mulai siaran dari browser"}
             </button>

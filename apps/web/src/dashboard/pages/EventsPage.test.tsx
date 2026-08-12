@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
-import EventsPage from "./EventsPage";
+import EventsPage, { resetBrowserPublishUnloadGuardForTesting } from "./EventsPage";
 import { setSession } from "../auth";
 import { formatDateTime } from "../format";
 import { resetPaymentAccountCacheForTesting } from "../paymentAccount";
@@ -286,11 +286,24 @@ describe("EventsPage", () => {
  * `beforeEach`/`afterEach` — happy-dom does not implement it either.
  */
 describe("EventsPage - browser publishing", () => {
+  /**
+   * `connectionState` starts `"new"` and `setRemoteDescription` transitions
+   * it to `"connected"` by default — fix round 1, Critical 1 added a real
+   * `waitForConnection` step to `publishToWhip` (see whip-publisher.ts and
+   * whip-publisher.test.ts), so a fake that never reports "connected" would
+   * make every "goes live" test in this file hang for real seconds instead
+   * of exercising the UI. The mid-stream-drop / never-connects paths
+   * themselves are pinned at the `whip-publisher.ts` unit level, not
+   * re-tested here — this file is about what the SCREEN does once
+   * negotiation has (or has not) succeeded.
+   */
   class FakePeerConnection {
     localDescription: { type: string; sdp: string } | null = null;
     remoteDescription: { type: string; sdp: string } | null = null;
     iceGatheringState = "complete";
+    connectionState = "new";
     closed = false;
+    private listeners = new Map<string, Set<() => void>>();
     addTrack() {}
     async createOffer() {
       return { type: "offer", sdp: "v=0\r\no=- fake-offer\r\n" };
@@ -300,9 +313,16 @@ describe("EventsPage - browser publishing", () => {
     }
     async setRemoteDescription(desc: { type: string; sdp: string }) {
       this.remoteDescription = desc;
+      this.connectionState = "connected";
+      for (const callback of this.listeners.get("connectionstatechange") ?? []) callback();
     }
-    addEventListener() {}
-    removeEventListener() {}
+    addEventListener(event: string, callback: () => void) {
+      if (!this.listeners.has(event)) this.listeners.set(event, new Set());
+      this.listeners.get(event)!.add(callback);
+    }
+    removeEventListener(event: string, callback: () => void) {
+      this.listeners.get(event)?.delete(callback);
+    }
     close() {
       this.closed = true;
     }
@@ -365,6 +385,14 @@ describe("EventsPage - browser publishing", () => {
   ) {
     stubFetch(routes);
     const jsonFetch = global.fetch;
+    // The real shape (CONTRIBUTING.md's "Browser publishing" section, and
+    // whip-publisher.test.ts's own `okAnswer`): the session sub-resource is
+    // NESTED under the stream key, `/whip/<streamKey>/<sessionId>` — a
+    // SIBLING of `/whip/session-x` would not start with `whip.url` at all,
+    // which is exactly the mismatch that made this helper's own DELETE
+    // branch below unreachable in fix round 1 until this default was
+    // corrected to match reality.
+    const defaultLocation = `${new URL(whip.url).pathname}/session-x`;
     global.fetch = (async (url: string, init?: RequestInit) => {
       if (typeof url === "string" && url.startsWith(whip.url)) {
         const method = (init?.method ?? "GET").toUpperCase();
@@ -374,7 +402,7 @@ describe("EventsPage - browser publishing", () => {
             status: whip.status ?? 201,
             headers: {
               "Content-Type": "application/sdp",
-              Location: whip.location ?? "/whip/session-x",
+              Location: whip.location ?? defaultLocation,
             },
           });
         }
@@ -391,6 +419,11 @@ describe("EventsPage - browser publishing", () => {
     originalMediaDevices = navigator.mediaDevices;
     originalRTCPeerConnection = (globalThis as Record<string, unknown>).RTCPeerConnection;
     (globalThis as Record<string, unknown>).RTCPeerConnection = FakePeerConnection;
+    // `activeBrowserPublishCount` is module state (Fix Round 1, Critical 2) —
+    // a test that intentionally leaves something mid-flight (Important 1's
+    // own test does exactly that) must not leak a nonzero count into the
+    // next test in this file.
+    resetBrowserPublishUnloadGuardForTesting();
   });
 
   afterEach(() => {
@@ -399,6 +432,7 @@ describe("EventsPage - browser publishing", () => {
       value: originalMediaDevices,
     });
     (globalThis as Record<string, unknown>).RTCPeerConnection = originalRTCPeerConnection;
+    resetBrowserPublishUnloadGuardForTesting();
   });
 
   it("explains how to grant access when camera/microphone permission is denied", async () => {
@@ -432,6 +466,55 @@ describe("EventsPage - browser publishing", () => {
     fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
 
     expect(await screen.findByText(/Tidak ditemukan kamera atau mikrofon/)).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: /Mulai siaran dari browser/ }).length).toBe(0);
+  });
+
+  // Fix round 1, Important 4: these two device states existed in
+  // DEVICE_STATUS_MESSAGE and classifyGetUserMediaError, and the report
+  // claimed they were "exercised only via the component test suite" — a
+  // claim that did not hold, since no test actually pinned either. Fixed
+  // here rather than merely re-asserted.
+  it("explains that the camera/mic is busy in another app (NotReadableError)", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: rejectingMediaDevices("NotReadableError"),
+    });
+    stubFetch([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }]);
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+
+    expect(await screen.findByText(/sedang dipakai aplikasi lain/)).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: /Mulai siaran dari browser/ }).length).toBe(0);
+  });
+
+  it("treats TrackStartError the same as a busy camera/mic", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: rejectingMediaDevices("TrackStartError"),
+    });
+    stubFetch([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }]);
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+
+    expect(await screen.findByText(/sedang dipakai aplikasi lain/)).toBeTruthy();
+  });
+
+  it("points at OBS/Streamlabs and a modern browser when this one has no mediaDevices support at all", async () => {
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
+    stubFetch([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }]);
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+
+    expect(await screen.findByText(/tidak mendukung siaran langsung dari browser/)).toBeTruthy();
     expect(screen.queryAllByRole("button", { name: /Mulai siaran dari browser/ }).length).toBe(0);
   });
 
@@ -476,9 +559,7 @@ describe("EventsPage - browser publishing", () => {
 
     const button = await screen.findByRole("button", { name: /Mulai siaran dari browser/ });
     expect(button.hasAttribute("disabled")).toBe(true);
-    expect(
-      await screen.findByText(/sedang live lewat OBS \/ Streamlabs/)
-    ).toBeTruthy();
+    expect(await screen.findByText(/sudah berstatus live saat ini/)).toBeTruthy();
   });
 
   it("offers to schedule a new session instead of device pickers when the session has ended", async () => {
@@ -500,24 +581,50 @@ describe("EventsPage - browser publishing", () => {
     expect(screen.queryAllByRole("button", { name: /Aktifkan kamera/ }).length).toBe(0);
   });
 
-  it("hides the browser-publish path entirely when it is not configured for a session", async () => {
+  it("hides the browser-publish path only for the session where it is unconfigured, not app-wide", async () => {
+    // A MIXED fixture — one configured session, one not — is the point of
+    // this rewrite (fix round 1: review measured that the single-session
+    // version of this test still passed against the PRE-Task-3 code, where
+    // there was no "Siarkan" button or "Siaran dari browser" text for ANY
+    // session, making both assertions vacuous — "hidden because null" and
+    // "hidden because the feature does not exist" were indistinguishable
+    // from a single session with nulled URLs). With both present in the
+    // same render, the configured session proves the feature exists and
+    // works, which is what makes the unconfigured session's absence mean
+    // something.
+    const UNCONFIGURED_SESSION = {
+      ...SCHEDULED_SESSION,
+      id: "event-unconfigured",
+      title: "Sesi tanpa WHIP",
+      rtmpUrl: null,
+      whipUrl: null,
+    };
     stubFetch([
       COMMUNITY,
       ENABLED,
-      {
-        path: EVENTS_PATH,
-        body: [{ ...SCHEDULED_SESSION, rtmpUrl: null, whipUrl: null }],
-      },
+      { path: EVENTS_PATH, body: [SCHEDULED_SESSION, UNCONFIGURED_SESSION] },
     ]);
 
     render();
     await screen.findByText("Sesi belajar saham");
+    await screen.findByText("Sesi tanpa WHIP");
 
-    // No way to reach the browser-publish panel at all — not even a
-    // "Siarkan" toggle, since there is nothing this session could publish to.
-    expect(screen.queryAllByRole("button", { name: "Siarkan" }).length).toBe(0);
-    expect(screen.queryAllByText("Siaran dari browser").length).toBe(0);
+    // Exactly one "Siarkan" button — for the configured session's row only.
+    const siarkanButtons = screen.getAllByRole("button", { name: "Siarkan" });
+    expect(siarkanButtons.length).toBe(1);
+
+    // And it genuinely works — expanding it shows the browser panel, proving
+    // the feature is present and only conditionally hidden, not absent.
+    fireEvent.click(siarkanButtons[0]!);
+    expect(await screen.findByText("Siaran dari browser")).toBeTruthy();
   });
+
+  /** Dispatches a REAL cancelable `beforeunload` at `window` and reports whether it was cancelled. */
+  function dispatchBeforeUnload(): boolean {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  }
 
   it("goes live from the browser, warns before unload, and stops cleanly", async () => {
     Object.defineProperty(navigator, "mediaDevices", {
@@ -526,7 +633,6 @@ describe("EventsPage - browser publishing", () => {
     });
     stubFetchWithWhip([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }], {
       url: SCHEDULED_SESSION.whipUrl,
-      location: "/whip/session-x",
     });
 
     render();
@@ -542,5 +648,145 @@ describe("EventsPage - browser publishing", () => {
 
     expect(await screen.findByRole("button", { name: /Mulai siaran dari browser/ })).toBeTruthy();
     expect(screen.queryAllByText(/Jangan tutup atau muat ulang tab ini/).length).toBe(0);
+  });
+
+  // Fix round 1, Critical 2. Review measured, through the real component,
+  // that the OLD "…warns before unload…" test above only ever asserted the
+  // ON-SCREEN paragraph's text — never the actual `beforeunload` LISTENER —
+  // which is exactly why a stale-identity bug that left the real listener
+  // permanently registered still passed it. This test dispatches a real,
+  // cancelable `beforeunload` at `window` and reads `defaultPrevented`,
+  // which only reflects reality if `removeEventListener` genuinely removed
+  // what `addEventListener` added.
+  it("cancels a real beforeunload while live, and stops cancelling it once stopped (Critical 2)", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: grantingMediaDevices(),
+    });
+    stubFetchWithWhip([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }], {
+      url: SCHEDULED_SESSION.whipUrl,
+    });
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+
+    // PROBE, pinned: nothing is live yet, so a real beforeunload passes through.
+    expect(dispatchBeforeUnload()).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Mulai siaran dari browser/ }));
+    await screen.findByRole("button", { name: "Hentikan siaran" });
+
+    // PROBE A/B, pinned: while live, the SAME real event is cancelled.
+    expect(dispatchBeforeUnload()).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hentikan siaran" }));
+    await screen.findByRole("button", { name: /Mulai siaran dari browser/ });
+
+    // PROBE, pinned: after stopping, it is no longer cancelled — the
+    // listener genuinely came off, not just the on-screen paragraph.
+    expect(dispatchBeforeUnload()).toBe(false);
+  });
+
+  // Fix round 1, Important 1. Review measured, through the real component,
+  // that collapsing a row WHILE `publishToWhip` was still in flight (before
+  // `handleRef.current` was ever set) left an open `RTCPeerConnection` with
+  // no DELETE issued and nothing able to close it — an unstoppable ghost
+  // publish. This is the exact race: the POST is held open past the click
+  // that collapses the row, so the promise resolves on an unmounted
+  // component. Important 3 (below) only locks collapsing once `publishing`
+  // is actually `true`, which is why this race exists at all — during
+  // "Menghubungkan…" the row is still collapsible.
+  it("closes an in-flight publish attempt if the row is collapsed before it resolves (Important 1)", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: grantingMediaDevices(),
+    });
+    stubFetch([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }]);
+    const jsonFetch = global.fetch;
+    let releasePost: (() => void) | undefined;
+    const postGate = new Promise<void>((resolve) => {
+      releasePost = resolve;
+    });
+    const whipCalls: string[] = [];
+    global.fetch = (async (url: string, init?: RequestInit) => {
+      if (typeof url === "string" && url.startsWith(SCHEDULED_SESSION.whipUrl)) {
+        const method = (init?.method ?? "GET").toUpperCase();
+        whipCalls.push(method);
+        if (method === "POST") {
+          await postGate; // held open until the test releases it
+          return new Response("v=0\r\no=- fake-answer\r\n", {
+            status: 201,
+            headers: {
+              "Content-Type": "application/sdp",
+              // Nested under the stream key, the real shape (see
+              // stubFetchWithWhip's own comment on why a sibling path like
+              // "/whip/session-x" would not even be recognised as a WHIP
+              // call by this same mock's own `startsWith` check below).
+              Location: `/whip/${SCHEDULED_SESSION.streamKey}/session-x`,
+            },
+          });
+        }
+        if (method === "DELETE") return new Response(null, { status: 200 });
+      }
+      return jsonFetch(url, init);
+    }) as unknown as typeof fetch;
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Mulai siaran dari browser/ }));
+
+    // Still connecting — the POST hasn't resolved, so `publishing` is still
+    // false and the row can still be collapsed (see this test's own comment
+    // on why that window exists).
+    await screen.findByRole("button", { name: "Menghubungkan..." });
+    fireEvent.click(screen.getByRole("button", { name: "Sembunyikan" }));
+    expect(await screen.findByRole("button", { name: "Siarkan" })).toBeTruthy();
+
+    // NOW let the negotiation succeed, on a component that is already gone.
+    releasePost?.();
+    await waitFor(() => expect(whipCalls).toContain("DELETE"));
+
+    // Re-expanding proves there is no leftover live state from the ghost —
+    // a fresh panel, not one that thinks it is already broadcasting.
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    expect(screen.queryAllByRole("button", { name: "Hentikan siaran" }).length).toBe(0);
+    expect(dispatchBeforeUnload()).toBe(false);
+  });
+
+  // Fix round 1, Important 3. Review measured that ONE CLICK on "Sembunyikan"
+  // silently ended a live broadcast with no confirmation, while the
+  // on-screen warning told the creator not to close or reload the TAB —
+  // never mentioning that a row a click away did the identical permanent
+  // damage. The toggle is now replaced by a locked indicator for exactly as
+  // long as this panel reports itself live.
+  it("keeps the row from being collapsed while live, and releases it once stopped (Important 3)", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: grantingMediaDevices(),
+    });
+    stubFetchWithWhip([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }], {
+      url: SCHEDULED_SESSION.whipUrl,
+    });
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Mulai siaran dari browser/ }));
+    await screen.findByRole("button", { name: "Hentikan siaran" });
+
+    // The toggle is GONE — nothing clickable can collapse this row now.
+    expect(screen.queryAllByRole("button", { name: "Sembunyikan" }).length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: "Siarkan" }).length).toBe(0);
+    expect(await screen.findByText("Sedang live")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hentikan siaran" }));
+
+    // Stopping releases the lock — the toggle is back.
+    expect(await screen.findByRole("button", { name: "Sembunyikan" })).toBeTruthy();
   });
 });
