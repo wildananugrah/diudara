@@ -107,5 +107,44 @@ echo "==> (re)start api + worker under pm2"
 pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save
 
+# `pm2 startOrReload` returning 0 means pm2 accepted the reload request, NOT
+# that the process is actually serving — a synchronous throw inside
+# bootstrap() (e.g. `apps/api/.env` half-configured — see
+# selectStreamingProvider/selectPaymentProvider/selectMessagingProviders in
+# bootstrap.ts) crashes `apps/api` on the very first tick, pm2 restarts it,
+# it crashes again, and the script would print "==> done" and exit 0 while
+# the box sits in a silent restart loop. Found the hard way (browser-
+# publishing Task 2 review, Important #2): a box already running the four
+# original MEDIAMTX_* variables throws the moment MEDIAMTX_WHIP_BASE_URL
+# ships without also being added to apps/api/.env, and nothing before this
+# point would have caught it. Same shape as the postgres health-poll above:
+# gate on the process's OWN synchronous check (GET /health, which also
+# round-trips the database — see routes/health.ts) rather than trusting a
+# log line or an exit code that only proves pm2 accepted the command.
+# 127.0.0.1:3000 matches PORT's documented default (.env.example) and the
+# literal address infra/nginx/live-hls.conf.template's own proxy_pass
+# already assumes for this same route.
+echo -n "waiting for the api to be healthy"
+api_healthy=""
+for _ in $(seq 1 30); do
+  if curl -sf -o /dev/null "http://127.0.0.1:3000/health"; then
+    api_healthy="1"
+    echo " ok"
+    break
+  fi
+  echo -n "."
+  sleep 2
+done
+if [ -z "$api_healthy" ]; then
+  echo "api never became healthy — check 'pm2 logs diudara-api --lines 50 --nostream'." >&2
+  echo "A common cause: apps/api/.env is half-configured for one of the guarded" >&2
+  echo "provider groups (Xendit, Telegram/Fonnte, or the five MEDIAMTX_*/" >&2
+  echo "STREAM_TOKEN_SECRET streaming variables) — bootstrap() refuses to start" >&2
+  echo "rather than boot half-wired, and pm2 silently restart-loops the crash." >&2
+  echo "See apps/api/.env.example and CONTRIBUTING.md's 'Live streaming (MediaMTX)'" >&2
+  echo "section." >&2
+  exit 1
+fi
+
 echo "==> done"
 pm2 list

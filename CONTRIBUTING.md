@@ -171,10 +171,20 @@ them.
 ## Live streaming (MediaMTX)
 
 Task 6 brings up a real MediaMTX instance in `infra/docker-compose.yml`, running from
-`infra/mediamtx.yml`. Like Postgres, it needs `apps/api/.env`'s four `MEDIAMTX_*`/
+`infra/mediamtx.yml`. Like Postgres, it needs `apps/api/.env`'s five `MEDIAMTX_*`/
 `STREAM_TOKEN_SECRET` variables (see `.env.example`) AND `infra/.env`'s own copy of
 `MEDIAMTX_WEBHOOK_SECRET` — the two must match exactly, the same rule as
 `POSTGRES_PASSWORD`/`DATABASE_URL` above.
+
+**Task 2 (browser publishing) added a fifth: `MEDIAMTX_WHIP_BASE_URL`.** All five —
+`MEDIAMTX_RTMP_HOST`, `MEDIAMTX_HLS_BASE_URL`, `MEDIAMTX_WHIP_BASE_URL`,
+`MEDIAMTX_WEBHOOK_SECRET`, `STREAM_TOKEN_SECRET` — are set together or not at all
+(`selectStreamingProvider` in `bootstrap.ts`): a box with only the original four now
+throws `Streaming is half-configured` at BOOT, in every environment including
+`development`. If you had a working local setup before Task 2 landed, add
+`MEDIAMTX_WHIP_BASE_URL` to `apps/api/.env` before your next `bun run dev` — the copy-paste
+block below already includes it. **The same applies to any already-deployed box**: see
+"Deploying" below for the pre-deploy step this requires.
 
 **A THIRD copy, as of Task 9 — final whole-branch review, Important.**
 `infra/nginx/live-hls.conf.template` also carries `${MEDIAMTX_WEBHOOK_SECRET}` (rendered
@@ -193,8 +203,8 @@ mismatch is the first thing to check — see `infra/.env.example`'s own note.
 
 ```bash
 cp infra/.env.example infra/.env               # if you haven't already; add MEDIAMTX_WEBHOOK_SECRET
-# apps/api/.env: set MEDIAMTX_RTMP_HOST, MEDIAMTX_HLS_BASE_URL, MEDIAMTX_WEBHOOK_SECRET
-# (same value as infra/.env), STREAM_TOKEN_SECRET (a DIFFERENT secret)
+# apps/api/.env: set MEDIAMTX_RTMP_HOST, MEDIAMTX_HLS_BASE_URL, MEDIAMTX_WHIP_BASE_URL,
+# MEDIAMTX_WEBHOOK_SECRET (same value as infra/.env), STREAM_TOKEN_SECRET (a DIFFERENT secret)
 docker compose -f infra/docker-compose.yml up -d mediamtx
 ```
 
@@ -834,6 +844,26 @@ service belongs in a workflow file, in a script, or in a committed `.env`.
 `scripts/deploy.sh` deliberately never touches `infra/.env` or `apps/api/.env`. Those hold
 the real secrets, they are placed on the box once by hand, and a redeploy must never
 overwrite them.
+
+**This cuts both ways: a new required variable is a manual pre-deploy step, not something
+the script can add for you.** `MEDIAMTX_WHIP_BASE_URL` (browser publishing, Task 2) is the
+concrete example — `selectStreamingProvider`'s all-or-nothing rule means an already-deployed
+box that has the original four `MEDIAMTX_*`/`STREAM_TOKEN_SECRET` variables set will refuse
+to boot the moment this variable is required but absent, in every environment including
+`development`. **Before deploying this change to a box that already has streaming
+configured, add `MEDIAMTX_WHIP_BASE_URL` to that box's `apps/api/.env` first** (see
+`.env.example` for the value's shape) — do this BEFORE the `git pull`, not after, since
+`scripts/deploy.sh`'s own post-reload health check (see below) will otherwise catch the
+half-configured box only by failing loudly, not by fixing it. The same rule applies to any
+future variable added to an existing all-or-nothing group (Xendit, Telegram/Fonnte,
+streaming): update the box's `.env` file by hand before the code that requires it lands.
+
+`scripts/deploy.sh` polls `GET /health` after `pm2 startOrReload` and fails the deploy
+(non-zero exit, loud message) if the api never becomes healthy — added specifically because
+an unhandled `bootstrap()` throw (a half-configured `.env`, exactly the scenario above)
+otherwise leaves pm2 silently restart-looping a crashed process while the script prints
+`==> done` and exits `0`. See the check's own comment in `scripts/deploy.sh` for the full
+reasoning.
 
 ## Migrations
 
