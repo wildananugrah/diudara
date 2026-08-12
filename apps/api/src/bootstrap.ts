@@ -260,9 +260,15 @@ export interface Dependencies {
   scheduleLiveSession: ScheduleLiveSession | undefined;
   /**
    * Task 3's `GET /communities/:communityId/events`. Unlike
-   * `scheduleLiveSession`, this is NEVER `undefined` — listing depends on no
-   * provider (see `ListLiveSessions`'s docstring) and works identically
-   * whether streaming is configured on this box or not.
+   * `scheduleLiveSession`, this FIELD is NEVER `undefined` — listing always
+   * works whether streaming is configured on this box or not. The
+   * `StreamingProviderPort` it is constructed with (below) MAY be
+   * `undefined` though (Task 2 review, Important #3): it is passed through
+   * as an OPTIONAL constructor param so `ListLiveSessions` can rebuild each
+   * row's `rtmpUrl`/`whipUrl` from its persisted `streamKey` when a provider
+   * is available, and return them `null` — never omit them, never throw —
+   * when it is not. See `ListLiveSessions`'s own docstring for the full
+   * reasoning.
    */
   listLiveSessions: ListLiveSessions;
   /**
@@ -1445,7 +1451,14 @@ export function bootstrap(): Dependencies {
   const scheduleLiveSession = streamingProvider
     ? new ScheduleLiveSession(eventRepository, streamingProvider)
     : undefined;
-  const listLiveSessions = new ListLiveSessions(eventRepository);
+  // `streamingProvider` (possibly `undefined`) passed through, NOT gated the
+  // way `scheduleLiveSession` is above: `ListLiveSessions` takes it as an
+  // OPTIONAL constructor param specifically so listing keeps working with
+  // streaming disabled (see that class's own docstring, Task 2 review
+  // Important #3) — it rebuilds rtmpUrl/whipUrl from each row's persisted
+  // streamKey when a provider is available, and returns them `null`
+  // otherwise, rather than needing a second undefined-ness story here.
+  const listLiveSessions = new ListLiveSessions(eventRepository, streamingProvider);
 
   // Task 4's publish/read authorisation. The webhook secret is read directly
   // here rather than re-derived from `streamingProvider`'s truthiness, and

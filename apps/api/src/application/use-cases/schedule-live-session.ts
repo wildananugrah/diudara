@@ -95,25 +95,65 @@ export class ScheduleLiveSession {
 }
 
 /**
+ * `EventRecord` plus the two URLs rebuilt for it, when they can be — see
+ * `ListLiveSessions`'s own docstring for when that is and is not possible.
+ */
+export interface ListedLiveSession extends EventRecord {
+  rtmpUrl: string | null;
+  whipUrl: string | null;
+}
+
+/**
  * `GET /communities/:communityId/events` — every session ever scheduled for
  * a community, for the creator who owns it.
  *
- * Deliberately NOT dependent on `StreamingProviderPort`: unlike scheduling,
- * listing rebuilds nothing and calls no provider, so it works exactly the
- * same whether streaming is configured on this box or not — a creator can
- * always see the sessions already on the calendar. `rtmpUrl` and `whipUrl`
- * are both absent from every row here (see `ScheduledSession`'s docstring for
- * why neither is ever persisted); `streamKey` is present, because it is the
- * creator's own secret and this is still their own list.
+ * REBUILDS `rtmpUrl` and `whipUrl` from the persisted `streamKey` (Task 2
+ * review, Important #3 — fixed after `whipUrl` shipped existing only in
+ * `ScheduleLiveSession`'s own response). Before this fix, a "go live from
+ * the browser" button had no publish target for any session other than the
+ * one just created in the current page load: `whipUrl` is never persisted
+ * (see `ScheduledSession`'s docstring — it is cheap to rebuild and not worth
+ * a column), and nothing rebuilt it again after the POST response. For RTMP
+ * that was survivable — a creator pastes the URL into OBS once, at schedule
+ * time — but it is NOT survivable for browser publishing, where the publish
+ * UI itself lives on this listing page. `StreamingProviderPort.createSession`
+ * is pure and synchronous (see that port's docstring), so rebuilding here
+ * costs nothing a persisted column would have saved.
+ *
+ * `streamingProvider` is OPTIONAL, unlike `ScheduleLiveSession`'s own
+ * (required) constructor param — deliberately: listing must keep working
+ * when streaming is disabled on this box (`bootstrap()` passes `undefined`
+ * exactly when `Dependencies.streamingProvider` is), so a creator can still
+ * see the sessions already on the calendar. When there is no provider to ask
+ * — or a row's `streamKey` is itself `null`, which none created through
+ * `ScheduleLiveSession` ever is, but the column allows it — both URLs come
+ * back `null` rather than being omitted, so a caller always sees the same
+ * two keys.
+ *
+ * `streamKey` itself is still present on every row, exactly as before this
+ * fix: it is the creator's own secret, and this is still their own list. No
+ * new exposure — `whipUrl` carries the same key `streamKey` already did.
  */
 export class ListLiveSessions {
-  constructor(private readonly events: EventRepositoryPort) {}
+  constructor(
+    private readonly events: EventRepositoryPort,
+    private readonly streamingProvider?: StreamingProviderPort
+  ) {}
 
-  async execute(input: { creatorId: string; communityId: string }): Promise<EventRecord[]> {
+  async execute(input: {
+    creatorId: string;
+    communityId: string;
+  }): Promise<ListedLiveSession[]> {
     const events = await this.events.listForCommunityForCreator(input.communityId, input.creatorId);
     if (!events) {
       throw new NotFoundError("community not found");
     }
-    return events;
+    return events.map((event) => {
+      if (!event.streamKey || !this.streamingProvider) {
+        return { ...event, rtmpUrl: null, whipUrl: null };
+      }
+      const session = this.streamingProvider.createSession({ streamKey: event.streamKey });
+      return { ...event, rtmpUrl: session.rtmpUrl, whipUrl: session.whipUrl };
+    });
   }
 }

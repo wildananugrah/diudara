@@ -158,6 +158,13 @@ describe("GET /communities/:communityId/events", () => {
     // The owner is allowed to see their own key again — it is how they would
     // recover it if OBS lost the connection settings.
     expect(list[0].streamKey).toBe(created.streamKey);
+    // Task 2 review, Important #3: rebuilt from the persisted streamKey by
+    // ListLiveSessions, not only available on the POST response that
+    // created the session — a "go live" button reading THIS endpoint (the
+    // realistic case, since a creator revisits this page later) must have a
+    // usable publish target too, not just the just-created one.
+    expect(list[0].rtmpUrl).toBe(created.rtmpUrl);
+    expect(list[0].whipUrl).toBe(created.whipUrl);
   });
 
   it("returns 404, and the stream key does not appear anywhere, for another creator's community", async () => {
