@@ -55,8 +55,7 @@ if [ "$status" != "healthy" ]; then
   exit 1
 fi
 
-# Fix round 2 (browser-publishing phase, Task 1 review, residual on Important
-# 1): infra/docker-compose.yml's mediamtx entrypoint already prints a WARN to
+# infra/docker-compose.yml's mediamtx entrypoint already prints a WARN to
 # `docker logs infra-mediamtx-1` on every start where
 # MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS is unset (see that file's own comment) —
 # loud INSIDE the container, but this script never surfaced it anywhere, so
