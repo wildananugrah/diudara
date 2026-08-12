@@ -130,13 +130,21 @@ pm2 save
 # gate on the process's OWN synchronous check (GET /health, which also
 # round-trips the database — see routes/health.ts) rather than trusting a
 # log line or an exit code that only proves pm2 accepted the command.
-# 127.0.0.1:3000 matches PORT's documented default (.env.example) and the
-# literal address infra/nginx/live-hls.conf.template's own proxy_pass
-# already assumes for this same route.
-echo -n "waiting for the api to be healthy"
+# The port is read from apps/api/.env rather than hardcoded, because a real
+# deployment does NOT necessarily use 3000: this box runs the api on 3004, and
+# its /etc/nginx snippet was hand-edited to match. Hardcoding the documented
+# default here would poll a port nothing listens on and fail every deploy with
+# "api never became healthy" while the api was in fact serving perfectly — a
+# health check that cries wolf gets ignored, which is worse than no check.
+# Falls back to 3000 (apps/api/src/server.ts's own default) when PORT is unset.
+api_port="$(sed -n 's/^[[:space:]]*PORT[[:space:]]*=[[:space:]]*//p' apps/api/.env | tail -1 | tr -d '"'\''[:space:]')"
+case "$api_port" in
+  ''|*[!0-9]*) api_port=3000 ;;
+esac
+echo -n "waiting for the api to be healthy on 127.0.0.1:$api_port"
 api_healthy=""
 for _ in $(seq 1 30); do
-  if curl -sf -o /dev/null "http://127.0.0.1:3000/health"; then
+  if curl -sf -o /dev/null "http://127.0.0.1:$api_port/health"; then
     api_healthy="1"
     echo " ok"
     break
