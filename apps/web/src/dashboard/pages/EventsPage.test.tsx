@@ -342,11 +342,25 @@ describe("EventsPage - browser publishing", () => {
   function fakeMediaStream(): MediaStream {
     const videoTrack = new FakeTrack("camera-1");
     const audioTrack = new FakeTrack("mic-1");
-    return {
+    const stream = {
       getTracks: () => [videoTrack, audioTrack],
       getVideoTracks: () => [videoTrack],
       getAudioTracks: () => [audioTrack],
-    } as unknown as MediaStream;
+    };
+    // CORRECTION (Task 4, the phase gate): `EventsPage.tsx` used to carry a
+    // comment claiming happy-dom leaves `srcObject` "a plain assignable
+    // property". It does not — its `HTMLMediaElement` setter throws
+    // `TypeError: ... The provided value is not of type 'MediaStream'` for
+    // anything failing `instanceof MediaStream`, and the component's own
+    // try/catch then swallowed it. So a plain object literal here CANNOT be
+    // used to assert anything about the preview: the assignment would look
+    // like it silently did nothing, which is indistinguishable from the real
+    // black-preview bug this fake now helps pin. Borrowing happy-dom's own
+    // `MediaStream.prototype` makes `instanceof` pass while keeping every
+    // fake method above (they are own properties, so they shadow it).
+    const MediaStreamCtor = (globalThis as { MediaStream?: { prototype: object } }).MediaStream;
+    if (MediaStreamCtor) Object.setPrototypeOf(stream, MediaStreamCtor.prototype);
+    return stream as unknown as MediaStream;
   }
 
   /** Grants access successfully with one camera and one microphone. */
@@ -467,6 +481,53 @@ describe("EventsPage - browser publishing", () => {
 
     expect(await screen.findByText(/Tidak ditemukan kamera atau mikrofon/)).toBeTruthy();
     expect(screen.queryAllByRole("button", { name: /Mulai siaran dari browser/ }).length).toBe(0);
+  });
+
+  /**
+   * TASK 4 (the phase gate), found in a real browser: the local self-preview
+   * was permanently BLACK. Measured on the real dashboard, in real Chromium,
+   * with a real publish in progress: `readyState: 0, videoWidth: 0,
+   * videoHeight: 0, paused: true`.
+   *
+   * The cause is an ordering bug in `requestAccess`, and it is invisible to
+   * every other test in this file because they all assert on TEXT: the
+   * `<video>` element renders only under `deviceStatus === "ready"`, but
+   * `requestAccess` assigned `videoRef.current.srcObject` BEFORE calling
+   * `setDeviceStatus("ready")` — so on the first grant `videoRef.current` was
+   * still `null`, the guard silently skipped the assignment, and nothing ever
+   * assigned it again. (A SECOND `requestAccess` — switching camera — does
+   * find the element and does work, which is why this looked fine in any
+   * manual poke that changed a device.)
+   *
+   * The checklist item this defeats is "see the local preview": a creator
+   * could go live with no way to tell whether their camera was pointed at
+   * them, at the ceiling, or covered.
+   */
+  it("shows the camera in the local preview as soon as access is granted", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: grantingMediaDevices(),
+    });
+    stubFetch([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }]);
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+
+    // Waiting on the go-live button, not on the video element, so this test
+    // fails on the ASSERTION below (a black preview) rather than on a
+    // timeout — a timeout would say "the element never appeared", which is
+    // not what is wrong.
+    await screen.findByRole("button", { name: /Mulai siaran dari browser/ });
+
+    const video = document.querySelector("video.video-preview") as HTMLVideoElement | null;
+    expect(video).not.toBe(null);
+    // The exact stream `getUserMedia` handed back, not merely "something
+    // truthy": a preview wired to a stale or empty stream is the same black
+    // box to a creator.
+    expect(video!.srcObject).not.toBe(null);
+    expect((video!.srcObject as MediaStream).getVideoTracks().length).toBe(1);
   });
 
   // Fix round 1, Important 4: these two device states existed in

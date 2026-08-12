@@ -570,6 +570,46 @@ function BrowserPublishSection({
   const [connecting, setConnecting] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
+  /**
+   * Bumped once per SUCCESSFUL `requestAccess`. Its only job is to give the
+   * preview effect below a dependency that changes when the STREAM changes —
+   * `streamRef` is a ref, so switching camera mid-session mutates it without
+   * re-running any effect. See that effect for the bug this exists to fix.
+   */
+  const [streamVersion, setStreamVersion] = useState(0);
+
+  /**
+   * Attaches the granted stream to the `<video>` self-preview.
+   *
+   * TASK 4 (the phase gate) FOUND THIS BLACK IN A REAL BROWSER — and the
+   * reason it has to be an EFFECT rather than a line inside `requestAccess`
+   * is the whole bug. `requestAccess` used to do `videoRef.current.srcObject
+   * = nextStream` directly, guarded by `if (videoRef.current)`. But the
+   * `<video>` element is rendered only under `deviceStatus === "ready"`, and
+   * that state is set AFTER the assignment — so on the FIRST grant the ref
+   * was still `null`, the guard silently skipped, and nothing assigned it
+   * ever again. Measured on the real dashboard: `readyState: 0, videoWidth:
+   * 0, videoHeight: 0, paused: true` for the entire broadcast.
+   *
+   * As an effect it runs AFTER the render that creates the element, so the
+   * ref is always populated by then. `streamVersion` in the dependency list
+   * is what keeps a camera SWITCH working too (the old code got that case
+   * right by accident, because the element does exist by then — this must
+   * not regress it).
+   */
+  useEffect(() => {
+    if (deviceStatus !== "ready") return;
+    const video = videoRef.current;
+    if (!video || streamRef.current === null) return;
+    try {
+      video.srcObject = streamRef.current;
+    } catch {
+      // Preview only; publishing does not depend on it. happy-dom (this
+      // repo's `bun test` DOM) implements `srcObject` as a plain property,
+      // but an environment where the assignment throws must not take the
+      // whole panel down over a preview.
+    }
+  }, [deviceStatus, streamVersion]);
 
   // Unmounting (collapsing a row's "Siarkan" panel — though Important 3
   // above prevents that specific trigger while `publishing` is true — or
@@ -647,18 +687,11 @@ function BrowserPublishSection({
       });
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = nextStream;
-      if (videoRef.current) {
-        // happy-dom (this repo's `bun test` DOM) does not implement media
-        // playback — `srcObject` is still a plain assignable property there,
-        // but guarded anyway so an unexpected environment cannot crash the
-        // whole panel over a preview that would not have shown video either
-        // way.
-        try {
-          videoRef.current.srcObject = nextStream;
-        } catch {
-          // Preview only; the publish path below does not depend on it.
-        }
-      }
+      // The `<video>` element does not exist yet on a first grant (it renders
+      // only under `deviceStatus === "ready"`, set below), which is exactly
+      // why attaching the stream is an EFFECT now rather than a line here —
+      // see the preview effect above for the black-preview bug that cost.
+      setStreamVersion((version) => version + 1);
 
       const devices = await navigator.mediaDevices.enumerateDevices();
       setCameras(devices.filter((d) => d.kind === "videoinput"));
