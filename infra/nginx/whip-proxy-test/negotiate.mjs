@@ -79,8 +79,51 @@ const result = await page.evaluate(
     videoStream.getVideoTracks().forEach((t) => pc.addTrack(t, videoStream));
     dest.stream.getAudioTracks().forEach((t) => pc.addTrack(t, dest.stream));
 
+    // Mirrors `preferH264` in apps/web/src/dashboard/whip-publisher.ts —
+    // MUST run before `createOffer`, same as the shipped module, since
+    // `setCodecPreferences` only affects offers built after it. Without
+    // this, Chromium's default video codec preference (VP8) is what gets
+    // negotiated, which is exactly the pre-fix codec path this harness is
+    // meant to exercise: MediaMTX's HLS muxer cannot carry VP8 or AV1, so a
+    // member watching that publish would get audio only. A preference, not
+    // a restriction — every codec Chromium supports stays in the list.
+    if (typeof RTCRtpSender !== "undefined") {
+      const codecs = RTCRtpSender.getCapabilities?.("video")?.codecs;
+      const h264 = codecs?.filter((codec) => codec.mimeType.toLowerCase() === "video/h264") ?? [];
+      if (h264.length > 0) {
+        const reordered = [...h264, ...codecs.filter((codec) => !h264.includes(codec))];
+        for (const transceiver of pc.getTransceivers?.() ?? []) {
+          const kind = transceiver.receiver?.track?.kind;
+          if (kind !== "video") continue;
+          try {
+            transceiver.setCodecPreferences?.(reordered);
+          } catch {
+            // A rejected list must not take the negotiation down with it.
+          }
+        }
+      }
+    }
+
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+
+    // Independent of whether ICE/media goes on to connect (see MediaMTX's
+    // own "N tracks (...)" log line for that): the codec preference above
+    // only matters if it actually shows up in the OFFER's `m=video` payload
+    // type order, which this reads straight back out of the SDP this
+    // negotiation is about to send, the same shape a `2 tracks (H264,
+    // Opus)` MediaMTX log line is checking for from the other side.
+    const videoCodecOrder = (() => {
+      const lines = pc.localDescription.sdp.split("\r\n");
+      const mLine = lines.find((l) => l.startsWith("m=video"));
+      if (!mLine) return [];
+      const rtpmap = new Map();
+      for (const line of lines) {
+        const match = line.match(/^a=rtpmap:(\d+) ([^/]+)\//);
+        if (match) rtpmap.set(match[1], match[2]);
+      }
+      return mLine.split(" ").slice(3).map((pt) => rtpmap.get(pt) ?? pt);
+    })();
 
     await new Promise((resolve) => {
       if (pc.iceGatheringState === "complete") return resolve();
@@ -100,7 +143,7 @@ const result = await page.evaluate(
     const location = postRes.headers.get("Location");
 
     if (postRes.status !== 201) {
-      return { ok: false, stage: "POST", status: postRes.status, body: answerSdp };
+      return { ok: false, stage: "POST", status: postRes.status, body: answerSdp, videoCodecOrder };
     }
 
     await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
@@ -124,6 +167,7 @@ const result = await page.evaluate(
       connectionState: pc.connectionState,
       iceConnectionState: pc.iceConnectionState,
       connected,
+      videoCodecOrder,
     };
   },
   { nginxOrigin, streamKey }

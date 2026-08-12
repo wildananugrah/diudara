@@ -47,7 +47,7 @@
 //
 //   INF [WebRTC] [session ...] peer connection established, local candidate: host/udp/127.0.0.1/8189, remote candidate: prflx/udp/172.26.0.1/...
 //   INF [path live/<key>] runOnOnline command started
-//   INF [path live/<key>] stream is available and online, 2 tracks (Opus, VP8)
+//   INF [path live/<key>] stream is available and online, 2 tracks (Opus, H264)
 //   INF [WebRTC] [session ...] is publishing to path 'live/<key>'
 //   ... (after "Hentikan siaran") ...
 //   INF [path live/<key>] runOnOnline command stopped
