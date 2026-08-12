@@ -7,16 +7,30 @@ import { fetchWatchSession } from "../api";
  * Re-attaches `?token=<token>` to `url`, overwriting any query string
  * already there.
  *
- * THE MOST IMPORTANT FUNCTION IN THIS FILE. MediaMTX re-authenticates EVERY
- * playlist request AND every segment/part request `hls.js` makes — and it
- * does NOT propagate a query string from `index.m3u8` to the segment URLs
- * it lists inside that playlist (confirmed against a real MediaMTX in
- * Task 6). A naive `hls.loadSource(url + "?token=...")` therefore
- * authorises the FIRST request and then 401s every one after it: the
- * playlist loads, playback starts, and dies on the first segment. Every
- * single request this player makes must run its URL back through this
- * function — see `buildXhrSetup` below, which is the ONE place that
- * happens.
+ * CORRECTED — final whole-branch review, minor. An earlier version of this
+ * docstring claimed MediaMTX does NOT propagate a query string from
+ * `index.m3u8` to the segment/part URLs it lists inside that playlist. The
+ * opposite is true, confirmed twice independently: Task 9's report (§1,
+ * and again in its native-Safari verification) found MediaMTX rewrites
+ * `?token=...` (and, separately, its own `?session=...`) directly into
+ * every sub-manifest URI it emits, and this fix wave's own end-to-end
+ * verification (`final-fix-report.md`) observed the identical thing with a
+ * bare `curl` against the real playlist text — no JavaScript involved at
+ * all, so it cannot be this function's doing. MediaMTX re-authenticates
+ * EVERY playlist request AND every segment/part request regardless (that
+ * part was always right, and is the reason re-attachment matters at all)
+ * — it is the "does not propagate" half that was backwards.
+ *
+ * `xhrSetup`/this function are KEPT ANYWAY, not made redundant by the
+ * correction: they are what the ONE cookie-less first request (the master
+ * playlist load itself, before MediaMTX has anything to propagate FROM
+ * yet) and the native-HLS branch (which has no `xhrSetup` hook and sets
+ * `video.src` directly — see `defaultAttachPlayer` below) both still
+ * depend on, and neither this codebase nor MediaMTX's own propagation
+ * behaviour is something a future MediaMTX upgrade is contractually bound
+ * to keep unchanged. Harmless either way; the risk this correction closes
+ * is a contributor reading the old claim and deleting `xhrSetup` as
+ * "redundant ceremony," not any behaviour change here.
  *
  * Exported (and kept pure — no DOM, no hls.js) so the exact rewriting
  * behaviour is directly testable without constructing a real player: see

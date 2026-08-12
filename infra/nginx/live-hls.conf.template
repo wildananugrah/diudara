@@ -1,11 +1,15 @@
-# Task 9: the two `location` blocks the real VPS's PUBLIC nginx needs for
-# `/live/`, re-authorising EVERY HLS request against apps/api instead of
-# trusting MediaMTX's own read-auth cache (which authorises once per viewer
-# session, not once per request — see mediamtx-webhooks.ts's
-# `/auth-request` docstring and task-9-report.md for the empirical finding
-# this responds to).
+# Task 9 (+ final whole-branch review FIX 1/2/3): the `location` blocks the
+# real VPS's PUBLIC nginx needs for `/live/`, re-authorising EVERY HLS
+# request against apps/api instead of trusting MediaMTX's own read-auth
+# cache (which authorises once per viewer session, not once per request —
+# see mediamtx-webhooks.ts's `/auth-request` docstring and
+# task-9-report.md for the empirical finding this responds to) — AND, as of
+# the final whole-branch review, rewriting the PUBLIC path (which now
+# carries only an event id, never the stream key) onto MediaMTX's
+# unchanged INTERNAL path (which still carries the stream key) after that
+# re-authorisation succeeds.
 #
-# THIS IS A FRAGMENT, NOT A STANDALONE nginx SERVER — it is two `location`
+# THIS IS A FRAGMENT, NOT A STANDALONE nginx SERVER — it is `location`
 # blocks, meant to be pasted (or `include`d, after rendering the one
 # templated value below) INSIDE the real public HTTPS server block that
 # already serves this app's SPA and API paths on :443. It is NOT its own
@@ -15,6 +19,20 @@
 # was this task's own local Docker-based proof harness, committed by
 # mistake as if it were the deployable artifact. Fixed: this file is now
 # the thing meant to actually ship.)
+#
+# FIX 2 (final whole-branch review, Important): "fixed" above was true of
+# the FRAGMENT's own contents, but nobody had actually PROVEN the shipped
+# file — copied verbatim into a real `server {}` block, reloaded, driven
+# with real requests — works. The Task 9 behavioural proof used a
+# DIFFERENT artifact (the standalone 8443 harness with
+# host.docker.internal targets), verified via `nginx -t`, which is SYNTAX,
+# not behaviour. The final whole-branch review's own verification instead
+# built a real `server { listen 8443 ssl; ... include
+# live-hls.conf.template; }` (self-signed cert, real MediaMTX, real
+# apps/api, envsubst-rendered exactly like a real deploy would) and drove
+# the identical checks THROUGH that server block — see
+# `final-fix-report.md` for the transcript. Only after that did this file
+# get treated as proven.
 #
 # THE ONE TEMPLATED VALUE: `${MEDIAMTX_WEBHOOK_SECRET}`. Render it with
 # whatever secrets-injection mechanism the real deploy uses before
@@ -27,7 +45,7 @@
 # MEDIAMTX_WEBHOOK_SECRET` explicitly set — an unfiltered envsubst replaces
 # every `$name`-shaped token in this file from the process environment,
 # which would silently blank out nginx's OWN variables below
-# (`$request_uri`, `$host`, `$arg_token`, `$mtx_key`, ...) the moment any of
+# (`$request_uri`, `$host`, `$mtx_event`, `$mtx_key`, ...) the moment any of
 # those names ALSO happened to match an environment variable.
 #
 # THE DOCUMENTED DEPLOYMENT IS BARE-METAL, NOT CONTAINERISED — this is why
@@ -64,25 +82,126 @@
 # alternative (MediaMTX's own per-session cache) is a real security gap —
 # but it is a genuine new coupling, not a free change.
 
-location ~ ^/live/(?<mtx_key>[^/]+)(?:/|$) {
-    # The regex REQUIRES the trailing-slash-or-end alternation, not just a
-    # trailing slash — found running this for real: `[^/]+/` alone matches
-    # `/live/<key>/anything` (every real HLS request MediaMTX ever serves)
-    # but NOT the bare `/live/<key>` with nothing after it, which then falls
-    # through this location entirely and 404s outside `auth_request`'s
-    # reach — not a security hole (fail-closed), but not a deliberate,
-    # explained refusal either. `(?:/|$)` matches both shapes the same way.
+# FIX 3 (final whole-branch review, Important): "/webhooks/mediamtx/ is
+# never on the public surface" was, until this block existed, a claim
+# about what THIS file does not contain — never a guard against whatever
+# ELSE the same server block proxies. `/webhooks/xendit` and
+# `/webhooks/telegram` MUST be publicly reachable (Xendit and Telegram both
+# call them from the internet), so the ordinary way to wire that is a
+# single `location /webhooks/ { proxy_pass http://127.0.0.1:3000; }` — and
+# `/webhooks/mediamtx/*` sits directly under that same prefix. Without an
+# explicit guard, `POST /webhooks/mediamtx/auth?secret=...` and
+# `GET /webhooks/mediamtx/auth-request` become PUBLICLY REACHABLE by
+# default, writing `MEDIAMTX_WEBHOOK_SECRET` into apps/api's access log on
+# every call (the secret travels as a query parameter on `/auth` — see
+# that route's own docstring for why) and letting a stranger probe the
+# `/auth`/`/auth-request`/`/lifecycle` endpoints directly.
+#
+# `location ^~ /webhooks/mediamtx/` — a PREFIX location (not a regex),
+# `deny all;` inside it. Two independent reasons this wins over whatever
+# else the server block proxies, so ORDER IN THE FILE DOES NOT MATTER for
+# this location the way it would for a `~` regex location (see the `/live/`
+# location below for the case where it DOES matter and how this file
+# avoids it):
+#   1. `/webhooks/mediamtx/` (18 characters) is a LONGER, more specific
+#      prefix than `/webhooks/` (10 characters) or `/` — nginx's own
+#      location-selection rule picks the LONGEST matching prefix among
+#      plain prefix locations, independent of `^~` and independent of
+#      where either location appears in the file.
+#   2. `^~` additionally means: once this is the longest matching prefix,
+#      nginx never even evaluates any REGEX (`~`/`~*`) location that might
+#      otherwise have matched `/webhooks/mediamtx/...` with higher
+#      priority than a plain `/webhooks/` prefix would.
+# Together: no matter what a real deploy's existing `/webhooks/` (or a
+# broader `/` SPA fallback) location looks like, or where in the file it
+# is declared, this one wins for anything under `/webhooks/mediamtx/`.
+# Paste this block ANYWHERE in the server block — the ordering note that
+# matters in this file is on the `/live/` location below, not this one.
+location ^~ /webhooks/mediamtx/ {
+    deny all;
+}
+
+# FIX 1 (final whole-branch review, Critical) + FIX 2 (Important, the
+# location-matching half): the PUBLIC path a member's browser ever
+# requests is now `/live/<eventId>/...` — an opaque row id, never the
+# stream key `MediaMTX` authorises publishes against (see
+# `ResolveWatchToken`'s own docstring in apps/api for the full reasoning).
+# MediaMTX's INTERNAL path is UNCHANGED (`live/<streamKey>`), so this
+# location must REWRITE the request after `auth_request` succeeds, using
+# the stream key the auth subrequest hands back — MediaMTX was never
+# taught about event ids.
+#
+# `^~ /live/`, NOT a `~` regex location — this is FIX 2's other half.
+# Regex (`~`) locations are evaluated in SOURCE ORDER, and the FIRST one
+# that matches wins — not the most specific one. A pre-existing regex
+# location elsewhere in this server block matching something as ordinary
+# as `\.(m3u8|ts)$` (a plausible "cache my static/streaming assets"
+# catch-all, or part of an SPA's own asset-serving rules) would, if it
+# happened to be declared EARLIER in the file, intercept every HLS
+# request with NO `auth_request` at all — a silent, total bypass of this
+# entire fix, and nothing about `nginx -t` or a casual read of this file
+# would reveal it. `^~` sidesteps the ordering question entirely rather
+# than merely documenting it: prefix locations are found FIRST, tracking
+# the LONGEST match, and if THAT longest-matching prefix location carries
+# `^~`, nginx uses it immediately and — per nginx's own documented
+# location-selection algorithm — NEVER EVALUATES ANY REGEX LOCATION AT
+# ALL, regardless of source order or how those regexes are written. A
+# `\.(m3u8|ts)$` regex anywhere else in the file, in any position, simply
+# cannot intercept a `/live/...` request once this location exists — not
+# "first one wins", but "the regex phase never runs" for this path. (This
+# guarantee assumes no OTHER `^~` or exact-match `=` location shares the
+# `/live/` prefix with equal or greater specificity — a safe assumption
+# for a namespace this distinctive, and worth an explicit grep for `^~`
+# and `location =` before pasting this in, same as any config change.)
+#
+# THE CAPTURE, WITHOUT A REGEX LOCATION: `^~` locations cannot carry named
+# regex captures themselves (that syntax belongs to `~` locations only —
+# the thing this file deliberately avoids). The event id and the rest of
+# the request path are captured instead with an `if` block matching
+# `$request_uri` — a well-known, if inelegant, nginx idiom for exactly
+# this: getting regex captures inside a prefix location nginx will always
+# reach. `if` here is safe (the usual "if is evil" warnings are about `if`
+# combined with `return`/`rewrite ... last` producing surprising control
+# flow; this `if` only ever runs `set`, which has none of those hazards).
+location ^~ /live/ {
+    set $mtx_event "";
+    set $mtx_rest "";
+    if ($request_uri ~ "^/live/([^/?]+)(/[^?]*)?") {
+        set $mtx_event $1;
+        set $mtx_rest $2;
+    }
+
+    # `$watch_token`, captured BEFORE `auth_request` fires — load-bearing
+    # ordering, found running this for real (Task 9): nginx's
+    # `auth_request` subrequest does NOT inherit `$args`/`$arg_*` from the
+    # request it is authorising, but a plain `set` variable DOES persist
+    # into the subrequest, the same way a regex capture does. See the
+    # internal location below for the empirical trace.
     set $watch_token $arg_token;
     auth_request /_internal/mediamtx-auth-request;
 
+    # Captures the auth subrequest's `X-Stream-Key` RESPONSE header into an
+    # nginx variable — this is what lets a request that arrived as
+    # `/live/<eventId>/...` get proxied to MediaMTX as
+    # `/live/<streamKey>/...` below. `auth_request_set` is the ONLY way a
+    # value from the auth subrequest's response reaches the rest of this
+    # location; nginx does not forward an `auth_request` subrequest's
+    # headers to anything on its own. If `auth_request` above refused
+    # (401/403), nginx has already stopped processing this request before
+    # reaching this line — `$mtx_key` is only ever read after a successful
+    # authorisation.
+    auth_request_set $mtx_key $upstream_http_x_stream_key;
+
     # nginx's default access log format includes the full request line —
-    # `GET /live/<key>/index.m3u8?token=<...> HTTP/1.1` — which would write
-    # both the stream key AND the watch token to disk on every single
-    # request, a brand new exposure this proxy would otherwise introduce
-    # (MediaMTX's own HLS port was loopback-only with no public-facing
-    # access log at all before Task 9). Off, for the same reason
-    # `/webhooks/mediamtx/auth`'s query-string secret is kept out of
-    # apps/api's own request logging — see that route's docstring.
+    # `GET /live/<eventId>/index.m3u8?token=<...> HTTP/1.1` — which would
+    # write the watch token to disk on every single request, a brand new
+    # exposure this proxy would otherwise introduce (MediaMTX's own HLS
+    # port was loopback-only with no public-facing access log at all
+    # before Task 9). Off, for the same reason `/webhooks/mediamtx/auth`'s
+    # query-string secret is kept out of apps/api's own request logging —
+    # see that route's docstring. (The event id itself is not a secret —
+    # this line is about the token, and about not needing a second
+    # justification for a second location.)
     #
     # NOT A COMPLETE FIX BY ITSELF — found running this for real, not
     # assumed: `auth_request` logs "auth request unexpected status" at
@@ -93,7 +212,7 @@ location ~ ^/live/(?<mtx_key>[^/]+)(?:/|$) {
     # directly: pointing the internal location at a stub that always
     # returns 500 produces exactly
     #   "auth request unexpected status: 500 ... request: \"GET
-    #    /live/<key>/index.m3u8?token=<TOKEN> HTTP/1.1\""
+    #    /live/<eventId>/index.m3u8?token=<TOKEN> HTTP/1.1\""
     # in nginx's ERROR log. DELIBERATE CHOICE, not an oversight: this
     # project keeps nginx's error log at its default level rather than
     # raising the threshold to suppress it, because that log is exactly
@@ -107,7 +226,44 @@ location ~ ^/live/(?<mtx_key>[^/]+)(?:/|$) {
     # strings first, not just "another log file").
     access_log off;
 
-    proxy_pass http://127.0.0.1:8888;
+    # THE REWRITE: proxy to MediaMTX's INTERNAL path
+    # (`/live/<streamKey><rest>`), built from `$mtx_key` (the auth
+    # subrequest's response header, NEVER from anything in the original
+    # client request), not to the public path nginx received. `$is_args`
+    # and `$args` re-attach the original query string (the `?token=...`
+    # `hls.js`/native HLS attaches to every request — see WatchPage.tsx) —
+    # supplying an explicit URI in `proxy_pass` stops nginx's usual
+    # "forward the matched URI automatically" behaviour, so the query
+    # string has to be re-added explicitly or every proxied request would
+    # silently lose its token.
+    proxy_pass http://127.0.0.1:8888/live/$mtx_key$mtx_rest$is_args$args;
+
+    # `proxy_redirect` — FOUND RUNNING THIS FOR REAL, NOT ANTICIPATED FROM
+    # THE DESIGN: MediaMTX answers a stream's FIRST HLS request with its own
+    # `302` "cookie check" redirect (see the `Set-Cookie: cookieCheck=1`
+    # dance CONTRIBUTING.md already documents) — and that redirect's
+    # `Location` header is MediaMTX echoing back the REQUEST PATH IT
+    # RECEIVED, which, after the rewrite above, is the INTERNAL
+    # `/live/<streamKey>/...` path. Without this line, that `Location`
+    # reaches the member's browser verbatim — reintroducing the exact leak
+    # this whole fix exists to close, through a response HEADER instead of
+    # the response body. Reproduced directly: with this line absent, `curl
+    # -D -` against a fresh session showed
+    #   `Location: http://<host>/live/<REAL STREAM KEY>/index.m3u8?cookieCheck=1&token=...`
+    # — the browser would have followed it and the address bar / network
+    # tab would show the stream key exactly as before this fix. With this
+    # line present, the SAME request's `Location` reads
+    #   `Location: http://<host>/live/<EVENT ID>/index.m3u8?cookieCheck=1&token=...`
+    # — rewritten back to the public form before nginx ever sends it
+    # onward. `$mtx_key`/`$mtx_event` are the SAME two variables the
+    # request-side rewrite above already uses, so this can never drift out
+    # of sync with it. (MediaMTX's sub-manifest URIs themselves — segment
+    # and part filenames — are RELATIVE, with no `/live/<key>/` prefix at
+    # all, so they need no equivalent rewrite: a relative URI resolves
+    # against whatever path the BROWSER already sees, which is always the
+    # public `/live/<eventId>/...` one. Only this one absolute redirect
+    # needed handling.)
+    proxy_redirect /live/$mtx_key/ /live/$mtx_event/;
     proxy_set_header Host $host;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
@@ -121,18 +277,18 @@ location ~ ^/live/(?<mtx_key>[^/]+)(?:/|$) {
 # use).
 #
 # Both authorisation inputs travel as HEADERS, not query parameters — the
-# obvious `?mtxPath=...&token=...` on this subrequest's own URL does not
+# obvious `?eventId=...&token=...` on this subrequest's own URL does not
 # work: nginx's `auth_request` subrequest does NOT inherit `$args`/`$arg_*`
 # from the request it is authorising. Confirmed with a probe upstream that
 # echoed back exactly what the subrequest received: `$arg_token`, read
 # directly inside THIS location, came back EMPTY every time, while
-# `$request_uri` and a location's own regex capture (`$mtx_key` above) both
-# came back correct. The working pattern: capture the token into a plain
-# `set $watch_token $arg_token;` in the OUTER location, BEFORE
+# `$request_uri` and the OUTER location's own captures (`$mtx_event` above)
+# both came back correct. The working pattern: capture the token into a
+# plain `set $watch_token $arg_token;` in the OUTER location, BEFORE
 # `auth_request` fires — a `set` variable persists into the subrequest the
-# same way a regex capture does, even though `$arg_token` itself does not.
-# See task-9-report.md for the full empirical trace, including the config
-# that does not work.
+# same way a regex/`if` capture does, even though `$arg_token` itself does
+# not. See task-9-report.md for the full empirical trace, including the
+# config that does not work.
 location = /_internal/mediamtx-auth-request {
     internal;
     access_log off;
@@ -150,6 +306,12 @@ location = /_internal/mediamtx-auth-request {
     proxy_pass_request_body off;
     proxy_set_header Content-Length "";
     proxy_set_header X-Mediamtx-Secret "${MEDIAMTX_WEBHOOK_SECRET}";
-    proxy_set_header X-Mtx-Path "live/$mtx_key";
+    # FIX 1: was `X-Mtx-Path: "live/$mtx_key"` (the streamKey-shaped
+    # internal path) — apps/api now resolves reads by EVENT ID (see
+    # `AuthoriseStream.authoriseReadByEventId`), so the header this
+    # subrequest sends changed to match what it can actually vouch for:
+    # the event id nginx captured from the PUBLIC request, nothing this
+    # nginx has independently verified as a real stream key.
+    proxy_set_header X-Mtx-Event-Id "$mtx_event";
     proxy_set_header X-Watch-Token "$watch_token";
 }

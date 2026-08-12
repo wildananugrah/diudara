@@ -176,6 +176,21 @@ Task 6 brings up a real MediaMTX instance in `infra/docker-compose.yml`, running
 `MEDIAMTX_WEBHOOK_SECRET` — the two must match exactly, the same rule as
 `POSTGRES_PASSWORD`/`DATABASE_URL` above.
 
+**A THIRD copy, as of Task 9 — final whole-branch review, Important.**
+`infra/nginx/live-hls.conf.template` also carries `${MEDIAMTX_WEBHOOK_SECRET}` (rendered
+via `envsubst` at deploy time, never committed as plaintext), because nginx's own
+`auth_request` subrequest has to authenticate to `apps/api` the same way MediaMTX's
+`runOnOnline`/`runOnOffline` hooks do. **If this third copy ever drifts from the other
+two, the failure is silent and total**: `/webhooks/mediamtx/auth-request` returns `401`,
+nginx's `auth_request` treats a `401` as an ordinary access denial — not an error, nothing
+logged beyond the routine deny — and **every single viewer** sees "Tautan sudah tidak
+berlaku" (`WatchPage.tsx`'s generic-refusal message), indistinguishable from an expired
+token. There is no alarm, no distinct error page, nothing in `apps/api`'s own logs (the
+request never reaches a route handler that would log anything — the secret check in
+`mediamtx-webhooks.ts` throws before that). If every viewer suddenly can't watch anything
+at once, and the creator says their broadcast is definitely running, this three-way secret
+mismatch is the first thing to check — see `infra/.env.example`'s own note.
+
 ```bash
 cp infra/.env.example infra/.env               # if you haven't already; add MEDIAMTX_WEBHOOK_SECRET
 # apps/api/.env: set MEDIAMTX_RTMP_HOST, MEDIAMTX_HLS_BASE_URL, MEDIAMTX_WEBHOOK_SECRET
@@ -184,11 +199,25 @@ docker compose -f infra/docker-compose.yml up -d mediamtx
 ```
 
 A creator publishes with OBS (or, to prove it locally, `ffmpeg`) to the `rtmpUrl` that
-`POST /communities/:communityId/events` returns, and a member watches the `hlsPlaybackPath`
-it also returns, with a `?token=<watch token>` query parameter. Every publish and every
-read is authorised against `apps/api`'s `/webhooks/mediamtx/auth` — MediaMTX has no other
+`POST /communities/:communityId/events` returns. Every publish and every read is
+authorised against `apps/api`'s `/webhooks/mediamtx/auth` — MediaMTX has no other
 access-control mechanism, and without it a stream key is just "a path that's hard to
 guess."
+
+**A member never sees `rtmpUrl` or the stream key at all — final whole-branch review
+fix.** An earlier version of this feature had `POST .../events`'s `hlsPlaybackPath`
+(built from the SAME stream key that authorises a publish) go straight to the member's
+browser via `GET /c/watch/:token`, which meant every paying member's network tab, browser
+history, and any link they forwarded carried the creator's publish credential — directly
+contradicting `EventRepositoryPort`'s own docstring on `streamKey` ("A SECRET. It travels
+to the creator who owns the community and nobody else."). Fixed by decoupling the two
+identities: MediaMTX's INTERNAL path is still `live/<streamKey>` (RTMP publishing is
+completely unaffected), but the PUBLIC HLS path a member's browser ever requests is now
+`/live/<eventId>/...` — an opaque row id, not a credential — and nginx (see below) rewrites
+one onto the other after re-authorising. `AuthoriseStream` grew a second read entry point
+(`authoriseReadByEventId`, resolving via the existing unscoped `findById` lookup) alongside
+the original stream-key-based one MediaMTX's own `authHTTPAddress` still uses; the two
+never share which identifier is legitimate for the other's purpose.
 
 ### The image must be the `-ffmpeg` tag, not the plain one — found running this for real
 
@@ -273,7 +302,7 @@ carry the same empirical findings (the `$arg_token`-is-empty-in-subrequests bug,
 error-log token exposure, the trailing-slash regex bug, all found running this for real) at
 the point in the config they apply to. In short:
 
-- It is **two `location` blocks, not a standalone `server`** — meant to be pasted (or,
+- It is **three `location` blocks, not a standalone `server`** — meant to be pasted (or,
   after rendering `${MEDIAMTX_WEBHOOK_SECRET}`, `include`d) inside the real public HTTPS
   server block that already serves this app's SPA and API paths, not a second listener on a
   second port. (An earlier version of the template WAS its own `server { listen 8443; }` —
@@ -304,6 +333,86 @@ surface exactly like `/webhooks/mediamtx/auth` and `/webhooks/mediamtx/lifecycle
 Nothing under `/webhooks/mediamtx/` is proxied by this (or any) public-facing nginx location;
 this new route is reached only by the `internal;`-marked location's own subrequest, over the
 same private `127.0.0.1` path MediaMTX's own webhook calls already use.
+
+**"Nothing is proxied there" is now enforced by the template, not only a claim about
+what it omits — final whole-branch review, Important.** `/webhooks/xendit` and
+`/webhooks/telegram` MUST be publicly proxied (Xendit and Telegram both call them from the
+internet), and the ordinary way to wire that is one `location /webhooks/ { proxy_pass
+...; }` covering the whole prefix — which `/webhooks/mediamtx/*` sits directly under. A
+template that said nothing about this would make the DEFAULT outcome of that ordinary
+`/webhooks/` proxy a PUBLICLY REACHABLE `/webhooks/mediamtx/auth?secret=...`, writing the
+shared secret into `apps/api`'s access log on every call. The template now ships
+`location ^~ /webhooks/mediamtx/ { deny all; }` — a `^~` PREFIX location, which nginx picks
+over a shorter `/webhooks/` prefix location purely by being the longer, more specific match
+(nginx's own longest-prefix rule, independent of file order or `^~`), and which additionally
+cannot lose to any REGEX location a real deploy's own config might also have. Paste this
+block anywhere in the server block — unlike the `/live/` location below, its ordering
+relative to other locations does not matter.
+
+**Regex-location ordering could otherwise defeat the whole `auth_request` fix silently —
+final whole-branch review, Important, and worth understanding even though the template
+now avoids it.** nginx evaluates REGEX (`~`) locations in the order they appear in the
+config file and uses the FIRST one that matches — not the most specific one. A real
+deploy's existing SPA/static-asset config plausibly already has something like
+`location ~ \.(m3u8|ts)$ { ... }` for caching headers; if that location happened to be
+declared before an equivalent `~ /live/...` location, it would intercept every HLS request
+with `auth_request` never running at all — a silent, total bypass that neither `nginx -t`
+nor a quick read of the file would reveal. The template sidesteps this rather than merely
+warning about it: `/live/` is a `location ^~ /live/` PREFIX location, not a regex one.
+Per nginx's own location-selection algorithm, once a `^~` prefix location is the longest
+matching prefix, nginx **never evaluates any regex location at all** for that request —
+not "first match wins", but "the regex phase does not run". Verified directly for this
+fix wave: a real nginx server block with a deliberately-planted `location ~
+\.(m3u8|ts)$ { return 200 "INTERCEPTED..."; }` declared BEFORE the `/live/` include still
+routed every `/live/...` request through `auth_request` (a bad token correctly got `403`,
+not the trap's `200`), while the SAME trap location still correctly caught an unrelated
+`.m3u8` path outside `/live/` — see `final-fix-report.md` for the transcript. (This
+guarantee assumes no OTHER `^~` or exact-match `location =` shares the `/live/` prefix
+with equal or greater specificity — worth an explicit `grep` before pasting this in, same
+as any nginx change.)
+
+**The public path carries only an event id — the rewrite, and the redirect it has to
+cover too.** `/live/` used to be a straight pass-through (`location ~
+^/live/(?<mtx_key>[^/]+)...`, proxying the SAME path segment MediaMTX itself understood).
+As of the final whole-branch review's Critical fix, the public segment is an EVENT ID and
+MediaMTX's own internal path is UNCHANGED (still `live/<streamKey>`), so this location has
+to translate one into the other:
+1. The event id (and the rest of the requested path — `index.m3u8`, a segment filename,
+   a part filename) is captured with a plain `if ($request_uri ~ "...")` inside the `^~`
+   location (a `~` LOCATION can't be used here without reopening the ordering problem
+   above, but a `~` inside an `if` is a different, safe mechanism — see the template's own
+   comment for why this specific "if" is not the kind the "if is evil" warnings are about).
+2. `auth_request` calls `/webhooks/mediamtx/auth-request` with the event id as
+   `X-Mtx-Event-Id` (NOT `X-Mtx-Path` — that header is gone; `AuthoriseStream` now resolves
+   this call via `findById`, the same unscoped-by-id lookup `ResolveWatchToken` uses,
+   never via `findByStreamKey`).
+3. On success, the route hands back the resolved event's stream key as an `X-Stream-Key`
+   RESPONSE HEADER — read only by nginx's `auth_request_set` over `127.0.0.1`, never
+   forwarded to the client — and `proxy_pass` uses it to rewrite the request onto
+   MediaMTX's internal `live/<streamKey>/...` path before proxying to port `8888`.
+4. **Found running this for real, not anticipated from the design**: MediaMTX answers a
+   stream's first HLS request with its own `302` "cookie check" redirect (see below), and
+   that redirect's `Location` header is MediaMTX echoing back the path it actually
+   received — the rewritten, streamKey-shaped INTERNAL one. Left unhandled, the stream key
+   would reach the member's browser through this header instead of the body, defeating the
+   fix through a different channel. `proxy_redirect /live/$mtx_key/ /live/$mtx_event/;`
+   rewrites it back before nginx returns it. MediaMTX's own sub-manifest URIs (segment and
+   part filenames) needed no equivalent handling — they are RELATIVE, with no `/live/<key>/`
+   prefix at all, so they resolve against whatever path the browser already has (the public,
+   event-id one).
+
+Verified end to end against the SHIPPED file (not a hand-reproduced stand-in): a real
+`nginx:1.27-alpine` container with the actual template `include`d inside a real `server {}`
+block (self-signed local proof, not the production TLS termination — that part of nginx is
+untouched by any of this), a real MediaMTX, a real `apps/api`, and a real `ffmpeg` publish.
+`GET /c/watch/:token` returned an `hlsUrl` containing the event id and, byte-for-byte, not
+the stream key; the master playlist, its `302` cookie-check redirect, the variant playlist,
+the init segment and a media segment all played through the proxy with no stream key
+anywhere in a header or a body; cancelling the subscription mid-playback cut the SAME
+already-open session off on its very next request (`403`, both the playlist reload and the
+next segment); and an `ffmpeg` publish attempt using the event id in place of a stream key
+was refused by MediaMTX itself (`RTMP ... failed to authenticate: server replied with code
+403`). See `final-fix-report.md` for the full transcript.
 
 **The watch token's exposure through nginx, stated precisely rather than as a blanket
 "never logged" claim**: it travels as a header (`X-Watch-Token`) into the internal auth
@@ -372,6 +481,91 @@ just above it. If a session's `event.status` is stuck at `scheduled` after a rea
 started (MediaMTX itself says `stream is available and online`, but the database
 disagrees), this — not `apps/api`'s own logs, which never see the request at all — is the
 first place to look: `docker logs infra-mediamtx-1 | grep -A2 -B2 runOnOnline`.
+
+### Finding events stuck by a lost hook — the reconciliation query
+
+Both failure directions above are MUTE: a lost `runOnOnline` leaves an event `scheduled`
+forever with nobody notified while the creator sees a working broadcast in OBS; a lost
+`runOnOffline` leaves an event `live` forever, which is also what widens the publish-key
+reuse window `authorise-stream.ts`'s own docstring describes (`PUBLISHABLE_STATUSES`
+includes `live`, so an event stuck `live` stays publishable by anyone who still has the
+key for far longer than a real session ever runs). Neither failure raises an alert on its
+own — this query is how an operator finds them rather than waiting for a support message.
+
+`event` carries no `created_at`/`updated_at` column of its own, so "how long has this been
+stuck" has to be reconstructed from whatever timestamp IS available for each direction:
+
+```sql
+-- Stuck SCHEDULED (a lost runOnOnline): flags anything scheduled more than
+-- 2 hours in the past. "Go live now" sessions (scheduledAt IS NULL) have NO
+-- timestamp anywhere on the row to judge age by — listed separately rather
+-- than silently dropped, since ignoring them would miss exactly the
+-- sessions a creator most likely started immediately.
+select id, community_id, title, scheduled_at,
+       (stream_key is not null) as has_stream_key
+from event
+where status = 'scheduled'
+  and scheduled_at is not null
+  and scheduled_at < now() - interval '2 hours'
+order by scheduled_at;
+
+select id, community_id, title
+from event
+where status = 'scheduled' and scheduled_at is null;
+-- ^ no age to filter on — cross-check each one with the creator directly
+--   ("did you ever open OBS for this one?") rather than a date threshold.
+
+-- Stuck LIVE (a lost runOnOffline): joins the `stream_live` activity_log
+-- row HandleStreamLifecycle writes on go-live (metadata->>'eventId') for a
+-- went-live timestamp the event row itself doesn't have. Flags anything
+-- live for more than 6 hours — longer than any realistic single session.
+select e.id, e.community_id, e.title, al.created_at as went_live_at,
+       now() - al.created_at as live_for
+from event e
+join activity_log al
+  on al.event_type = 'stream_live'
+  and al.metadata ->> 'eventId' = e.id::text
+where e.status = 'live'
+  and al.created_at < now() - interval '6 hours'
+order by al.created_at;
+```
+
+**What to do about a hit:**
+1. Check `docker logs infra-mediamtx-1 | grep -A2 -B2 runOnOnline` (or `runOnOffline`) for
+   the failure symptom described just above — a wrong-secret 401, a connection failure to
+   `apps/api`, or a malformed URL. Fix whatever it names (the usual culprit is the
+   three-way `MEDIAMTX_WEBHOOK_SECRET` drift the previous section describes, or `apps/api`
+   having been down at the moment the hook fired).
+2. For a stuck `live` row where the creator confirms the broadcast is genuinely over: it is
+   safe to `update event set status = 'ended' where id = '<id>';` directly — `markEnded`'s
+   own allowlist predicate (`{scheduled, live}` -> `ended`) is exactly what this mirrors,
+   and nothing downstream re-notifies members on end (`NotifyStreamLive` only ever fires on
+   go-live), so a manual correction here has no side effect beyond closing the publish
+   window early.
+3. For a stuck `scheduled` row: ask the creator whether they ever opened OBS for it. If
+   not, it is simply a forgotten schedule — safe to leave, or the creator can just start a
+   new session. If they DID try and the hook failure is now fixed, have them stop and
+   restart their publish in OBS — a fresh RTMP connection is what re-fires `runOnOnline`;
+   nothing retries the original failed call on its own.
+
+### Deferred, on purpose: an OBS reconnect currently kills the session
+
+**Known, accepted, not fixed in this wave — a creator support question this note exists to
+answer, not a bug to chase.** `runOnOffline` fires on ANY publisher disconnect, not only a
+deliberate stop — a Task 6 end-to-end run proved this directly (`ffmpeg` stopped → `live` →
+`ended`). So a few seconds of packet loss that makes OBS auto-reconnect hits exactly the
+same hook a deliberate "Stop Streaming" click does: the event flips to `ended`, and `ended`
+is excluded from `PUBLISHABLE_STATUSES` (`authorise-stream.ts`), so the creator's own
+reconnecting encoder is refused by the SAME authorisation that protects the stream from
+everyone else. Every member's watch token is bound to that `eventId`, and any WhatsApp link
+already sent is now dead too. **The only way to resume today is scheduling a brand-new
+session** (`POST .../events` again) — there is no "resume" affordance, and telling a creator
+to "just reconnect OBS" is the wrong answer; tell them to start a fresh session instead.
+This is a known, real gap for the most likely first-hour failure mode on an Indonesian
+home/mobile uplink, deliberately left alone for this wave rather than folded in with the
+security fixes above — do not attempt to fix the underlying behaviour without a fresh
+design pass (naively excluding `ended` from `runOnOffline`'s effect would reopen the
+republish window `PUBLISHABLE_STATUSES` excluding `ended` exists to close).
 
 ## Running the test suite
 

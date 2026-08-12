@@ -109,6 +109,23 @@ the token identifies a *subscription*, not a device or a person. Binding to an I
 would break the common case of a member opening the link on their phone after checking out on a
 laptop. This is the same tradeoff the product already accepts for Telegram invite links.
 
+**Known limitation, recorded honestly (final whole-branch review, documentation-only) — the
+6-hour bound above describes one token, not the credential a member actually holds.** The
+subscription status page (`GET /c/subscription/:subscriptionId/status`) mints a **fresh**
+6-hour watch token on **every visit**, for as long as the subscription stays active
+(`GetSubscriptionStatus`, "Replay access re-mints a token on each visit" a few lines above).
+That status page's own URL is not itself a watch token — but its own docstring says it "may
+sit in browser history or be shared," the same guessable-URL treatment this section already
+gives Telegram invite links. Put together: **the status URL is a durable, renewable stream
+credential**, not the bounded, single 6-hour window this section describes for a token in
+isolation. Anyone holding that URL can mint a new 6-hour watch token every single time they
+visit it, for the entire remaining life of the subscription — materially different from "a
+leaked token expires in 6 hours." The mitigating factor is the same one the rest of this
+document leans on: every mint still requires the entitlement re-check (§5.2) to succeed, so
+this only extends how long an *already-entitled* leak stays exploitable, not who can start
+exploiting it — but it is a real escalation over the single-token framing above, not a
+restatement of it, and is recorded here rather than left implicit.
+
 ## 6. Storage
 
 Biznet Gio NEO Object Storage, which is S3-compatible: `region: "idn"` with a custom endpoint.
