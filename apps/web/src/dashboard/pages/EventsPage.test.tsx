@@ -642,12 +642,12 @@ describe("EventsPage - browser publishing", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Mulai siaran dari browser/ }));
 
     expect(await screen.findByRole("button", { name: "Hentikan siaran" })).toBeTruthy();
-    expect(await screen.findByText(/Jangan tutup atau muat ulang tab ini/)).toBeTruthy();
+    expect(await screen.findByText(/Jangan tutup, muat ulang, atau berpindah/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Hentikan siaran" }));
 
     expect(await screen.findByRole("button", { name: /Mulai siaran dari browser/ })).toBeTruthy();
-    expect(screen.queryAllByText(/Jangan tutup atau muat ulang tab ini/).length).toBe(0);
+    expect(screen.queryAllByText(/Jangan tutup, muat ulang, atau berpindah/).length).toBe(0);
   });
 
   // Fix round 1, Critical 2. Review measured, through the real component,
@@ -686,6 +686,35 @@ describe("EventsPage - browser publishing", () => {
 
     // PROBE, pinned: after stopping, it is no longer cancelled — the
     // listener genuinely came off, not just the on-screen paragraph.
+    expect(dispatchBeforeUnload()).toBe(false);
+  });
+
+  // Fix round 2: the Critical 2 test above covers before/while/after-stop,
+  // but not the FOURTH case — unmounting the whole page while still live
+  // (e.g. a real dashboard navigation away, not routed through this row's
+  // own "Siarkan" toggle, which Important 3 locks while live but a full
+  // page unmount bypasses entirely). Review executed this case and found it
+  // already correct; this test is what keeps it that way.
+  it("removes the beforeunload guard on a full unmount too, not only an explicit stop", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: grantingMediaDevices(),
+    });
+    stubFetchWithWhip([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }], {
+      url: SCHEDULED_SESSION.whipUrl,
+    });
+
+    const view = render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Mulai siaran dari browser/ }));
+    await screen.findByRole("button", { name: "Hentikan siaran" });
+
+    expect(dispatchBeforeUnload()).toBe(true);
+
+    view.unmount();
+
     expect(dispatchBeforeUnload()).toBe(false);
   });
 

@@ -83,6 +83,21 @@ import type { CreatedLiveSession, LiveSession, StreamingStatus } from "../types"
  * went live once got a spurious "leave site?" prompt for the rest of the
  * tab's life. The guard below is ref-counted (not a boolean) because more
  * than one row can be live at once.
+ *
+ * `beforeunload` DOES NOT COVER IN-APP NAVIGATION (fix round 2, N3, measured
+ * by review): clicking a dashboard `<Link>` unmounts `BrowserPublishSection`
+ * via React Router's own client-side routing, which never fires a
+ * `beforeunload` event at all — the unmount cleanup still correctly closes
+ * the connection and issues the DELETE (so nothing leaks), but the broadcast
+ * still ends permanently with no confirmation, exactly like closing the tab
+ * does. The clean fix — blocking navigation itself — needs React Router's
+ * `useBlocker`, which requires a DATA router (`createBrowserRouter`); this
+ * app is wired on the plain `<BrowserRouter>` (`App.tsx`), where `useBlocker`
+ * throws outright. Migrating the router is a real, app-wide change well
+ * outside a fix-round Minor's scope, so the warning text below is honest
+ * about the wider trigger ("berpindah ke halaman lain di dasbor ini")
+ * instead — reviewed guidance was explicit that misleading copy is worse
+ * than a terser guarantee, not that a guard is mandatory.
  * =======================================================================
  */
 
@@ -595,6 +610,19 @@ function BrowserPublishSection({
    */
   function handleDisconnected() {
     if (cancelledRef.current) return;
+    // Fix round 2, N1 (measured: `pc.closed === false` after a drop without
+    // this): a dropped connection is not a stop the CALLER initiated, so
+    // nothing had closed the peer connection or issued the WHIP DELETE
+    // before this ran — leaking the connection and leaving the session open
+    // server-side. That matters concretely because the message below invites
+    // a retry, and an orphaned server-side session is exactly what that
+    // retry could collide with (a "menolak permintaan ini" from MediaMTX
+    // until the old session times out on its own). `close()` is safe to
+    // call even though `publishToWhip`'s own `onDisconnected` already fired
+    // from inside this same connection's state-change handling — it is
+    // idempotent (`pc.close()` on an already-failed connection, a
+    // best-effort DELETE either way).
+    handleRef.current?.close();
     handleRef.current = null;
     unregisterUnloadWarning();
     setPublishing(false);
@@ -791,9 +819,9 @@ function BrowserPublishSection({
           {publishing ? (
             <>
               <p className="notice notice-warning" role="alert">
-                Jangan tutup atau muat ulang tab ini selama siaran berlangsung — menutup tab akan
-                menghentikan siaran ini secara permanen, dan Anda harus menjadwalkan sesi baru
-                untuk siaran berikutnya.
+                Jangan tutup, muat ulang, atau berpindah ke halaman lain di dasbor ini selama
+                siaran berlangsung — semuanya akan menghentikan siaran ini secara permanen, dan
+                Anda harus menjadwalkan sesi baru untuk siaran berikutnya.
               </p>
               <button type="button" className="button-danger" onClick={stopLive}>
                 Hentikan siaran
