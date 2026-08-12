@@ -302,7 +302,12 @@ carry the same empirical findings (the `$arg_token`-is-empty-in-subrequests bug,
 error-log token exposure, the trailing-slash regex bug, all found running this for real) at
 the point in the config they apply to. In short:
 
-- It is **three `location` blocks, not a standalone `server`** — meant to be pasted (or,
+- It is **four `location` blocks, not a standalone `server`** (three at the time this
+  paragraph was first written — the browser-publishing phase's Task 1 added the fourth, the
+  `/whip/` location covered in its own "Browser publishing (WebRTC / WHIP)" section above; the
+  count is worth keeping current here because it is the operator-facing description of a
+  manual step `scripts/deploy.sh` explicitly does not automate — a real deploy has to notice a
+  new block was added, not just re-paste however many it remembers) — meant to be pasted (or,
   after rendering `${MEDIAMTX_WEBHOOK_SECRET}`, `include`d) inside the real public HTTPS
   server block that already serves this app's SPA and API paths, not a second listener on a
   second port. (An earlier version of the template WAS its own `server { listen 8443; }` —
@@ -651,9 +656,9 @@ url's path.
 **Verified end to end, twice — direct against MediaMTX, and through the nginx `/whip/`
 location — not assumed from the config alone:**
 
-A real Chromium browser (Playwright-driven; see `task-1-report.md` for the full transcript
-and why a getUserMedia override — a canvas `captureStream()` + a Web Audio oscillator,
-standing in for the real camera/mic — was necessary: this sandboxed macOS dev machine cannot
+A real Chromium browser (Playwright-driven; a getUserMedia override — a canvas
+`captureStream()` + a Web Audio oscillator, standing in for the real camera/mic — was necessary
+because this sandboxed macOS dev machine cannot
 grant the OS-level camera/microphone TCC permission non-interactively, confirmed by
 `getUserMedia` hanging indefinitely against both Playwright's bundled Chromium and the real
 installed Google Chrome.app with `--use-fake-device-for-media-stream
@@ -696,8 +701,19 @@ a client sees. The same real-browser flow, repeated through a real `nginx:1.27-a
 container running the actual (envsubst-rendered) `infra/nginx/live-hls.conf.template`'s
 `/whip/` location, reached `RTCPeerConnection.connectionState === "connected"` end to end —
 including the `proxy_redirect`-rewritten session `Location` — and produced the identical
-`runOnOnline` → `live` → `runOnOffline` → `ended` lifecycle. See `task-1-report.md` for every
-command and its full raw output.
+`runOnOnline` → `live` → `runOnOffline` → `ended` lifecycle.
+
+**This nginx proof is a committed, re-runnable harness, not only a narrated transcript** —
+`infra/nginx/whip-proxy-test/` (`run.sh` + `negotiate.mjs`, isolated from the root workspace so
+`bun run test`/`bun run typecheck` never touch it — see its own `package.json`). Given a real
+scheduled session's stream key, it stands up the actual committed template in a real nginx
+container and drives a real `RTCPeerConnection` through it, printing the same `RESULT: { ... }`
+JSON shape quoted above. Re-run it after any change to `/whip/`'s location block rather than
+trusting this section to still be accurate:
+
+```
+$ infra/nginx/whip-proxy-test/run.sh <streamKey>
+```
 
 ### The environment finding worth knowing before attempting this again
 

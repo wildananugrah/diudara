@@ -195,6 +195,14 @@ location ^~ /webhooks/mediamtx/ {
 location ^~ /whip/ {
     set $whip_key "";
     set $whip_session "";
+    # $request_uri is the RAW request line — not percent-decoded — so this
+    # capture (and the proxy_redirect below, which rebuilds MediaMTX's
+    # internal path from the same $whip_key) is only correct as long as
+    # $whip_key can never legitimately contain a character that would
+    # decode differently from its raw form. True today because `newStreamKey`
+    # (streaming-provider.port.ts) only ever mints 32-char lowercase hex, but
+    # NOT enforced here — a future key format with, say, a literal `/` would
+    # need re-checking this assumption, not just this comment updated.
     if ($request_uri ~ "^/whip/([^/?]+)(/[^/?]+)?") {
         set $whip_key $1;
         set $whip_session $2;

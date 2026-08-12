@@ -62,6 +62,41 @@ services:
       # only load-bearing once publisher and server are on DIFFERENT
       # machines; see infra/.env.example.
       MTX_WEBRTCADDITIONALHOSTS: ${MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS:-}
+    # Fix round 1, Important 1: make a missing webrtcAdditionalHosts LOUD,
+    # not silent. scripts/deploy.sh runs `docker compose up -d` on every
+    # redeploy but deliberately never touches infra/.env — real secrets are
+    # placed there by hand, once (see CONTRIBUTING.md) — so a production
+    # infra/.env that never got MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS filled in
+    # would otherwise fail in the WORST way: WebRTC still negotiates (the
+    # local-interface ICE candidate still exists), just with no candidate a
+    # REMOTE browser can ever reach, so `connectionState` simply never
+    # becomes "connected" and NOTHING errors on either side — exactly the
+    # failure mode this task's own brief named as the one to guard against.
+    # This overrides the image's plain `/mediamtx` entrypoint with a
+    # one-line shell check first (the `-ffmpeg` tag ships BusyBox's
+    # `/bin/sh` for precisely this kind of thing — see the image comment
+    # above) that prints an unmissable line to THIS container's own logs
+    # (`docker logs infra-mediamtx-1`, the same place CONTRIBUTING.md's "A
+    # failing hook is not silent, but it is easy to miss" section already
+    # sends an operator looking) on every single start: a WARN if the
+    # variable is empty, an INF confirming the value if it is not —
+    # mirroring how `apps/api`'s own `[bootstrap] streaming provider: ...`
+    # line always states which way an analogous all-or-nothing streaming
+    # decision went, rather than staying quiet on the "everything is fine"
+    # path and only speaking up on failure. Deliberately a WARNING, not a
+    # failure: this variable is CORRECTLY empty for local same-machine
+    # testing (see infra/.env.example), and refusing to start would block
+    # boot for that legitimate case — ruled out explicitly by this task's
+    # own review.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$MTX_WEBRTCADDITIONALHOSTS" ]; then
+          echo "WARN [mediamtx] MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS is unset (infra/.env). Browser publishing (WebRTC/WHIP) is enabled, but a remote browser's ICE negotiation will silently fail to connect any media unless this server's public IP is set here -- see infra/mediamtx.yml's webrtcAdditionalHosts comment and CONTRIBUTING.md's 'Browser publishing (WebRTC / WHIP)' section. Expected to be empty ONLY when the publishing browser and this server are the SAME machine (local dev)." >&2
+        else
+          echo "INF [mediamtx] browser publishing (WebRTC/WHIP): webrtcAdditionalHosts=$$MTX_WEBRTCADDITIONALHOSTS" >&2
+        fi
+        exec /mediamtx /mediamtx.yml
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro
     ports:

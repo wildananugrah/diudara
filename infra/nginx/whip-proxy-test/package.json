@@ -1,0 +1,8 @@
+{
+  "name": "whip-proxy-test",
+  "private": true,
+  "description": "Not a workspace member (root package.json's workspaces glob is apps/*, packages/* only — this directory is deliberately outside both, so `bun run test`/`bun run typecheck` from the repo root never touch it). A standalone harness that drives a real RTCPeerConnection against infra/nginx/live-hls.conf.template's /whip/ location through a real nginx container. See run.sh for usage.",
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}
