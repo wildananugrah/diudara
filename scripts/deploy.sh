@@ -55,6 +55,42 @@ if [ "$status" != "healthy" ]; then
   exit 1
 fi
 
+# infra/docker-compose.yml's mediamtx entrypoint already prints a WARN to
+# `docker logs infra-mediamtx-1` on every start where
+# MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS is unset (see that file's own comment) —
+# loud INSIDE the container, but this script never surfaced it anywhere, so
+# on a real non-interactive redeploy that WARN sat in a log stream nobody was
+# watching, which is not meaningfully different from the checklist entry it
+# was meant to replace. This terminal is the one place an operator running a
+# real redeploy IS watching synchronously — the postgres health-poll above
+# already earns its keep the same way, gating on its OWN synchronous check
+# rather than trusting a log line to be noticed later.
+#
+# Deliberately CANNOT fail the deploy, unlike the postgres check above: an
+# empty MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS is correct on a box where the
+# publishing browser and this server are the same machine, and a real
+# production redeploy must not break because of it — see
+# infra/mediamtx.yml's own webrtcAdditionalHosts comment. `|| true` on the
+# grep (not just the `docker logs`) means an empty match (nothing to report)
+# and a hard error reading the log (mediamtx not up yet, docker unreachable)
+# are both treated as "nothing to report" rather than aborting under this
+# script's `set -e`.
+echo "==> checking mediamtx logs for the browser-publishing (WebRTC/WHIP) warning"
+# 2>&1, NOT 2>/dev/null — found running this for real: the entrypoint
+# wrapper's WARN/INF lines are `echo ... >&2` INSIDE the container (stderr),
+# and `docker logs` mirrors a container's stdout/stderr onto its OWN
+# matching streams rather than interleaving them into one. `2>/dev/null`
+# here would silently discard exactly the line this check exists to find,
+# passing grep nothing to ever match and making this whole step a no-op
+# that looked correct in every test that didn't check the WARN case against
+# a genuinely fresh container.
+mediamtx_warn="$(docker logs --tail 20 infra-mediamtx-1 2>&1 | grep 'WARN \[mediamtx\]' || true)"
+if [ -n "$mediamtx_warn" ]; then
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo "$mediamtx_warn"
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+fi
+
 echo "==> db migrate"
 (cd apps/api && bun run db:migrate)
 
@@ -70,6 +106,54 @@ sudo chown -R "$(id -un):www-data" "$(dirname "$WEB_DIST_TARGET")"
 echo "==> (re)start api + worker under pm2"
 pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save
+
+# `pm2 startOrReload` returning 0 means pm2 accepted the reload request, NOT
+# that the process is actually serving — a synchronous throw inside
+# bootstrap() (e.g. `apps/api/.env` half-configured — see
+# selectStreamingProvider/selectPaymentProvider/selectMessagingProviders in
+# bootstrap.ts) crashes `apps/api` on the very first tick, pm2 restarts it,
+# it crashes again, and the script would print "==> done" and exit 0 while
+# the box sits in a silent restart loop. The concrete case that motivated
+# this: a box already running the four original MEDIAMTX_* variables throws
+# the moment MEDIAMTX_WHIP_BASE_URL ships without also being added to
+# apps/api/.env, and nothing before this point would have caught it.
+#
+# This check only works because ecosystem.config.cjs leaves both apps in
+# pm2's default FORK mode, where `reload` fully replaces the process. Switch
+# either app to `exec_mode: "cluster"` and pm2 will keep the old workers
+# alive when new ones fail to boot — /health would then answer from the
+# PREVIOUS release and this poll would pass while the deploy had in fact
+# failed. If cluster mode is ever wanted, this check needs to verify the
+# running code's identity, not just that something answers.
+#
+# Same shape as the postgres health-poll above:
+# gate on the process's OWN synchronous check (GET /health, which also
+# round-trips the database — see routes/health.ts) rather than trusting a
+# log line or an exit code that only proves pm2 accepted the command.
+# 127.0.0.1:3000 matches PORT's documented default (.env.example) and the
+# literal address infra/nginx/live-hls.conf.template's own proxy_pass
+# already assumes for this same route.
+echo -n "waiting for the api to be healthy"
+api_healthy=""
+for _ in $(seq 1 30); do
+  if curl -sf -o /dev/null "http://127.0.0.1:3000/health"; then
+    api_healthy="1"
+    echo " ok"
+    break
+  fi
+  echo -n "."
+  sleep 2
+done
+if [ -z "$api_healthy" ]; then
+  echo "api never became healthy — check 'pm2 logs diudara-api --lines 50 --nostream'." >&2
+  echo "A common cause: apps/api/.env is half-configured for one of the guarded" >&2
+  echo "provider groups (Xendit, Telegram/Fonnte, or the five MEDIAMTX_*/" >&2
+  echo "STREAM_TOKEN_SECRET streaming variables) — bootstrap() refuses to start" >&2
+  echo "rather than boot half-wired, and pm2 silently restart-loops the crash." >&2
+  echo "See apps/api/.env.example and CONTRIBUTING.md's 'Live streaming (MediaMTX)'" >&2
+  echo "section." >&2
+  exit 1
+fi
 
 echo "==> done"
 pm2 list

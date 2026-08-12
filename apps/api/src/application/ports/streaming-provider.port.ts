@@ -10,10 +10,11 @@ import { randomBytes } from "node:crypto";
  * (Task 4) accepts a publish to ANY path our own webhook authorises, so
  * nothing needs to be provisioned or registered at the provider before a
  * creator can go live — "creating a session" is minting a key
- * (`newStreamKey`, below) and building the two URLs the creator's encoder
- * and the member's player need. See `MediaMtxAdapter`'s docstring for the
- * reasoning in full; it is worth reading before assuming this port is
- * unfinished because it has no HTTP client.
+ * (`newStreamKey`, below) and building the URLs the creator's encoder (or,
+ * as of Task 2, their browser) and the member's player need. See
+ * `MediaMtxAdapter`'s docstring for the reasoning in full; it is worth
+ * reading before assuming this port is unfinished because it has no HTTP
+ * client.
  */
 export interface StreamingProviderPort {
   /**
@@ -21,8 +22,16 @@ export interface StreamingProviderPort {
    * concrete adapter was built with. Never throws, never awaits anything —
    * there is nothing here that can fail at the provider, because nothing
    * here talks to the provider.
+   *
+   * `whipUrl` (Task 2) is the creator's BROWSER publish target — WebRTC via
+   * WHIP, an alternative to the `rtmpUrl` an encoder like OBS uses, ingesting
+   * the SAME stream key into the SAME session. It carries the stream key
+   * exactly as `rtmpUrl` does, so it is exactly as sensitive: owner-scoped at
+   * every caller, never handed to a member.
    */
-  createSession(input: { streamKey: string }): { rtmpUrl: string; hlsPlaybackPath: string };
+  createSession(input: {
+    streamKey: string;
+  }): { rtmpUrl: string; whipUrl: string; hlsPlaybackPath: string };
 }
 
 /**

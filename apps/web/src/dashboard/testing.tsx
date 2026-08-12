@@ -7,7 +7,7 @@
  * how one page ends up tested against a response shape the API does not send.
  */
 import { render } from "@testing-library/react";
-import type { ReactElement } from "react";
+import { StrictMode, type ReactElement } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { setSession } from "./auth";
 
@@ -80,19 +80,36 @@ export function stubFetch(routes: StubRoute[]): FetchStub {
   return stub;
 }
 
-/** Renders one dashboard page at `path`, signed in, inside a router. */
+/**
+ * Renders one dashboard page at `path`, signed in, inside a router — wrapped
+ * in `<StrictMode>`, matching `main.tsx` (the app's REAL root, which does
+ * the same). NOT decoration: `<StrictMode>` deliberately double-invokes
+ * every effect on mount in development (setup -> cleanup -> setup again),
+ * specifically to surface an effect whose cleanup mutates something the
+ * setup half never resets — exactly the shape of the bug Task 3's fix round
+ * 1 found only by driving a REAL browser (`cancelledRef` in
+ * `EventsPage.tsx`'s `BrowserPublishSection`, never caught by this test
+ * suite because `render()` did not do this). Wrapping it here, once, means
+ * every dashboard page test gets that coverage from now on at zero ongoing
+ * cost — measured after adding this: the full web suite still comes back
+ * green, unchanged. If you are looking at this wrapper wondering whether it
+ * is safe to remove because it "does nothing visible": it is not decoration,
+ * it is exactly what caught a real bug once already.
+ */
 export function renderPage(
   element: ReactElement,
   { path, at }: { path: string; at: string }
 ): ReturnType<typeof render> {
   setSession("jwt-test", TEST_CREATOR);
   return render(
-    <MemoryRouter initialEntries={[at]}>
-      <Routes>
-        <Route path={path} element={element} />
-        <Route path="/dashboard/login" element={<div>Masuk ke DIUDARA</div>} />
-        <Route path="*" element={<div>Halaman lain</div>} />
-      </Routes>
-    </MemoryRouter>
+    <StrictMode>
+      <MemoryRouter initialEntries={[at]}>
+        <Routes>
+          <Route path={path} element={element} />
+          <Route path="/dashboard/login" element={<div>Masuk ke DIUDARA</div>} />
+          <Route path="*" element={<div>Halaman lain</div>} />
+        </Routes>
+      </MemoryRouter>
+    </StrictMode>
   );
 }

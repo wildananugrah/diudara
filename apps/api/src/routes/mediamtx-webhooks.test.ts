@@ -438,11 +438,13 @@ describe("POST /webhooks/mediamtx/auth — end-to-end wiring", () => {
     const originals = {
       MEDIAMTX_RTMP_HOST: process.env.MEDIAMTX_RTMP_HOST,
       MEDIAMTX_HLS_BASE_URL: process.env.MEDIAMTX_HLS_BASE_URL,
+      MEDIAMTX_WHIP_BASE_URL: process.env.MEDIAMTX_WHIP_BASE_URL,
       MEDIAMTX_WEBHOOK_SECRET: process.env.MEDIAMTX_WEBHOOK_SECRET,
       STREAM_TOKEN_SECRET: process.env.STREAM_TOKEN_SECRET,
     };
     process.env.MEDIAMTX_RTMP_HOST = "mediamtx.internal";
     process.env.MEDIAMTX_HLS_BASE_URL = "https://hls.diudara.test";
+    process.env.MEDIAMTX_WHIP_BASE_URL = "https://whip.diudara.test";
     process.env.MEDIAMTX_WEBHOOK_SECRET = SECRET;
     process.env.STREAM_TOKEN_SECRET = SECRET;
 
@@ -685,11 +687,13 @@ describe("GET /webhooks/mediamtx/auth-request — end-to-end wiring", () => {
     const originals = {
       MEDIAMTX_RTMP_HOST: process.env.MEDIAMTX_RTMP_HOST,
       MEDIAMTX_HLS_BASE_URL: process.env.MEDIAMTX_HLS_BASE_URL,
+      MEDIAMTX_WHIP_BASE_URL: process.env.MEDIAMTX_WHIP_BASE_URL,
       MEDIAMTX_WEBHOOK_SECRET: process.env.MEDIAMTX_WEBHOOK_SECRET,
       STREAM_TOKEN_SECRET: process.env.STREAM_TOKEN_SECRET,
     };
     process.env.MEDIAMTX_RTMP_HOST = "mediamtx.internal";
     process.env.MEDIAMTX_HLS_BASE_URL = "https://hls.diudara.test";
+    process.env.MEDIAMTX_WHIP_BASE_URL = "https://whip.diudara.test";
     process.env.MEDIAMTX_WEBHOOK_SECRET = SECRET;
     process.env.STREAM_TOKEN_SECRET = SECRET;
 
@@ -874,11 +878,13 @@ describe("POST /webhooks/mediamtx/lifecycle — end-to-end wiring", () => {
     const originals = {
       MEDIAMTX_RTMP_HOST: process.env.MEDIAMTX_RTMP_HOST,
       MEDIAMTX_HLS_BASE_URL: process.env.MEDIAMTX_HLS_BASE_URL,
+      MEDIAMTX_WHIP_BASE_URL: process.env.MEDIAMTX_WHIP_BASE_URL,
       MEDIAMTX_WEBHOOK_SECRET: process.env.MEDIAMTX_WEBHOOK_SECRET,
       STREAM_TOKEN_SECRET: process.env.STREAM_TOKEN_SECRET,
     };
     process.env.MEDIAMTX_RTMP_HOST = "mediamtx.internal";
     process.env.MEDIAMTX_HLS_BASE_URL = "https://hls.diudara.test";
+    process.env.MEDIAMTX_WHIP_BASE_URL = "https://whip.diudara.test";
     process.env.MEDIAMTX_WEBHOOK_SECRET = SECRET;
     process.env.STREAM_TOKEN_SECRET = SECRET;
 

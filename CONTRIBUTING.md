@@ -171,10 +171,20 @@ them.
 ## Live streaming (MediaMTX)
 
 Task 6 brings up a real MediaMTX instance in `infra/docker-compose.yml`, running from
-`infra/mediamtx.yml`. Like Postgres, it needs `apps/api/.env`'s four `MEDIAMTX_*`/
+`infra/mediamtx.yml`. Like Postgres, it needs `apps/api/.env`'s five `MEDIAMTX_*`/
 `STREAM_TOKEN_SECRET` variables (see `.env.example`) AND `infra/.env`'s own copy of
 `MEDIAMTX_WEBHOOK_SECRET` — the two must match exactly, the same rule as
 `POSTGRES_PASSWORD`/`DATABASE_URL` above.
+
+**Task 2 (browser publishing) added a fifth: `MEDIAMTX_WHIP_BASE_URL`.** All five —
+`MEDIAMTX_RTMP_HOST`, `MEDIAMTX_HLS_BASE_URL`, `MEDIAMTX_WHIP_BASE_URL`,
+`MEDIAMTX_WEBHOOK_SECRET`, `STREAM_TOKEN_SECRET` — are set together or not at all
+(`selectStreamingProvider` in `bootstrap.ts`): a box with only the original four now
+throws `Streaming is half-configured` at BOOT, in every environment including
+`development`. If you had a working local setup before Task 2 landed, add
+`MEDIAMTX_WHIP_BASE_URL` to `apps/api/.env` before your next `bun run dev` — the copy-paste
+block below already includes it. **The same applies to any already-deployed box**: see
+"Deploying" below for the pre-deploy step this requires.
 
 **A THIRD copy, as of Task 9 — final whole-branch review, Important.**
 `infra/nginx/live-hls.conf.template` also carries `${MEDIAMTX_WEBHOOK_SECRET}` (rendered
@@ -193,8 +203,8 @@ mismatch is the first thing to check — see `infra/.env.example`'s own note.
 
 ```bash
 cp infra/.env.example infra/.env               # if you haven't already; add MEDIAMTX_WEBHOOK_SECRET
-# apps/api/.env: set MEDIAMTX_RTMP_HOST, MEDIAMTX_HLS_BASE_URL, MEDIAMTX_WEBHOOK_SECRET
-# (same value as infra/.env), STREAM_TOKEN_SECRET (a DIFFERENT secret)
+# apps/api/.env: set MEDIAMTX_RTMP_HOST, MEDIAMTX_HLS_BASE_URL, MEDIAMTX_WHIP_BASE_URL,
+# MEDIAMTX_WEBHOOK_SECRET (same value as infra/.env), STREAM_TOKEN_SECRET (a DIFFERENT secret)
 docker compose -f infra/docker-compose.yml up -d mediamtx
 ```
 
@@ -302,7 +312,12 @@ carry the same empirical findings (the `$arg_token`-is-empty-in-subrequests bug,
 error-log token exposure, the trailing-slash regex bug, all found running this for real) at
 the point in the config they apply to. In short:
 
-- It is **three `location` blocks, not a standalone `server`** — meant to be pasted (or,
+- It is **four `location` blocks, not a standalone `server`** (three at the time this
+  paragraph was first written — the browser-publishing phase's Task 1 added the fourth, the
+  `/whip/` location covered in its own "Browser publishing (WebRTC / WHIP)" section above; the
+  count is worth keeping current here because it is the operator-facing description of a
+  manual step `scripts/deploy.sh` explicitly does not automate — a real deploy has to notice a
+  new block was added, not just re-paste however many it remembers) — meant to be pasted (or,
   after rendering `${MEDIAMTX_WEBHOOK_SECRET}`, `include`d) inside the real public HTTPS
   server block that already serves this app's SPA and API paths, not a second listener on a
   second port. (An earlier version of the template WAS its own `server { listen 8443; }` —
@@ -567,6 +582,190 @@ security fixes above — do not attempt to fix the underlying behaviour without 
 design pass (naively excluding `ended` from `runOnOffline`'s effect would reopen the
 republish window `PUBLISHABLE_STATUSES` excluding `ended` exists to close).
 
+### Browser publishing (WebRTC / WHIP) — Task 1 of the browser-publishing phase
+
+A **second** way to publish, alongside RTMP above — RTMP is completely unchanged, and this
+adds **no new credential and no new auth path**: MediaMTX asks the SAME `authHTTPAddress`
+`{action: "publish", path: "live/<streamKey>", ...}` for a WebRTC publish that it asks for an
+RTMP one, so `AuthoriseStream`'s existing publish branch (`scheduled`/`live` allow, `ended`
+refuses) is the only gate. Confirmed against a live instance, not assumed — see the
+verification transcript below.
+
+**The verified WHIP endpoint — this is the fact Task 2's adapter is built against:**
+
+```
+POST http://<webrtc-host>:8889/live/<streamKey>/whip
+```
+
+Confirmed two ways before anything was built on it: (1) mediamtx.org's own WebRTC-clients
+documentation states the pattern `http://localhost:8889/mystream/whip`; (2) MediaMTX's own
+`internal/servers/webrtc/http_server.go` (v1.20.0) matches WHIP routes with
+`^/(.+?)/(whip|whep)$` (no session id — the initial POST) and `^/(.+?)/(whip|whep)/(.+?)$`
+(PATCH/DELETE against the session id MediaMTX returns in its `201 Created`'s `Location`
+header). Then confirmed a third way, the one that actually matters per this project's own
+track record: a real Chromium browser POSTing a real SDP offer to this exact URL against a
+real MediaMTX instance, real ICE negotiating, and the event flipping to `live`. See below.
+
+**This is a DIFFERENT url from MediaMTX's own browser publish PAGE**, one path segment
+longer: `http://<webrtc-host>:8889/live/<streamKey>/publish` is an HTML page (MediaMTX's own
+debug tool, embedded in the binary) whose own JavaScript (`publisher.js`) is what POSTs to
+the `/whip` url above. This task's own verification drove that page directly, per the task
+brief; Task 2's real product UI builds the `/whip` url itself instead, since a real product
+needs its own camera/mic picker, not MediaMTX's test page.
+
+**The ports, and why the split exists** (`infra/mediamtx.yml`, `infra/docker-compose.yml`):
+
+- `webrtcAddress: :8889` — WHIP **signalling** (the POST above, and the PATCH/DELETE against
+  the session it creates). Bound to `127.0.0.1` on the host, exactly like `hlsAddress`/8888
+  above, and for the identical reason: nginx is the public front door, proxying this over 443
+  (see the `/whip/` location below) so Cloudflare — which does not proxy UDP — never has to
+  touch it directly.
+- `webrtcLocalUDPAddress: :8189` — the actual audio/video **media**, all UDP. Published
+  **directly and publicly** (`"8189:8189/udp"`, no loopback restriction), because a creator's
+  browser reaches it straight from the internet, never through nginx: Cloudflare's proxy is
+  TCP-only, the identical reason RTMP needed `stream.mhamzah.id`, a DNS-only subdomain,
+  instead of the proxied apex. **This is the port that must be open at the VPS provider's
+  firewall** — not 8889 — for browser publishing to work at all in production.
+- `webrtcAdditionalHosts` is deliberately left **unset** in the committed `infra/mediamtx.yml`
+  (MediaMTX's own default, `[]`) and is instead the `MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS`
+  variable in `infra/.env` (comma-separated, optional — no `:?` guard, unlike
+  `MEDIAMTX_WEBHOOK_SECRET`), injected via the `MTX_WEBRTCADDITIONALHOSTS` environment
+  override (the same mechanism `MTX_AUTHHTTPADDRESS` already uses). **This is the one setting
+  that differs between this task's local proof and a real deployment, and it matters**:
+  without the server's real public IP in it, `webrtcIPsFromInterfaces` (MediaMTX's default,
+  left on) only offers the LOCAL interface address as an ICE candidate — which a browser on
+  the public internet cannot route to. Negotiation completes, no error appears on either
+  side, and no media ever connects: a silent failure, and one of the three specific causes
+  this task's brief named up front if WebRTC does not negotiate on a real deployment. Left
+  unset for this task's own local proof (publisher and MediaMTX were the same machine, where
+  the local interface candidate already connects) — **set it to the VPS's real public IP
+  before ever testing this feature on a real server.**
+
+**The nginx location — `/whip/`, a SEPARATE prefix from `/live/`, not nested under it.**
+MediaMTX's own WHIP url shape (`/live/<streamKey>/whip[/<sessionId>]`) sits literally under
+the `/live/` prefix the HLS read location above already owns as `^~` — and per nginx's own
+location-selection rules (see that location's own comment for the citation), once a `^~`
+prefix location is selected as the longest match, nginx skips every regex location for that
+request, unconditionally, regardless of file order. That makes it impossible to give WHIP
+requests different handling from HLS reads with a regex location nested under `/live/`, so
+`infra/nginx/live-hls.conf.template` instead gives WHIP a prefix that does not literally
+start with `/live/` at all: public url `/whip/<streamKey>` (and
+`/whip/<streamKey>/<sessionId>` for the session sub-resource), one segment shorter than
+MediaMTX's own shape since the fixed `whip` text moves from the middle to the front.
+`proxy_pass` rebuilds MediaMTX's internal shape from the captured pieces; `proxy_redirect`
+rewrites MediaMTX's own `201 Created` `Location` header (which names the new session
+resource using its OWN internal path) back to the public `/whip/<key>/<sessionId>` form
+before nginx returns it — the same class of fix `/live/`'s own `proxy_redirect` already
+applies to HLS's cookie-check redirect. **No `auth_request` on this location** — deliberate:
+a publish is authorised by MediaMTX's own `authHTTPAddress` call straight to `apps/api`,
+never through this nginx at all, the same gate RTMP already goes through; this location's
+only job is carrying WHIP's signalling bytes across the one hop Cloudflare can carry (nginx
+on 443). `access_log off`, per this task's own constraint: the stream key travels in this
+url's path.
+
+**Verified end to end, twice — direct against MediaMTX, and through the nginx `/whip/`
+location — not assumed from the config alone:**
+
+A real Chromium browser (Playwright-driven; a getUserMedia override — a canvas
+`captureStream()` + a Web Audio oscillator, standing in for the real camera/mic — was necessary
+because this sandboxed macOS dev machine cannot
+grant the OS-level camera/microphone TCC permission non-interactively, confirmed by
+`getUserMedia` hanging indefinitely against both Playwright's bundled Chromium and the real
+installed Google Chrome.app with `--use-fake-device-for-media-stream
+--use-fake-ui-for-media-stream` and an explicit `context.grantPermissions` — nobody can click
+the native system dialog. Everything downstream of `getUserMedia` — MediaMTX's own unmodified
+publish page and `publisher.js`, the real `RTCPeerConnection`, the real SDP offer/answer, the
+real WHIP POST, the real ICE negotiation — was untouched and real) published against a real
+`scheduled` session's stream key from `POST /communities/:id/events`:
+
+```
+INF [WebRTC] [session ...] peer connection established, local candidate: host/udp/127.0.0.1/8189, remote candidate: prflx/udp/172.26.0.1/...
+INF [path live/<key>] runOnOnline command started
+INF [path live/<key>] stream is available and online, 2 tracks (Opus, H264)
+INF [WebRTC] [session ...] is publishing to path 'live/<key>'
+```
+
+**That `H264` is load-bearing, not incidental — Task 4's own phase gate found the opposite
+signature (`Opus, VP8`, and this task's own first run showed `Opus, AV1`) is a real,
+member-facing defect, not a cosmetic codec difference.** MediaMTX's HLS muxer cannot carry
+VP8 or AV1 at all: it silently drops the video track and mixes the audio through alone,
+logging one easy-to-miss `WAR` line and nothing else —
+
+```
+INF [path live/<key>] stream is available and online, 2 tracks (Opus, VP8)
+WAR [HLS] [muxer live/<key>] skipping track 2 (VP8)
+INF [HLS] [muxer live/<key>] is converting into HLS, 1 track (Opus)
+```
+
+— and a member gets **audio only**: `readyState 4`, playback time genuinely advancing, and
+`videoWidth: 0, videoHeight: 0` forever. Nothing else reports it — the creator's own preview
+is their LOCAL camera, never the round trip, so the creator's screen looks completely normal
+throughout. Chromium's default video codec preference is VP8, which is exactly why this
+survived Task 1's own verification above and the entire rest of the live-streaming phase
+before it: RTMP/OBS was never affected, because `ffmpeg` publishes H264 already. The fix —
+`preferH264` in `whip-publisher.ts`, run before `createOffer` — reorders the video
+transceiver's codec preferences rather than restricting them, so a browser without H264
+support still negotiates something instead of failing to negotiate video at all. **The check
+after any change here is MediaMTX logging `stream is available and online, 2 tracks (H264,
+Opus)`, not merely that a publish connects** — a healthy-looking connection with the wrong
+codec is this defect exactly.
+
+`GET .../events` then showed `"status": "live"`. Stopping the publish (closing the browser)
+produced:
+
+```
+INF [path live/<key>] runOnOnline command stopped
+INF [path live/<key>] runOnOffline command launched
+INF [WebRTC] [session ...] closed: peer connection closed
+```
+
+— and the event flipped to `"status": "ended"`. A **wrong** key (a path that resolves to no
+event) was refused at the WHIP layer itself, both directly against MediaMTX and through the
+nginx `/whip/` location:
+
+```
+$ curl -i -X POST http://localhost:8889/live/not-a-real-key/whip -d 'v=0'
+HTTP/1.1 401 Unauthorized
+{"status":"error","error":"authentication error"}
+```
+
+— and MediaMTX's own log names exactly what refused it: `failed to authenticate: server
+replied with code 403: {"ok":false}`, i.e. `apps/api`'s `/webhooks/mediamtx/auth` route
+answering `REFUSED_BODY` with a `403`, which MediaMTX's WHIP layer translates into the `401`
+a client sees. The same real-browser flow, repeated through a real `nginx:1.27-alpine`
+container running the actual (envsubst-rendered) `infra/nginx/live-hls.conf.template`'s
+`/whip/` location, reached `RTCPeerConnection.connectionState === "connected"` end to end —
+including the `proxy_redirect`-rewritten session `Location` — and produced the identical
+`runOnOnline` → `live` → `runOnOffline` → `ended` lifecycle.
+
+**This nginx proof is a committed, re-runnable harness, not only a narrated transcript** —
+`infra/nginx/whip-proxy-test/` (`run.sh` + `negotiate.mjs`, isolated from the root workspace so
+`bun run test`/`bun run typecheck` never touch it — see its own `package.json`). Given a real
+scheduled session's stream key, it stands up the actual committed template in a real nginx
+container and drives a real `RTCPeerConnection` through it, printing the same `RESULT: { ... }`
+JSON shape quoted above. Re-run it after any change to `/whip/`'s location block rather than
+trusting this section to still be accurate:
+
+```
+$ infra/nginx/whip-proxy-test/run.sh <streamKey>
+```
+
+### The environment finding worth knowing before attempting this again
+
+**Automated browser tests of camera/microphone features cannot run non-interactively on a
+real macOS dev machine.** `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream`
+(the standard Chromium flags for exactly this) are not sufficient here: macOS gates camera
+and microphone access at the OS level (TCC), independent of Chromium's own in-browser
+permission UI, and `getUserMedia` simply hangs forever waiting on a native system dialog that
+nothing in a non-interactive session can click through — confirmed against both a fresh
+Playwright-installed Chromium AND the real, already-installed `Google Chrome.app` on this
+machine. Any future automated verification of camera/mic-driven browser features on a machine
+like this one needs the SAME workaround this task used: override `navigator.mediaDevices.
+getUserMedia` (via `page.addInitScript`, before the page's own JS runs) to return a
+`canvas.captureStream()` + Web Audio synthetic `MediaStream` instead of a real hardware one.
+This proves the WebRTC transport and negotiation genuinely; it does not prove real camera
+hardware or a real permission-grant UX flow, which still need a human with a real device.
+
 ## Running the test suite
 
 ```bash
@@ -661,6 +860,57 @@ commit before it reaches production. A push to `main` deploys whether the tests 
 not — which is why "Both must be green before a commit" above is a real obligation rather
 than a formality.
 
+### Pre-deploy checklist: browser publishing (WHIP)
+
+`scripts/deploy.sh` pulls, builds, migrates, and reloads pm2 — full stop. It does not touch
+nginx, the host firewall, or the VPS provider's own network layer, so browser publishing
+needs four manual steps on the box that nothing in the automated deploy performs for you.
+Do them in this order — the `.env` variables first, because a missing one restart-loops the
+API the moment `git pull` lands the code that requires it; the reload and the firewall
+changes are independent of each other but both have to be done before a creator can
+actually go live from a browser:
+
+1. **`apps/api/.env` on the box: add (or confirm) `MEDIAMTX_WHIP_BASE_URL`, before the
+   `git pull`, not after.** See "This cuts both ways" below for the full mechanism —
+   `selectStreamingProvider`'s all-or-nothing rule throws `Streaming is half-configured` at
+   boot the instant this variable is required but absent, in every environment. Skip this
+   and the API restart-loops; `scripts/deploy.sh`'s own health-check poll is what catches
+   it, loudly, not a fix. **It must be the same public origin as `MEDIAMTX_HLS_BASE_URL`** —
+   nginx serves `/live/` and `/whip/` from the same server block on the same origin, and
+   nothing cross-checks the two strings against each other; see `apps/api/.env.example`'s
+   own note on both variables.
+2. **`infra/.env` on the box: set `MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS` to the box's real
+   public IP.** See "The ports, and why the split exists" in the Live-streaming section
+   above for why. Skipping this does not crash anything — `scripts/deploy.sh` prints a WARN
+   banner — but it produces the single most confusing failure this feature has: negotiation
+   completes, no error appears on either side, and media never connects, because MediaMTX
+   only offers a LOCAL-interface ICE candidate that no browser on the public internet can
+   route to.
+3. **Install the new fourth nginx `location` block and reload nginx.** `scripts/deploy.sh`
+   explicitly does not deploy nginx config. Paste (or re-`include`) the `/whip/` block from
+   `infra/nginx/live-hls.conf.template` into the real server block — see "The nginx location
+   block the real VPS needs" above for the full template and citation — then `nginx -t` and
+   reload. Skip this and the WHIP POST never reaches MediaMTX at all: nginx has no route for
+   it, so a creator never gets past the negotiation step. RTMP and HLS keep working
+   unaffected, so this is easy to miss until a creator actually tries browser publishing.
+4. **Open UDP 8189 at two layers: the host firewall AND the VPS provider's network-level
+   firewall or security group.** See "The ports, and why the split exists" above — this is
+   the media, not the signalling, and it is published directly and publicly, never through
+   nginx. This project has already been caught by the provider-level layer once, for RTMP's
+   1935 — expect the same here: a host firewall rule alone is not sufficient if the provider
+   filters upstream of it. Skip this at either layer and ICE never connects: signalling
+   succeeds, the creator's browser reports nothing wrong of its own, and media never flows.
+
+**The diagnostic an operator needs, that no other committed doc states plainly:** steps 2
+through 4 above all fail into the exact same creator-facing message —
+"Gagal terhubung ke server siaran. Penyebab paling umum adalah jaringan yang memblokir lalu
+lintas UDP..." (`whip-publisher.ts`) — which blames the CREATOR's network. A deploy missing
+any one of them still passes `deploy.sh`'s health check, still leaves RTMP and HLS working,
+and tells every creator who tries browser publishing that their own WiFi is at fault. If more
+than one creator reports "my network blocks UDP" right after a deploy, treat this checklist —
+a missed nginx location, a missed firewall layer, a missed public IP — as the first suspect,
+not their network.
+
 ### The secrets boundary
 
 A credential that reaches a real external service — a Xendit key, a Telegram bot token, an
@@ -670,6 +920,26 @@ service belongs in a workflow file, in a script, or in a committed `.env`.
 `scripts/deploy.sh` deliberately never touches `infra/.env` or `apps/api/.env`. Those hold
 the real secrets, they are placed on the box once by hand, and a redeploy must never
 overwrite them.
+
+**This cuts both ways: a new required variable is a manual pre-deploy step, not something
+the script can add for you.** `MEDIAMTX_WHIP_BASE_URL` (browser publishing, Task 2) is the
+concrete example — `selectStreamingProvider`'s all-or-nothing rule means an already-deployed
+box that has the original four `MEDIAMTX_*`/`STREAM_TOKEN_SECRET` variables set will refuse
+to boot the moment this variable is required but absent, in every environment including
+`development`. **Before deploying this change to a box that already has streaming
+configured, add `MEDIAMTX_WHIP_BASE_URL` to that box's `apps/api/.env` first** (see
+`.env.example` for the value's shape) — do this BEFORE the `git pull`, not after, since
+`scripts/deploy.sh`'s own post-reload health check (see below) will otherwise catch the
+half-configured box only by failing loudly, not by fixing it. The same rule applies to any
+future variable added to an existing all-or-nothing group (Xendit, Telegram/Fonnte,
+streaming): update the box's `.env` file by hand before the code that requires it lands.
+
+`scripts/deploy.sh` polls `GET /health` after `pm2 startOrReload` and fails the deploy
+(non-zero exit, loud message) if the api never becomes healthy — added specifically because
+an unhandled `bootstrap()` throw (a half-configured `.env`, exactly the scenario above)
+otherwise leaves pm2 silently restart-looping a crashed process while the script prints
+`==> done` and exits `0`. See the check's own comment in `scripts/deploy.sh` for the full
+reasoning.
 
 ## Migrations
 

@@ -44,10 +44,11 @@ export default defineConfig({
       "^/c/": { target: "http://localhost:3000", bypass: bypassPageNavigation },
       "/webhooks": "http://localhost:3000",
       // ---------------------------------------------------------------
-      // The dashboard's API paths (Phase 6). All three are reached only by
-      // fetch() from /dashboard/* screens, never by a browser navigation.
+      // The dashboard's API paths (Phase 6, plus later additions). Every one
+      // of these is reached only by fetch() from /dashboard/* screens, never
+      // by a browser navigation.
       //
-      // NO `bypass` ON THESE THREE, and the asymmetry with /c above is the
+      // NO `bypass` ON ANY OF THESE, and the asymmetry with /c above is the
       // point rather than an oversight. `bypass` exists solely because a SPA
       // ROUTE and an API PATH share a prefix; the dashboard lives at
       // /dashboard/*, which no API route uses, so there is no collision to
@@ -67,6 +68,18 @@ export default defineConfig({
       "/communities": "http://localhost:3000",
       "/payment-account": "http://localhost:3000",
       "/ai": "http://localhost:3000",
+      // Missing here left `GET /streaming/status` unproxied — the dev server
+      // fell through to its SPA history fallback and answered 200 with
+      // index.html instead of the API's JSON. `LiveStreamingNavLink` and
+      // `EventsPage` (Task 7, then Task 3's browser-publishing UI) both call
+      // this on mount; unproxied, `res.json()` throws on the HTML body and
+      // both fail toward HIDING (see those components' own docstrings on why
+      // that direction is deliberate for this one flag), so "Siaran
+      // langsung" simply never appeared while running `vite dev` — found
+      // while driving Task 3's UI in a real browser, not from reading this
+      // file. Production is unaffected: nginx there proxies every API path
+      // to apps/api regardless of this list.
+      "/streaming": "http://localhost:3000",
     },
   },
 });

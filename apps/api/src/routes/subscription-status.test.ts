@@ -65,23 +65,25 @@ async function checkout(a: ReturnType<typeof app>) {
 }
 
 /**
- * All four streaming env vars, restored afterwards — the same pattern
+ * All five streaming env vars, restored afterwards — the same pattern
  * `mediamtx-webhooks.test.ts`'s own end-to-end tests use to exercise the
  * REAL `bootstrap()` with streaming enabled, rather than a hand-built
  * `deps` object. `selectStreamingProvider` throws on anything less than
- * all four, so `getSubscriptionStatus`'s `watchUrl` field cannot be
- * observed through the real app without all four present.
+ * all five, so `getSubscriptionStatus`'s `watchUrl` field cannot be
+ * observed through the real app without all five present.
  */
 async function withStreamingConfigured<T>(fn: () => Promise<T>): Promise<T> {
   const STREAM_SECRET = "d".repeat(32);
   const originals = {
     MEDIAMTX_RTMP_HOST: process.env.MEDIAMTX_RTMP_HOST,
     MEDIAMTX_HLS_BASE_URL: process.env.MEDIAMTX_HLS_BASE_URL,
+    MEDIAMTX_WHIP_BASE_URL: process.env.MEDIAMTX_WHIP_BASE_URL,
     MEDIAMTX_WEBHOOK_SECRET: process.env.MEDIAMTX_WEBHOOK_SECRET,
     STREAM_TOKEN_SECRET: process.env.STREAM_TOKEN_SECRET,
   };
   process.env.MEDIAMTX_RTMP_HOST = "mediamtx.internal";
   process.env.MEDIAMTX_HLS_BASE_URL = "https://hls.diudara.test";
+  process.env.MEDIAMTX_WHIP_BASE_URL = "https://whip.diudara.test";
   process.env.MEDIAMTX_WEBHOOK_SECRET = STREAM_SECRET;
   process.env.STREAM_TOKEN_SECRET = STREAM_SECRET;
   try {

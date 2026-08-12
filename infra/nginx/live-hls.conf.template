@@ -121,6 +121,117 @@ location ^~ /webhooks/mediamtx/ {
     deny all;
 }
 
+# Task 1 (browser-publishing phase): the public WHIP SIGNALLING endpoint —
+# proxies to MediaMTX's webrtcAddress (8889, loopback-only — see
+# infra/mediamtx.yml and infra/docker-compose.yml) over 443, exactly the
+# way `/live/` below already does for HLS on port 8888. CONFIRMED against a
+# live MediaMTX server, not assumed from docs:
+# `http://<host>:8889/<path>/whip` is MediaMTX's actual WHIP ingest url (a
+# browser POSTs its SDP offer there) — a DIFFERENT url from MediaMTX's own
+# browser publish PAGE (`/<path>/publish`, an HTML page whose own
+# JavaScript is what POSTs to `/whip`). See CONTRIBUTING.md's "Browser
+# publishing (WebRTC / WHIP)" section for the full transcript this was
+# verified against, including the real `201 Created` / SDP-answer body / ICE
+# negotiation this location's shape was built to carry unmodified.
+#
+# `access_log off` — REQUIRED, per this task's brief: the stream key
+# travels in this url's path (`/whip/<streamKey>`, or
+# `/whip/<streamKey>/<sessionId>` for the ICE-trickle PATCH and the DELETE
+# WHIP issues against the session MediaMTX creates), exactly like RTMP's
+# `rtmpUrl` already does. A creator legitimately owns this credential (it
+# comes back from `POST .../events` alongside `rtmpUrl` — this is the
+# PUBLISH side, not the read side `/live/` below protects), but nginx's own
+# access log on disk is still not the place for it to sit in plaintext, the
+# identical reasoning `/live/`'s own `access_log off` below applies to the
+# watch token.
+#
+# THE ERROR LOG CARRIES THIS KEY TOO, ON THE MOST ORDINARY FAILURE THERE IS
+# — found running this for real, with MediaMTX stopped:
+#   connect() failed (111: Connection refused) while connecting to upstream,
+#   ... upstream: "http://127.0.0.1:8889/live/<streamKey>/whip"
+# The stream key appears TWICE in that one line (the upstream URL nginx
+# tried, and the original request URI nginx also logs alongside it) — once
+# per failed attempt. Triggered by MediaMTX being unreachable, which
+# `scripts/deploy.sh` causes on every single redeploy, however briefly, by
+# restarting the MediaMTX container while nginx keeps running. `access_log
+# off` above keeps this out of the ACCESS log exactly as designed; it does
+# nothing for the ERROR log, same as `/live/`'s own `auth_request` failure
+# below — see that location's note for the full reasoning on why this
+# project accepts that trade (an operator needing the error log when things
+# break) rather than raising nginx's error-log threshold to suppress it.
+#
+# NO `auth_request` HERE, deliberately — unlike `/live/` below. A publish is
+# authorised by MediaMTX's OWN `authHTTPAddress` call straight to
+# apps/api's `/webhooks/mediamtx/auth`, over `host.docker.internal`, never
+# through this nginx at all (see infra/mediamtx.yml) — the SAME gate RTMP
+# publishing already goes through, and the design's own explicit
+# constraint: no second credential, no second auth path. This location's
+# only job is carrying the WHIP signalling bytes across the one hop
+# Cloudflare's TCP-only proxy can actually carry (nginx on 443) — the media
+# itself never touches nginx at all, see webrtcLocalUDPAddress in
+# infra/mediamtx.yml.
+#
+# WHY A SEPARATE `/whip/` PREFIX, NOT NESTED UNDER `/live/`: MediaMTX's own
+# WHIP url shape is `/live/<streamKey>/whip[/<sessionId>]` — literally
+# UNDER the `/live/` prefix the read location below already owns as a
+# `^~` PREFIX location. Per nginx's own location-selection algorithm (see
+# that location's own header comment for the full citation), a `^~` prefix
+# location, once selected as the longest matching prefix, makes nginx skip
+# EVERY regex location for that request — so a `~ ^/live/(.+)/whip$`
+# location placed anywhere else in this file, in any order, would NEVER be
+# reached for a request under `/live/`; `/live/`'s own `^~` status wins
+# unconditionally. The only way to give WHIP requests different handling
+# than HLS reads without touching that read location's security-critical
+# `auth_request` logic at all is a prefix that does not literally start
+# with "/live/" — "/whip/" doesn't (nginx's longest-PREFIX rule requires an
+# exact literal-character match, and "/whip/" / "/live/" share no common
+# prefix beyond "/"), so this location and `/live/` below never compete for
+# the same request, and this file keeps the same "no regex, no ordering
+# question" property the read location's own comments already establish.
+#
+# THE REWRITE, both directions: the public url is `/whip/<streamKey>` (or
+# `/whip/<streamKey>/<sessionId>`) — one path segment SHORTER than
+# MediaMTX's own `/live/<streamKey>/whip[/<sessionId>]`, since the fixed
+# "whip" text moved from a middle segment to the prefix. `$whip_key`/
+# `$whip_session` below capture the two dynamic pieces from the public url
+# (mirroring `$mtx_event`/`$mtx_rest` in `/live/` below) and `proxy_pass`
+# rebuilds MediaMTX's own shape from them. WHIP's own protocol is what makes
+# the SECOND rewrite direction necessary: MediaMTX answers the initial POST
+# with `201 Created` and a `Location` header naming the new session
+# resource — confirmed with a real POST against a real server — and that
+# header is MediaMTX echoing back the INTERNAL path it received
+# (`/live/<streamKey>/whip/<sessionId>`), the same class of leak `/live/`'s
+# own `proxy_redirect` below exists to fix for HLS's cookie-check redirect.
+# `proxy_redirect` here does the identical job: rewrites that `Location`
+# back to the public `/whip/<streamKey>/<sessionId>` shape before nginx
+# returns it, so the browser's own WHIP client — which resolves `Location`
+# against the url it already has — issues its later PATCH/DELETE calls back
+# at THIS location instead of a url nginx never proxies.
+location ^~ /whip/ {
+    set $whip_key "";
+    set $whip_session "";
+    # $request_uri is the RAW request line — not percent-decoded — so this
+    # capture (and the proxy_redirect below, which rebuilds MediaMTX's
+    # internal path from the same $whip_key) is only correct as long as
+    # $whip_key can never legitimately contain a character that would
+    # decode differently from its raw form. True today because `newStreamKey`
+    # (streaming-provider.port.ts) only ever mints 32-char lowercase hex, but
+    # NOT enforced here — a future key format with, say, a literal `/` would
+    # need re-checking this assumption, not just this comment updated.
+    if ($request_uri ~ "^/whip/([^/?]+)(/[^/?]+)?") {
+        set $whip_key $1;
+        set $whip_session $2;
+    }
+
+    access_log off;
+
+    proxy_pass http://127.0.0.1:8889/live/$whip_key/whip$whip_session$is_args$args;
+    proxy_redirect /live/$whip_key/whip/ /whip/$whip_key/;
+    proxy_set_header Host $host;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+
 # FIX 1 (final whole-branch review, Critical) + FIX 2 (Important, the
 # location-matching half): the PUBLIC path a member's browser ever
 # requests is now `/live/<eventId>/...` — an opaque row id, never the
@@ -223,7 +334,11 @@ location ^~ /live/ {
     # server must be treated as a secret-bearing file** — the same
     # handling `apps/api/.env` already gets (restricted permissions, never
     # shipped to a less-trusted log aggregator without stripping query
-    # strings first, not just "another log file").
+    # strings first, not just "another log file"). This is not only the
+    # watch token: the `/whip/` location above logs the STREAM KEY to this
+    # same error log on its own most ordinary failure (MediaMTX
+    # unreachable) — see that location's own comment. One file, two
+    # different secrets, same handling required for both.
     access_log off;
 
     # THE REWRITE: proxy to MediaMTX's INTERNAL path

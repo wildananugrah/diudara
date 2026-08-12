@@ -922,19 +922,20 @@ describe(".env.example", () => {
   });
 
   /**
-   * Same shape as the messaging-tokens test above, extended to four
-   * variables: all four ship as commented placeholders with no committed
+   * Same shape as the messaging-tokens test above, extended to five
+   * variables: all five ship as commented placeholders with no committed
    * value, and the file names both the fallback adapter and the allowlist
    * that permits it, so a reader relying on this file alone (not the source)
    * can still find out what an absent value does.
    */
-  it("documents the four streaming variables as commented placeholders, set together or not at all", () => {
+  it("documents the five streaming variables as commented placeholders, set together or not at all", () => {
     const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
     const lines = example.split("\n");
 
     for (const name of [
       "MEDIAMTX_RTMP_HOST",
       "MEDIAMTX_HLS_BASE_URL",
+      "MEDIAMTX_WHIP_BASE_URL",
       "MEDIAMTX_WEBHOOK_SECRET",
       "STREAM_TOKEN_SECRET",
     ]) {
@@ -2249,12 +2250,13 @@ describe("bootstrap() AI provider wiring", () => {
 const FULL_STREAMING_CONFIG = {
   rtmpHost: "stream.example.com",
   hlsBaseUrl: "https://stream.example.com/hls",
+  whipBaseUrl: "https://stream.example.com",
   webhookSecret: "wh_".padEnd(32, "s"),
   streamTokenSecret: "tok_".padEnd(32, "t"),
 };
 
 describe("selectStreamingProvider", () => {
-  it("selects MediaMtxAdapter when all four env vars are set", () => {
+  it("selects MediaMtxAdapter when all five env vars are set", () => {
     captureConsoleLog(() => {
       const provider = selectStreamingProvider({ ...FULL_STREAMING_CONFIG, nodeEnv: "test" });
       expect(provider).toBeInstanceOf(MediaMtxAdapter);
@@ -2277,13 +2279,14 @@ describe("selectStreamingProvider", () => {
     });
   });
 
-  it("selects FakeStreamingAdapter when all four env vars are unset in development or test", () => {
+  it("selects FakeStreamingAdapter when all five env vars are unset in development or test", () => {
     captureConsoleLog(() => {
       for (const nodeEnv of ["test", "development"]) {
         expect(
           selectStreamingProvider({
             rtmpHost: undefined,
             hlsBaseUrl: undefined,
+            whipBaseUrl: undefined,
             webhookSecret: undefined,
             streamTokenSecret: undefined,
             nodeEnv,
@@ -2323,6 +2326,7 @@ describe("selectStreamingProvider", () => {
             selectStreamingProvider({
               rtmpHost: blank,
               hlsBaseUrl: blank,
+              whipBaseUrl: blank,
               webhookSecret: blank,
               streamTokenSecret: blank,
               nodeEnv,
@@ -2338,6 +2342,7 @@ describe("selectStreamingProvider", () => {
       selectStreamingProvider({
         rtmpHost: undefined,
         hlsBaseUrl: undefined,
+        whipBaseUrl: undefined,
         webhookSecret: undefined,
         streamTokenSecret: undefined,
         nodeEnv: "production",
@@ -2391,6 +2396,7 @@ describe("selectStreamingProvider", () => {
       selectStreamingProvider({
         rtmpHost: undefined,
         hlsBaseUrl: undefined,
+        whipBaseUrl: undefined,
         webhookSecret: undefined,
         streamTokenSecret: undefined,
         nodeEnv: "test",
@@ -2402,6 +2408,7 @@ describe("selectStreamingProvider", () => {
       selectStreamingProvider({
         rtmpHost: undefined,
         hlsBaseUrl: undefined,
+        whipBaseUrl: undefined,
         webhookSecret: undefined,
         streamTokenSecret: undefined,
         nodeEnv: "development",
@@ -2414,7 +2421,7 @@ describe("selectStreamingProvider", () => {
 describe("bootstrap() streaming provider wiring", () => {
   it("wires FakeStreamingAdapter under NODE_ENV=test with no streaming config", () => {
     // "No streaming config" relies on `test-env-preload.ts` deleting all
-    // four streaming env vars once, for the whole process, before any test
+    // five streaming env vars once, for the whole process, before any test
     // file (including this one) is even loaded — not on this machine's
     // `apps/api/.env` happening not to set them. A `beforeEach` scoped to
     // this file was tried first (review round 2) and was not enough: Bun
@@ -2428,12 +2435,13 @@ describe("bootstrap() streaming provider wiring", () => {
     });
   });
 
-  it("wires MediaMtxAdapter when all four streaming env vars are configured", () => {
+  it("wires MediaMtxAdapter when all five streaming env vars are configured", () => {
     withJwtSecret("x".repeat(32), () => {
       withEnv(
         {
           MEDIAMTX_RTMP_HOST: FULL_STREAMING_CONFIG.rtmpHost,
           MEDIAMTX_HLS_BASE_URL: FULL_STREAMING_CONFIG.hlsBaseUrl,
+          MEDIAMTX_WHIP_BASE_URL: FULL_STREAMING_CONFIG.whipBaseUrl,
           MEDIAMTX_WEBHOOK_SECRET: FULL_STREAMING_CONFIG.webhookSecret,
           STREAM_TOKEN_SECRET: FULL_STREAMING_CONFIG.streamTokenSecret,
         },
@@ -2445,11 +2453,34 @@ describe("bootstrap() streaming provider wiring", () => {
     });
   });
 
+  // Task 2: proves MEDIAMTX_WHIP_BASE_URL actually reaches the constructed
+  // adapter, not just that SOME MediaMtxAdapter got built — the same
+  // "wiring, not just instantiation" gap `appBaseUrl`'s own docstring on
+  // `Dependencies` warns about.
+  it("wires MEDIAMTX_WHIP_BASE_URL through to a real whipUrl", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          MEDIAMTX_RTMP_HOST: FULL_STREAMING_CONFIG.rtmpHost,
+          MEDIAMTX_HLS_BASE_URL: FULL_STREAMING_CONFIG.hlsBaseUrl,
+          MEDIAMTX_WHIP_BASE_URL: FULL_STREAMING_CONFIG.whipBaseUrl,
+          MEDIAMTX_WEBHOOK_SECRET: FULL_STREAMING_CONFIG.webhookSecret,
+          STREAM_TOKEN_SECRET: FULL_STREAMING_CONFIG.streamTokenSecret,
+        },
+        () => {
+          const deps = bootstrap();
+          const session = deps.streamingProvider!.createSession({ streamKey: "abc123" });
+          expect(session.whipUrl).toBe("https://stream.example.com/whip/abc123");
+        }
+      );
+    });
+  });
+
   // Mirrors the AI provider's own "boots with the co-builder disabled even
   // when [irrelevant config] is garbage" test: a fully-configured
   // production box (payments and messaging both real) with NO streaming
   // configuration must still boot, and streamingProvider must be undefined
-  // rather than throwing or silently activating a fake. The four streaming
+  // rather than throwing or silently activating a fake. The five streaming
   // vars are left OUT of the `withEnv` below deliberately — `test-env-preload.ts`
   // already guarantees they are absent for the whole run, and repeating
   // them here would only be a per-test workaround this file does not need.

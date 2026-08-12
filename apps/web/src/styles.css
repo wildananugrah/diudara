@@ -596,6 +596,36 @@ tbody tr:last-child td {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---------- browser publishing (Task 3) ---------- */
+
+/*
+ * `PublishOptions` (EventsPage.tsx) lays "Siaran dari browser" and "OBS /
+ * Streamlabs" side by side on desktop — the two-column view the Task 3
+ * brief describes as "presenting both paths for a session" — and stacks
+ * them on narrow screens, same breakpoint as the rest of this dashboard.
+ */
+.publish-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+/*
+ * The muted local preview shown once device permission is granted. A fixed
+ * aspect-ratio box (rather than sizing off the actual video dimensions,
+ * which vary per camera) keeps the panel from jumping around as
+ * `BrowserPublishSection` swaps devices.
+ */
+.video-preview {
+  width: 100%;
+  max-width: 360px;
+  aspect-ratio: 16 / 9;
+  background: #111827;
+  border-radius: var(--radius);
+  object-fit: cover;
+}
+
 /* ---------- copyable link ---------- */
 
 .copy-row {

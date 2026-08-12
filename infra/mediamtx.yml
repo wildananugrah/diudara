@@ -69,8 +69,140 @@ authHTTPExclude:
 rtmpAddress: :1935
 hlsAddress: :8888
 
+# ---------------------------------------------------------------------------
+# WebRTC (WHIP) ingest — browser-publishing phase, Task 1.
+#
+# A SECOND way to publish, alongside RTMP above — RTMP is unchanged. No new
+# credential and no new auth path: authMethod/authHTTPExclude above already
+# cover this without any change, because MediaMTX asks authHTTPAddress the
+# SAME `{action: "publish", path: "live/<streamKey>", ...}` for a WebRTC
+# publish that it asks for an RTMP one — CONFIRMED against a live instance
+# (see CONTRIBUTING.md's "Browser publishing (WebRTC / WHIP)" section for
+# the trace), not assumed from docs. AuthoriseStream's existing publish
+# branch (`scheduled`/`live` allow, `ended` refuses) is the only gate.
+#
+# THE VERIFIED WHIP ENDPOINT, confirmed against mediamtx.org's own
+# WebRTC-clients documentation AND a real publish (see CONTRIBUTING.md for
+# the transcript):
+#   http://<host>:8889/live/<streamKey>/whip
+# NOT MediaMTX's own browser publish PAGE, which is a DIFFERENT url one path
+# segment longer — `http://<host>:8889/live/<streamKey>/publish`, an HTML
+# page whose own embedded JavaScript (`publisher.js`) is what POSTs the SDP
+# offer to the `/whip` url above. This file's own local proof used the
+# `/publish` page directly, per this task's brief; Task 2's browser adapter
+# builds the `/whip` url instead, since a real product UI has its own
+# camera/mic picker rather than reusing MediaMTX's test page.
+webrtc: true
+
+# The WebRTC HTTP/signalling listener — the WHIP endpoint above (the initial
+# POST, and the ICE-trickle PATCH requests a session sends afterwards), plus
+# MediaMTX's own publish/read test pages, all go through this port. Bound
+# like hlsAddress above ("every interface inside the container"; the host-side
+# restriction to 127.0.0.1 lives in docker-compose.yml's port mapping, not
+# here) and NOT exposed publicly for the identical reason hlsAddress isn't:
+# nginx is the public front door for signalling, proxying it over 443 (see
+# live-hls.conf.template) so Cloudflare — which does not proxy UDP, see
+# webrtcLocalUDPAddress below — never has to touch this port directly.
+webrtcAddress: :8889
+
+# The WebRTC MEDIA port — the actual audio/video RTP packets, all UDP.
+# Direct to the server, bypassing nginx AND Cloudflare entirely: Cloudflare
+# does not proxy UDP, the identical reason RTMP needed a DNS-only subdomain
+# (stream.mhamzah.id) instead of the proxied apex. Published on the HOST
+# directly in docker-compose.yml ("8189:8189/udp", NOT loopback-restricted
+# the way hlsAddress/webrtcAddress are) — this is the port that must be open
+# at the VPS provider's firewall, not 8889, for a creator's browser to reach
+# this server at all. MediaMTX's own default; named explicitly here rather
+# than left implicit so the docker-compose port mapping has an unambiguous
+# value to point at.
+webrtcLocalUDPAddress: :8189
+
+# webrtcAdditionalHosts (MediaMTX's own default: [], left UNSET in this
+# file) is what makes a remote browser's ICE negotiation actually CONNECT
+# once this server sits behind a cloud provider's NAT/private network
+# interface — true of every real VPS. Without it, webrtcIPsFromInterfaces
+# (default true, also left as MediaMTX's default) only offers the server's
+# LOCAL interface address as an ICE candidate, which a browser on the public
+# internet cannot route to — negotiation completes but no candidate pair
+# ever connects: a silent failure with no error on either side, and one of
+# the three specific causes this task's brief calls out if WebRTC does not
+# negotiate. Set via the MTX_WEBRTCADDITIONALHOSTS environment override —
+# the same mechanism MTX_AUTHHTTPADDRESS above uses — built in
+# docker-compose.yml from MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS in infra/.env;
+# see that file's own comment. Not a secret, so (unlike authHTTPAddress)
+# there is no confidentiality reason it COULDN'T be a literal value in this
+# committed file instead — left as an env override anyway because the value
+# is deployment-specific (a dev laptop, a staging VPS and production all
+# have different public IPs), the same reason MEDIAMTX_RTMP_HOST is an
+# apps/api/.env variable rather than baked into MediaMtxAdapter. This task's
+# own local proof left it unset: publisher and server were the same
+# machine, where the local interface candidate already connects — see
+# CONTRIBUTING.md for what that does and does not verify.
+
 paths:
   all_others:
+    # MediaMTX's OWN DEFAULT FOR THIS IS `yes`, AND THAT DEFAULT IS WRONG FOR
+    # THIS PRODUCT. Found by the browser-publishing phase gate (Task 4), by
+    # running it, not by reading the docs: with `overridePublisher` left
+    # unset, a SECOND publisher to a path that already has one is not refused
+    # — MediaMTX disconnects the FIRST publisher and hands the path to the
+    # newcomer. Captured from a real run, a real browser publish holding the
+    # key and a real ffmpeg RTMP publish arriving after it:
+    #
+    #   INF [path live/<key>] closing existing publisher
+    #   INF [path live/<key>] runOnOnline command stopped
+    #   INF [path live/<key>] runOnOffline command launched
+    #   INF [path live/<key>] runOnOnline command started
+    #   INF [RTMP] [conn ...] is publishing to path 'live/<key>'
+    #   INF [WebRTC] [session ...] closed: terminated
+    #
+    # THE DAMAGE IS NOT ONLY "the creator's broadcast was cut off", bad as
+    # that is. Look at the hook order: `runOnOffline` fires BEFORE the
+    # replacement's `runOnOnline`. `HandleStreamLifecycle.handleOffline`
+    # marks the event `ended`, and `handleOnline` then REFUSES to resurrect
+    # an `ended` event — deliberately, so a late `online` cannot revive a
+    # finished session (see that class's own comment). The observed end
+    # state, measured: ffmpeg still publishing eleven minutes later while the
+    # event row read `ended`, no member able to get a watch link for a stream
+    # that was demonstrably on the air, and no error anywhere.
+    #
+    # `no` makes MediaMTX refuse the second publisher instead. The first
+    # publisher keeps the path — but what the NEWCOMER sees differs by
+    # protocol, measured against a real second-publisher race for each:
+    #
+    # RTMP: the newcomer's connection is refused outright, which an RTMP
+    # encoder surfaces as a failed connection immediately.
+    #
+    # WHIP: MediaMTX answers the losing POST with `201 Created` and lets ICE
+    # connect — the refusal is NOT visible at negotiation time at all. The
+    # newcomer's browser only learns anything is wrong when MediaMTX closes
+    # that connection shortly after, which `whip-publisher.ts` reports via
+    # `onDisconnected` as "Koneksi siaran terputus di tengah jalan" (a
+    # mid-broadcast-drop message, about the symptom, not the cause) —
+    # measured at +16.3s after the losing publisher's "Hentikan siaran"
+    # button had already appeared. The creator-facing "Server penyiaran
+    # menolak permintaan ini" message in `whip-publisher.ts` exists for a
+    # DIFFERENT case (the WHIP POST itself answering with a non-2xx status,
+    # e.g. an `ended` session) — a second publisher losing this race never
+    # reaches it, because the POST that starts the race succeeds.
+    #
+    # Refusing the newcomer is still the right direction for this product
+    # specifically: the publisher already on the path is the one whose
+    # members are watching, and a stream key is a long-lived credential a
+    # creator may have pasted into OBS months ago. Narrowing WHIP's own
+    # 16.3s window is a known, deliberately deferred follow-up, not a defect
+    # this file's policy needs to fix.
+    #
+    # `false`, NOT `no`: MediaMTX's own reference config writes these flags as
+    # `yes`/`no` (YAML 1.1 booleans), but whether that parses as a boolean or
+    # as the STRING "no" depends on the YAML library version, and a flag that
+    # silently parses as a truthy string is exactly the failure this line
+    # exists to prevent. `false` is a boolean under both YAML 1.1 and 1.2, and
+    # matches `runOnOnlineRestart: false` a few lines below. Verified against a
+    # real container after the change — see the phase-gate report's transcript
+    # of the same two-publisher race now being REFUSED.
+    overridePublisher: false
+
     # The publisher started / stopped. These are the real hook names: there
     # is no runOnPublish or runOnUnpublish, whatever an earlier draft of this
     # spec said. They are SHELL COMMANDS MediaMTX runs (not requests it

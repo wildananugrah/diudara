@@ -89,6 +89,7 @@ describe("ScheduleLiveSession", () => {
     });
 
     expect(result.rtmpUrl).toContain("rtmp://");
+    expect(result.whipUrl).toContain(result.streamKey);
     expect(result.streamKey).toMatch(/^[0-9a-f]{32}$/);
     expect(result.hlsPlaybackPath).toContain(result.streamKey);
     expect(result.status).toBe("scheduled");
@@ -111,6 +112,7 @@ describe("ScheduleLiveSession", () => {
 
     expect(second.streamKey).not.toBe(first.streamKey);
     expect(second.rtmpUrl).not.toBe(first.rtmpUrl);
+    expect(second.whipUrl).not.toBe(first.whipUrl);
   });
 
   it("throws NotFoundError for another creator's community, and persists nothing", async () => {
@@ -155,17 +157,68 @@ describe("ListLiveSessions", () => {
     const scheduler = new ScheduleLiveSession(repository, new FakeStreamingAdapter());
     await scheduler.execute({ creatorId: "creator-1", communityId: "community-1", title: "One" });
 
-    const useCase = new ListLiveSessions(repository);
+    const useCase = new ListLiveSessions(repository, new FakeStreamingAdapter());
     const listed = await useCase.execute({ creatorId: "creator-1", communityId: "community-1" });
 
     expect(listed).toHaveLength(1);
     expect(listed[0]!.title).toBe("One");
   });
 
+  /**
+   * Task 2 review, Important #3: `whipUrl` used to exist only in
+   * `ScheduleLiveSession`'s own response — a session scheduled in an
+   * EARLIER request had no publish target from this endpoint at all, which
+   * is fatal for a "go live from the browser" button (unlike RTMP, where a
+   * creator pastes the URL into OBS once and never needs it again). Uses a
+   * FRESH `ListLiveSessions`/`FakeStreamingAdapter` pair, not the one the
+   * scheduler used, to prove the rebuild depends only on the persisted
+   * `streamKey` and the adapter's own configuration.
+   */
+  it("rebuilds rtmpUrl and whipUrl from the persisted stream key, not only at creation time", async () => {
+    const { repository } = fakeEventRepository({ "community-1": "creator-1" });
+    const scheduler = new ScheduleLiveSession(repository, new FakeStreamingAdapter());
+    const created = await scheduler.execute({
+      creatorId: "creator-1",
+      communityId: "community-1",
+      title: "One",
+    });
+
+    const useCase = new ListLiveSessions(repository, new FakeStreamingAdapter());
+    const listed = await useCase.execute({ creatorId: "creator-1", communityId: "community-1" });
+
+    expect(listed[0]!.rtmpUrl).toBe(created.rtmpUrl);
+    expect(listed[0]!.whipUrl).toBe(created.whipUrl);
+  });
+
+  it("returns null rtmpUrl and whipUrl — never omitted, never thrown — when streaming is not configured on this box", async () => {
+    const { repository } = fakeEventRepository({ "community-1": "creator-1" });
+    const scheduler = new ScheduleLiveSession(repository, new FakeStreamingAdapter());
+    await scheduler.execute({ creatorId: "creator-1", communityId: "community-1", title: "One" });
+
+    // No provider passed — the same shape `bootstrap()` produces when
+    // `Dependencies.streamingProvider` is `undefined`.
+    const useCase = new ListLiveSessions(repository);
+    const listed = await useCase.execute({ creatorId: "creator-1", communityId: "community-1" });
+
+    expect(listed[0]!.rtmpUrl).toBeNull();
+    expect(listed[0]!.whipUrl).toBeNull();
+  });
+
   it("throws NotFoundError for another creator's community", async () => {
     const { repository } = fakeEventRepository({ "community-1": "creator-1" });
     const useCase = new ListLiveSessions(repository);
 
+    await expect(
+      useCase.execute({ creatorId: "stranger", communityId: "community-1" })
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it("404s for another creator's community without leaking rtmpUrl/whipUrl anywhere", async () => {
+    const { repository } = fakeEventRepository({ "community-1": "creator-1" });
+    const scheduler = new ScheduleLiveSession(repository, new FakeStreamingAdapter());
+    await scheduler.execute({ creatorId: "creator-1", communityId: "community-1", title: "One" });
+
+    const useCase = new ListLiveSessions(repository, new FakeStreamingAdapter());
     await expect(
       useCase.execute({ creatorId: "stranger", communityId: "community-1" })
     ).rejects.toBeInstanceOf(NotFoundError);
