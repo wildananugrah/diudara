@@ -681,9 +681,34 @@ real WHIP POST, the real ICE negotiation — was untouched and real) published a
 ```
 INF [WebRTC] [session ...] peer connection established, local candidate: host/udp/127.0.0.1/8189, remote candidate: prflx/udp/172.26.0.1/...
 INF [path live/<key>] runOnOnline command started
-INF [path live/<key>] stream is available and online, 2 tracks (Opus, AV1)
+INF [path live/<key>] stream is available and online, 2 tracks (Opus, H264)
 INF [WebRTC] [session ...] is publishing to path 'live/<key>'
 ```
+
+**That `H264` is load-bearing, not incidental — Task 4's own phase gate found the opposite
+signature (`Opus, VP8`, and this task's own first run showed `Opus, AV1`) is a real,
+member-facing defect, not a cosmetic codec difference.** MediaMTX's HLS muxer cannot carry
+VP8 or AV1 at all: it silently drops the video track and mixes the audio through alone,
+logging one easy-to-miss `WAR` line and nothing else —
+
+```
+INF [path live/<key>] stream is available and online, 2 tracks (Opus, VP8)
+WAR [HLS] [muxer live/<key>] skipping track 2 (VP8)
+INF [HLS] [muxer live/<key>] is converting into HLS, 1 track (Opus)
+```
+
+— and a member gets **audio only**: `readyState 4`, playback time genuinely advancing, and
+`videoWidth: 0, videoHeight: 0` forever. Nothing else reports it — the creator's own preview
+is their LOCAL camera, never the round trip, so the creator's screen looks completely normal
+throughout. Chromium's default video codec preference is VP8, which is exactly why this
+survived Task 1's own verification above and the entire rest of the live-streaming phase
+before it: RTMP/OBS was never affected, because `ffmpeg` publishes H264 already. The fix —
+`preferH264` in `whip-publisher.ts`, run before `createOffer` — reorders the video
+transceiver's codec preferences rather than restricting them, so a browser without H264
+support still negotiates something instead of failing to negotiate video at all. **The check
+after any change here is MediaMTX logging `stream is available and online, 2 tracks (H264,
+Opus)`, not merely that a publish connects** — a healthy-looking connection with the wrong
+codec is this defect exactly.
 
 `GET .../events` then showed `"status": "live"`. Stopping the publish (closing the browser)
 produced:
@@ -834,6 +859,57 @@ opens a pull request a shell on the production server.
 commit before it reaches production. A push to `main` deploys whether the tests pass or
 not — which is why "Both must be green before a commit" above is a real obligation rather
 than a formality.
+
+### Pre-deploy checklist: browser publishing (WHIP)
+
+`scripts/deploy.sh` pulls, builds, migrates, and reloads pm2 — full stop. It does not touch
+nginx, the host firewall, or the VPS provider's own network layer, so browser publishing
+needs four manual steps on the box that nothing in the automated deploy performs for you.
+Do them in this order — the `.env` variables first, because a missing one restart-loops the
+API the moment `git pull` lands the code that requires it; the reload and the firewall
+changes are independent of each other but both have to be done before a creator can
+actually go live from a browser:
+
+1. **`apps/api/.env` on the box: add (or confirm) `MEDIAMTX_WHIP_BASE_URL`, before the
+   `git pull`, not after.** See "This cuts both ways" below for the full mechanism —
+   `selectStreamingProvider`'s all-or-nothing rule throws `Streaming is half-configured` at
+   boot the instant this variable is required but absent, in every environment. Skip this
+   and the API restart-loops; `scripts/deploy.sh`'s own health-check poll is what catches
+   it, loudly, not a fix. **It must be the same public origin as `MEDIAMTX_HLS_BASE_URL`** —
+   nginx serves `/live/` and `/whip/` from the same server block on the same origin, and
+   nothing cross-checks the two strings against each other; see `apps/api/.env.example`'s
+   own note on both variables.
+2. **`infra/.env` on the box: set `MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS` to the box's real
+   public IP.** See "The ports, and why the split exists" in the Live-streaming section
+   above for why. Skipping this does not crash anything — `scripts/deploy.sh` prints a WARN
+   banner — but it produces the single most confusing failure this feature has: negotiation
+   completes, no error appears on either side, and media never connects, because MediaMTX
+   only offers a LOCAL-interface ICE candidate that no browser on the public internet can
+   route to.
+3. **Install the new fourth nginx `location` block and reload nginx.** `scripts/deploy.sh`
+   explicitly does not deploy nginx config. Paste (or re-`include`) the `/whip/` block from
+   `infra/nginx/live-hls.conf.template` into the real server block — see "The nginx location
+   block the real VPS needs" above for the full template and citation — then `nginx -t` and
+   reload. Skip this and the WHIP POST never reaches MediaMTX at all: nginx has no route for
+   it, so a creator never gets past the negotiation step. RTMP and HLS keep working
+   unaffected, so this is easy to miss until a creator actually tries browser publishing.
+4. **Open UDP 8189 at two layers: the host firewall AND the VPS provider's network-level
+   firewall or security group.** See "The ports, and why the split exists" above — this is
+   the media, not the signalling, and it is published directly and publicly, never through
+   nginx. This project has already been caught by the provider-level layer once, for RTMP's
+   1935 — expect the same here: a host firewall rule alone is not sufficient if the provider
+   filters upstream of it. Skip this at either layer and ICE never connects: signalling
+   succeeds, the creator's browser reports nothing wrong of its own, and media never flows.
+
+**The diagnostic an operator needs, that no other committed doc states plainly:** steps 2
+through 4 above all fail into the exact same creator-facing message —
+"Gagal terhubung ke server siaran. Penyebab paling umum adalah jaringan yang memblokir lalu
+lintas UDP..." (`whip-publisher.ts`) — which blames the CREATOR's network. A deploy missing
+any one of them still passes `deploy.sh`'s health check, still leaves RTMP and HLS working,
+and tells every creator who tries browser publishing that their own WiFi is at fault. If more
+than one creator reports "my network blocks UDP" right after a deploy, treat this checklist —
+a missed nginx location, a missed firewall layer, a missed public IP — as the first suspect,
+not their network.
 
 ### The secrets boundary
 
