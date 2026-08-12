@@ -47,19 +47,49 @@ export type ResolveWatchTokenResult = { allowed: true; hlsUrl: string } | { allo
  * event, wrong community, inactive subscription — returns the identical
  * `{ allowed: false }`. The route turns that into the ONE generic 403 body,
  * never a reason: see `routes/public-subscription.ts`.
+ *
+ * FINAL WHOLE-BRANCH REVIEW CRITICAL, FIXED HERE: this class used to return
+ * `event.hlsPlaybackPath` verbatim — a URL `MediaMtxAdapter.createSession`
+ * builds from the event's `streamKey`, the SAME string that authorises a
+ * publish (`AuthoriseStream.authorisePublish`). That handed every member's
+ * browser the creator's publish credential in plain sight (network tab,
+ * history, any forwarded link) — see `EventRepositoryPort`'s own docstring
+ * on `streamKey`: "A SECRET. It travels to the creator who owns the
+ * community and nobody else." The fix: build the URL here from `event.id`
+ * instead — an opaque row id, not a credential, safe for any watch-token
+ * holder to see — against a base URL this class is configured with
+ * (`hlsBaseUrl`, the SAME `MEDIAMTX_HLS_BASE_URL` value `MediaMtxAdapter`
+ * uses, since both point at the one public HLS origin). `event.streamKey`
+ * itself never leaves this process from this call; it is read only to
+ * gate on "this event was actually set up for streaming" (see `execute`)
+ * and is never placed in the returned `hlsUrl`. nginx is what rewrites the
+ * public `/live/<eventId>/...` path this produces back onto MediaMTX's
+ * unchanged internal `/live/<streamKey>/...` — see
+ * `AuthoriseStream.authoriseReadByEventId` and
+ * `infra/nginx/live-hls.conf.template` for the other half of this fix.
  */
 export class ResolveWatchToken {
+  private readonly streamTokenSecret: string;
+  /** `config.hlsBaseUrl` with any trailing slash stripped — see the constructor. */
+  private readonly hlsBaseUrl: string;
+
   constructor(
     private readonly events: EventRepositoryPort,
     private readonly subscriptions: SubscriptionRepositoryPort,
-    private readonly config: { streamTokenSecret: string }
-  ) {}
+    config: { streamTokenSecret: string; hlsBaseUrl: string }
+  ) {
+    this.streamTokenSecret = config.streamTokenSecret;
+    // Trailing slash stripped for the same reason `MediaMtxAdapter`'s own
+    // constructor strips one from the identical env var — concatenating
+    // "/live/<id>/index.m3u8" below must never produce a doubled "//".
+    this.hlsBaseUrl = config.hlsBaseUrl.replace(/\/+$/, "");
+  }
 
   async execute(input: { token: string; now: number }): Promise<ResolveWatchTokenResult> {
     const claims = verifyWatchToken({
       token: input.token,
       now: input.now,
-      secret: this.config.streamTokenSecret,
+      secret: this.streamTokenSecret,
     });
     if (!claims) {
       return { allowed: false };
@@ -68,8 +98,13 @@ export class ResolveWatchToken {
     // `findById` is the second sanctioned unscoped lookup on this port —
     // there is no authenticated creator here, only the eventId the token's
     // own signature names. See `EventRepositoryPort.findById`'s docstring.
+    // The `streamKey` gate (replacing an earlier `!event.hlsPlaybackPath`
+    // check) means the same thing it always did: this event was never
+    // actually wired up for streaming (should not be reachable in practice
+    // — `ScheduleLiveSession` always sets both together — kept as a
+    // defensive floor, not a check anything currently exercises).
     const event = await this.events.findById(claims.eventId);
-    if (!event || !event.hlsPlaybackPath) {
+    if (!event || !event.streamKey) {
       return { allowed: false };
     }
 
@@ -88,6 +123,6 @@ export class ResolveWatchToken {
       return { allowed: false };
     }
 
-    return { allowed: true, hlsUrl: event.hlsPlaybackPath };
+    return { allowed: true, hlsUrl: `${this.hlsBaseUrl}/live/${event.id}/index.m3u8` };
   }
 }

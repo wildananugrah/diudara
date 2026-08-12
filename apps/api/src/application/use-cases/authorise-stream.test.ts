@@ -301,6 +301,129 @@ describe("AuthoriseStream — read", () => {
   });
 });
 
+/**
+ * `authoriseReadByEventId` — the entry point nginx's `auth_request` calls
+ * (Task 9, `mediamtx-webhooks.ts`'s `/auth-request` route), added by the
+ * final whole-branch review's Critical fix: the public HLS path a member's
+ * browser ever requests is now `/live/<eventId>/...`, so the re-auth check
+ * on every segment has to resolve by event id, not by stream key — the
+ * whole point being that the stream key never has to appear anywhere a
+ * member's browser can see it. Mirrors "AuthoriseStream — read" above
+ * property-for-property (same token/entitlement checks, same
+ * `authoriseReadForEvent` helper under the hood), plus the NEW behaviour:
+ * only this entry point ever hands the stream key back out, and only to a
+ * caller that already proved entitlement.
+ */
+describe("AuthoriseStream — read by event id (nginx auth_request)", () => {
+  it("allows a read with a valid token, and returns the event's own stream key", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = tokenFor(subscription.id, event.id);
+
+    const result = await useCase.authoriseReadByEventId({
+      eventId: event.id,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: true, streamKey });
+  });
+
+  it("refuses once the subscription is cancelled after the token was minted", async () => {
+    const community = await seedCommunity();
+    const { event } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = tokenFor(subscription.id, event.id);
+
+    await cancelSubscription(subscription.id);
+
+    const result = await useCase.authoriseReadByEventId({
+      eventId: event.id,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("refuses a token minted for event A when presented against event B's id", async () => {
+    const community = await seedCommunity();
+    const { event: eventA } = await seedEvent(community.id, "live");
+    const { event: eventB } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = tokenFor(subscription.id, eventA.id);
+
+    const result = await useCase.authoriseReadByEventId({
+      eventId: eventB.id,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("refuses when the subscription's community differs from the event's community", async () => {
+    const subscriberCommunity = await seedCommunity("Rina");
+    const eventCommunity = await seedCommunity("Budi");
+    const { event } = await seedEvent(eventCommunity.id, "live");
+    const subscription = await seedActiveSubscription(subscriberCommunity.id);
+    const token = tokenFor(subscription.id, event.id);
+
+    const result = await useCase.authoriseReadByEventId({
+      eventId: event.id,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("refuses an unknown event id even with an otherwise well-formed token", async () => {
+    const community = await seedCommunity();
+    const subscription = await seedActiveSubscription(community.id);
+    const token = tokenFor(subscription.id, "00000000-0000-4000-8000-000000000000");
+
+    const result = await useCase.authoriseReadByEventId({
+      eventId: "00000000-0000-4000-8000-000000000000",
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("refuses a read with no token in the query at all", async () => {
+    const community = await seedCommunity();
+    const { event } = await seedEvent(community.id, "live");
+
+    const result = await useCase.authoriseReadByEventId({ eventId: event.id, query: "", now: NOW });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  /**
+   * The property this task exists to close: presenting a STREAM KEY where
+   * this method expects an event id must not accidentally resolve to
+   * anything — `findById` and `findByStreamKey` are different lookups
+   * against different columns, so a key is simply never a valid id.
+   */
+  it("refuses when the caller passes a stream key instead of an event id", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = tokenFor(subscription.id, event.id);
+
+    const result = await useCase.authoriseReadByEventId({
+      eventId: streamKey,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+});
+
 describe("AuthoriseStream — unrecognised actions", () => {
   it("refuses an action that is neither publish nor read", async () => {
     const community = await seedCommunity();

@@ -13,13 +13,29 @@ beforeEach(resetDatabase);
 const SECRET = "a".repeat(32);
 const OTHER_SECRET = "b".repeat(32);
 const NOW = Date.parse("2026-08-11T10:00:00.000Z");
+/**
+ * The stream-key-shaped value stored on `event.hlsPlaybackPath` for these
+ * fixtures — deliberately NOT what `execute()` is expected to return
+ * anymore (final whole-branch review fix: this class stopped trusting that
+ * column and now builds the public URL from `event.id` + `hlsBaseUrl`
+ * instead, so a member's browser never sees the stream key). Kept only
+ * because the `event` row still has a NOT-relevant-here `hlsPlaybackPath`
+ * column to populate.
+ */
 const HLS_PATH = "https://fake-mediamtx.local/live/key/index.m3u8";
+const HLS_BASE_URL = "https://hls.diudara.test";
 
 const eventRepository = new DrizzleEventRepository(db);
 const subscriptionRepository = new DrizzleSubscriptionRepository(db);
 const useCase = new ResolveWatchToken(eventRepository, subscriptionRepository, {
   streamTokenSecret: SECRET,
+  hlsBaseUrl: HLS_BASE_URL,
 });
+
+/** The exact public URL shape `execute()` must now build — see the class docstring. */
+function expectedHlsUrl(eventId: string): string {
+  return `${HLS_BASE_URL}/live/${eventId}/index.m3u8`;
+}
 
 let seedCounter = 0;
 
@@ -85,7 +101,7 @@ function tokenFor(subscriptionId: string, eventId: string, secret = SECRET, now 
 }
 
 describe("ResolveWatchToken — the happy path", () => {
-  it("resolves a valid token for an active subscription to the event's HLS URL", async () => {
+  it("resolves a valid token for an active subscription to a URL built from the event id, not the stream key", async () => {
     const community = await seedCommunity();
     const event = await seedEvent(community.id, "live");
     const subscription = await seedActiveSubscription(community.id);
@@ -93,7 +109,30 @@ describe("ResolveWatchToken — the happy path", () => {
 
     const result = await useCase.execute({ token, now: NOW });
 
-    expect(result).toEqual({ allowed: true, hlsUrl: HLS_PATH });
+    expect(result).toEqual({ allowed: true, hlsUrl: expectedHlsUrl(event.id) });
+  });
+
+  /**
+   * FINAL WHOLE-BRANCH REVIEW CRITICAL, PINNED HERE: `event.hlsPlaybackPath`
+   * (the OLD, wrong return value) is streamKey-shaped — see `seedEvent`
+   * above, which stores `HLS_PATH` on the row. If `execute()` ever
+   * regressed to returning that column verbatim again, this assertion
+   * would fail: the returned URL must contain the event id and must NOT
+   * contain the string this fixture's stream key is built from.
+   */
+  it("never hands back the stream key — the exact defect this fix closes", async () => {
+    const community = await seedCommunity();
+    const event = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = tokenFor(subscription.id, event.id);
+
+    const result = await useCase.execute({ token, now: NOW });
+
+    expect(result.allowed).toBe(true);
+    if (!result.allowed) throw new Error("unreachable");
+    expect(result.hlsUrl).toContain(event.id);
+    expect(result.hlsUrl).not.toContain("key");
+    expect(result.hlsUrl).not.toBe(HLS_PATH);
   });
 
   /**
@@ -110,7 +149,7 @@ describe("ResolveWatchToken — the happy path", () => {
 
     const result = await useCase.execute({ token, now: NOW });
 
-    expect(result).toEqual({ allowed: true, hlsUrl: HLS_PATH });
+    expect(result).toEqual({ allowed: true, hlsUrl: expectedHlsUrl(event.id) });
   });
 
   it("also resolves a merely scheduled event's URL — nothing here gates on lifecycle status", async () => {
@@ -122,6 +161,21 @@ describe("ResolveWatchToken — the happy path", () => {
     const result = await useCase.execute({ token, now: NOW });
 
     expect(result.allowed).toBe(true);
+  });
+
+  it("strips a trailing slash from a configured hlsBaseUrl, matching MediaMtxAdapter's own rule", async () => {
+    const trailingSlashUseCase = new ResolveWatchToken(eventRepository, subscriptionRepository, {
+      streamTokenSecret: SECRET,
+      hlsBaseUrl: `${HLS_BASE_URL}/`,
+    });
+    const community = await seedCommunity();
+    const event = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = tokenFor(subscription.id, event.id);
+
+    const result = await trailingSlashUseCase.execute({ token, now: NOW });
+
+    expect(result).toEqual({ allowed: true, hlsUrl: expectedHlsUrl(event.id) });
   });
 });
 

@@ -15,6 +15,17 @@ import type { StreamingProviderPort } from "../../application/ports/streaming-pr
  *
  * Records every call so a test can assert what a use-case asked for without
  * inspecting the URLs' shape.
+ *
+ * FIX (final whole-branch review, minor): `hlsPlaybackPath` used to carry an
+ * extra `/hls` segment (`https://fake-mediamtx.local/hls/live/<key>/...`)
+ * that `MediaMtxAdapter` never produces — that adapter builds
+ * `${hlsBaseUrl}/live/<key>/index.m3u8` with NOTHING inserted between the
+ * configured base and `live/`; a `/hls` prefix only ever appeared in that
+ * adapter's own tests because the EXAMPLE `hlsBaseUrl` they configured
+ * happened to end in `/hls`, not because the adapter added it. Removed here
+ * so the fake matches the real adapter's actual construction rule, not an
+ * accidental shape nothing in `infra/nginx/live-hls.conf.template`'s
+ * `/live/...` location would ever match.
  */
 export class FakeStreamingAdapter implements StreamingProviderPort {
   readonly sessions: { streamKey: string }[] = [];
@@ -23,7 +34,7 @@ export class FakeStreamingAdapter implements StreamingProviderPort {
     this.sessions.push({ streamKey: input.streamKey });
     return {
       rtmpUrl: `rtmp://fake-mediamtx.local:1935/live/${input.streamKey}`,
-      hlsPlaybackPath: `https://fake-mediamtx.local/hls/live/${input.streamKey}/index.m3u8`,
+      hlsPlaybackPath: `https://fake-mediamtx.local/live/${input.streamKey}/index.m3u8`,
     };
   }
 }

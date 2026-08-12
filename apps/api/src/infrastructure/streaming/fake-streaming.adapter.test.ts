@@ -23,4 +23,16 @@ describe("FakeStreamingAdapter", () => {
     expect(a.rtmpUrl).not.toBe(b.rtmpUrl);
     expect(a.hlsPlaybackPath).not.toBe(b.hlsPlaybackPath);
   });
+
+  /**
+   * Final whole-branch review, minor: an earlier version inserted an extra
+   * `/hls` segment nothing in `MediaMtxAdapter` — or the nginx `/live/...`
+   * location it must match — ever produces. Locking in the exact shape
+   * rather than the looser `.toContain` checks above.
+   */
+  it("builds an hlsPlaybackPath shaped exactly like MediaMtxAdapter's own — no extra /hls segment", () => {
+    const adapter = new FakeStreamingAdapter();
+    const session = adapter.createSession({ streamKey: "abc123" });
+    expect(session.hlsPlaybackPath).toBe("https://fake-mediamtx.local/live/abc123/index.m3u8");
+  });
 });

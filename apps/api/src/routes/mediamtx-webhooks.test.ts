@@ -475,14 +475,20 @@ describe("POST /webhooks/mediamtx/auth — end-to-end wiring", () => {
  * session (see the route's own docstring in `mediamtx-webhooks.ts` for the
  * empirical finding this responds to).
  */
+/**
+ * `eventId`, NOT `mtxPath` — final whole-branch review fix: nginx's
+ * `auth_request` now re-authorises reads by EVENT ID (the public path
+ * segment members' browsers actually request), not by stream key. See
+ * `mediamtx-webhooks.ts`'s `/auth-request` docstring for the full reasoning.
+ */
 function getAuthRequest(
   a: Hono<any>,
-  params: { mtxPath?: string; token?: string },
+  params: { eventId?: string; token?: string },
   secret: string | null = SECRET
 ) {
   const headers: Record<string, string> = {};
   if (secret !== null) headers[HEADER] = secret;
-  if (params.mtxPath !== undefined) headers["X-Mtx-Path"] = params.mtxPath;
+  if (params.eventId !== undefined) headers["X-Mtx-Event-Id"] = params.eventId;
   if (params.token !== undefined) headers["X-Watch-Token"] = params.token;
   return a.request("/webhooks/mediamtx/auth-request", { headers });
 }
@@ -491,7 +497,7 @@ describe("GET /webhooks/mediamtx/auth-request — secret verification", () => {
   it("401s a missing secret header, and never calls AuthoriseStream at all", async () => {
     const a = app(new ThrowingAuthoriseStream());
 
-    const res = await getAuthRequest(a, { mtxPath: "live/anything" }, null);
+    const res = await getAuthRequest(a, { eventId: "00000000-0000-4000-8000-000000000000" }, null);
 
     expect(res.status).toBe(401);
   });
@@ -499,7 +505,11 @@ describe("GET /webhooks/mediamtx/auth-request — secret verification", () => {
   it("401s a wrong secret header, and never calls AuthoriseStream at all", async () => {
     const a = app(new ThrowingAuthoriseStream());
 
-    const res = await getAuthRequest(a, { mtxPath: "live/anything" }, "wrong-secret");
+    const res = await getAuthRequest(
+      a,
+      { eventId: "00000000-0000-4000-8000-000000000000" },
+      "wrong-secret"
+    );
 
     expect(res.status).toBe(401);
   });
@@ -508,7 +518,7 @@ describe("GET /webhooks/mediamtx/auth-request — secret verification", () => {
     const a = app(new ThrowingAuthoriseStream());
 
     const res = await a.request(`/webhooks/mediamtx/auth-request?secret=${encodeURIComponent(SECRET)}`, {
-      headers: { "X-Mtx-Path": "live/anything" },
+      headers: { "X-Mtx-Event-Id": "00000000-0000-4000-8000-000000000000" },
     });
 
     expect(res.status).toBe(401);
@@ -516,7 +526,7 @@ describe("GET /webhooks/mediamtx/auth-request — secret verification", () => {
 });
 
 describe("GET /webhooks/mediamtx/auth-request — read", () => {
-  it("returns 2xx for a valid token against an active, matching subscription", async () => {
+  it("returns 2xx for a valid token against an active, matching subscription, and returns the stream key via X-Stream-Key — never in the body", async () => {
     const community = await seedCommunity();
     const { event, streamKey } = await seedEvent(community.id, "live");
     const subscription = await seedActiveSubscription(community.id);
@@ -529,14 +539,21 @@ describe("GET /webhooks/mediamtx/auth-request — read", () => {
     });
     const a = app();
 
-    const res = await getAuthRequest(a, { mtxPath: `live/${streamKey}`, token });
+    const res = await getAuthRequest(a, { eventId: event.id, token });
 
     expect(isSuccessStatus(res.status)).toBe(true);
+    // The whole point of this fix: nginx needs the stream key to rewrite
+    // onto MediaMTX's internal path, but it must arrive as a HEADER
+    // (`auth_request_set` reads response headers, never the body) and must
+    // never appear in anything a browser-facing body could echo.
+    expect(res.headers.get("X-Stream-Key")).toBe(streamKey);
+    const body = await res.text();
+    expect(body).not.toContain(streamKey);
   });
 
   it("refuses once the subscription is cancelled between mint and read — THE property this route exists for", async () => {
     const community = await seedCommunity();
-    const { event, streamKey } = await seedEvent(community.id, "live");
+    const { event } = await seedEvent(community.id, "live");
     const subscription = await seedActiveSubscription(community.id);
     const token = mintWatchToken({
       subscriptionId: subscription.id,
@@ -549,15 +566,16 @@ describe("GET /webhooks/mediamtx/auth-request — read", () => {
     await cancelSubscription(subscription.id);
 
     const a = app();
-    const res = await getAuthRequest(a, { mtxPath: `live/${streamKey}`, token });
+    const res = await getAuthRequest(a, { eventId: event.id, token });
 
     expect(isSuccessStatus(res.status)).toBe(false);
+    expect(res.headers.get("X-Stream-Key")).toBeNull();
   });
 
   it("refuses a request naming another community's event", async () => {
     const communityA = await seedCommunity("Rina");
     const communityB = await seedCommunity("Budi");
-    const { event: eventB, streamKey: streamKeyB } = await seedEvent(communityB.id, "live");
+    const { event: eventB } = await seedEvent(communityB.id, "live");
     // A subscription entitled in community A only.
     const subscription = await seedActiveSubscription(communityA.id);
     const token = mintWatchToken({
@@ -569,32 +587,59 @@ describe("GET /webhooks/mediamtx/auth-request — read", () => {
     });
     const a = app();
 
-    const res = await getAuthRequest(a, { mtxPath: `live/${streamKeyB}`, token });
+    const res = await getAuthRequest(a, { eventId: eventB.id, token });
 
     expect(isSuccessStatus(res.status)).toBe(false);
   });
 
   it("refuses a missing token", async () => {
     const community = await seedCommunity();
-    const { streamKey } = await seedEvent(community.id, "live");
+    const { event } = await seedEvent(community.id, "live");
     const a = app();
 
-    const res = await getAuthRequest(a, { mtxPath: `live/${streamKey}` });
+    const res = await getAuthRequest(a, { eventId: event.id });
 
     expect(isSuccessStatus(res.status)).toBe(false);
   });
 
-  it("refuses an unknown stream key", async () => {
+  it("refuses an unknown event id", async () => {
     const a = app();
 
-    const res = await getAuthRequest(a, { mtxPath: "live/no-such-key", token: "anything" });
+    const res = await getAuthRequest(a, {
+      eventId: "00000000-0000-4000-8000-000000000000",
+      token: "anything",
+    });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+  });
+
+  /**
+   * The property FIX 1 exists to guarantee: presenting a STREAM KEY where
+   * this endpoint expects an EVENT ID must not resolve to anything —
+   * `X-Mtx-Event-Id` is resolved via `findById`, a different column than
+   * `findByStreamKey` uses, so a key is never a valid id here.
+   */
+  it("refuses when a stream key is presented instead of an event id", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = mintWatchToken({
+      subscriptionId: subscription.id,
+      eventId: event.id,
+      now: Date.now(),
+      ttlMs: WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const a = app();
+
+    const res = await getAuthRequest(a, { eventId: streamKey, token });
 
     expect(isSuccessStatus(res.status)).toBe(false);
   });
 
   it("refuses an expired token", async () => {
     const community = await seedCommunity();
-    const { event, streamKey } = await seedEvent(community.id, "live");
+    const { event } = await seedEvent(community.id, "live");
     const subscription = await seedActiveSubscription(community.id);
     const token = mintWatchToken({
       subscriptionId: subscription.id,
@@ -605,7 +650,7 @@ describe("GET /webhooks/mediamtx/auth-request — read", () => {
     });
     const a = app();
 
-    const res = await getAuthRequest(a, { mtxPath: `live/${streamKey}`, token });
+    const res = await getAuthRequest(a, { eventId: event.id, token });
 
     expect(isSuccessStatus(res.status)).toBe(false);
   });
@@ -622,7 +667,10 @@ describe("GET /webhooks/mediamtx/auth-request — read", () => {
       })
     );
 
-    const res = await getAuthRequest(a, { mtxPath: "live/anything", token: "x" });
+    const res = await getAuthRequest(a, {
+      eventId: "00000000-0000-4000-8000-000000000000",
+      token: "x",
+    });
 
     expect(isSuccessStatus(res.status)).toBe(false);
   });
@@ -663,12 +711,13 @@ describe("GET /webhooks/mediamtx/auth-request — end-to-end wiring", () => {
       }
     }
 
-    const allowed = await getAuthRequest(a, { mtxPath: `live/${streamKey}`, token });
+    const allowed = await getAuthRequest(a, { eventId: event.id, token });
     expect(isSuccessStatus(allowed.status)).toBe(true);
+    expect(allowed.headers.get("X-Stream-Key")).toBe(streamKey);
 
     const wrongSecret = await getAuthRequest(
       a,
-      { mtxPath: `live/${streamKey}`, token },
+      { eventId: event.id, token },
       "wrong-secret"
     );
     expect(wrongSecret.status).toBe(401);

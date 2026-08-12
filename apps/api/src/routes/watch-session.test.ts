@@ -107,7 +107,15 @@ describe("GET /c/watch/:token — streaming disabled on this box", () => {
 });
 
 describe("GET /c/watch/:token — the happy path", () => {
-  it("resolves a valid token to the event's real HLS URL", async () => {
+  /**
+   * FINAL WHOLE-BRANCH REVIEW CRITICAL, PINNED AT THE ROUTE LEVEL: this
+   * route used to echo `event.hlsPlaybackPath` (streamKey-shaped) straight
+   * to the browser. `hlsUrl` must now be built from the event id, and the
+   * persisted `hlsPlaybackPath` column (still streamKey-shaped internally —
+   * see `ScheduleLiveSession`/`MediaMtxAdapter`) must never appear in the
+   * response body at all.
+   */
+  it("resolves a valid token to a URL built from the event id — never the stored, streamKey-shaped hlsPlaybackPath", async () => {
     await withStreamingConfigured(async () => {
       const a = app();
       const community = await seedCommunity();
@@ -120,7 +128,9 @@ describe("GET /c/watch/:token — the happy path", () => {
 
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body).toEqual({ hlsUrl: hlsPlaybackPath });
+      expect(body).toEqual({ hlsUrl: `https://hls.diudara.test/live/${event.id}/index.m3u8` });
+      expect(body.hlsUrl).not.toBe(hlsPlaybackPath);
+      expect(body.hlsUrl).not.toContain("watch-key-fixed");
     });
   });
 

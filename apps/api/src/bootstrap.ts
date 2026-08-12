@@ -1459,8 +1459,23 @@ export function bootstrap(): Dependencies {
   // `authoriseStream` — both need nothing but `STREAM_TOKEN_SECRET`, and
   // both refuse everything (this route's ONE generic body; that webhook's
   // `{ allowed: false }`) when it is absent.
+  //
+  // `hlsBaseUrl` (final whole-branch review fix — see `ResolveWatchToken`'s
+  // own docstring): this class now BUILDS the member-facing HLS URL from
+  // `event.id` rather than trusting the `streamKey`-shaped
+  // `event.hlsPlaybackPath` column, so it needs the same public HLS origin
+  // `MediaMtxAdapter` was configured with. Reading `MEDIAMTX_HLS_BASE_URL`
+  // directly here, rather than threading it through from `streamingProvider`,
+  // relies on the SAME invariant `mediamtxWebhookSecret` above already does:
+  // `selectStreamingProvider` (already run, without throwing, by the time
+  // this line executes) enforces all four streaming env vars together or
+  // none at all, so `streamTokenSecret` present implies
+  // `MEDIAMTX_HLS_BASE_URL` is too.
   const resolveWatchToken = streamTokenSecret
-    ? new ResolveWatchToken(eventRepository, subscriptionRepository, { streamTokenSecret })
+    ? new ResolveWatchToken(eventRepository, subscriptionRepository, {
+        streamTokenSecret,
+        hlsBaseUrl: presentOrUndefined(process.env.MEDIAMTX_HLS_BASE_URL) as string,
+      })
     : undefined;
 
   // Task 5's `POST /webhooks/mediamtx/lifecycle`. Gated on `mediamtxWebhookSecret`

@@ -1,5 +1,5 @@
 import { verifyWatchToken } from "../../domain/watch-token";
-import type { EventRepositoryPort } from "../ports/event-repository.port";
+import type { EventRecord, EventRepositoryPort } from "../ports/event-repository.port";
 import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
 
 /**
@@ -130,6 +130,33 @@ function watchTokenFromQuery(query: string): string | null {
  *          lose access on their very next segment request, not at the end
  *          of the token's 6-hour lifetime.
  *
+ * A THIRD ENTRY POINT — `authoriseReadByEventId`, below — exists for exactly
+ * one caller: nginx's `auth_request` re-authorisation (Task 9,
+ * `mediamtx-webhooks.ts`'s `/auth-request` route). FINAL WHOLE-BRANCH REVIEW
+ * CRITICAL, FIXED HERE: `createSession` (`MediaMtxAdapter`) builds the
+ * member-facing HLS URL from the SAME `streamKey` that authorises a publish
+ * — so the URL handed to every paying member is also, verbatim, the
+ * publish credential, and this `execute()` method's `read` branch (resolving
+ * by `streamKey` via `path`) cannot be the thing nginx calls without that
+ * credential appearing in a member's browser history. The fix decouples the
+ * two: the PUBLIC HLS path a member's browser ever sees is
+ * `/live/<eventId>/...`, never `/live/<streamKey>/...` — eventId is not a
+ * credential, it is an opaque row id a member is always allowed to know they
+ * are watching. `authoriseReadByEventId` resolves by `findById` (the SAME
+ * sanctioned unscoped-by-id lookup `ResolveWatchToken` already uses — there
+ * is no authenticated creator on this path either), runs the IDENTICAL
+ * token-and-entitlement checks as `execute()`'s `read` branch, and — ONLY on
+ * success — returns the event's `streamKey` so the caller (nginx, via
+ * `auth_request_set`) can rewrite the request onto MediaMTX's UNCHANGED
+ * internal path before proxying. MediaMTX itself was never taught about
+ * event ids and still only understands `live/<streamKey>` — the internal
+ * publish/read surface is deliberately untouched by this fix, only the
+ * public-facing HLS path changed. The key crosses exactly one boundary (an
+ * HTTP response header nginx reads over `127.0.0.1`, captured by
+ * `auth_request_set` and never forwarded to the original client) and is
+ * never present in the two literal bodies (`ALLOWED_BODY`/`REFUSED_BODY`)
+ * either endpoint ever sends to anything a browser can see.
+ *
  * EVERY refusal — no such event, ended event, bad signature, expired token,
  * wrong event, wrong community, cancelled subscription — returns the same
  * `{ allowed: false }`. Nothing here, or in the route that calls this,
@@ -194,7 +221,54 @@ export class AuthoriseStream {
     if (!event) {
       return { allowed: false };
     }
+    return this.authoriseReadForEvent(event, query, now);
+  }
 
+  /**
+   * nginx's `auth_request` re-authorisation, by EVENT ID — see this class's
+   * own docstring (the "THIRD ENTRY POINT" section) for the full reasoning.
+   * `findById` is the second sanctioned unscoped lookup (alongside
+   * `findByStreamKey`), documented on `EventRepositoryPort` itself; there is
+   * no authenticated creator on this path.
+   *
+   * Runs the SAME token-and-entitlement checks `authoriseRead` does — see
+   * `authoriseReadForEvent` below, which both now share — and, ONLY on
+   * success, returns the event's `streamKey` so the caller can rewrite the
+   * request onto MediaMTX's unchanged internal path. A `null` `streamKey` on
+   * the resolved event (should never happen for a row `ScheduleLiveSession`
+   * created, but this port's type allows it) refuses rather than handing
+   * back an empty string nginx would proxy onto a bare `/live/` path.
+   */
+  async authoriseReadByEventId(input: {
+    eventId: string;
+    query: string;
+    now: number;
+  }): Promise<{ allowed: false } | { allowed: true; streamKey: string }> {
+    const event = await this.events.findById(input.eventId);
+    if (!event || !event.streamKey) {
+      return { allowed: false };
+    }
+    const result = await this.authoriseReadForEvent(event, input.query, input.now);
+    if (!result.allowed) {
+      return { allowed: false };
+    }
+    return { allowed: true, streamKey: event.streamKey };
+  }
+
+  /**
+   * The read decision's actual logic, shared by `authoriseRead` (resolves
+   * `event` by stream key, for MediaMTX's own direct `authHTTPAddress`
+   * call) and `authoriseReadByEventId` (resolves `event` by id, for nginx's
+   * `auth_request`) — both already have `event` in hand by the time this
+   * runs, and everything past that point is identical: THE ENTITLEMENT
+   * RE-CHECK, read fresh on every single request, never cached, never
+   * trusted from the token — see this class's own docstring.
+   */
+  private async authoriseReadForEvent(
+    event: EventRecord,
+    query: string,
+    now: number
+  ): Promise<{ allowed: boolean }> {
     const token = watchTokenFromQuery(query);
     if (!token) {
       return { allowed: false };
@@ -208,9 +282,6 @@ export class AuthoriseStream {
       return { allowed: false };
     }
 
-    // THE ENTITLEMENT RE-CHECK. Not redundant with the signature check
-    // above — see this class's docstring. Read fresh, on every single
-    // request; never cached, never trusted from the token.
     const entitlement = await this.subscriptions.findByIdWithCommunity(claims.subscriptionId);
     if (!entitlement) {
       return { allowed: false };

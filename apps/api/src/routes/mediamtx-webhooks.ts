@@ -196,33 +196,50 @@ export function mediamtxWebhookRoutes(
    * WHY A SEPARATE ROUTE, NOT A REUSED `/auth`: nginx's `auth_request`
    * subrequest has no built-in way to construct MediaMTX's POST-JSON-body
    * contract (it mirrors the original request, normally a bodyless GET) —
-   * so this route accepts the two inputs `AuthoriseStream.authoriseRead`
-   * actually needs as HEADERS instead: `X-Mtx-Path` (built by nginx from
-   * the request URL as exactly `live/<key>` — see the nginx config; the
-   * specific FILE being requested carries no additional
-   * authorisation-relevant information, matching what MediaMTX's own
-   * `authHTTPAddress` call already sends) and `X-Watch-Token` (the SAME
-   * watch token `hls.js`'s `xhrSetup` re-attaches to every request, per
-   * Task 8). `action` is hard-coded to `"read"`: nginx only ever proxies
-   * HLS reads here — RTMP publish (port 1935) is never proxied through
-   * nginx at all (see CONTRIBUTING.md's port-asymmetry note), so this
-   * route has no publish case to handle.
+   * so this route accepts the inputs `AuthoriseStream.authoriseReadByEventId`
+   * actually needs as HEADERS instead: `X-Mtx-Event-Id` (built by nginx from
+   * the PUBLIC request URL's captured event id — see the nginx config) and
+   * `X-Watch-Token` (the SAME watch token `hls.js`'s `xhrSetup` re-attaches
+   * to every request, per Task 8). `action` is implicitly `"read"`: nginx
+   * only ever proxies HLS reads here — RTMP publish (port 1935) is never
+   * proxied through nginx at all (see CONTRIBUTING.md's port-asymmetry note),
+   * so this route has no publish case to handle.
+   *
+   * FINAL WHOLE-BRANCH REVIEW CRITICAL, FIXED HERE: this route used to read
+   * `X-Mtx-Path` (`live/<streamKey>`) and call `AuthoriseStream.execute`
+   * with `action: "read"` — resolving by STREAM KEY, the same identifier
+   * that authorises a publish. That was safe only because, before this fix,
+   * the PUBLIC path a member's browser requested (`/live/<streamKey>/...`)
+   * happened to equal MediaMTX's INTERNAL path — so nginx's own regex
+   * capture from the public URL already was the stream key. Once
+   * `ResolveWatchToken` stopped handing that key to members (see its own
+   * docstring), the public path became `/live/<eventId>/...` instead, and
+   * this route had to change what it resolves BY, not just what it is
+   * called: `X-Mtx-Event-Id` names the event id nginx captured, and
+   * `AuthoriseStream.authoriseReadByEventId` resolves it via `findById` (the
+   * unscoped-by-id lookup, not `findByStreamKey`). On success, the response
+   * now also carries an `X-Stream-Key` HEADER (never a body field) so nginx
+   * can rewrite the request onto MediaMTX's still-`live/<streamKey>`-shaped
+   * internal path before proxying — see the nginx config's
+   * `auth_request_set` for the other half of this. The key crosses this one
+   * response header, read only by nginx over `127.0.0.1`/loopback, and is
+   * never in a body a browser could ever see.
    *
    * HEADERS, NOT QUERY PARAMETERS — found running this for real, not from
-   * documentation. The obvious design reuses `?mtxPath=...&token=...` on
+   * documentation. The obvious design reuses `?eventId=...&token=...` on
    * this route's own URL, exactly like `/auth`'s `secret` query parameter.
    * It does not work: nginx's `auth_request` subrequest does NOT inherit
    * `$args`/`$arg_*` from the request it is authorising — confirmed with a
    * probe upstream that echoed back what the subrequest actually received.
    * `$arg_token`, read directly inside the internal `auth_request` location,
    * came back EMPTY every time, while `$request_uri` and a location's own
-   * regex-captured variable (`$mtx_key` in the nginx config) both came back
-   * correct. The working pattern (see `infra/nginx/live-hls.conf.template`):
-   * capture the token into a plain nginx variable with `set $watch_token
-   * $arg_token;` in the OUTER location, BEFORE `auth_request` fires — a
-   * `set` variable persists into the subrequest the same way a regex
-   * capture does, even though `$arg_token` itself does not — then forward
-   * that variable as a header. See task-9-report.md for the full trace.
+   * regex-captured variable came back correct. The working pattern (see
+   * `infra/nginx/live-hls.conf.template`): capture the token into a plain
+   * nginx variable with `set $watch_token $arg_token;` in the OUTER
+   * location, BEFORE `auth_request` fires — a `set` variable persists into
+   * the subrequest the same way a regex capture does, even though
+   * `$arg_token` itself does not — then forward that variable as a header.
+   * See task-9-report.md for the full trace.
    *
    * SECRET, VIA HEADER: unlike `authHTTPAddress`, nginx has no limitation
    * on custom headers (`proxy_set_header` in the internal location), so
@@ -232,7 +249,10 @@ export function mediamtxWebhookRoutes(
    * nginx's `auth_request` module only inspects the STATUS CODE (2xx =
    * allow, 401/403 = deny) — same rule as MediaMTX's own `authHTTPAddress`
    * — so this reuses `ALLOWED_BODY`/`REFUSED_BODY` for consistency, though
-   * nginx never reads either body.
+   * nginx never reads either body. The `X-Stream-Key` response header is
+   * ONLY ever consumed by nginx's `auth_request_set` — nginx does not
+   * forward an `auth_request` subrequest's headers to the client on its own,
+   * and this app adds no directive that would.
    *
    * MUST NOT be reachable from the public internet, same as `/auth` and
    * `/lifecycle` above: it is called ONLY by nginx's internal `auth_request`
@@ -250,18 +270,23 @@ export function mediamtxWebhookRoutes(
       return c.json(REFUSED_BODY, 403);
     }
 
-    const mtxPath = c.req.header("X-Mtx-Path") ?? "";
+    const eventId = c.req.header("X-Mtx-Event-Id") ?? "";
     const token = c.req.header("X-Watch-Token");
     const query = token ? `token=${encodeURIComponent(token)}` : "";
 
-    const { allowed } = await deps.authoriseStream.execute({
-      action: "read",
-      path: mtxPath,
+    const result = await deps.authoriseStream.authoriseReadByEventId({
+      eventId,
       query,
       now: Date.now(),
     });
 
-    return allowed ? c.json(ALLOWED_BODY, 200) : c.json(REFUSED_BODY, 403);
+    if (!result.allowed) {
+      return c.json(REFUSED_BODY, 403);
+    }
+    // Read only by nginx's `auth_request_set` — never forwarded to the
+    // client. See this route's own docstring for why that is safe.
+    c.header("X-Stream-Key", result.streamKey);
+    return c.json(ALLOWED_BODY, 200);
   });
 
   /**
