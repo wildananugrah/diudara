@@ -52,6 +52,16 @@ services:
       # than into the committed mediamtx.yml file. MTX_<UPPERCASE_KEY> is
       # MediaMTX's own rule for overriding any config key via environment.
       MTX_AUTHHTTPADDRESS: http://host.docker.internal:3000/webhooks/mediamtx/auth?secret=${MEDIAMTX_WEBHOOK_SECRET:?set MEDIAMTX_WEBHOOK_SECRET in infra/.env, matching apps/api/.env}
+      # Task 1 (browser publishing / WHIP): the server's public IP(s), NOT a
+      # secret — see mediamtx.yml's own comment on webrtcAdditionalHosts for
+      # why this is still an env override rather than a literal value in the
+      # committed config (deployment-specific, exactly like
+      # apps/api/.env's MEDIAMTX_RTMP_HOST). Comma-separated per MediaMTX's
+      # own environment-override convention for list-typed keys. Optional —
+      # no `:?` guard, unlike MEDIAMTX_WEBHOOK_SECRET above — because it is
+      # only load-bearing once publisher and server are on DIFFERENT
+      # machines; see infra/.env.example.
+      MTX_WEBRTCADDITIONALHOSTS: ${MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS:-}
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro
     ports:
@@ -63,6 +73,24 @@ services:
       # CONTRIBUTING.md for the location block); publishing 8888 itself
       # would let anyone fetch segments with no read authorisation at all.
       - "127.0.0.1:8888:8888"
+      # Task 1 (browser publishing / WHIP): WebRTC SIGNALLING — loopback
+      # ONLY, exactly like HLS above and for the identical reason. nginx on
+      # the real VPS proxies WHIP requests to this port from the public
+      # https:// origin (see live-hls.conf.template); publishing 8889
+      # itself would let anyone bypass authorisation and hit MediaMTX's own
+      # (unauthenticated-by-default) publish/read test pages directly.
+      - "127.0.0.1:8889:8889"
+      # Task 1 (browser publishing / WHIP): WebRTC MEDIA — the actual
+      # audio/video packets, all UDP, published PUBLICLY and DIRECTLY —
+      # this is the one WebRTC port that is NOT loopback-restricted, and
+      # deliberately: it is reached straight from a creator's browser, never
+      # through nginx or Cloudflare, because Cloudflare's proxy does not
+      # carry UDP at all (see mediamtx.yml's webrtcLocalUDPAddress comment).
+      # This port, not 8889, is what must be open at the VPS provider's
+      # firewall — a provider blocking it is one of the three specific
+      # causes CONTRIBUTING.md and this task's brief call out if WebRTC does
+      # not negotiate.
+      - "8189:8189/udp"
     extra_hosts:
       # Lets the container reach the API on the Docker host as
       # host.docker.internal — required on LINUX (the production VPS):
