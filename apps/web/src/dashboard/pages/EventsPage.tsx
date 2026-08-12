@@ -653,23 +653,32 @@ function BrowserPublishSection({
     // Fix round 2, N1 (measured: `pc.closed === false` after a drop without
     // this): a dropped connection is not a stop the CALLER initiated, so
     // nothing had closed the peer connection or issued the WHIP DELETE
-    // before this ran — leaking the connection and leaving the session open
-    // server-side. That matters concretely because the message below invites
-    // a retry, and an orphaned server-side session is exactly what that
-    // retry could collide with (a "menolak permintaan ini" from MediaMTX
-    // until the old session times out on its own). `close()` is safe to
-    // call even though `publishToWhip`'s own `onDisconnected` already fired
-    // from inside this same connection's state-change handling — it is
-    // idempotent (`pc.close()` on an already-failed connection, a
-    // best-effort DELETE either way).
+    // before this ran — leaking the connection, leaving the camera/mic
+    // active, and leaving the session open server-side with nothing left
+    // able to close it. `close()` is safe to call even though
+    // `publishToWhip`'s own `onDisconnected` already fired from inside this
+    // same connection's state-change handling — it is idempotent
+    // (`pc.close()` on an already-failed connection, a best-effort DELETE
+    // either way).
+    //
+    // The message below does NOT invite a retry of THIS session:
+    // `runOnOffline` already fired for this drop (see mediamtx.yml), which
+    // flips the event to `ended` server-side within moments of this handler
+    // running, and `ended` is excluded from `PUBLISHABLE_STATUSES`
+    // (authorise-stream.ts) — telling a creator to just try again would send
+    // them at a republish the server is guaranteed to refuse. See
+    // CONTRIBUTING.md's "Deferred, on purpose: an OBS reconnect currently
+    // kills the session" for the same lifecycle rule from the RTMP side.
+    // Scheduling a new session is the only way to resume.
     handleRef.current?.close();
     handleRef.current = null;
     unregisterUnloadWarning();
     setPublishing(false);
     onPublishingChange?.(false);
     setPublishError(
-      "Koneksi siaran terputus di tengah jalan. Coba mulai siaran lagi, atau gunakan OBS / " +
-        "Streamlabs sebagai alternatif."
+      "Koneksi siaran terputus di tengah jalan — sesi ini otomatis ditandai selesai dan " +
+        "tidak bisa disiarkan ulang. Jadwalkan sesi baru di bawah untuk melanjutkan, atau " +
+        "gunakan OBS / Streamlabs sebagai alternatif."
     );
   }
 

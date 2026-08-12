@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import EventsPage, { resetBrowserPublishUnloadGuardForTesting } from "./EventsPage";
 import { setSession } from "../auth";
@@ -292,10 +299,12 @@ describe("EventsPage - browser publishing", () => {
    * `waitForConnection` step to `publishToWhip` (see whip-publisher.ts and
    * whip-publisher.test.ts), so a fake that never reports "connected" would
    * make every "goes live" test in this file hang for real seconds instead
-   * of exercising the UI. The mid-stream-drop / never-connects paths
-   * themselves are pinned at the `whip-publisher.ts` unit level, not
-   * re-tested here — this file is about what the SCREEN does once
-   * negotiation has (or has not) succeeded.
+   * of exercising the UI. The never-connects / initial-negotiation-failure
+   * paths are pinned at the `whip-publisher.ts` unit level, not re-tested
+   * here. A drop AFTER a successful go-live IS exercised here too, via
+   * `_setConnectionState("failed")` below — that path is about what this
+   * SCREEN shows a creator, not just that `whip-publisher.ts`'s own
+   * `onDisconnected` callback fires.
    */
   class FakePeerConnection {
     localDescription: { type: string; sdp: string } | null = null;
@@ -325,6 +334,11 @@ describe("EventsPage - browser publishing", () => {
     }
     close() {
       this.closed = true;
+    }
+    /** Simulates a mid-broadcast drop — a state change after `close()` was never called. */
+    _setConnectionState(state: string) {
+      this.connectionState = state;
+      for (const callback of this.listeners.get("connectionstatechange") ?? []) callback();
     }
   }
 
@@ -709,6 +723,47 @@ describe("EventsPage - browser publishing", () => {
 
     expect(await screen.findByRole("button", { name: /Mulai siaran dari browser/ })).toBeTruthy();
     expect(screen.queryAllByText(/Jangan tutup, muat ulang, atau berpindah/).length).toBe(0);
+  });
+
+  // A mid-broadcast drop fires the SAME server-side `runOnOffline` -> `ended`
+  // chain a deliberate stop does (see mediamtx.yml and
+  // authorise-stream.ts's `PUBLISHABLE_STATUSES`), so retrying is refused —
+  // the message shown here must point at scheduling a new session instead of
+  // inviting a retry the server is guaranteed to reject.
+  it("points at scheduling a new session, not a retry, when the connection drops mid-broadcast", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: grantingMediaDevices(),
+    });
+    stubFetchWithWhip([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }], {
+      url: SCHEDULED_SESSION.whipUrl,
+    });
+
+    let capturedPc: FakePeerConnection | undefined;
+    (globalThis as Record<string, unknown>).RTCPeerConnection = class extends FakePeerConnection {
+      constructor() {
+        super();
+        capturedPc = this;
+      }
+    };
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Mulai siaran dari browser/ }));
+    await screen.findByRole("button", { name: "Hentikan siaran" });
+
+    act(() => {
+      capturedPc?._setConnectionState("failed");
+    });
+
+    const message = await screen.findByText(/Koneksi siaran terputus di tengah jalan/);
+    expect(message.textContent).toContain("Jadwalkan sesi baru");
+    expect(message.textContent).toContain("OBS");
+    expect(message.textContent).not.toContain("Coba mulai siaran lagi");
+    // The stale "live" UI must not linger once the drop is reported.
+    expect(screen.queryAllByRole("button", { name: "Hentikan siaran" }).length).toBe(0);
   });
 
   // Fix round 1, Critical 2. Review measured, through the real component,
