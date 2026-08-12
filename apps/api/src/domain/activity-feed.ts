@@ -1,7 +1,7 @@
 /**
  * WHAT A CREATOR SEES IN THEIR ACTIVITY FEED, AND WHAT THEY DO NOT.
  *
- * `activity_log` holds 14 event types and MOST OF THEM ARE INTERNAL DIAGNOSTICS.
+ * `activity_log` holds 18 event types and MOST OF THEM ARE INTERNAL DIAGNOSTICS.
  * A raw feed of `access_not_revoked` and `churn_revoke_skipped` rows is noise at
  * best and alarming at worst: they describe a retry deciding not to act, which the
  * system then handles by itself. So this module is an ALLOWLIST, not a denylist —
@@ -95,6 +95,21 @@ const PLATFORM_LABELS: Record<string, string> = {
   whatsapp: "WhatsApp",
 };
 
+/**
+ * Why ONE member did not get a "we're live" message, in Indonesian. Same
+ * lookup-not-interpolation rule as `REMINDER_STAGE_LABELS`/`PLATFORM_LABELS` — the
+ * `reason` field is written by `NotifyStreamLive`, a use-case in a different file, and
+ * a value it starts writing tomorrow must not appear here as a raw snake_case string.
+ */
+const STREAM_NOTIFY_SKIP_REASON_LABELS: Record<string, string> = {
+  event_not_live: "siaran sudah berakhir",
+  subscription_not_active: "anggota sudah tidak aktif",
+  // Review round 2: this member IS active — just not for this event's own
+  // community — so it must not share `subscription_not_active`'s label, which
+  // would tell a creator an active member is inactive.
+  subscription_wrong_community: "anggota bukan bagian dari komunitas ini",
+};
+
 /** Appends ` (detail)` when there is a detail, and nothing otherwise. */
 function withDetail(label: string, detail: string | undefined): string {
   return detail === undefined ? label : `${label} (${detail})`;
@@ -106,9 +121,14 @@ type Describer = (metadata: unknown) => ActivityEventDescription;
  * THE ALLOWLIST. Its keys are the only event types a creator ever sees, and each
  * one owns its own label.
  *
- * The six ordinary events are the business happening: somebody joined, renewed,
- * left, was reminded, was let into the group, was removed from it. The two
- * `*_manual_required` entries are the ones that need a person.
+ * The six original ordinary events are the business happening: somebody joined,
+ * renewed, left, was reminded, was let into the group, was removed from it. Task 5
+ * adds four more: a stream going live, a stream ending, one member being told about
+ * it, and one member deliberately NOT being told (with why) — visible for the same
+ * reason `channel_access_granted`/`channel_access_revoked` are, despite firing once
+ * per member rather than once per creator action: a creator watching their own
+ * go-live wants to see it land, member by member, the same way they watch invites
+ * land. The two `*_manual_required` entries are the ones that need a person.
  *
  * DELIBERATELY ABSENT, and why:
  *   renewal_reminder_queued    the `_sent` row is the delivery — showing both doubles
@@ -160,6 +180,34 @@ const DESCRIBERS: Record<string, Describer> = {
       booleanField(metadata, "automated") === false
         ? "Akses grup dicabut — belum diterapkan di grup, sedang dicoba ulang"
         : withDetail("Akses grup dicabut", PLATFORM_LABELS[stringField(metadata, "platform") ?? ""]),
+    severity: "info",
+  }),
+
+  // ===================================================================
+  // TASK 5: LIVE STREAMING. Written by `HandleStreamLifecycle`
+  // (`stream_live`/`stream_ended`) and `NotifyStreamLive`
+  // (`stream_live_notified`/`stream_live_notify_skipped`).
+  // ===================================================================
+  stream_live: () => ({ label: "Siaran langsung dimulai", severity: "info" }),
+
+  stream_ended: () => ({ label: "Siaran langsung berakhir", severity: "info" }),
+
+  // One row per member, like `channel_access_granted` — a creator watching a go-live
+  // wants to see delivery land, member by member.
+  stream_live_notified: () => ({
+    label: "Anggota diberi tahu bahwa siaran sedang berlangsung",
+    severity: "info",
+  }),
+
+  // The counterpart: nothing to act on (no retry fixes a churned member or a stream
+  // that already ended), so `info` rather than a warning — but named, not hidden,
+  // because a creator who sees "50 diberi tahu" and wonders about the rest should be
+  // able to find out why without reading a database.
+  stream_live_notify_skipped: (metadata) => ({
+    label: withDetail(
+      "Anggota tidak diberi tahu tentang siaran langsung",
+      STREAM_NOTIFY_SKIP_REASON_LABELS[stringField(metadata, "reason") ?? ""]
+    ),
     severity: "info",
   }),
 

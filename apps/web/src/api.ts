@@ -31,12 +31,20 @@ export interface CheckoutResult {
 
 /**
  * Mirrors apps/api/src/application/use-cases/get-subscription-status.ts.
- * Deliberately the ONLY field the endpoint returns — see that file and
+ * `status` is the only field the endpoint ALWAYS returns — see that file and
  * routes/public-subscription.ts for why: the subscription id travels in a
- * public, unauthenticated URL.
+ * public, unauthenticated URL. `watchUrl` is the one narrow exception
+ * (Task 8): a `/watch/<token>` path, present only while this member's
+ * subscription is active AND their community has a live event right now.
  */
 export interface SubscriptionStatus {
   status: string;
+  watchUrl?: string;
+}
+
+/** Mirrors apps/api/src/application/use-cases/resolve-watch-token.ts's success shape. */
+export interface WatchSession {
+  hlsUrl: string;
 }
 
 /** Thrown for any non-2xx response from the API. */
@@ -89,6 +97,24 @@ export async function fetchSubscriptionStatus(subscriptionId: string): Promise<S
     throw new ApiError(await readErrorMessage(res, `failed to load status (${res.status})`), res.status);
   }
   return (await res.json()) as SubscriptionStatus;
+}
+
+/**
+ * Resolves a `/watch/<token>` token into the HLS URL `hls.js` should load —
+ * see apps/api/src/application/use-cases/resolve-watch-token.ts. Every
+ * refusal reason (expired, malformed, wrong community, an inactive
+ * subscription, streaming not configured) answers with the SAME 403 body
+ * — `WatchPage` never reads `error` out of it and never should, so this
+ * function does not bother returning it either; the one Indonesian message
+ * the page shows for any `ApiError` here is deliberately uninformative
+ * about which of those it was.
+ */
+export async function fetchWatchSession(token: string): Promise<WatchSession> {
+  const res = await fetch(`/c/watch/${encodeURIComponent(token)}`);
+  if (!res.ok) {
+    throw new ApiError(`watch link is no longer valid (${res.status})`, res.status);
+  }
+  return (await res.json()) as WatchSession;
 }
 
 /**

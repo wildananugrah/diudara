@@ -48,11 +48,20 @@ import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
 import { DrizzleAiConversationRepository } from "./infrastructure/repositories/drizzle-ai-conversation.repository";
 import { DrizzleAiUsageRepository } from "./infrastructure/repositories/drizzle-ai-usage.repository";
 import { SendAiMessage } from "./application/use-cases/send-ai-message";
+import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
+import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
+import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
+import { DrizzleStreamLifecycleUnitOfWork } from "./infrastructure/repositories/drizzle-stream-lifecycle.unit-of-work";
+import { ScheduleLiveSession, ListLiveSessions } from "./application/use-cases/schedule-live-session";
+import { AuthoriseStream } from "./application/use-cases/authorise-stream";
+import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lifecycle";
+import { ResolveWatchToken } from "./application/use-cases/resolve-watch-token";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 import type { AiProviderPort } from "./application/ports/ai-provider.port";
+import type { StreamingProviderPort } from "./application/ports/streaming-provider.port";
 
 /** Values that may be interpolated into a `DatabasePing` tagged template. */
 type PingValue = string | number | boolean | Date | null;
@@ -227,6 +236,100 @@ export interface Dependencies {
    * without a co-builder.
    */
   sendAiMessage: SendAiMessage | undefined;
+  /**
+   * Task 2's live-streaming provider — the SECOND feature in this codebase
+   * (after `aiProvider`) that boots DISABLED rather than refusing to start
+   * when unconfigured. See `selectStreamingProvider` for the full four-way
+   * decision; `undefined` means MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/
+   * MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET are not set and (per the
+   * design spec §7) the creator's streaming UI stays hidden rather than
+   * offering a "go live" button that always fails, exactly the way
+   * `aiProvider: undefined` hides the co-builder chat screen.
+   */
+  streamingProvider: StreamingProviderPort | undefined;
+  /**
+   * Task 3's `POST /communities/:communityId/events` — scheduling a live
+   * session. `undefined` EXACTLY when `streamingProvider` is: this use-case
+   * requires a real `StreamingProviderPort` (see `ScheduleLiveSession`'s own
+   * docstring for why the "is streaming configured" decision is made once,
+   * here, rather than inside the use-case), so there is nothing to construct
+   * it against when streaming is disabled. `routes/events.ts` checks this
+   * exactly the way `routes/ai.ts` checks `sendAiMessage` and answers 503.
+   */
+  scheduleLiveSession: ScheduleLiveSession | undefined;
+  /**
+   * Task 3's `GET /communities/:communityId/events`. Unlike
+   * `scheduleLiveSession`, this is NEVER `undefined` — listing depends on no
+   * provider (see `ListLiveSessions`'s docstring) and works identically
+   * whether streaming is configured on this box or not.
+   */
+  listLiveSessions: ListLiveSessions;
+  /**
+   * Task 4's `POST /webhooks/mediamtx/auth` decision logic — `undefined`
+   * EXACTLY when `streamTokenSecret` is. Mirrors `scheduleLiveSession`'s
+   * undefined-ness rather than `listLiveSessions`'s: unlike listing,
+   * authorising a read needs `STREAM_TOKEN_SECRET` to verify a watch
+   * token's signature, so there is nothing to construct it against when
+   * streaming is disabled.
+   *
+   * NOT the same condition as `streamingProvider` being `undefined` — a
+   * docstring here once claimed it was, and that was wrong: under a
+   * `RELAXED_NODE_ENVS` box (`development`/`test`) with NO streaming
+   * variables set at all, `selectStreamingProvider` returns a real,
+   * truthy `FakeStreamingAdapter` (see that function's case 3), so
+   * `streamingProvider` is defined while `MEDIAMTX_WEBHOOK_SECRET` /
+   * `STREAM_TOKEN_SECRET` are genuinely absent and `authoriseStream` stays
+   * `undefined`. Concretely: a relaxed dev box has "schedule a session"
+   * enabled (`scheduleLiveSession` is set) while every call to
+   * `POST /webhooks/mediamtx/auth` 401s (see `mediamtxWebhookSecret`
+   * below) — a real, if confusing-looking, combination, and the correct
+   * one: fail-closed on authorisation is the right default even when
+   * scheduling itself is happily faked. Do not "fix" the route's
+   * `!deps.authoriseStream` guard as dead code on the strength of the old
+   * (wrong) claim that it can never be reached — this is exactly the case
+   * that reaches it.
+   */
+  authoriseStream: AuthoriseStream | undefined;
+  /**
+   * The shared secret `POST /webhooks/mediamtx/auth` requires, checked
+   * against EITHER `X-Mediamtx-Secret` (a header — what Task 5's
+   * `runOnOnline`/`runOnOffline` shell `curl` commands can send) OR a
+   * `secret` query parameter (what MediaMTX's own `authHTTPAddress` POST
+   * can carry, since it has no way to attach a custom header — see
+   * `routes/mediamtx-webhooks.ts`'s docstring). It is the ONLY
+   * authentication on that route either way, exactly like
+   * `xenditCallbackToken`/`telegramWebhookSecret` above. `undefined` in
+   * lockstep with `authoriseStream` (see that field — and see that field
+   * for why "in lockstep with `authoriseStream`" is NOT the same thing as
+   * "in lockstep with `streamingProvider`"), in which case
+   * `verifyCallbackToken` rejects every delivery. Deliberately NOT
+   * narrowed to `string`, for the same reason `xenditCallbackToken` is
+   * not: that would force a `?? ""` at the call site, and an empty
+   * expected token used to match an empty header.
+   */
+  mediamtxWebhookSecret: string | undefined;
+  /**
+   * Task 5's `POST /webhooks/mediamtx/lifecycle` decision logic — `undefined`
+   * in lockstep with `mediamtxWebhookSecret` (both are read off the same
+   * `MEDIAMTX_WEBHOOK_SECRET`; see that field for what "in lockstep" does and
+   * does not imply). Unlike `authoriseStream`, this class needs no secret of
+   * its own to do its job — it only reads and writes `event`, `activity_log`
+   * and `outbox` — so gating its construction on the secret is a choice made
+   * for symmetry with the route it serves (there is no reachable path to
+   * `POST /lifecycle` on a box where the secret is unset, so wiring the
+   * use-case anyway would only be dead weight) rather than a requirement of
+   * the class itself.
+   */
+  handleStreamLifecycle: HandleStreamLifecycle | undefined;
+  /**
+   * Task 8's `GET /c/watch/:token` decision logic — `undefined` in lockstep
+   * with `authoriseStream` (both are read off `STREAM_TOKEN_SECRET`; see
+   * that field for what "in lockstep" does and does not imply). A member
+   * opening a `/watch/<token>` URL on a box with streaming disabled sees the
+   * SAME "link is not valid" message as an expired token — see
+   * `routes/public-subscription.ts`'s `WATCH_REFUSED_BODY`.
+   */
+  resolveWatchToken: ResolveWatchToken | undefined;
 }
 
 /**
@@ -680,6 +783,151 @@ export function resolveAiDailyMessageLimit(env: { value: string | undefined }): 
 }
 
 /**
+ * Minimum `MEDIAMTX_WEBHOOK_SECRET`/`STREAM_TOKEN_SECRET` length, the same
+ * floor as `JWT_SECRET`/`XENDIT_CALLBACK_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`
+ * above and for the same reason: `MEDIAMTX_WEBHOOK_SECRET` is the ONLY
+ * authentication on both MediaMTX webhooks (Task 4), and
+ * `STREAM_TOKEN_SECRET` signs every watch token
+ * (`apps/api/src/domain/watch-token.ts`) — a short one is
+ * offline-brute-forceable from a single leaked token or webhook payload, and
+ * either lets an attacker reach a paid stream they never paid for.
+ */
+const MIN_STREAMING_SECRET_LENGTH = 32;
+
+/** The four env vars that make up streaming configuration, for error text. */
+const STREAMING_ENV_VAR_NAMES = {
+  rtmpHost: "MEDIAMTX_RTMP_HOST",
+  hlsBaseUrl: "MEDIAMTX_HLS_BASE_URL",
+  webhookSecret: "MEDIAMTX_WEBHOOK_SECRET",
+  streamTokenSecret: "STREAM_TOKEN_SECRET",
+} as const;
+
+/**
+ * Length floor for a present streaming secret, checked only once all four
+ * streaming variables are known to be set — see `selectStreamingProvider`.
+ * Mirrors `assertUsableJwtSecret` above in shape.
+ */
+export function assertUsableStreamingSecret(name: string, secret: string): void {
+  if (secret.length < MIN_STREAMING_SECRET_LENGTH) {
+    throw new Error(
+      `${name} is too short (${secret.length} characters; ${MIN_STREAMING_SECRET_LENGTH} ` +
+        `required). It is load-bearing for access to paid streams. Generate one: ` +
+        "openssl rand -hex 32"
+    );
+  }
+}
+
+/**
+ * Chooses the live-streaming provider adapter — the SECOND selector in this
+ * file (after `selectAiProvider`) that boots DISABLED rather than refusing
+ * to start when unconfigured, and deliberately so (design spec §7, plan
+ * Global Constraints): a community with no live streaming still charges
+ * members and gates its Telegram/WhatsApp channels exactly as before, so
+ * refusing to boot over a missing MediaMTX host would let an OPTIONAL
+ * feature take down a REQUIRED one.
+ *
+ * Same shape as `selectAiProvider`, generalised from two variables to four
+ * because a live session needs all of them or none:
+ *
+ *   1. All four set -> `MediaMtxAdapter`, in EVERY environment, once the two
+ *      secrets clear `MIN_STREAMING_SECRET_LENGTH` (checked here, at BOOT,
+ *      rather than deferred to whatever later reads them — a short secret
+ *      must fail loudly now, not as a webhook that silently never
+ *      authenticates or a token nobody can forge protection against).
+ *   2. PARTIAL configuration (1-3 of the four set) throws in EVERY
+ *      environment — the same rule `selectPaymentProvider` and
+ *      `selectMessagingProviders` apply to their own pairs, extended to
+ *      four: a host with no webhook secret is a webhook nothing can
+ *      authenticate, and a webhook secret with no host is a signing key
+ *      naming a stream nobody can reach.
+ *   3. NONE set, INSIDE `RELAXED_NODE_ENVS` -> `FakeStreamingAdapter`, the
+ *      SAME allowlist reused from `isRelaxedNodeEnv` (see `selectAiProvider`
+ *      above for why this is not a second gate).
+ *   4. NONE set, OUTSIDE `RELAXED_NODE_ENVS` -> `undefined`. THE FEATURE IS
+ *      DISABLED, NOT THE BOOT — same divergence `selectAiProvider` makes
+ *      from `selectPaymentProvider`/`selectMessagingProviders`, and for the
+ *      same reason: nothing is on the line if streaming is simply
+ *      unavailable.
+ *
+ * Case 4 is the one this project has paid for twice already (Phase 3,
+ * `RELAXED_NODE_ENVS`'s own docstring): a guard that is correct in isolation
+ * but whose trigger point — an unrecognised or unset `NODE_ENV` — is never
+ * actually exercised by a test is no guard at all. `bootstrap.test.ts` pins
+ * this for `production`, a plausible misspelling (`"Development"`, which
+ * `RELAXED_NODE_ENVS` — a `Set`, not a case-insensitive check — correctly
+ * treats as unrecognised), and unset, crossed with streaming configuration
+ * that is genuinely absent and with configuration that is present but
+ * blank/whitespace-only (which `presentOrUndefined` normalises to the same
+ * "absent" state) — none of those combinations may throw.
+ */
+export function selectStreamingProvider(env: {
+  rtmpHost: string | undefined;
+  hlsBaseUrl: string | undefined;
+  webhookSecret: string | undefined;
+  streamTokenSecret: string | undefined;
+  nodeEnv: string | undefined;
+}): StreamingProviderPort | undefined {
+  const values = {
+    rtmpHost: presentOrUndefined(env.rtmpHost),
+    hlsBaseUrl: presentOrUndefined(env.hlsBaseUrl),
+    webhookSecret: presentOrUndefined(env.webhookSecret),
+    streamTokenSecret: presentOrUndefined(env.streamTokenSecret),
+  };
+  const entries = Object.entries(values) as [keyof typeof values, string | undefined][];
+  const setCount = entries.filter(([, value]) => value !== undefined).length;
+
+  if (setCount === entries.length) {
+    assertUsableStreamingSecret("MEDIAMTX_WEBHOOK_SECRET", values.webhookSecret as string);
+    assertUsableStreamingSecret("STREAM_TOKEN_SECRET", values.streamTokenSecret as string);
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] streaming provider: MediaMtxAdapter " +
+        "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET " +
+        "are all set — live streaming is available)"
+    );
+    return new MediaMtxAdapter({
+      rtmpHost: values.rtmpHost as string,
+      hlsBaseUrl: values.hlsBaseUrl as string,
+    });
+  }
+
+  if (setCount > 0) {
+    const present = entries
+      .filter(([, value]) => value !== undefined)
+      .map(([key]) => STREAMING_ENV_VAR_NAMES[key]);
+    const missing = entries
+      .filter(([, value]) => value === undefined)
+      .map(([key]) => STREAMING_ENV_VAR_NAMES[key]);
+    throw new Error(
+      `Streaming is half-configured: ${present.join(", ")} set but ${missing.join(", ")} not. ` +
+        "Set MEDIAMTX_RTMP_HOST, MEDIAMTX_HLS_BASE_URL, MEDIAMTX_WEBHOOK_SECRET and " +
+        "STREAM_TOKEN_SECRET together or not at all — see apps/api/.env.example. Refusing to " +
+        "start rather than boot with streaming half-wired."
+    );
+  }
+
+  if (isRelaxedNodeEnv(env.nodeEnv)) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] streaming provider: FakeStreamingAdapter " +
+        "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET " +
+        "not set — no real MediaMTX will be used; set all four to switch to MediaMtxAdapter)"
+    );
+    return new FakeStreamingAdapter();
+  }
+
+  logProviderChoice(
+    env.nodeEnv,
+    "[bootstrap] streaming provider: none — live streaming is DISABLED " +
+      "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET not " +
+      `set, and NODE_ENV is ${describeNodeEnv(env.nodeEnv)}, outside ${RELAXED_NODE_ENVS_LIST}). ` +
+      "Unlike payments/messaging this does NOT block boot: the creator's streaming UI stays " +
+      "hidden. Set all four env vars to enable it."
+  );
+  return undefined;
+}
+
+/**
  * The token `resolveCallbackToken` hands back under `NODE_ENV=test`, and the
  * one value it refuses to accept anywhere else. It is committed to this
  * repository, so treating it as a real secret would mean shipping a publicly
@@ -1029,6 +1277,12 @@ export function bootstrap(): Dependencies {
 
   const memberRepository = new DrizzleMemberRepository(db);
   const subscriptionRepository = new DrizzleSubscriptionRepository(db);
+  // Task 3's event repository, constructed here (rather than down by
+  // `scheduleLiveSession`/`listLiveSessions`, where it used to live alone)
+  // because `getSubscriptionStatus` below needs it too — one shared instance,
+  // same rule `subscriptionRepository` already follows for its own many
+  // consumers.
+  const eventRepository = new DrizzleEventRepository(db);
   const appBaseUrl = resolveAppBaseUrl({
     appBaseUrl: process.env.APP_BASE_URL,
     nodeEnv: process.env.NODE_ENV,
@@ -1047,7 +1301,21 @@ export function bootstrap(): Dependencies {
     clock,
     { appBaseUrl }
   );
-  const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository);
+  // Task 8's watch link. Read directly off `process.env` here (rather than
+  // derived from `streamingProvider`'s truthiness) for the exact reason
+  // `authoriseStream`/`mediamtxWebhookSecret` do this further down: by the
+  // time `selectStreamingProvider` (below) has run without throwing, either
+  // all four streaming vars are set and length-valid or all four are
+  // genuinely absent — so a plain `presentOrUndefined` read here is exactly
+  // as strict, without this file's several selectors needing to agree about
+  // what "configured" means. Declared before `selectStreamingProvider` is
+  // even called is safe: a half-configured box makes that call throw before
+  // this function ever returns anything, so nothing constructed off this
+  // value here is ever handed to a caller in that case.
+  const streamTokenSecret = presentOrUndefined(process.env.STREAM_TOKEN_SECRET);
+  const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
+    streamTokenSecret,
+  });
 
   // The webhook's three writes commit together or not at all — see
   // PaymentActivationUnitOfWorkPort. The read that precedes them uses the
@@ -1145,6 +1413,84 @@ export function bootstrap(): Dependencies {
       )
     : undefined;
 
+  // Task 2's live-streaming provider. The SECOND feature in this codebase
+  // that boots disabled rather than refusing to start — see
+  // selectStreamingProvider.
+  const streamingProvider = selectStreamingProvider({
+    rtmpHost: process.env.MEDIAMTX_RTMP_HOST,
+    hlsBaseUrl: process.env.MEDIAMTX_HLS_BASE_URL,
+    webhookSecret: process.env.MEDIAMTX_WEBHOOK_SECRET,
+    streamTokenSecret: process.env.STREAM_TOKEN_SECRET,
+    nodeEnv: process.env.NODE_ENV,
+  });
+
+  // Task 3's scheduling endpoints. `eventRepository` is constructed earlier
+  // now (Task 8 needs it for `getSubscriptionStatus` too) and shared, not
+  // itself exposed on `Dependencies` — same rule the tier/channel
+  // repositories follow, since nothing outside this module needs to see it.
+  // `scheduleLiveSession` mirrors `sendAiMessage`'s undefined-ness exactly:
+  // constructed only when `streamingProvider` is, because its constructor
+  // requires a real `StreamingProviderPort` rather than accepting
+  // `| undefined` and checking internally — see `ScheduleLiveSession`'s
+  // docstring for why that decision belongs here and not there.
+  const scheduleLiveSession = streamingProvider
+    ? new ScheduleLiveSession(eventRepository, streamingProvider)
+    : undefined;
+  const listLiveSessions = new ListLiveSessions(eventRepository);
+
+  // Task 4's publish/read authorisation. The webhook secret is read directly
+  // here rather than re-derived from `streamingProvider`'s truthiness, and
+  // `streamTokenSecret` itself was already resolved earlier (alongside
+  // `getSubscriptionStatus`) — see that declaration for why reading it before
+  // `selectStreamingProvider` runs is still safe. Both secrets rely on the
+  // SAME invariant `selectStreamingProvider` enforces: by the time execution
+  // reaches this line, either both MEDIAMTX_WEBHOOK_SECRET and
+  // STREAM_TOKEN_SECRET are set and length-valid (the four-vars-together
+  // branch), or both are genuinely absent (partial configuration threw
+  // already) — so a plain `presentOrUndefined` read is exactly as strict as
+  // re-checking `streamingProvider`, without depending on this file's several
+  // selectors agreeing forever about what "configured" means.
+  const mediamtxWebhookSecret = presentOrUndefined(process.env.MEDIAMTX_WEBHOOK_SECRET);
+  const authoriseStream = streamTokenSecret
+    ? new AuthoriseStream(eventRepository, subscriptionRepository, { streamTokenSecret })
+    : undefined;
+
+  // Task 8's `GET /c/watch/:token`. `undefined` in lockstep with
+  // `authoriseStream` — both need nothing but `STREAM_TOKEN_SECRET`, and
+  // both refuse everything (this route's ONE generic body; that webhook's
+  // `{ allowed: false }`) when it is absent.
+  //
+  // `hlsBaseUrl` (final whole-branch review fix — see `ResolveWatchToken`'s
+  // own docstring): this class now BUILDS the member-facing HLS URL from
+  // `event.id` rather than trusting the `streamKey`-shaped
+  // `event.hlsPlaybackPath` column, so it needs the same public HLS origin
+  // `MediaMtxAdapter` was configured with. Reading `MEDIAMTX_HLS_BASE_URL`
+  // directly here, rather than threading it through from `streamingProvider`,
+  // relies on the SAME invariant `mediamtxWebhookSecret` above already does:
+  // `selectStreamingProvider` (already run, without throwing, by the time
+  // this line executes) enforces all four streaming env vars together or
+  // none at all, so `streamTokenSecret` present implies
+  // `MEDIAMTX_HLS_BASE_URL` is too.
+  const resolveWatchToken = streamTokenSecret
+    ? new ResolveWatchToken(eventRepository, subscriptionRepository, {
+        streamTokenSecret,
+        hlsBaseUrl: presentOrUndefined(process.env.MEDIAMTX_HLS_BASE_URL) as string,
+      })
+    : undefined;
+
+  // Task 5's `POST /webhooks/mediamtx/lifecycle`. Gated on `mediamtxWebhookSecret`
+  // rather than constructed unconditionally — see the `handleStreamLifecycle`
+  // field's own docstring for why that is a symmetry choice, not a real
+  // dependency of the class. Takes BOTH the pooled `eventRepository` (the
+  // stream-key lookup, kept outside any transaction — review round 2, mirroring
+  // `HandlePaymentWebhook`'s own split) AND the unit-of-work (the transition, its
+  // activity_log row, and every per-member notify_stream_live row, which must
+  // commit or roll back together — see `StreamLifecycleUnitOfWorkPort`'s own
+  // docstring for why).
+  const handleStreamLifecycle = mediamtxWebhookSecret
+    ? new HandleStreamLifecycle(eventRepository, new DrizzleStreamLifecycleUnitOfWork(db))
+    : undefined;
+
   return {
     creatorRepository,
     tokenIssuer,
@@ -1180,5 +1526,12 @@ export function bootstrap(): Dependencies {
     sql,
     aiProvider,
     sendAiMessage,
+    streamingProvider,
+    scheduleLiveSession,
+    listLiveSessions,
+    authoriseStream,
+    resolveWatchToken,
+    mediamtxWebhookSecret,
+    handleStreamLifecycle,
   };
 }

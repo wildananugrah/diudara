@@ -3,6 +3,7 @@ import LandingPage from "./pages/LandingPage";
 import NotFoundPage from "./pages/NotFoundPage";
 import CheckoutPage from "./pages/CheckoutPage";
 import StatusPage from "./pages/StatusPage";
+import WatchPage from "./pages/WatchPage";
 import DashboardLayout from "./dashboard/DashboardLayout";
 import LoginPage from "./dashboard/LoginPage";
 import RequireAuth from "./dashboard/RequireAuth";
@@ -14,6 +15,7 @@ import AccountPage from "./dashboard/pages/AccountPage";
 import MembersPage from "./dashboard/pages/MembersPage";
 import ActivityPage from "./dashboard/pages/ActivityPage";
 import CoBuilderPage from "./dashboard/pages/CoBuilderPage";
+import EventsPage from "./dashboard/pages/EventsPage";
 
 export function AppRoutes() {
   return (
@@ -26,6 +28,12 @@ export function AppRoutes() {
           here only for readability, not because order is load-bearing. */}
       <Route path="/c/:slug/status/:subscriptionId" element={<StatusPage />} />
       <Route path="/c/:slug" element={<CheckoutPage />} />
+
+      {/* Task 8: the member watch page. A bare, standalone route — not
+          nested under /c — because a `/watch/<token>` URL is delivered on
+          its own (a WhatsApp message, the status page's "Tonton sekarang"
+          link) and has to work with nothing else in the address. */}
+      <Route path="/watch/:token" element={<WatchPage />} />
 
       {/*
         THE CREATOR DASHBOARD, under /dashboard.
@@ -56,6 +64,7 @@ export function AppRoutes() {
         <Route path="c/:communityId/channels" element={<ChannelsPage />} />
         <Route path="c/:communityId/members" element={<MembersPage />} />
         <Route path="c/:communityId/activity" element={<ActivityPage />} />
+        <Route path="c/:communityId/streaming" element={<EventsPage />} />
         {/* An unknown /dashboard/... path goes to the dashboard's own home, not
             to the public checkout 404 the catch-all below serves. */}
         <Route path="*" element={<Navigate to="/dashboard" replace />} />

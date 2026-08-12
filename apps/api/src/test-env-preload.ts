@@ -70,6 +70,52 @@ if (!process.env.DATABASE_URL) {
 }
 
 /**
+ * DELETED, NOT MERELY LEFT ALONE — every test file's own `bootstrap()` call
+ * must be independent of whatever `apps/api/.env` happens to contain for
+ * live streaming, and this is the ONE place that can guarantee that for
+ * every file, not just one.
+ *
+ * `selectStreamingProvider` (bootstrap.ts) throws `Streaming is
+ * half-configured` when ONE to THREE of these four are set, and throws a
+ * "too short" error when all four are set but either secret is under 32
+ * characters. Task 6 (live streaming, infra) put real values for all four
+ * into `apps/api/.env` so a developer can drive a local MediaMTX — and
+ * `bun test` auto-loads that file — which means EVERY bare `bootstrap()`
+ * call in EVERY test file (not just the ones that test streaming) is
+ * exposed to it: `routes/health.test.ts`'s `createApp(bootstrap())`,
+ * `routes/auth.test.ts`, `routes/tiers.test.ts`, and roughly a dozen more,
+ * none of which set up or care about streaming at all.
+ *
+ * A `beforeEach` inside one test file was tried first and was not enough —
+ * Bun scopes a `beforeEach` to the file that declares it, so
+ * `bun test src/routes/health.test.ts` in isolation never loads
+ * `bootstrap.test.ts` and never runs its hook. THIS module, by contrast, is
+ * the preload: it runs once, before any test file is evaluated, for every
+ * invocation of `bun test` in this workspace — the only point that reaches
+ * all of them, including files that will be added after this comment is
+ * written.
+ *
+ * No `afterEach`/restore counterpart, and none is needed: this preload runs
+ * ONCE per process, before the process's own environment (real or
+ * `apps/api/.env`-loaded) has been read by anything, and every test in the
+ * run shares that one process. There is no "original value" to put back —
+ * the whole run simply never has these four set, by design, the same way a
+ * CI box with no `apps/api/.env` at all never has them set. A test that
+ * wants one or more of these DOES set them explicitly (see `withEnv` in
+ * `bootstrap.test.ts`), and that is scoped correctly today: it sets, runs,
+ * and restores to whatever this preload already established — undefined —
+ * within a single test, never leaking into another file.
+ */
+for (const key of [
+  "MEDIAMTX_RTMP_HOST",
+  "MEDIAMTX_HLS_BASE_URL",
+  "MEDIAMTX_WEBHOOK_SECRET",
+  "STREAM_TOKEN_SECRET",
+]) {
+  delete process.env[key];
+}
+
+/**
  * Drops the databases of runs that died before they could drop their own.
  *
  * The only backstop there is: `afterAll` does not run when a process is killed, and a

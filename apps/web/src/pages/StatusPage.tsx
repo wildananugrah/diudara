@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { ApiError, fetchSubscriptionStatus } from "../api";
 
 /** How often to re-check the subscription's status. */
@@ -17,7 +17,7 @@ const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
 type Phase =
   | { name: "checking" }
-  | { name: "active" }
+  | { name: "active"; watchUrl?: string }
   | { name: "timed-out" }
   | { name: "not-found" }
   | { name: "error"; message: string };
@@ -41,6 +41,13 @@ export default function StatusPage({
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | undefined;
     const deadline = Date.now() + timeoutMs;
+    // Set the instant the subscription is FIRST seen active, and never
+    // cleared afterwards. Once true, no later poll — whether it 404s, throws,
+    // or simply times out — is allowed to downgrade the phase away from
+    // "active": the member has genuinely paid, and a transient blip while
+    // this page keeps polling FOR A watchUrl (see below) must not replace
+    // "Pembayaran berhasil!" with an error or a timeout screen.
+    let reachedActive = false;
 
     function stop() {
       if (intervalId !== undefined) {
@@ -55,8 +62,29 @@ export default function StatusPage({
         if (cancelled) return;
 
         if (result.status === "active") {
-          setPhase({ name: "active" });
-          stop();
+          reachedActive = true;
+          setPhase({ name: "active", watchUrl: result.watchUrl });
+          // A member who paid BEFORE the creator went live gets `active`
+          // with no `watchUrl` — this page is "the only place a member can
+          // reach a stream until Fonnte is configured" (Task 8 brief), so
+          // stopping here permanently would mean the "Tonton sekarang" link
+          // never appears in this tab even once the creator does go live.
+          // Keep polling, bounded by the SAME deadline an abandoned tab was
+          // always going to hit, until either a watchUrl shows up (nothing
+          // left to wait for) or the deadline arrives (give up quietly —
+          // the success screen itself is not in question, only the link).
+          if (result.watchUrl || Date.now() >= deadline) {
+            stop();
+          }
+          return;
+        }
+
+        // Once the success screen has been shown, a later poll reporting
+        // anything else is noise from the watchUrl-only polling window
+        // above, not a reason to take "Pembayaran berhasil!" away — just
+        // let the clock (not the status value) decide when to stop asking.
+        if (reachedActive) {
+          if (Date.now() >= deadline) stop();
           return;
         }
 
@@ -73,6 +101,11 @@ export default function StatusPage({
         setPhase({ name: "checking" });
       } catch (err) {
         if (cancelled) return;
+
+        if (reachedActive) {
+          if (Date.now() >= deadline) stop();
+          return;
+        }
 
         if (err instanceof ApiError && err.status === 404) {
           setPhase({ name: "not-found" });
@@ -116,6 +149,13 @@ export default function StatusPage({
         <>
           <h1 style={styles.heading}>Pembayaran berhasil!</h1>
           <p>Keanggotaan Anda sudah aktif. Anda akan segera menerima akses melalui WhatsApp.</p>
+          {phase.watchUrl ? (
+            <p>
+              <Link to={phase.watchUrl} style={styles.watchLink}>
+                Tonton sekarang
+              </Link>
+            </p>
+          ) : null}
         </>
       ) : null}
 
@@ -182,5 +222,15 @@ const styles: Record<string, React.CSSProperties> = {
     border: "3px solid #ddd",
     borderTopColor: "#16a34a",
     animation: "diudara-spin 0.8s linear infinite",
+  },
+  watchLink: {
+    display: "inline-block",
+    marginTop: 8,
+    padding: "10px 20px",
+    borderRadius: 8,
+    backgroundColor: "#16a34a",
+    color: "#fff",
+    textDecoration: "none",
+    fontWeight: 600,
   },
 };

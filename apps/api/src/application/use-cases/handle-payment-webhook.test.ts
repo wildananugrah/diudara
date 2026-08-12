@@ -165,6 +165,9 @@ function harness(
     async hasLiveSubscriptionInCommunity() {
       throw new Error("not used");
     },
+    async listActiveForCommunity() {
+      throw new Error("not used");
+    },
     async markPaid(input): Promise<MarkPaidOutcome> {
       calls.markPaid.push(input.transactionId);
       order.push("markPaid");
@@ -226,6 +229,9 @@ function harness(
       calls.enqueued.push({ eventType: input.eventType, payload: input.payload });
       order.push("outbox");
       return { id: `outbox-${calls.enqueued.length}` };
+    },
+    async enqueueMany() {
+      throw new Error("not used");
     },
     async claimBatch() {
       throw new Error("not used");

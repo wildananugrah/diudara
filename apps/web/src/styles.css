@@ -482,17 +482,43 @@ button:disabled {
   color: var(--amber);
 }
 
+/*
+ * `.badge-ended` (EventsPage.tsx's live-session status) JOINS this rule
+ * rather than repeating its hex triple: same meaning ("finished, no longer
+ * actionable") as a churned member or an archived community, so it shares
+ * their rule the same way `.badge-archived` already does — one edit here
+ * moves all three together instead of three rules silently drifting apart.
+ */
 .badge-churned,
-.badge-archived {
+.badge-archived,
+.badge-ended {
   background: #f3f4f6;
   border-color: #d1d5db;
   color: #4b5563;
 }
 
-.badge-paused {
+/*
+ * `.badge-scheduled` (EventsPage.tsx) JOINS this rule for the same reason:
+ * "not happening yet, nothing wrong" is the same meaning as a paused
+ * community, so it shares the rule instead of duplicating its hex triple.
+ */
+.badge-paused,
+.badge-scheduled {
   background: #eff6ff;
   border-color: #bfdbfe;
   color: #1e40af;
+}
+
+/*
+ * `.badge-live` (EventsPage.tsx) — no existing badge means "this is
+ * happening RIGHT NOW, pay attention", so this borrows `.button-danger`'s
+ * red literals directly (via existing custom properties where one exists)
+ * rather than joining an unrelated rule just to avoid a second declaration.
+ */
+.badge-live {
+  background: var(--red-bg);
+  border-color: #fca5a5;
+  color: var(--red);
 }
 
 /* ---------- metric tiles ---------- */

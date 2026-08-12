@@ -130,6 +130,41 @@ export function memberStatusExplanation(status: string): string {
   }
 }
 
+export function liveSessionStatusLabel(status: string): string {
+  switch (status) {
+    case "scheduled":
+      return "Terjadwal";
+    case "live":
+      return "Live";
+    case "ended":
+      return "Selesai";
+    default:
+      return status;
+  }
+}
+
+/**
+ * WHAT THE STATUS ACTUALLY MEANS FOR OBS, not just its name — same reasoning
+ * as `communityStatusExplanation`. `ended` is the one a creator could
+ * otherwise misread as "just not started yet, try starting OBS again": see
+ * `AuthoriseStream`'s `PUBLISHABLE_STATUSES` (apps/api) — the stream key
+ * stops authorising a NEW publish the moment the session ends, on purpose,
+ * so nobody who captured the RTMP URL can restart it after the creator moved
+ * on.
+ */
+export function liveSessionStatusExplanation(status: string): string {
+  switch (status) {
+    case "scheduled":
+      return "Belum dimulai. Masukkan URL RTMP dan stream key di bawah ke OBS, lalu tekan “Start Streaming”.";
+    case "live":
+      return "Sedang berlangsung — OBS Anda saat ini mengirim video ke server.";
+    case "ended":
+      return "Sudah selesai. Stream key ini tidak bisa dipakai untuk memulai siaran baru.";
+    default:
+      return "";
+  }
+}
+
 const DATE_TIME = new Intl.DateTimeFormat("id-ID", {
   day: "numeric",
   month: "short",

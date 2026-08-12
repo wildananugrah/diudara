@@ -58,6 +58,47 @@ export const OUTBOX_SEND_RENEWAL_REMINDER = "send_renewal_reminder";
  */
 export const OUTBOX_REVOKE_SUBSCRIPTION_ACCESS = "revoke_subscription_access";
 
+/**
+ * The `event_type` of ONE ROW `HandleStreamLifecycle` (Task 5) queues PER MEMBER the
+ * moment an event goes `live`: "tell this one member the stream is up, with a watch
+ * link".
+ *
+ * ONE ROW PER MEMBER, not one row for the whole community — a single row fanning out
+ * to an unbounded roster breaks `ProcessOutbox`'s staleness model (`touchProcessing`
+ * fires once at dequeue, and the reclaim window is sized around "one row is one or two
+ * provider calls"), and a reclaimed fan-out row means a second worker re-sends to the
+ * ENTIRE community concurrently — the exact double-claim `FOR UPDATE SKIP LOCKED`
+ * exists to prevent. Per-member rows keep every row's cost bounded and let one bad send
+ * retry independently, without re-messaging everybody else.
+ *
+ * Written exactly once per (event, member) pair per go-live — `markLive`'s atomic
+ * status predicate is what guarantees the go-live happens at most once, and every row
+ * for it is enqueued INSIDE THE SAME TRANSACTION as that transition and its
+ * `activity_log` row (`StreamLifecycleUnitOfWorkPort`, `HandleStreamLifecycle`), not
+ * after it commits. That ordering is load-bearing: once `status='live'` commits, no
+ * later hook can ever re-open the opportunity to queue these rows, so a crash or a
+ * thrown error between the transition and an enqueue that happened afterwards would
+ * leave the event permanently `live` with nobody ever told and nothing able to fix it.
+ *
+ * The payload carries `eventId` and `subscriptionId` — ids only, never a community id
+ * and never the stream key. `NotifyStreamLive` re-resolves everything else fresh, at
+ * delivery time: whether the event is STILL `live` (MediaMTX can fire `runOnOffline`
+ * before the row is ever claimed — sending a watch link to a finished session is worse
+ * than sending nothing), and whether THIS subscription is STILL active (a member can
+ * churn between go-live and delivery). Both are re-read, never trusted from the
+ * enqueue-time snapshot the roster was built from.
+ *
+ * A retry of one row can duplicate a "we're live" WhatsApp message to a member already
+ * notified successfully — `(eventId, subscriptionId)` would be exactly as natural an
+ * idempotency key as `renewal_reminder`'s `(subscription_id, stage)` claim table, and
+ * this codebase already ships that shape once. No claim table was added for this event
+ * type because a watch token is a stateless HMAC (`domain/watch-token.ts`): re-minting
+ * one for a retry creates no provider-side artifact, categorically unlike Phase 4's
+ * Telegram invite link, where a re-mint produced a second live, unkillable credential.
+ * A duplicate message is a nuisance; a duplicate invite link was a security bug.
+ */
+export const OUTBOX_NOTIFY_STREAM_LIVE = "notify_stream_live";
+
 /** A row handed to a worker by `claimBatch`, already marked as being processed. */
 export interface ClaimedOutboxRow {
   id: string;
@@ -90,6 +131,20 @@ export interface ClaimedOutboxRow {
  */
 export interface OutboxRepositoryPort {
   enqueue(input: { eventType: string; payload: unknown }): Promise<{ id: string }>;
+  /**
+   * The same write as `enqueue`, `inputs.length` times, as ONE round trip — review
+   * round 2 on `HandleStreamLifecycle`. A per-member `enqueue` in a loop is
+   * `inputs.length` serial `await`s, each one held open inside the enqueuer's
+   * transaction (which is holding a row lock and one of postgres.js's ten pool
+   * connections for the whole loop) while whatever triggered the write — here,
+   * MediaMTX's fire-and-forget `curl` — waits on the response. `enqueueMany` turns
+   * that into a single multi-row `INSERT ... RETURNING`, with no change to the
+   * atomicity guarantee `enqueue` already has: called from inside a unit of work,
+   * every row it inserts still commits or rolls back with everything else in it.
+   *
+   * Returns `[]` for an empty `inputs` rather than issuing a no-op statement.
+   */
+  enqueueMany(inputs: { eventType: string; payload: unknown }[]): Promise<{ id: string }[]>;
   claimBatch(limit: number): Promise<ClaimedOutboxRow[]>;
   /** Terminal success. The row is never claimed again. */
   /**

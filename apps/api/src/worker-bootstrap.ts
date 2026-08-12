@@ -1,5 +1,6 @@
 import { db } from "./db/client";
 import {
+  assertUsableStreamingSecret,
   resolveAppBaseUrl,
   selectMessagingProviders,
   type MessagingProviders,
@@ -9,6 +10,7 @@ import { SystemClock } from "./infrastructure/clock/system.clock";
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
 import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
+import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import { DrizzleRenewalReminderRepository } from "./infrastructure/repositories/drizzle-renewal-reminder.repository";
@@ -29,9 +31,14 @@ import {
   SendRenewalReminder,
   sendRenewalReminderOutboxHandler,
 } from "./application/use-cases/send-renewal-reminder";
+import {
+  NotifyStreamLive,
+  notifyStreamLiveOutboxHandler,
+} from "./application/use-cases/notify-stream-live";
 import { ProcessOutbox, type OutboxHandler } from "./application/use-cases/process-outbox";
 import {
   OUTBOX_GRANT_ACCESS,
+  OUTBOX_NOTIFY_STREAM_LIVE,
   OUTBOX_REVOKE_ACCESS,
   OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
   OUTBOX_SEND_RENEWAL_REMINDER,
@@ -86,6 +93,17 @@ export interface WorkerDependencies {
    * class and not the creator-facing one with an invented creator id (spec §5).
    */
   revokeChannelAccessForSystem: RevokeChannelAccessForSystem;
+  /**
+   * Task 5's `notify_stream_live` consumer — `undefined` exactly when
+   * `STREAM_TOKEN_SECRET` is unset, mirroring `Dependencies.authoriseStream`'s
+   * own undefined-ness in the API root: without it there is no secret to sign
+   * a watch token with, and a row can only exist at all if the API's own
+   * `handleStreamLifecycle` was configured to enqueue one, which needs the
+   * same secret. Exposed for the same reason as `grantChannelAccess`: a test
+   * must be able to prove the worker can actually notify a member, not only
+   * that a handler is registered under the right string.
+   */
+  notifyStreamLive: NotifyStreamLive | undefined;
   messaging: MessagingProviders;
 }
 
@@ -205,6 +223,49 @@ export function bootstrapWorker(): WorkerDependencies {
     clock
   );
 
+  // Task 5's `notify_stream_live` consumer. `STREAM_TOKEN_SECRET` is read directly
+  // here, exactly the way `bootstrap()` reads it for `authoriseStream`, rather than
+  // re-derived from anything else — see `WorkerDependencies.notifyStreamLive`'s own
+  // docstring for why `undefined` here can only happen alongside the API root's own
+  // `authoriseStream`/`handleStreamLifecycle` being `undefined` too.
+  //
+  // Run through `assertUsableStreamingSecret` — the SAME length floor
+  // `selectStreamingProvider` enforces on the API side, not a bare presence check.
+  // Without it, a worker box whose `STREAM_TOKEN_SECRET` diverges from (or is merely
+  // shorter/weaker than) the API's own would happily mint watch tokens the API's
+  // `AuthoriseStream` rejects at read time — every member gets a link that 403s on
+  // every segment, and nothing here would ever fail to surface it.
+  const streamTokenSecret =
+    typeof process.env.STREAM_TOKEN_SECRET === "string" && process.env.STREAM_TOKEN_SECRET.length > 0
+      ? process.env.STREAM_TOKEN_SECRET
+      : undefined;
+  if (streamTokenSecret) {
+    assertUsableStreamingSecret("STREAM_TOKEN_SECRET", streamTokenSecret);
+  }
+  const notifyStreamLive = streamTokenSecret
+    ? new NotifyStreamLive(
+        new DrizzleEventRepository(db),
+        new DrizzleSubscriptionRepository(db),
+        new DrizzleMemberRepository(db),
+        new DrizzleActivityLogRepository(db),
+        // The WhatsApp provider, never the gating one — same rule as
+        // `grantChannelAccess`/`sendRenewalReminder` above:
+        // `TelegramBotAdapter.notify` throws.
+        messaging.notifier,
+        // The SAME clock instance every other pass in this root shares — see
+        // `WorkerDependencies.clock`'s own docstring for why a second clock
+        // constructed here would be a bug, not a style choice.
+        clock,
+        {
+          appBaseUrl: resolveAppBaseUrl({
+            appBaseUrl: process.env.APP_BASE_URL,
+            nodeEnv: process.env.NODE_ENV,
+          }),
+          streamTokenSecret,
+        }
+      )
+    : undefined;
+
   const handlers = new Map<string, OutboxHandler>([
     [OUTBOX_GRANT_ACCESS, grantAccessOutboxHandler(grantChannelAccess)],
     [OUTBOX_REVOKE_ACCESS, revokeAccessOutboxHandler(retryChannelAccessRevocation)],
@@ -214,6 +275,13 @@ export function bootstrapWorker(): WorkerDependencies {
       revokeSubscriptionAccessOutboxHandler(revokeChannelAccessForSystem),
     ],
   ]);
+  // Registered ONLY when configured — an unregistered event type is not silent:
+  // `ProcessOutbox` fails the row (bounded retry, then permanent), which is the
+  // right outcome for a `notify_stream_live` row that should never have been
+  // enqueued in the first place on a box with streaming disabled.
+  if (notifyStreamLive) {
+    handlers.set(OUTBOX_NOTIFY_STREAM_LIVE, notifyStreamLiveOutboxHandler(notifyStreamLive));
+  }
 
   return {
     processOutbox: new ProcessOutbox(new DrizzleOutboxRepository(db), handlers),
@@ -224,6 +292,7 @@ export function bootstrapWorker(): WorkerDependencies {
     retryChannelAccessRevocation,
     sendRenewalReminder,
     revokeChannelAccessForSystem,
+    notifyStreamLive,
     messaging,
   };
 }

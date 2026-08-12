@@ -483,6 +483,30 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
   }
 
   /**
+   * See the port docstring. Same `subscription → membership_tier` join
+   * `hasLiveSubscriptionInCommunity` uses, filtered to `active` alone (not
+   * `RENEWABLE_STATUSES`) and to THIS community, with no `LIMIT` — unlike that
+   * method this is not an existence check, it is the actual roster
+   * `NotifyStreamLive` sends to.
+   */
+  async listActiveForCommunity(communityId: string): Promise<{ id: string; memberId: string }[]> {
+    if (!UUID_PATTERN.test(communityId)) {
+      // A MISS, not a driver error — same rule as `findRenewalContext`. `communityId`
+      // is read out of `event.community_id`, resolved from an outbox payload's
+      // `eventId`, so it can never legitimately be malformed — but nothing here
+      // should turn "it somehow is" into a 500 in the worker's log.
+      return [];
+    }
+    return this.db
+      .select({ id: subscriptions.id, memberId: subscriptions.memberId })
+      .from(subscriptions)
+      .innerJoin(membershipTiers, eq(subscriptions.tierId, membershipTiers.id))
+      .where(
+        and(eq(membershipTiers.communityId, communityId), eq(subscriptions.status, ACTIVE_SUBSCRIPTION))
+      );
+  }
+
+  /**
    * `id` arrives straight off an untrusted webhook body, so it is shape-checked
    * before it reaches the driver — see UUID_PATTERN above for why a malformed
    * value must be a miss and not an error.

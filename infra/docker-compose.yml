@@ -20,5 +20,56 @@ services:
       timeout: 5s
       retries: 5
 
+  # Task 6: MediaMTX, the RTMP/HLS server every publish and every read is
+  # authorised against apps/api for (design spec §5). Pinned to a specific
+  # tag, not `latest` — this config was written and verified against v1.20.0
+  # (see CONTRIBUTING.md); an unpinned tag could silently change the
+  # environment-variable override rule this compose file relies on
+  # (MTX_AUTHHTTPADDRESS) out from under it.
+  #
+  # THE `-ffmpeg` VARIANT, NOT THE PLAIN ONE — discovered running this for
+  # real, not from documentation. The plain `bluenviron/mediamtx:1.20.0`
+  # image is built `FROM scratch`: no shell, no `curl`, nothing but the
+  # `mediamtx` binary. `runOnOnline`/`runOnOffline` below are shell commands
+  # (see mediamtx.yml's own comment on why they must be), and a `FROM
+  # scratch` container cannot run one — MediaMTX itself confirmed this by
+  # logging `runOnOnline command exited: exec: "curl": executable file not
+  # found in $PATH`. The `-ffmpeg` tag is Alpine-based (see the project's
+  # own docker/ffmpeg.Dockerfile) and ships BusyBox, which is where `/bin/sh`
+  # and `wget` come from — NOT `curl`, which Alpine does not install by
+  # default either. The hooks below use `wget`, not the brief's original
+  # `curl`, for exactly this reason.
+  mediamtx:
+    image: bluenviron/mediamtx:1.20.0-ffmpeg
+    restart: unless-stopped
+    environment:
+      # Read by infra/mediamtx.yml's runOnOnline/runOnOffline wget commands —
+      # those ARE shell commands, so they can (and do) send this as a header.
+      MEDIAMTX_WEBHOOK_SECRET: ${MEDIAMTX_WEBHOOK_SECRET:?set MEDIAMTX_WEBHOOK_SECRET in infra/.env, matching apps/api/.env}
+      # authHTTPAddress has NO way to send a header (see mediamtx.yml's own
+      # comment on this), so the secret travels as a query parameter
+      # instead — baked in HERE, as a container environment variable, rather
+      # than into the committed mediamtx.yml file. MTX_<UPPERCASE_KEY> is
+      # MediaMTX's own rule for overriding any config key via environment.
+      MTX_AUTHHTTPADDRESS: http://host.docker.internal:3000/webhooks/mediamtx/auth?secret=${MEDIAMTX_WEBHOOK_SECRET:?set MEDIAMTX_WEBHOOK_SECRET in infra/.env, matching apps/api/.env}
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      # RTMP: public. A creator's OBS connects from outside this host, and
+      # publish authorisation is what protects this port — see mediamtx.yml.
+      - "1935:1935"
+      # HLS: loopback ONLY, exactly like Postgres's binding above. nginx on
+      # the real VPS proxies to this from the public https:// origin (see
+      # CONTRIBUTING.md for the location block); publishing 8888 itself
+      # would let anyone fetch segments with no read authorisation at all.
+      - "127.0.0.1:8888:8888"
+    extra_hosts:
+      # Lets the container reach the API on the Docker host as
+      # host.docker.internal — required on LINUX (the production VPS):
+      # Docker Desktop on macOS provides this mapping automatically, so this
+      # line is a no-op locally but load-bearing in production. See
+      # CONTRIBUTING.md.
+      - "host.docker.internal:host-gateway"
+
 volumes:
   postgres_data:
