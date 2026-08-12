@@ -167,13 +167,31 @@ paths:
     # that was demonstrably on the air, and no error anywhere.
     #
     # `no` makes MediaMTX refuse the second publisher instead. The first
-    # publisher keeps the path; the newcomer gets an error, which is what
-    # `whip-publisher.ts` turns into the creator-facing "Server penyiaran
-    # menolak permintaan ini" message, and what an RTMP encoder surfaces as a
-    # failed connection. Refusing the newcomer is the right direction for
-    # this product specifically: the publisher already on the path is the one
-    # whose members are watching, and a stream key is a long-lived credential
-    # a creator may have pasted into OBS months ago.
+    # publisher keeps the path — but what the NEWCOMER sees differs by
+    # protocol, measured against a real second-publisher race for each:
+    #
+    # RTMP: the newcomer's connection is refused outright, which an RTMP
+    # encoder surfaces as a failed connection immediately.
+    #
+    # WHIP: MediaMTX answers the losing POST with `201 Created` and lets ICE
+    # connect — the refusal is NOT visible at negotiation time at all. The
+    # newcomer's browser only learns anything is wrong when MediaMTX closes
+    # that connection shortly after, which `whip-publisher.ts` reports via
+    # `onDisconnected` as "Koneksi siaran terputus di tengah jalan" (a
+    # mid-broadcast-drop message, about the symptom, not the cause) —
+    # measured at +16.3s after the losing publisher's "Hentikan siaran"
+    # button had already appeared. The creator-facing "Server penyiaran
+    # menolak permintaan ini" message in `whip-publisher.ts` exists for a
+    # DIFFERENT case (the WHIP POST itself answering with a non-2xx status,
+    # e.g. an `ended` session) — a second publisher losing this race never
+    # reaches it, because the POST that starts the race succeeds.
+    #
+    # Refusing the newcomer is still the right direction for this product
+    # specifically: the publisher already on the path is the one whose
+    # members are watching, and a stream key is a long-lived credential a
+    # creator may have pasted into OBS months ago. Narrowing WHIP's own
+    # 16.3s window is a known, deliberately deferred follow-up, not a defect
+    # this file's policy needs to fix.
     #
     # `false`, NOT `no`: MediaMTX's own reference config writes these flags as
     # `yes`/`no` (YAML 1.1 booleans), but whether that parses as a boolean or
