@@ -113,11 +113,20 @@ pm2 save
 # selectStreamingProvider/selectPaymentProvider/selectMessagingProviders in
 # bootstrap.ts) crashes `apps/api` on the very first tick, pm2 restarts it,
 # it crashes again, and the script would print "==> done" and exit 0 while
-# the box sits in a silent restart loop. Found the hard way (browser-
-# publishing Task 2 review, Important #2): a box already running the four
-# original MEDIAMTX_* variables throws the moment MEDIAMTX_WHIP_BASE_URL
-# ships without also being added to apps/api/.env, and nothing before this
-# point would have caught it. Same shape as the postgres health-poll above:
+# the box sits in a silent restart loop. The concrete case that motivated
+# this: a box already running the four original MEDIAMTX_* variables throws
+# the moment MEDIAMTX_WHIP_BASE_URL ships without also being added to
+# apps/api/.env, and nothing before this point would have caught it.
+#
+# This check only works because ecosystem.config.cjs leaves both apps in
+# pm2's default FORK mode, where `reload` fully replaces the process. Switch
+# either app to `exec_mode: "cluster"` and pm2 will keep the old workers
+# alive when new ones fail to boot — /health would then answer from the
+# PREVIOUS release and this poll would pass while the deploy had in fact
+# failed. If cluster mode is ever wanted, this check needs to verify the
+# running code's identity, not just that something answers.
+#
+# Same shape as the postgres health-poll above:
 # gate on the process's OWN synchronous check (GET /health, which also
 # round-trips the database — see routes/health.ts) rather than trusting a
 # log line or an exit code that only proves pm2 accepted the command.
