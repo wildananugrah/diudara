@@ -23,6 +23,8 @@ const SCHEDULED_SESSION = {
   status: "scheduled",
   hlsPlaybackPath: "/live/aaaa/index.m3u8",
   recordingUrl: null,
+  rtmpUrl: "rtmp://mediamtx.example.com:1935/live",
+  whipUrl: "https://stream.example.com/whip/" + "a".repeat(32),
 };
 
 const CREATED_SESSION = {
@@ -30,6 +32,7 @@ const CREATED_SESSION = {
   title: "Q&A langsung",
   status: "scheduled",
   rtmpUrl: "rtmp://mediamtx.example.com:1935/live",
+  whipUrl: "https://stream.example.com/whip/" + "b".repeat(32),
   streamKey: "b".repeat(32),
   hlsPlaybackPath: "/live/bbbb/index.m3u8",
 };
@@ -261,5 +264,283 @@ describe("EventsPage", () => {
     await screen.findByText("Kelas Lain");
     expect(screen.queryAllByText(CREATED_SESSION.rtmpUrl).length).toBe(0);
     expect(screen.queryAllByText(CREATED_SESSION.streamKey).length).toBe(0);
+  });
+});
+
+/**
+ * Browser publishing (Task 3): device permission, preview, go-live/stop, and
+ * — per the brief, "most of this task's value" — a distinct Indonesian
+ * message for each failure. The real WHIP negotiation (`whip-publisher.ts`)
+ * is exercised separately, against an injected `fetchFn`, in
+ * `whip-publisher.test.ts` — these tests exercise the SCREEN around it: what
+ * a creator sees for each of the five named failure states, plus the two
+ * structural checks the brief calls out (the button disabled while `live`,
+ * the whole path hidden when unconfigured).
+ *
+ * `RTCPeerConnection` does not exist in happy-dom (this repo's `bun test`
+ * DOM — see CONTRIBUTING.md's "environment finding" section on why camera/mic
+ * browser features cannot run for real on this machine), so a minimal fake is
+ * installed on `globalThis` here, the same shape `whip-publisher.test.ts`
+ * uses for the identical reason. `navigator.mediaDevices` is stubbed the same
+ * way `navigator.clipboard` already is in this file's own top-level
+ * `beforeEach`/`afterEach` — happy-dom does not implement it either.
+ */
+describe("EventsPage - browser publishing", () => {
+  class FakePeerConnection {
+    localDescription: { type: string; sdp: string } | null = null;
+    remoteDescription: { type: string; sdp: string } | null = null;
+    iceGatheringState = "complete";
+    closed = false;
+    addTrack() {}
+    async createOffer() {
+      return { type: "offer", sdp: "v=0\r\no=- fake-offer\r\n" };
+    }
+    async setLocalDescription(desc: { type: string; sdp: string }) {
+      this.localDescription = desc;
+    }
+    async setRemoteDescription(desc: { type: string; sdp: string }) {
+      this.remoteDescription = desc;
+    }
+    addEventListener() {}
+    removeEventListener() {}
+    close() {
+      this.closed = true;
+    }
+  }
+
+  class FakeTrack {
+    stopped = false;
+    constructor(private deviceId: string) {}
+    stop() {
+      this.stopped = true;
+    }
+    getSettings() {
+      return { deviceId: this.deviceId };
+    }
+  }
+
+  function fakeMediaStream(): MediaStream {
+    const videoTrack = new FakeTrack("camera-1");
+    const audioTrack = new FakeTrack("mic-1");
+    return {
+      getTracks: () => [videoTrack, audioTrack],
+      getVideoTracks: () => [videoTrack],
+      getAudioTracks: () => [audioTrack],
+    } as unknown as MediaStream;
+  }
+
+  /** Grants access successfully with one camera and one microphone. */
+  function grantingMediaDevices() {
+    return {
+      getUserMedia: async () => fakeMediaStream(),
+      enumerateDevices: async () =>
+        [
+          { deviceId: "camera-1", kind: "videoinput", label: "Kamera Depan" },
+          { deviceId: "mic-1", kind: "audioinput", label: "Mikrofon Bawaan" },
+        ] as MediaDeviceInfo[],
+    };
+  }
+
+  /** `getUserMedia` rejects with the given `DOMException` name. */
+  function rejectingMediaDevices(errorName: string) {
+    return {
+      getUserMedia: async () => {
+        const err = new Error(errorName);
+        err.name = errorName;
+        throw err;
+      },
+      enumerateDevices: async () => [] as MediaDeviceInfo[],
+    };
+  }
+
+  /**
+   * The JSON API stub (`stubFetch`) PLUS a fake WHIP endpoint at `whip.url` —
+   * `stubFetch` alone always answers JSON and cannot also serve
+   * `application/sdp` with a `Location` header, so WHIP requests are
+   * intercepted first and everything else falls through to it.
+   */
+  function stubFetchWithWhip(
+    routes: StubRoute[],
+    whip: { url: string; throwOnPost?: boolean; status?: number; location?: string }
+  ) {
+    stubFetch(routes);
+    const jsonFetch = global.fetch;
+    global.fetch = (async (url: string, init?: RequestInit) => {
+      if (typeof url === "string" && url.startsWith(whip.url)) {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST") {
+          if (whip.throwOnPost === true) throw new TypeError("Failed to fetch");
+          return new Response("v=0\r\no=- fake-answer\r\n", {
+            status: whip.status ?? 201,
+            headers: {
+              "Content-Type": "application/sdp",
+              Location: whip.location ?? "/whip/session-x",
+            },
+          });
+        }
+        if (method === "DELETE") return new Response(null, { status: 200 });
+      }
+      return jsonFetch(url, init);
+    }) as unknown as typeof fetch;
+  }
+
+  let originalMediaDevices: MediaDevices | undefined;
+  let originalRTCPeerConnection: unknown;
+
+  beforeEach(() => {
+    originalMediaDevices = navigator.mediaDevices;
+    originalRTCPeerConnection = (globalThis as Record<string, unknown>).RTCPeerConnection;
+    (globalThis as Record<string, unknown>).RTCPeerConnection = FakePeerConnection;
+  });
+
+  afterEach(() => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: originalMediaDevices,
+    });
+    (globalThis as Record<string, unknown>).RTCPeerConnection = originalRTCPeerConnection;
+  });
+
+  it("explains how to grant access when camera/microphone permission is denied", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: rejectingMediaDevices("NotAllowedError"),
+    });
+    stubFetch([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }]);
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+
+    const message = await screen.findByText(/Izin kamera\/mikrofon ditolak/);
+    expect(message.textContent).toContain("gembok");
+    // The "go live" button must not appear at all while access is denied.
+    expect(screen.queryAllByRole("button", { name: /Mulai siaran dari browser/ }).length).toBe(0);
+  });
+
+  it("says so, before ever offering to go live, when there is no camera or microphone", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: rejectingMediaDevices("NotFoundError"),
+    });
+    stubFetch([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }]);
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+
+    expect(await screen.findByText(/Tidak ditemukan kamera atau mikrofon/)).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: /Mulai siaran dari browser/ }).length).toBe(0);
+  });
+
+  it("names UDP-blocking and points at OBS when the WHIP negotiation itself fails", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: grantingMediaDevices(),
+    });
+    stubFetchWithWhip([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }], {
+      url: SCHEDULED_SESSION.whipUrl,
+      throwOnPost: true,
+    });
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Mulai siaran dari browser/ }));
+
+    const message = await screen.findByText(/Gagal terhubung ke server siaran/);
+    expect(message.textContent).toContain("UDP");
+    expect(message.textContent).toContain("OBS");
+    // Failing to connect must not leave the creator stuck believing they are live.
+    expect(screen.queryAllByRole("button", { name: "Hentikan siaran" }).length).toBe(0);
+  });
+
+  it("disables the go-live button and explains why when the session is already live via OBS", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: grantingMediaDevices(),
+    });
+    stubFetch([
+      COMMUNITY,
+      ENABLED,
+      { path: EVENTS_PATH, body: [{ ...SCHEDULED_SESSION, status: "live" }] },
+    ]);
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+
+    const button = await screen.findByRole("button", { name: /Mulai siaran dari browser/ });
+    expect(button.hasAttribute("disabled")).toBe(true);
+    expect(
+      await screen.findByText(/sedang live lewat OBS \/ Streamlabs/)
+    ).toBeTruthy();
+  });
+
+  it("offers to schedule a new session instead of device pickers when the session has ended", async () => {
+    stubFetch([
+      COMMUNITY,
+      ENABLED,
+      { path: EVENTS_PATH, body: [{ ...SCHEDULED_SESSION, status: "ended" }] },
+    ]);
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+
+    // The panel's own "ended" message — distinct from the ALWAYS-present
+    // "Jadwalkan sesi baru" schedule-form heading further down the page,
+    // which is why this matches the fuller sentence rather than that phrase
+    // alone.
+    expect(await screen.findByText(/Sesi ini sudah selesai/)).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: /Aktifkan kamera/ }).length).toBe(0);
+  });
+
+  it("hides the browser-publish path entirely when it is not configured for a session", async () => {
+    stubFetch([
+      COMMUNITY,
+      ENABLED,
+      {
+        path: EVENTS_PATH,
+        body: [{ ...SCHEDULED_SESSION, rtmpUrl: null, whipUrl: null }],
+      },
+    ]);
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+
+    // No way to reach the browser-publish panel at all — not even a
+    // "Siarkan" toggle, since there is nothing this session could publish to.
+    expect(screen.queryAllByRole("button", { name: "Siarkan" }).length).toBe(0);
+    expect(screen.queryAllByText("Siaran dari browser").length).toBe(0);
+  });
+
+  it("goes live from the browser, warns before unload, and stops cleanly", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: grantingMediaDevices(),
+    });
+    stubFetchWithWhip([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }], {
+      url: SCHEDULED_SESSION.whipUrl,
+      location: "/whip/session-x",
+    });
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Mulai siaran dari browser/ }));
+
+    expect(await screen.findByRole("button", { name: "Hentikan siaran" })).toBeTruthy();
+    expect(await screen.findByText(/Jangan tutup atau muat ulang tab ini/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hentikan siaran" }));
+
+    expect(await screen.findByRole("button", { name: /Mulai siaran dari browser/ })).toBeTruthy();
+    expect(screen.queryAllByText(/Jangan tutup atau muat ulang tab ini/).length).toBe(0);
   });
 });

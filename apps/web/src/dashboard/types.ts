@@ -123,8 +123,9 @@ export interface StreamingStatus {
 }
 
 /**
- * `EventRecord`, as `GET /communities/:communityId/events` returns each row —
- * apps/api/src/application/ports/event-repository.port.ts.
+ * `ListedLiveSession`, as `GET /communities/:communityId/events` returns each
+ * row — apps/api/src/application/use-cases/schedule-live-session.ts (Task 2
+ * added `rtmpUrl`/`whipUrl` here; it started as `EventRecord` alone).
  *
  * `streamKey` IS A SECRET, exactly like `Tier.priceAmount` is money: the API
  * returns it only to the creator who owns the community (a stranger's
@@ -132,6 +133,16 @@ export interface StreamingStatus {
  * EventsPage.tsx must never cache one across a community switch or put one
  * in a URL. It appears here (not just on the create response) so a creator
  * who lost their OBS settings can recover it.
+ *
+ * `rtmpUrl`/`whipUrl` are REBUILT per row from the persisted `streamKey`
+ * (Task 2 review, Important #3), not persisted themselves — so a session
+ * scheduled yesterday still carries a live publish target today, which is
+ * exactly what Task 3's "go live from the browser" button needs: without
+ * this, browser publishing would only ever work for a session created in
+ * the current page-load. Both are `null` together, never independently —
+ * either streaming is disabled on this server, or (pathologically) the row
+ * has no `streamKey` at all — so `whipUrl === null` is Task 3's UI's single
+ * signal to hide the browser-publish path for a session.
  */
 export interface LiveSession {
   id: string;
@@ -144,19 +155,23 @@ export interface LiveSession {
   status: string;
   hlsPlaybackPath: string | null;
   recordingUrl: string | null;
+  rtmpUrl: string | null;
+  whipUrl: string | null;
 }
 
 /**
  * `ScheduledSession` — apps/api/src/application/use-cases/schedule-live-session.ts
- * — `POST /communities/:communityId/events`'s response. `rtmpUrl` appears
- * ONLY here: it is never persisted, so it never appears in `LiveSession`
- * (the list response) again after this call returns.
+ * — `POST /communities/:communityId/events`'s response. `rtmpUrl`/`whipUrl`
+ * are never `null` here (unlike `LiveSession`'s): this endpoint 503s before
+ * returning anything at all when streaming is not configured (see
+ * `routes/events.ts`), so reaching a 201 already proves both URLs exist.
  */
 export interface CreatedLiveSession {
   id: string;
   title: string;
   status: string;
   rtmpUrl: string;
+  whipUrl: string;
   streamKey: string;
   hlsPlaybackPath: string;
 }
