@@ -1,4 +1,6 @@
 import { describe, expect, it, beforeEach } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client";
 import {
@@ -388,5 +390,53 @@ describe("HandleStreamLifecycle — offline", () => {
 
     const activity = await db.select().from(activityLogs);
     expect(activity).toHaveLength(0);
+  });
+});
+
+/**
+ * A CONFIG GUARD, not a unit test of this class — and it lives here, in this
+ * class's own test file, because this class is where the damage lands.
+ *
+ * TASK 4 (the browser-publishing phase gate) found, by running two real
+ * publishers against one real MediaMTX, that `infra/mediamtx.yml` did not set
+ * `overridePublisher`, and MediaMTX's own default for it is `yes`: a second
+ * publisher to a path that already has one is not refused, it DISCONNECTS the
+ * first and takes the path over. MediaMTX's captured log for that race:
+ *
+ *   INF [path live/<key>] closing existing publisher
+ *   INF [path live/<key>] runOnOffline command launched
+ *   INF [path live/<key>] runOnOnline command started
+ *   INF [WebRTC] [session ...] closed: terminated
+ *
+ * Read that hook order against `handleOffline` and `handleOnline` above:
+ * `offline` marks the event `ended`, and `handleOnline` then deliberately
+ * REFUSES to resurrect an `ended` event (a late `online` must never revive a
+ * finished session). So the takeover leaves the event permanently `ended`
+ * while a publisher is still on the air — measured: eleven minutes of ffmpeg
+ * publishing to a session the database called `ended`, no watch link
+ * obtainable by any member, and no error raised anywhere.
+ *
+ * There is no way to assert this from inside the process — the setting lives
+ * in a YAML file a container reads — so this reads that file. It is the same
+ * shape as `bootstrap.test.ts`'s ".env.example" guard: pin the FILE, so a
+ * reword or a deletion fails a test instead of silently re-opening the hole.
+ */
+describe("infra/mediamtx.yml's publisher-conflict policy", () => {
+  const config = readFileSync(
+    join(import.meta.dir, "..", "..", "..", "..", "..", "infra", "mediamtx.yml"),
+    "utf8"
+  );
+
+  it("refuses a second publisher rather than letting it take the path over", () => {
+    const line = config
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.startsWith("overridePublisher:"));
+
+    expect(line).toBeDefined();
+    // `false`, not `no`: whether YAML's `no` parses as a boolean or as the
+    // truthy STRING "no" depends on the parser's YAML version, and a flag
+    // that silently reads truthy is exactly the failure being guarded.
+    expect(line).toBe("overridePublisher: false");
   });
 });

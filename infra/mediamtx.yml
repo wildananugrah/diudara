@@ -141,6 +141,50 @@ webrtcLocalUDPAddress: :8189
 
 paths:
   all_others:
+    # MediaMTX's OWN DEFAULT FOR THIS IS `yes`, AND THAT DEFAULT IS WRONG FOR
+    # THIS PRODUCT. Found by the browser-publishing phase gate (Task 4), by
+    # running it, not by reading the docs: with `overridePublisher` left
+    # unset, a SECOND publisher to a path that already has one is not refused
+    # — MediaMTX disconnects the FIRST publisher and hands the path to the
+    # newcomer. Captured from a real run, a real browser publish holding the
+    # key and a real ffmpeg RTMP publish arriving after it:
+    #
+    #   INF [path live/<key>] closing existing publisher
+    #   INF [path live/<key>] runOnOnline command stopped
+    #   INF [path live/<key>] runOnOffline command launched
+    #   INF [path live/<key>] runOnOnline command started
+    #   INF [RTMP] [conn ...] is publishing to path 'live/<key>'
+    #   INF [WebRTC] [session ...] closed: terminated
+    #
+    # THE DAMAGE IS NOT ONLY "the creator's broadcast was cut off", bad as
+    # that is. Look at the hook order: `runOnOffline` fires BEFORE the
+    # replacement's `runOnOnline`. `HandleStreamLifecycle.handleOffline`
+    # marks the event `ended`, and `handleOnline` then REFUSES to resurrect
+    # an `ended` event — deliberately, so a late `online` cannot revive a
+    # finished session (see that class's own comment). The observed end
+    # state, measured: ffmpeg still publishing eleven minutes later while the
+    # event row read `ended`, no member able to get a watch link for a stream
+    # that was demonstrably on the air, and no error anywhere.
+    #
+    # `no` makes MediaMTX refuse the second publisher instead. The first
+    # publisher keeps the path; the newcomer gets an error, which is what
+    # `whip-publisher.ts` turns into the creator-facing "Server penyiaran
+    # menolak permintaan ini" message, and what an RTMP encoder surfaces as a
+    # failed connection. Refusing the newcomer is the right direction for
+    # this product specifically: the publisher already on the path is the one
+    # whose members are watching, and a stream key is a long-lived credential
+    # a creator may have pasted into OBS months ago.
+    #
+    # `false`, NOT `no`: MediaMTX's own reference config writes these flags as
+    # `yes`/`no` (YAML 1.1 booleans), but whether that parses as a boolean or
+    # as the STRING "no" depends on the YAML library version, and a flag that
+    # silently parses as a truthy string is exactly the failure this line
+    # exists to prevent. `false` is a boolean under both YAML 1.1 and 1.2, and
+    # matches `runOnOnlineRestart: false` a few lines below. Verified against a
+    # real container after the change — see the phase-gate report's transcript
+    # of the same two-publisher race now being REFUSED.
+    overridePublisher: false
+
     # The publisher started / stopped. These are the real hook names: there
     # is no runOnPublish or runOnUnpublish, whatever an earlier draft of this
     # spec said. They are SHELL COMMANDS MediaMTX runs (not requests it
