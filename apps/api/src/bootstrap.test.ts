@@ -2421,7 +2421,7 @@ describe("selectStreamingProvider", () => {
 describe("bootstrap() streaming provider wiring", () => {
   it("wires FakeStreamingAdapter under NODE_ENV=test with no streaming config", () => {
     // "No streaming config" relies on `test-env-preload.ts` deleting all
-    // four streaming env vars once, for the whole process, before any test
+    // five streaming env vars once, for the whole process, before any test
     // file (including this one) is even loaded — not on this machine's
     // `apps/api/.env` happening not to set them. A `beforeEach` scoped to
     // this file was tried first (review round 2) and was not enough: Bun
@@ -2480,7 +2480,7 @@ describe("bootstrap() streaming provider wiring", () => {
   // when [irrelevant config] is garbage" test: a fully-configured
   // production box (payments and messaging both real) with NO streaming
   // configuration must still boot, and streamingProvider must be undefined
-  // rather than throwing or silently activating a fake. The four streaming
+  // rather than throwing or silently activating a fake. The five streaming
   // vars are left OUT of the `withEnv` below deliberately — `test-env-preload.ts`
   // already guarantees they are absent for the whole run, and repeating
   // them here would only be a per-test workaround this file does not need.

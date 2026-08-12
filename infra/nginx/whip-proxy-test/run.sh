@@ -16,7 +16,7 @@
 #     for every ${VAR} the template contains).
 #   - A running MediaMTX + apps/api stack (`docker compose -f
 #     infra/docker-compose.yml up -d`, `apps/api`'s dev server up, with the
-#     four MEDIAMTX_*/STREAM_TOKEN_SECRET vars set so MediaMtxAdapter, not
+#     five MEDIAMTX_*/STREAM_TOKEN_SECRET vars set so MediaMtxAdapter, not
 #     FakeStreamingAdapter, is selected — see CONTRIBUTING.md) reachable at
 #     127.0.0.1 on the ports docker-compose.yml maps.
 #   - A REAL stream key from a scheduled session, passed as this script's
