@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../../db/client";
 import { communities, creators, joinRequests, members, membershipTiers } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
+import { ArrivalLatch } from "../../test-support/arrival-latch";
 import { DrizzleJoinRequestRepository } from "./drizzle-join-request.repository";
 
 beforeEach(resetDatabase);
@@ -15,8 +16,11 @@ let seedCounter = 0;
  * A creator → free community → tier → member chain, i.e. what a member sees
  * before asking to join. No subscription and no transaction — this is the
  * free path, which never creates either.
+ *
+ * `memberName` defaults to a real name; pass `null` for tests about the case
+ * `PendingJoinRequestRow.memberName` exists to report honestly.
  */
-async function seedFreeCommunity() {
+async function seedFreeCommunity(memberName: string | null = "Siti") {
   seedCounter += 1;
   const [creator] = await db
     .insert(creators)
@@ -37,7 +41,7 @@ async function seedFreeCommunity() {
     .returning();
   const [member] = await db
     .insert(members)
-    .values({ whatsappNumber: `+62811000${String(seedCounter).padStart(4, "0")}`, name: "Siti" })
+    .values({ whatsappNumber: `+62811000${String(seedCounter).padStart(4, "0")}`, name: memberName })
     .returning();
   return { creator, community, tier, member };
 }
@@ -105,6 +109,55 @@ describe("DrizzleJoinRequestRepository.createPending", () => {
     expect(requestA).not.toBeNull();
     expect(requestB).not.toBeNull();
   });
+
+  it("succeeds again after the first request was REJECTED — re-requesting is allowed, there is no blocklist", async () => {
+    // The index is partial (`WHERE status = 'pending'`) precisely so a decided row
+    // never blocks a future request. Drop that clause and every test elsewhere in
+    // this file still passes — this is the one test that would fail, which is the
+    // whole reason the index is partial rather than total.
+    const { community, tier, member } = await seedFreeCommunity();
+    const first = await repo.createPending({
+      communityId: community.id,
+      tierId: tier.id,
+      memberId: member.id,
+    });
+    expect(first).not.toBeNull();
+    const decided = await repo.decide({
+      id: first!.id,
+      status: "rejected",
+      decidedBy: (await seedFreeCommunity()).creator.id,
+      decidedAt: new Date(),
+    });
+    expect(decided).toBe(true);
+
+    const second = await repo.createPending({
+      communityId: community.id,
+      tierId: tier.id,
+      memberId: member.id,
+    });
+
+    expect(second).not.toBeNull();
+    expect(second!.id).not.toBe(first!.id);
+    expect(second!.status).toBe("pending");
+  });
+
+  it("lets exactly ONE of several concurrent submits for the same (community, member) win", async () => {
+    const { community, tier, member } = await seedFreeCommunity();
+    const latch = new ArrivalLatch(4);
+
+    const results = await Promise.all(
+      Array.from({ length: 4 }, async () => {
+        await latch.arriveAndWait();
+        return repo.createPending({
+          communityId: community.id,
+          tierId: tier.id,
+          memberId: member.id,
+        });
+      })
+    );
+
+    expect(results.filter((row) => row !== null)).toHaveLength(1);
+  });
 });
 
 describe("DrizzleJoinRequestRepository.decide", () => {
@@ -139,6 +192,33 @@ describe("DrizzleJoinRequestRepository.decide", () => {
     expect(decided?.decidedBy).toBe(owner.id);
     expect(decided?.decidedAt?.toISOString()).toBe(decidedAt.toISOString());
   });
+
+  it("lets exactly ONE of several concurrent deciders win", async () => {
+    // Two owners' browser tabs, or one owner double-clicking approve — the predicate
+    // in the UPDATE, not a preceding read, is what has to decide this.
+    const { community, tier, member } = await seedFreeCommunity();
+    const { creator: owner } = await seedFreeCommunity();
+    const request = await repo.createPending({
+      communityId: community.id,
+      tierId: tier.id,
+      memberId: member.id,
+    });
+    const latch = new ArrivalLatch(4);
+
+    const outcomes = await Promise.all(
+      Array.from({ length: 4 }, async (_unused, index) => {
+        await latch.arriveAndWait();
+        return repo.decide({
+          id: request!.id,
+          status: index % 2 === 0 ? "approved" : "rejected",
+          decidedBy: owner.id,
+          decidedAt: new Date(Date.UTC(2026, 7, 13, index)),
+        });
+      })
+    );
+
+    expect(outcomes.filter((won) => won)).toHaveLength(1);
+  });
 });
 
 describe("DrizzleJoinRequestRepository.listPendingForCommunity", () => {
@@ -168,9 +248,28 @@ describe("DrizzleJoinRequestRepository.listPendingForCommunity", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(pending!.id);
     expect(rows[0].memberId).toBe(member.id);
-    expect(rows[0].memberName).toBe(member.name ?? "");
+    expect(rows[0].memberName).toBe(member.name);
     expect(rows[0].memberWhatsappNumber).toBe(member.whatsappNumber);
     expect(rows[0].tierId).toBe(tier.id);
     expect(rows[0].tierName).toBe(tier.name);
+  });
+
+  it("reports a NULL member name as null, verbatim — a WhatsApp-only signup may have none", async () => {
+    // The path the memberName: string -> string | null deviation was about. A
+    // repository coalescing this to '' would make it untestable that the column is
+    // actually reported honestly rather than papered over.
+    const { community, tier, member } = await seedFreeCommunity(null);
+    expect(member.name).toBeNull();
+    const pending = await repo.createPending({
+      communityId: community.id,
+      tierId: tier.id,
+      memberId: member.id,
+    });
+
+    const rows = await repo.listPendingForCommunity(community.id);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(pending!.id);
+    expect(rows[0].memberName).toBeNull();
   });
 });
