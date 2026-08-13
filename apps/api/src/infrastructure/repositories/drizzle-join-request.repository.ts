@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { joinRequests, members, membershipTiers } from "../../db/schema";
 import type {
@@ -6,7 +6,6 @@ import type {
   JoinRequestRepositoryPort,
   PendingJoinRequestRow,
 } from "../../application/ports/join-request-repository.port";
-import { uniqueViolationConstraint } from "./pg-errors";
 
 /** Matches the canonical 8-4-4-4-12 hex form Postgres accepts for `uuid` — see the
  * identical constant in `drizzle-subscription.repository.ts`. A malformed id here
@@ -17,14 +16,6 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 /** `join_request.status` as created by `createPending` (the column's own default). */
 const PENDING = "pending";
 
-/**
- * The unique index's name — see `join_request_community_member_pending_unique` in
- * `db/schema.ts`. `createPending` catches exactly this constraint's violation and
- * turns it into `null`; any other unique violation is a programming error and is
- * left to propagate.
- */
-const PENDING_UNIQUE_CONSTRAINT = "join_request_community_member_pending_unique";
-
 export class DrizzleJoinRequestRepository implements JoinRequestRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
 
@@ -32,30 +23,47 @@ export class DrizzleJoinRequestRepository implements JoinRequestRepositoryPort {
    * See the port docstring. The unique index — not a preceding `select` — is what
    * decides whether this member already has an open request in this community: two
    * submits in the same instant cannot both see "nothing yet", so only the database
-   * arbitrating the INSERT itself closes the race. The loser gets a clean `null`
-   * rather than an unhandled `23505` reaching the caller as a 500.
+   * arbitrating the INSERT itself closes the race.
+   *
+   * `ON CONFLICT ... DO NOTHING`, deliberately NOT a bare INSERT wrapped in a
+   * try/catch for `23505`. A unique violation ABORTS THE ENCLOSING TRANSACTION in
+   * Postgres — every statement after it fails with "current transaction is aborted,
+   * commands ignored until end of transaction block" until a ROLLBACK — so catching
+   * the error here only produces a clean `null` when this call happens to be the
+   * LAST statement of its transaction. `RequestToJoin` calls this from inside
+   * `JoinRequestUnitOfWorkPort.run`, where it is NOT the last statement (the caller
+   * goes on to check the result and, on success, enqueue an outbox row): a
+   * try/catch here would return `null` as promised and then poison every statement
+   * that followed, including a future `activityLog` write or a "look up the
+   * existing request instead of 409ing" read. `ON CONFLICT DO NOTHING` never raises
+   * the error in the first place — the loser's INSERT is simply a no-op,
+   * `RETURNING` yields no row, and `null` is genuinely clean, transaction intact.
+   *
+   * `target` + `where` are given explicitly, matching
+   * `join_request_community_member_pending_unique`'s own partial predicate exactly.
+   * Postgres only infers a PARTIAL unique index as the arbiter when the `ON
+   * CONFLICT` clause's `WHERE` matches the index's `WHERE` — a bare
+   * `onConflictDoNothing()` would not infer this index at all and would raise "no
+   * unique or exclusion constraint matching the ON CONFLICT specification" instead.
    */
   async createPending(input: {
     communityId: string;
     tierId: string;
     memberId: string;
   }): Promise<JoinRequestRecord | null> {
-    try {
-      const [row] = await this.db
-        .insert(joinRequests)
-        .values({
-          communityId: input.communityId,
-          tierId: input.tierId,
-          memberId: input.memberId,
-        })
-        .returning();
-      return row ?? null;
-    } catch (err) {
-      if (uniqueViolationConstraint(err) === PENDING_UNIQUE_CONSTRAINT) {
-        return null;
-      }
-      throw err;
-    }
+    const [row] = await this.db
+      .insert(joinRequests)
+      .values({
+        communityId: input.communityId,
+        tierId: input.tierId,
+        memberId: input.memberId,
+      })
+      .onConflictDoNothing({
+        target: [joinRequests.communityId, joinRequests.memberId],
+        where: sql`${joinRequests.status} = 'pending'`,
+      })
+      .returning();
+    return row ?? null;
   }
 
   async findById(id: string): Promise<JoinRequestRecord | null> {

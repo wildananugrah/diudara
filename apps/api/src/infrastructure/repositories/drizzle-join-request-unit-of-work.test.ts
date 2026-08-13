@@ -108,4 +108,51 @@ describe("DrizzleJoinRequestUnitOfWork", () => {
     expect(visibleMidTransaction).toBe(0);
     expect(await db.select().from(outbox)).toHaveLength(1);
   });
+
+  /**
+   * Fix round 1, Critical: a bare INSERT caught for `23505` returns a clean `null`
+   * on its own, but Postgres has already ABORTED THE TRANSACTION by the time the
+   * catch runs — every statement after it fails with "current transaction is
+   * aborted, commands ignored until end of transaction block" until a ROLLBACK.
+   * `RequestToJoin` calls `createPending` from inside exactly this unit of work and
+   * then goes on to `outbox.enqueue` in the SAME transaction on success, so a caught
+   * `23505` here would only ever look safe in a test that never performs a second
+   * write afterwards. This test performs one, and would have failed against the
+   * try/catch implementation.
+   */
+  it("keeps the transaction usable after createPending refuses a duplicate — the null must not abort it", async () => {
+    const { community, tier, member } = await seedFreeCommunity();
+
+    // A first pending request, committed in its own transaction.
+    await unitOfWork().run(async (repositories) => {
+      const created = await repositories.joinRequests.createPending({
+        communityId: community.id,
+        tierId: tier.id,
+        memberId: member.id,
+      });
+      expect(created).not.toBeNull();
+    });
+
+    let secondWriteSucceeded = false;
+    await unitOfWork().run(async (repositories) => {
+      const duplicate = await repositories.joinRequests.createPending({
+        communityId: community.id,
+        tierId: tier.id,
+        memberId: member.id,
+      });
+      expect(duplicate).toBeNull();
+
+      // THE assertion this test exists for: a statement AFTER the refused
+      // duplicate, in the SAME transaction, must still succeed.
+      await repositories.outbox.enqueue({ eventType: "notify_join_request", payload: {} });
+      secondWriteSucceeded = true;
+    });
+
+    expect(secondWriteSucceeded).toBe(true);
+    // Exactly the ONE row from the first, successful request — the duplicate
+    // attempt created nothing, but its refusal did not roll back or corrupt the
+    // enqueue that followed it in the same transaction.
+    expect(await db.select().from(joinRequests)).toHaveLength(1);
+    expect(await db.select().from(outbox)).toHaveLength(1);
+  });
 });

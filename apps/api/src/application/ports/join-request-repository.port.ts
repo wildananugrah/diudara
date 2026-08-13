@@ -41,7 +41,16 @@ export interface PendingJoinRequestRow {
  * arbitrates one open request per (community, member).
  */
 export interface JoinRequestRepositoryPort {
-  /** Returns null when a pending request already exists — the unique index refused it. */
+  /**
+   * Returns null when a pending request already exists — the unique index refused
+   * it — WITHOUT aborting an enclosing transaction. Implementations must arbitrate
+   * with `ON CONFLICT ... DO NOTHING` (or equivalent), never a bare INSERT caught
+   * for a unique-violation error: a caught `23505` is clean on its own, but Postgres
+   * has already aborted the transaction by the time the catch runs, so anything this
+   * method's caller does afterwards IN THE SAME TRANSACTION — as `RequestToJoin`
+   * does, via `JoinRequestUnitOfWorkPort` — would fail with "current transaction is
+   * aborted" instead of proceeding normally.
+   */
   createPending(input: {
     communityId: string;
     tierId: string;

@@ -59,11 +59,25 @@ function joinRequestRecord(overrides: Partial<JoinRequestRecord> = {}): JoinRequ
   };
 }
 
-/** A fake unit of work that simply runs `work` against the fakes it was built with. */
+/**
+ * A fake unit of work that simply runs `work` against the fakes it was built
+ * with. `runCallCount` exists so a test can pin ATOMICITY itself: this fake
+ * cannot see whether the two writes inside `work` genuinely share a Postgres
+ * transaction (only `drizzle-join-request-unit-of-work.test.ts` can prove
+ * that, against the real adapter) — but it CAN prove that `RequestToJoin`
+ * asks for exactly ONE unit of work per request, rather than one per write. A
+ * refactor that split the create and the enqueue into two separate
+ * `unitOfWork.run(...)` calls would keep every other test green (this fake
+ * has no way to fail a split into two successful, sequential transactions)
+ * and only this counter would catch it.
+ */
 class FakeJoinRequestUnitOfWork implements JoinRequestUnitOfWorkPort {
+  runCallCount = 0;
+
   constructor(private readonly repositories: JoinRequestRepositories) {}
 
   async run<T>(work: (repositories: JoinRequestRepositories) => Promise<T>): Promise<T> {
+    this.runCallCount += 1;
     return work(this.repositories);
   }
 }
@@ -246,6 +260,7 @@ function harness(
     createPendingCalls,
     activeSubscriptionChecks,
     findOrCreateCalls,
+    unitOfWork,
   };
 }
 
@@ -258,7 +273,7 @@ const REQUEST = {
 
 describe("RequestToJoin — happy path", () => {
   it("creates a pending request and enqueues exactly one notify_join_request row", async () => {
-    const { requestToJoin, outboxCalls, createPendingCalls } = harness();
+    const { requestToJoin, outboxCalls, createPendingCalls, unitOfWork } = harness();
 
     const result = await requestToJoin.execute(REQUEST);
 
@@ -269,6 +284,13 @@ describe("RequestToJoin — happy path", () => {
     expect(outboxCalls).toHaveLength(1);
     expect(outboxCalls[0].eventType).toBe(OUTBOX_NOTIFY_JOIN_REQUEST);
     expect(outboxCalls[0].payload).toEqual({ joinRequestId: "request-1" });
+
+    // Pins ATOMICITY at the call-site: exactly ONE unit of work for the whole
+    // request, not one per write. A refactor that split `createPending` and
+    // `outbox.enqueue` into two separate `unitOfWork.run(...)` calls would keep
+    // every assertion above green — this counter is the one thing that would
+    // catch it. See `FakeJoinRequestUnitOfWork`'s own docstring.
+    expect(unitOfWork.runCallCount).toBe(1);
   });
 
   it("resolves the member via findOrCreateByWhatsappNumber before checking membership", async () => {
