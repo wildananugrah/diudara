@@ -217,6 +217,7 @@ describe("describeActivityEvent", () => {
       STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
       JOIN_REQUEST_APPROVED_EVENT,
       JOIN_REQUEST_REJECTED_EVENT,
+      JOIN_REQUEST_NOTIFY_SKIPPED_EVENT,
     ]) {
       expect(describeActivityEvent(eventType, null)!.severity).toBe("info");
     }
@@ -252,6 +253,28 @@ describe("describeActivityEvent", () => {
       reason: "some_future_reason",
     })!;
     expect(described.label).toContain("Anggota tidak diberi tahu tentang siaran langsung");
+    expect(described.label).not.toContain("some_future_reason");
+  });
+
+  /**
+   * Fix round 1. The reason used to be baked into the label literal — this pins
+   * that it is now LOOKED UP (same shape as `STREAM_NOTIFY_SKIP_REASON_LABELS`),
+   * and that the label is unambiguous about WHOSE WhatsApp number is missing:
+   * this is shown to the pemilik themselves, and a bare "nomor WhatsApp belum
+   * diatur" could otherwise read as being about the requesting member's number.
+   */
+  it("names why the owner was not told about a join request, unambiguously as their OWN number", () => {
+    const label = describeActivityEvent(JOIN_REQUEST_NOTIFY_SKIPPED_EVENT, {
+      reason: "creator_whatsapp_missing",
+    })!.label;
+    expect(label).toContain("nomor WhatsApp sendiri belum diatur");
+  });
+
+  it("falls back to the plain label for a join-request-skip reason it does not recognise", () => {
+    const described = describeActivityEvent(JOIN_REQUEST_NOTIFY_SKIPPED_EVENT, {
+      reason: "some_future_reason",
+    })!;
+    expect(described.label).toContain("Pemilik belum diberi tahu tentang permintaan bergabung");
     expect(described.label).not.toContain("some_future_reason");
   });
 

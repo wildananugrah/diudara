@@ -1,10 +1,22 @@
 import { describe, expect, it, beforeEach } from "bun:test";
+import { eq } from "drizzle-orm";
 import { db } from "../../db/client";
-import { activityLogs, communities, creators, joinRequests, members, membershipTiers } from "../../db/schema";
+import {
+  activityLogs,
+  communities,
+  creators,
+  joinRequests,
+  members,
+  membershipTiers,
+  outbox,
+} from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { DrizzleActivityLogRepository } from "../../infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleJoinRequestRepository } from "../../infrastructure/repositories/drizzle-join-request.repository";
+import { DrizzleOutboxRepository } from "../../infrastructure/repositories/drizzle-outbox.repository";
 import { FakeMessagingAdapter } from "../../infrastructure/messaging/fake-messaging.adapter";
+import { OUTBOX_NOTIFY_JOIN_REQUEST } from "../ports/outbox-repository.port";
+import { ProcessOutbox } from "./process-outbox";
 import {
   CREATOR_WHATSAPP_MISSING_REASON,
   JOIN_REQUEST_CONTEXT_MISSING_REASON,
@@ -173,6 +185,84 @@ describe("NotifyJoinRequest", () => {
   // into the exact same `null` a vanished request produces — proven above — so
   // this is not a separate code path to exercise, only an unreachable trigger
   // for one already covered.
+
+  /**
+   * Fix round 1. The two consume-don't-retry cases above are deliberately NOT
+   * how a TRANSIENT failure (the provider being down) must behave — the outbox
+   * still needs to retry that, and nothing had proven it. `execute`'s send is a
+   * bare, uncaught `await this.notifier.notify(...)`, so a throw there must
+   * reach the caller rather than being swallowed into a `notified: false` skip
+   * result, which is exactly the "accidental widening" the crux of this task
+   * warns against — a WhatsApp outage must not silently look identical to a
+   * creator who never set a number.
+   */
+  it("a transient send failure propagates rather than being converted into a skip", async () => {
+    const { request } = await seedPendingRequest();
+    const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+    notifier.failNextNotify = true;
+    const useCase = buildUseCase(notifier);
+
+    await expect(useCase.execute({ joinRequestId: request.id })).rejects.toThrow();
+
+    // Not recorded as a skip: this is not a case the design treats as "nothing
+    // fixable by a retry" — the whole point is that a retry CAN fix it.
+    const activity = await activityRowsFor(request.id);
+    expect(activity).toHaveLength(0);
+  });
+});
+
+/**
+ * Fix round 1's headline gap: `bun run test` passed 1591/1591 even after the
+ * reviewer wrapped `notify` in a try/catch that turned a provider outage into
+ * a silent `notified: false` skip. These two facts were unpinned:
+ *   1. the throw actually reaches `ProcessOutbox`, so the row is RETRIED, not
+ *      marked `sent`;
+ *   2. a later pass, once the provider recovers, actually delivers it.
+ * Driven through the REAL worker wiring — `notifyJoinRequestOutboxHandler` and
+ * `ProcessOutbox` together — the same shape `send-renewal-reminder.test.ts`
+ * uses for its own send failure, not a bare use-case call.
+ */
+describe("a failed send retries through the outbox", () => {
+  it("RETRIES rather than consuming the row, and a later pass delivers", async () => {
+    const { creator, request } = await seedPendingRequest();
+    const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+    const useCase = buildUseCase(notifier);
+    const outboxRepository = new DrizzleOutboxRepository(db);
+    const { id } = await outboxRepository.enqueue({
+      eventType: OUTBOX_NOTIFY_JOIN_REQUEST,
+      payload: { joinRequestId: request.id },
+    });
+    const processOutbox = new ProcessOutbox(
+      outboxRepository,
+      new Map([[OUTBOX_NOTIFY_JOIN_REQUEST, notifyJoinRequestOutboxHandler(useCase)]]),
+      // baseBackoffMs 0 so the retry is immediately due.
+      { maxAttempts: 5, baseBackoffMs: 0 }
+    );
+
+    notifier.failNextNotify = true;
+    const failed = await processOutbox.execute();
+
+    expect(failed.claimed).toBe(1);
+    expect(failed.sent).toBe(0);
+    expect(failed.retried).toBe(1);
+    expect(notifier.notifications).toHaveLength(0);
+    const [pending] = await db.select().from(outbox).where(eq(outbox.id, id));
+    expect(pending.status).toBe("pending");
+    expect(pending.lastError).toContain("notify");
+    // Never treated as the crux case this task exists for: the provider being
+    // down is not the creator having no WhatsApp number, and must not be
+    // recorded as though it were.
+    expect(await activityRowsFor(request.id)).toHaveLength(0);
+
+    // The retry, once the provider is healthy again, actually delivers.
+    const delivered = await processOutbox.execute();
+
+    expect(delivered.sent).toBe(1);
+    const [settled] = await db.select().from(outbox).where(eq(outbox.id, id));
+    expect(settled.status).toBe("sent");
+    expect(notifier.notifications).toHaveLength(1);
+    expect(notifier.notifications[0]!.toWhatsappNumber).toBe(creator.whatsappNumber!);
+  });
 });
 
 describe("notifyJoinRequestOutboxHandler", () => {
