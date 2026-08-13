@@ -14,41 +14,58 @@ at all outside `development`/`test` without keys.
 This phase adds the other way in. A community can be **free**, and a member **asks to join**
 while the owner **approves**. Payment becomes one of two access modes rather than the only one.
 
-## 2. Configuration, and what `none` must not mean
+## 2. Configuration: no new variable, because the keys already say it
 
-Two settings, at two levels.
+**There is deliberately no `PAYMENT_GATEWAY_PROVIDER` setting.** It was considered and rejected:
+it would have been a second switch describing a fact the environment already states. Whether
+Xendit is available is answered by whether `XENDIT_SECRET_KEY` and `XENDIT_SPLIT_RULE_ID` are
+set, and whether a given community charges is answered by its owner.
 
-**`PAYMENT_GATEWAY_PROVIDER` — the deployment's capability.** `xendit` or `none`.
+So there is **one** new setting, and it belongs to the creator, not the operator:
 
-**`community.access_mode` — what each community does.** `paid` or `request`. The creator
-chooses; it is not a deployment-wide switch.
+**`community.access_mode`** — `paid` or `request`.
 
-**The rule that keeps this safe: `none` must never mean "use the fake adapter."** Today
-`selectPaymentProvider` throws outside `development`/`test` precisely so nobody ever takes fake
-money for real, and this spec must not weaken that. `none` means *there is no payment path*:
+This also brings payments in line with how every other optional subsystem in this codebase
+behaves. Streaming and the AI co-builder both follow the rule "absent configuration disables the
+feature without blocking boot." Payments is the only one that throws instead, and this phase
+retires that exception:
+
+| Xendit keys | `NODE_ENV` | Result |
+|---|---|---|
+| Both set | any | `XenditPaymentAdapter`. Unchanged — real money moves |
+| Exactly one set | any | **Throws.** Unchanged, in every environment |
+| Neither set | `development` / `test` | `FakePaymentAdapter`. Unchanged |
+| Neither set | anything else | **Payments disabled.** Today this throws; now the API boots without a payment path |
+
+**The rule that makes retiring the throw safe: absent keys must never mean "use the fake
+adapter" outside `RELAXED_NODE_ENVS`.** That throw exists for a specific documented reason — the
+fake adapter writes unrecoverable `fake-acct-*` ids into `creator.xendit_account_id` and would
+take fake money for real. Replacing it with *disabled* removes the hazard; replacing it with
+*fake* would ship exactly the disaster it was written to prevent. An implementer who "helpfully"
+falls back to the fake here has reintroduced it.
+
+Disabled means genuinely absent, not stubbed:
 
 - `StartCheckout` is not constructed, and `POST /c/:slug/checkout` returns **404** — not a fake
   invoice, not a 500.
-- A community whose `access_mode` is `paid` still renders under `none`, but has **no join path
-  at all** — not checkout, and **not** the request form. It reads as "not accepting new members
-  right now," the wording paused communities already use.
-- Setting `access_mode = paid` is refused while the deployment is `none`.
+- A community whose `access_mode` is `paid` still renders, but has **no join path at all** —
+  not checkout, and **not** the request form. It reads as "not accepting new members right now,"
+  the wording paused communities already use.
+- Setting or changing `access_mode` to `paid` is refused while payments are disabled.
 
-That third rule is the one an implementer is most likely to get wrong by being helpful. Falling
-back to the request form for a `paid` community would hand out, for free, memberships the owner
-priced — a silent giveaway triggered by an operator changing an environment variable. A community
-whose owner chose `paid` accepts members only through payment, and if payment is unavailable it
-accepts nobody.
+That second point is the one an implementer is most likely to get wrong by being helpful.
+Falling back to the request form for a `paid` community would hand out, for free, memberships
+the owner priced — a silent giveaway triggered by nothing more than a missing environment
+variable. A community whose owner chose `paid` accepts members only through payment, and if
+payment is unavailable it accepts nobody.
 
-`PAYMENT_GATEWAY_PROVIDER=xendit` keeps today's behaviour exactly, including the
-half-configured throw: `XENDIT_SECRET_KEY` and `XENDIT_SPLIT_RULE_ID` set together or not at
-all, and the fake adapter permitted only inside `RELAXED_NODE_ENVS`.
-
-**This is a deliberately loosened guard.** It is safer than the workaround it replaces — running
-production as `NODE_ENV=development` to dodge the boot refusal, which also relaxes every other
-guard keyed to that allowlist. It stays safe only because `none` closes the checkout route
-rather than faking it. An implementer who "helpfully" falls back to `FakePaymentAdapter` under
-`none` has reintroduced exactly the hazard the original throw existed to prevent.
+**Retiring the throw is a deliberate loosening, and worth stating plainly.** It is safer than the
+workaround it replaces: to run without Xendit today an operator must set
+`NODE_ENV=development`, which relaxes *every* guard keyed to `RELAXED_NODE_ENVS`, not just this
+one — and hands production the fake adapter into the bargain. After this change a production box
+runs as `production`, with payments simply absent. That is a smaller blast radius than the state
+it replaces, but it is only smaller because the last row of the table above says *disabled* and
+not *fake*.
 
 ## 3. What does not change
 
@@ -160,8 +177,8 @@ schedule."
 
 | Condition | Behaviour |
 |---|---|
-| `POST /c/:slug/checkout` while the deployment is `none` | 404 — the route does not exist |
-| Join request to a `paid` community | 404 on the request route, whatever the deployment mode — a paid community never accepts a free join |
+| `POST /c/:slug/checkout` while payments are disabled | 404 — the route does not exist |
+| Join request to a `paid` community | 404 on the request route, whether or not payments are configured — a paid community never accepts a free join |
 | Join request to a paused or archived community | 409, the message `StartCheckout` already uses |
 | Member already active in this community | 409, saying they are already a member and to check WhatsApp for their invite |
 | Duplicate pending request | 409, saying the request is already waiting — never a second row |
@@ -179,11 +196,12 @@ schedule."
   `findPastGraceDeadline`** — §8's chain, executed rather than reasoned.
 - Approve is owner-scoped: a stranger gets 404, and the response leaks nothing.
 - Approving twice enqueues **one** `grant_access` row.
-- `selectPaymentProvider` under `none`: no adapter constructed, checkout route absent, and
-  **the fake adapter is not reachable in any environment** under `none`.
-- `xendit` mode still throws when half-configured, in every environment — the existing tests must
-  keep passing unchanged.
-- A community set to `paid` cannot be created or updated while the deployment is `none`.
+- `selectPaymentProvider` with neither key set, per row of §2's table — in particular that
+  outside `RELAXED_NODE_ENVS` it returns a disabled payment path rather than throwing, and that
+  **the fake adapter is unreachable there**. The half-configured throw must still fire in every
+  environment, with its existing tests unchanged.
+- A community cannot be created with, or updated to, `access_mode = paid` while payments are
+  disabled.
 - Web: the checkout page renders the request form under `request` and the purchase form under
   `paid`; the owner's pending list renders, approves and rejects.
 
