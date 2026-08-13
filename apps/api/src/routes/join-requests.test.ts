@@ -360,6 +360,33 @@ describe("POST /communities/:id/join-requests/:requestId/reject", () => {
     expect(await res.json()).toEqual([]);
   });
 
+  /**
+   * Fix round 1: without this scoping, approving a deactivated-tier request
+   * 409s with a message telling the owner to reject instead — and rejecting
+   * used to hit the identical 409, a genuine deadlock with no escape that did
+   * not require briefly reactivating (and republishing) a retired tier. This
+   * is the escape hatch the message promises, proven end to end.
+   */
+  it("succeeds rejecting a request even when its tier has been deactivated", async () => {
+    const a = app();
+    const { token, community, tier, joinRequestId } = await seedPendingRequest(a);
+
+    const deactivate = await a.request(`/communities/${community.id}/tiers/${tier.id}`, {
+      method: "PATCH",
+      headers: bearer(token),
+      body: JSON.stringify({ isActive: false }),
+    });
+    expect(deactivate.status).toBe(200);
+
+    const res = await a.request(
+      `/communities/${community.id}/join-requests/${joinRequestId}/reject`,
+      { method: "POST", headers: bearer(token) }
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ subscriptionId: null });
+  });
+
   it("404s for a creator who does not own the community — never 403", async () => {
     const a = app();
     const { community, joinRequestId } = await seedPendingRequest(a);

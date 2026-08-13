@@ -451,12 +451,26 @@ describe("DecideJoinRequest — tier no longer active", () => {
     );
   });
 
-  it("409s rejecting a request for a deactivated tier too — the check runs before branching on decision", async () => {
-    const { decideJoinRequest } = harness({ tiers: [tier({ isActive: false })] });
+  /**
+   * Fix round 1: this used to assert the OPPOSITE — that rejecting a
+   * deactivated-tier request also 409s. That was a genuine deadlock: the
+   * approval 409's own message tells the owner to reject instead, and
+   * rejecting hit the exact same wall, with no escape that did not require
+   * briefly reactivating (and republishing) a tier the owner deliberately
+   * retired. Rejecting a pending request never touches the tier — it only
+   * flips `join_request.status` — so a deactivated tier is not this
+   * decision's business at all.
+   */
+  it("lets a rejection succeed even when the tier has been deactivated — rejecting never touches the tier", async () => {
+    const { decideJoinRequest, activityLogCalls } = harness({
+      tiers: [tier({ isActive: false })],
+    });
 
-    await expect(
-      decideJoinRequest.execute({ ...INPUT, decision: "rejected" })
-    ).rejects.toBeInstanceOf(ConflictError);
+    const result = await decideJoinRequest.execute({ ...INPUT, decision: "rejected" });
+
+    expect(result).toEqual({ subscriptionId: null });
+    expect(activityLogCalls).toHaveLength(1);
+    expect(activityLogCalls[0].eventType).toBe("join_request_rejected");
   });
 });
 
