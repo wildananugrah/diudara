@@ -8,7 +8,11 @@ import {
   publicCheckoutUrl,
   publicLinkLabel,
 } from "./format";
-import { ensurePaymentAccountStatusLoaded, getPaymentAccountState } from "./paymentAccount";
+import {
+  ensurePaymentAccountStatusLoaded,
+  getPaymentAccountState,
+  getPaymentsAvailable,
+} from "./paymentAccount";
 import type { AiStatus, Community, StreamingStatus } from "./types";
 
 /** A label, its input, and that field's own error message. Shared by every form. */
@@ -150,10 +154,39 @@ export function CopyableLink({ url, label }: { url: string; label: string }) {
  */
 export function PaymentAccountNotice() {
   const state = useSyncExternalStore(subscribeToAuth, getPaymentAccountState);
+  const available = useSyncExternalStore(subscribeToAuth, getPaymentsAvailable);
   useEffect(() => {
     ensurePaymentAccountStatusLoaded();
   }, []);
   if (state === "connected") return null;
+
+  // NOTHING TO CONNECT ON THIS SERVER. Every sentence below assumes the
+  // creator can fix this by pressing a button — but `POST /payment-account`
+  // answers 503 on a box with no payment provider, so the instruction cannot
+  // be followed, and "Paket yang Anda buat tidak akan bisa dibeli siapa pun"
+  // describes a purchase that is not on offer here at all. Found by driving
+  // the dashboard against a real payments-disabled box: this was the last
+  // false sentence left on a free community's screens.
+  //
+  // Still a warning rather than silence: a community created before this
+  // server dropped its payment provider can still be `paid`, and its owner
+  // deserves to know why nobody can join it.
+  if (available === "unavailable") {
+    return (
+      <div className="notice notice-warning" data-testid="payment-account-notice" role="status">
+        <h3>Server ini tidak menerima pembayaran</h3>
+        <p>
+          DIUDARA di server ini berjalan tanpa penyedia pembayaran, jadi komunitas berbayar tidak
+          bisa dibuat dan komunitas berbayar yang sudah ada tidak menerima anggota baru. Tidak ada
+          yang bisa Anda perbaiki sendiri dari dasbor — hubungi pengelola server Anda.
+        </p>
+        <p>
+          Komunitas <strong>gratis</strong> tetap berjalan penuh: calon anggota mengajukan
+          permintaan dan Anda menyetujuinya di tab “Anggota”.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="notice notice-warning" data-testid="payment-account-notice" role="status">

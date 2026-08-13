@@ -456,6 +456,25 @@ describe("CommunityOverviewPage — copy that assumed a purchase (gate fix round
     expect(screen.getByTestId("status-explanation").textContent).toMatch(/checkout|dibeli/i);
   });
 
+  it("does not say a free community's unused tiers were never BOUGHT", async () => {
+    stubFree();
+
+    render();
+    await screen.findByTestId("tier-distribution");
+
+    expect(screen.getByText(/belum pernah disetujui untuk siapa pun/i)).toBeTruthy();
+    expect(screen.queryAllByText(/belum pernah dibeli siapa pun/i).length).toBe(0);
+  });
+
+  it("still says 'belum pernah dibeli' for a paid community", async () => {
+    stub();
+
+    render();
+    await screen.findByTestId("tier-distribution");
+
+    expect(screen.getByText(/belum pernah dibeli siapa pun/i)).toBeTruthy();
+  });
+
   it("does not tell a free community its tiers are for buying", async () => {
     stubFree(EMPTY_METRICS);
 

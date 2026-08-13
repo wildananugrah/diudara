@@ -267,8 +267,10 @@ function TierDistribution({
         </table>
       </div>
       <p className="hint">
-        Hanya anggota berstatus aktif yang dihitung di sini. Paket yang menunjukkan 0 anggota belum
-        pernah dibeli siapa pun.
+        Hanya anggota berstatus aktif yang dihitung di sini.{" "}
+        {isRequestMode(community)
+          ? "Paket yang menunjukkan 0 anggota belum pernah disetujui untuk siapa pun."
+          : "Paket yang menunjukkan 0 anggota belum pernah dibeli siapa pun."}
       </p>
     </div>
   );

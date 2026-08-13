@@ -315,3 +315,38 @@ describe("CommunitiesPage — access mode on the create form (gate fix round)", 
     expect([...select.options].map((o) => o.value)).toEqual(["paid", "request"]);
   });
 });
+
+/** The last false sentence on a free community's screens: the payments warning
+    told a creator to press a button that answers 503 on a server with no
+    payment provider, and described purchases that are not on offer there. */
+describe("PaymentAccountNotice — a server with no payment provider (gate fix round)", () => {
+  it("does not tell the creator to go and connect payments they cannot connect", async () => {
+    stubFetch([
+      { path: "/payment-account", body: { connected: false, provisioning: false, available: false } },
+      { path: "/communities", body: [] },
+    ]);
+
+    render();
+    await screen.findByText(/Belum ada komunitas/);
+
+    const notice = await screen.findByTestId("payment-account-notice");
+    expect(notice.textContent).toMatch(/tidak menerima pembayaran/i);
+    expect(notice.textContent).not.toMatch(/Hubungkan pembayaran/i);
+    expect(notice.textContent).not.toMatch(/dibeli/i);
+    // Still says free communities work, so the screen is not just a dead end.
+    expect(notice.textContent).toMatch(/gratis/i);
+  });
+
+  it("keeps the ordinary 'connect your payments' warning on a server that HAS a provider", async () => {
+    stubFetch([
+      { path: "/payment-account", body: { connected: false, provisioning: false, available: true } },
+      { path: "/communities", body: [] },
+    ]);
+
+    render();
+    await screen.findByText(/Belum ada komunitas/);
+
+    const notice = await screen.findByTestId("payment-account-notice");
+    expect(notice.textContent).toMatch(/Hubungkan pembayaran/i);
+  });
+});
