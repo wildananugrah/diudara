@@ -1,6 +1,13 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { apiFetch, apiRequest, DashboardApiError } from "../apiClient";
+import {
+  apiFetch,
+  apiRequest,
+  approveJoinRequest,
+  DashboardApiError,
+  listJoinRequests,
+  rejectJoinRequest,
+} from "../apiClient";
 import {
   formatDate,
   formatDateTime,
@@ -11,7 +18,19 @@ import {
 import { CommunityHeader, EmptyState, ErrorPanel, NotFoundPanel } from "../ui";
 import { useCommunity } from "../useCommunity";
 import { useLoad } from "../useLoad";
-import type { Community, MemberRosterPage, MemberRow, RevokeResult } from "../types";
+import type {
+  Community,
+  JoinRequestRow,
+  MemberRosterPage,
+  MemberRow,
+  RevokeResult,
+} from "../types";
+
+/**
+ * `community.accessMode` value that accepts a free join request instead of a
+ * purchase — mirrors `CheckoutPage.tsx`'s own constant of the same name.
+ */
+const REQUEST_ACCESS_MODE = "request";
 
 /** Rows per request. The API's own default, and its cap is 100. */
 const PAGE_LIMIT = 25;
@@ -82,24 +101,279 @@ type CsvState =
 export default function MembersPage() {
   const { communityId } = useParams<{ communityId: string }>();
   const [communityLoad] = useCommunity(communityId);
+  /** Bumped after every join-request decision, so `Roster` refetches — see
+      `Roster`'s own `refreshToken` dependency below. */
+  const [rosterVersion, setRosterVersion] = useState(0);
 
   if (communityLoad.kind === "loading") return <p className="muted">Memuat...</p>;
   if (communityLoad.kind === "error") return <ErrorPanel message={communityLoad.message} />;
   if (communityLoad.data === null) return <NotFoundPanel />;
 
+  const community = communityLoad.data;
+
   return (
     <section>
-      <CommunityHeader community={communityLoad.data} />
+      <CommunityHeader community={community} />
+      {community.accessMode === REQUEST_ACCESS_MODE ? (
+        <JoinRequests community={community} onDecided={() => setRosterVersion((v) => v + 1)} />
+      ) : null}
       <h2>Anggota</h2>
-      <Roster community={communityLoad.data} />
+      <Roster community={community} refreshToken={rosterVersion} />
     </section>
   );
 }
 
-function Roster({ community }: { community: Community }) {
+/**
+ * The owner's inbox of pending free-community join requests.
+ *
+ * Rendered by the caller ONLY when `community.accessMode === "request"` — a
+ * paid community has no `join_request` rows at all, and a section that always
+ * rendered (even empty) would imply otherwise. Nothing here fetches unless
+ * that condition already held, so a paid community never even calls
+ * `GET .../join-requests`.
+ */
+function JoinRequests({
+  community,
+  onDecided,
+}: {
+  community: Community;
+  onDecided: () => void;
+}) {
+  const [load, handle] = useLoad(() => listJoinRequests(community.id), [community.id]);
+  /**
+   * Set only on a 409 (decided in another tab already).
+   *
+   * LIVES HERE, NOT IN `JoinRequestTable` — a conflict always arrives in the
+   * same state update that removes the request's row (see `decide`'s catch
+   * branch below), and when that removal empties the list this component
+   * stops rendering `JoinRequestTable` at all. State kept inside the table
+   * would vanish in the very same render that was supposed to show it; kept
+   * here, it survives the table unmounting underneath it.
+   */
+  const [conflict, setConflict] = useState<string | null>(null);
+
+  if (load.kind === "loading") {
+    return <p className="muted">Memuat permintaan bergabung...</p>;
+  }
+  if (load.kind === "error") {
+    return <ErrorPanel message={load.message} onRetry={handle.reload} />;
+  }
+
+  const requests = load.data;
+
+  /** Drops one settled request from the list in place — the same shortcut
+      `Roster.loadMore` uses via `handle.update`, so a decision does not cost
+      a second round trip to see its own row disappear. */
+  function removeRequest(id: string) {
+    handle.update(requests.filter((request) => request.id !== id));
+  }
+
+  return (
+    <div className="stack join-requests">
+      <h2>Permintaan bergabung ({requests.length})</h2>
+      {conflict !== null ? (
+        <p className="notice notice-info" data-testid="join-request-conflict" role="status">
+          {conflict}
+        </p>
+      ) : null}
+      {requests.length === 0 ? (
+        <p className="muted">Tidak ada permintaan yang menunggu saat ini.</p>
+      ) : (
+        <JoinRequestTable
+          community={community}
+          requests={requests}
+          onSettled={(id) => {
+            removeRequest(id);
+            onDecided();
+          }}
+          onConflict={setConflict}
+        />
+      )}
+    </div>
+  );
+}
+
+/** A join request's own version of `memberLabel` (below) — same fallback, same reasoning. */
+function joinRequestLabel(request: JoinRequestRow): string {
+  return request.memberName ?? request.memberWhatsappNumber;
+}
+
+/**
+ * One row per pending request, with the owner's two decisions.
+ *
+ * APPROVE SENDS IMMEDIATELY; REJECT ASKS FIRST. Deliberately asymmetric:
+ * approval is recoverable (the owner can revoke the member afterwards through
+ * `MemberTable`'s existing flow on this same page), but a rejection is
+ * SILENT BY DESIGN — the member is never told, so a mis-tap is invisible to
+ * everyone, including the owner, and there is no "undo" to reach for. The
+ * confirmation dialog below follows `MemberTable`'s own `revoke-confirm`
+ * pattern rather than inventing a second one.
+ */
+function JoinRequestTable({
+  community,
+  requests,
+  onSettled,
+  onConflict,
+}: {
+  community: Community;
+  requests: JoinRequestRow[];
+  onSettled: (id: string) => void;
+  /** Reports a 409's message up to `JoinRequests` (or clears it with `null`)
+      — see that component's docstring on `conflict` for why the message
+      cannot live here. */
+  onConflict: (message: string | null) => void;
+}) {
+  /** The request awaiting reject confirmation, or null. */
+  const [confirming, setConfirming] = useState<JoinRequestRow | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  /** Per-request error text for a decision that failed for a reason OTHER
+      than a 409 — the row stays, so the owner can just try again. */
+  const [rowErrors, setRowErrors] = useState<ReadonlyMap<string, string>>(new Map());
+
+  async function decide(request: JoinRequestRow, decision: "approve" | "reject") {
+    setBusyId(request.id);
+    onConflict(null);
+    setRowErrors((previous) => {
+      if (!previous.has(request.id)) return previous;
+      const next = new Map(previous);
+      next.delete(request.id);
+      return next;
+    });
+    try {
+      if (decision === "approve") {
+        await approveJoinRequest(community.id, request.id);
+      } else {
+        await rejectJoinRequest(community.id, request.id);
+      }
+      onSettled(request.id);
+    } catch (err) {
+      if (err instanceof DashboardApiError && err.status === 409) {
+        // Decided in another tab already (the owner's own open-elsewhere
+        // case the brief calls out) — the row is stale, not actionable.
+        // Removing it and refreshing the roster is safer than leaving it for
+        // the owner to click again and hit the same 409.
+        onConflict(
+          `${joinRequestLabel(request)}: permintaan ini sudah diproses di tab atau perangkat lain.`
+        );
+        onSettled(request.id);
+      } else {
+        setRowErrors((previous) => {
+          const next = new Map(previous);
+          next.set(
+            request.id,
+            err instanceof Error ? err.message : "gagal memproses permintaan"
+          );
+          return next;
+        });
+      }
+    } finally {
+      setBusyId(null);
+      setConfirming(null);
+    }
+  }
+
+  return (
+    <>
+      {confirming !== null ? (
+        <div className="notice notice-warning" data-testid="reject-confirm" role="alertdialog">
+          <h3>Tolak permintaan {joinRequestLabel(confirming)}?</h3>
+          <p>
+            Anggota ini TIDAK diberi tahu bahwa permintaannya ditolak — tidak ada pesan yang
+            dikirim ke mereka. Pastikan Anda yakin sebelum melanjutkan; tindakan ini tidak bisa
+            dibatalkan dari dasbor.
+          </p>
+          <div className="row">
+            <button
+              type="button"
+              className="button-danger"
+              onClick={() => decide(confirming, "reject")}
+              disabled={busyId !== null}
+            >
+              Ya, tolak permintaan
+            </button>
+            <button
+              type="button"
+              className="button-quiet"
+              onClick={() => setConfirming(null)}
+              disabled={busyId !== null}
+            >
+              Batal
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Nama</th>
+              <th>WhatsApp</th>
+              <th>Paket</th>
+              <th>Menunggu sejak</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {requests.map((request) => {
+              const rowError = rowErrors.get(request.id);
+              return (
+                <tr key={request.id}>
+                  <td>
+                    {request.memberName === null ? (
+                      <span className="muted">Tanpa nama ({request.memberWhatsappNumber})</span>
+                    ) : (
+                      request.memberName
+                    )}
+                  </td>
+                  <td>{request.memberWhatsappNumber}</td>
+                  <td>{request.tierName}</td>
+                  <td>{formatDateTime(request.createdAt)}</td>
+                  <td>
+                    <div className="row">
+                      <button
+                        type="button"
+                        className="button-primary"
+                        onClick={() => decide(request, "approve")}
+                        disabled={busyId !== null || confirming !== null}
+                      >
+                        Setujui
+                      </button>
+                      <button
+                        type="button"
+                        className="button-danger"
+                        onClick={() => setConfirming(request)}
+                        disabled={busyId !== null || confirming !== null}
+                      >
+                        Tolak
+                      </button>
+                    </div>
+                    {rowError !== undefined ? (
+                      <p className="form-error" role="alert">
+                        {rowError}
+                      </p>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+function Roster({
+  community,
+  refreshToken,
+}: {
+  community: Community;
+  refreshToken: number;
+}) {
   const [load, handle] = useLoad(
     () => apiFetch<MemberRosterPage>(`/communities/${community.id}/members?limit=${PAGE_LIMIT}`),
-    [community.id]
+    [community.id, refreshToken]
   );
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);

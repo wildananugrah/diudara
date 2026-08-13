@@ -1,5 +1,6 @@
 import { ApiError } from "../api";
 import { clearToken, getToken, setSession, type DashboardCreator } from "./auth";
+import type { JoinRequestDecisionResult, JoinRequestRow } from "./types";
 
 /**
  * An error from the dashboard API, with the 400's per-field messages already
@@ -163,4 +164,39 @@ export function signup(input: {
   password: string;
 }): Promise<AuthSuccess> {
   return authenticate("/auth/signup", input);
+}
+
+/** `GET /communities/:communityId/join-requests` — pending free-community requests only. */
+export function listJoinRequests(communityId: string): Promise<JoinRequestRow[]> {
+  return apiFetch<JoinRequestRow[]>(`/communities/${communityId}/join-requests`);
+}
+
+/**
+ * `POST /communities/:communityId/join-requests/:requestId/approve`.
+ *
+ * Answers 404 for a non-owner — never 403, so a stranger cannot learn the
+ * community or the request exists — and 409 when the request was already
+ * decided, most often because the owner has this page open in another tab.
+ * Both surface as an ordinary `DashboardApiError`; `MembersPage.tsx` decides
+ * what each means on screen.
+ */
+export function approveJoinRequest(
+  communityId: string,
+  requestId: string
+): Promise<JoinRequestDecisionResult> {
+  return apiFetch<JoinRequestDecisionResult>(
+    `/communities/${communityId}/join-requests/${requestId}/approve`,
+    { method: "POST" }
+  );
+}
+
+/** Same contract as `approveJoinRequest`, for the other decision. */
+export function rejectJoinRequest(
+  communityId: string,
+  requestId: string
+): Promise<JoinRequestDecisionResult> {
+  return apiFetch<JoinRequestDecisionResult>(
+    `/communities/${communityId}/join-requests/${requestId}/reject`,
+    { method: "POST" }
+  );
 }

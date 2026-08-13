@@ -555,6 +555,21 @@ button:disabled {
   margin: 0;
 }
 
+/* ---------- join requests ---------- */
+
+/*
+ * The pending join-request queue (MembersPage.tsx) sits above the paid roster
+ * it feeds into. A plain heading followed immediately by another table read
+ * as one continuous list in review — this border is the only thing telling a
+ * creator "everything above this line is still waiting on you; everything
+ * below it is already settled".
+ */
+.join-requests {
+  padding-bottom: 20px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
 /* ---------- tables ---------- */
 
 /* Wide content scrolls inside its own box; the page body never scrolls sideways. */

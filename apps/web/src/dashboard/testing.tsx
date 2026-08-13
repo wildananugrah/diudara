@@ -20,6 +20,7 @@ export const TEST_COMMUNITY = {
   slug: "kelas-bimbel-budi",
   niche: "bimbel",
   status: "active",
+  accessMode: "paid",
   createdAt: "2026-08-01T02:00:00.000Z",
 };
 

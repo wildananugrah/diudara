@@ -31,6 +31,13 @@ export interface Community {
   niche: string | null;
   /** `active` | `paused` | `archived`. A free varchar in the schema, so treated as a string. */
   status: string;
+  /**
+   * `paid` | `request`. `request` means this community has no priced checkout —
+   * a member asks to join and the owner approves or rejects (see
+   * `MembersPage.tsx`'s join-request queue). A free varchar, same reasoning as
+   * `status`.
+   */
+  accessMode: string;
   /** ISO 8601 — `Date` serialised by Hono's `c.json`. */
   createdAt: string;
 }
@@ -110,6 +117,42 @@ export interface MemberRow {
 export interface MemberRosterPage {
   members: MemberRow[];
   nextCursor: string | null;
+}
+
+/**
+ * `PendingJoinRequestRow` — apps/api/src/application/ports/join-request-repository.port.ts.
+ * `GET /communities/:communityId/join-requests`'s response, one row per pending
+ * request for this community. Never includes decided rows — see
+ * `ListJoinRequests` (apps/api).
+ */
+export interface JoinRequestRow {
+  id: string;
+  memberId: string;
+  /**
+   * `members.name`, verbatim — including `null`. THE REPOSITORY DELIBERATELY
+   * DOES NOT COALESCE THIS TO `''`: a WhatsApp-only signup may have no name at
+   * all, and a caller that turned the gap into an empty string once produced
+   * "Permintaan bergabung baru di Kelas Rina:  ingin bergabung ke tier Free." —
+   * a broken sentence with a doubled space. `MembersPage.tsx` is the caller
+   * that knows this is a dashboard table cell, and renders "Tanpa nama" itself
+   * rather than trusting a coalesced value from here.
+   */
+  memberName: string | null;
+  memberWhatsappNumber: string;
+  tierId: string;
+  tierName: string;
+  /** ISO 8601 — `Date` serialised by Hono's `c.json`. */
+  createdAt: string;
+}
+
+/**
+ * `POST /communities/:communityId/join-requests/:requestId/approve` or
+ * `.../reject` — apps/api/src/application/use-cases/decide-join-request.ts.
+ * `subscriptionId` is non-null only for an approval; a rejection never creates
+ * one.
+ */
+export interface JoinRequestDecisionResult {
+  subscriptionId: string | null;
 }
 
 /** `GET /ai/status` — apps/api/src/routes/ai.ts. */

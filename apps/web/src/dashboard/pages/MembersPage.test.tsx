@@ -1,11 +1,36 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import MembersPage from "./MembersPage";
-import { renderPage, stubFetch, TEST_COMMUNITY, type StubRoute } from "../testing";
+import { renderPage, stubFetch, TEST_COMMUNITY, type FetchStub, type StubRoute } from "../testing";
 
 const ROSTER = `/communities/${TEST_COMMUNITY.id}/members`;
 const CSV = `/communities/${TEST_COMMUNITY.id}/members.csv`;
 const COMMUNITY_PATH = `/communities/${TEST_COMMUNITY.id}`;
+const JOIN_REQUESTS = `/communities/${TEST_COMMUNITY.id}/join-requests`;
+
+/** Same community, but accepting free join requests instead of payments. */
+const REQUEST_COMMUNITY = { ...TEST_COMMUNITY, accessMode: "request" };
+
+const RINA = {
+  id: "88888888-8888-4888-8888-888888888888",
+  memberId: "99999999-9999-4999-8999-999999999999",
+  memberName: "Rina Wulandari",
+  memberWhatsappNumber: "+6281299999999",
+  tierId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  tierName: "Free",
+  createdAt: "2026-08-10T02:00:00.000Z",
+};
+
+/** A WhatsApp-only signup — `member.name` is null, not `''`. */
+const NAMELESS = {
+  id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  memberId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  memberName: null,
+  memberWhatsappNumber: "+6281200000099",
+  tierId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  tierName: "Free",
+  createdAt: "2026-08-11T02:00:00.000Z",
+};
 
 const SITI = {
   memberId: "22222222-2222-4222-8222-222222222222",
@@ -66,6 +91,16 @@ function revokeFromRow(name: string): void {
 /** The community lookup every community screen makes, plus whatever the test needs. */
 function stub(routes: StubRoute[]) {
   return stubFetch([{ path: COMMUNITY_PATH, body: TEST_COMMUNITY }, ...routes]);
+}
+
+/** Same as `stub`, but the community accepts free join requests. */
+function stubRequestMode(routes: StubRoute[]) {
+  return stubFetch([{ path: COMMUNITY_PATH, body: REQUEST_COMMUNITY }, ...routes]);
+}
+
+/** How many times the roster itself (not the community lookup) has been fetched so far. */
+function countRosterGets(stubbed: FetchStub): number {
+  return stubbed.calls.filter((c) => c.method === "GET" && c.url.startsWith(ROSTER)).length;
 }
 
 let originalFetch: typeof fetch;
@@ -425,5 +460,163 @@ describe("MembersPage", () => {
     render();
 
     expect(await screen.findByText(/Komunitas tidak ditemukan/)).toBeTruthy();
+  });
+});
+
+describe("MembersPage — join requests (free communities, Task 7)", () => {
+  it("does not fetch or show a join-request section for a paid community", async () => {
+    const stubbed = stub([{ path: ROSTER, body: { members: [], nextCursor: null } }]);
+
+    render();
+    await screen.findByText(/Belum ada anggota/);
+
+    expect(screen.queryAllByText(/Permintaan bergabung/).length).toBe(0);
+    // Not merely hidden — never asked for, so a paid community cannot even
+    // momentarily imply it has requests waiting.
+    expect(stubbed.calls.some((c) => c.url.includes("/join-requests"))).toBe(false);
+  });
+
+  it("shows the pending queue for a request-mode community, with a count in the heading", async () => {
+    stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+    ]);
+
+    render();
+
+    expect(await screen.findByText("Permintaan bergabung (1)")).toBeTruthy();
+    expect(screen.getByText("Rina Wulandari")).toBeTruthy();
+    expect(screen.getByText(RINA.memberWhatsappNumber)).toBeTruthy();
+    expect(screen.getByText("Free")).toBeTruthy();
+  });
+
+  it("shows a zero count rather than an empty list that could be mistaken for absence", async () => {
+    stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [] },
+    ]);
+
+    render();
+
+    expect(await screen.findByText("Permintaan bergabung (0)")).toBeTruthy();
+  });
+
+  it("RENDERS 'Tanpa nama' DE-EMPHASISED, with the WhatsApp number beside it, for a null member name", async () => {
+    stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [NAMELESS] },
+    ]);
+
+    render();
+
+    const cell = await screen.findByText(/Tanpa nama/);
+    expect(cell.textContent).toContain(NAMELESS.memberWhatsappNumber);
+    expect(cell.className).toMatch(/muted/);
+  });
+
+  it("APPROVES WITH NO CONFIRMATION, removes the row, and refreshes the roster", async () => {
+    const stubbed = stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+      {
+        method: "POST",
+        path: `${JOIN_REQUESTS}/${RINA.id}/approve`,
+        body: { subscriptionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" },
+      },
+    ]);
+
+    render();
+    await screen.findByText("Rina Wulandari");
+    // Counted as a BASELINE, not a fixed number: StrictMode (see testing.tsx)
+    // double-invokes the mount effect, so the roster is already fetched more
+    // than once before any decision happens. What matters here is that a
+    // decision causes at least one MORE fetch, not the absolute count.
+    const rosterGetsBeforeDecision = countRosterGets(stubbed);
+
+    fireEvent.click(screen.getByRole("button", { name: "Setujui" }));
+
+    // No confirmation dialog ever appears for an approval.
+    expect(screen.queryAllByTestId("reject-confirm").length).toBe(0);
+
+    await waitFor(() => expect(screen.queryAllByText("Rina Wulandari").length).toBe(0));
+    // The roster is refetched — an approved member must show up without a
+    // manual reload.
+    await waitFor(() =>
+      expect(countRosterGets(stubbed)).toBeGreaterThan(rosterGetsBeforeDecision)
+    );
+  });
+
+  it("ASKS FOR CONFIRMATION before rejecting, and sends nothing until it is given", async () => {
+    const stubbed = stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+    ]);
+
+    render();
+    await screen.findByText("Rina Wulandari");
+
+    fireEvent.click(screen.getByRole("button", { name: "Tolak" }));
+
+    expect(screen.getByTestId("reject-confirm").textContent).toMatch(/Rina Wulandari/);
+    expect(stubbed.calls.some((c) => c.method === "POST")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Batal" }));
+    expect(screen.queryAllByTestId("reject-confirm").length).toBe(0);
+    expect(stubbed.calls.some((c) => c.method === "POST")).toBe(false);
+    // Cancelling leaves the request exactly where it was.
+    expect(screen.getByText("Rina Wulandari")).toBeTruthy();
+  });
+
+  it("rejects on confirmation, removes the row, and refreshes the roster", async () => {
+    const stubbed = stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+      {
+        method: "POST",
+        path: `${JOIN_REQUESTS}/${RINA.id}/reject`,
+        body: { subscriptionId: null },
+      },
+    ]);
+
+    render();
+    await screen.findByText("Rina Wulandari");
+    const rosterGetsBeforeDecision = countRosterGets(stubbed);
+
+    fireEvent.click(screen.getByRole("button", { name: "Tolak" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ya, tolak permintaan" }));
+
+    await waitFor(() => expect(screen.queryAllByText("Rina Wulandari").length).toBe(0));
+    await waitFor(() =>
+      expect(countRosterGets(stubbed)).toBeGreaterThan(rosterGetsBeforeDecision)
+    );
+    const post = stubbed.calls.find((c) => c.method === "POST")!;
+    expect(post.url).toBe(`${JOIN_REQUESTS}/${RINA.id}/reject`);
+  });
+
+  it("shows a message and refreshes, rather than leaving a stale row, when the request was already decided elsewhere (409)", async () => {
+    const stubbed = stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+      {
+        method: "POST",
+        path: `${JOIN_REQUESTS}/${RINA.id}/approve`,
+        status: 409,
+        body: { error: "permintaan ini sudah diproses" },
+      },
+    ]);
+
+    render();
+    await screen.findByText("Rina Wulandari");
+    const rosterGetsBeforeDecision = countRosterGets(stubbed);
+
+    fireEvent.click(screen.getByRole("button", { name: "Setujui" }));
+
+    expect((await screen.findByTestId("join-request-conflict")).textContent).toMatch(
+      /sudah diproses|tab lain|perangkat lain/i
+    );
+    await waitFor(() => expect(screen.queryAllByText("Rina Wulandari").length).toBe(0));
+    await waitFor(() =>
+      expect(countRosterGets(stubbed)).toBeGreaterThan(rosterGetsBeforeDecision)
+    );
   });
 });
