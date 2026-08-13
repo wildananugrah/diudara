@@ -87,6 +87,33 @@ export const ACCESS_MODES = ["paid", "request"] as const;
 export const REQUEST_ONLY = ["request"] as const;
 
 /**
+ * `community.access_mode` value whose join path is a request, not a purchase.
+ *
+ * Exported because four screens' COPY depends on it, not just their behaviour:
+ * a request-mode community has no checkout, no price and no payment, so every
+ * sentence containing "checkout", "dibeli" or "pembayaran" is false for one.
+ * The gate found a free-community creator being told their numbers would appear
+ * "setelah pembayaran pertama berhasil" — a payment that can never happen.
+ */
+export const REQUEST_ACCESS_MODE = "request";
+
+/** True when this community's members join by asking rather than by paying. */
+export function isRequestMode(community: { accessMode: string }): boolean {
+  return community.accessMode === REQUEST_ACCESS_MODE;
+}
+
+/**
+ * The label above a community's public link. It is a CHECKOUT link only for a
+ * paid community; for a free one it opens a join-request form and calling it a
+ * checkout misdescribes the single most-shared thing in the product.
+ */
+export function publicLinkLabel(community: { accessMode: string }): string {
+  return isRequestMode(community)
+    ? "Tautan pendaftaran publik — sebarkan ini ke calon anggota"
+    : "Tautan checkout publik — sebarkan ini ke calon anggota";
+}
+
+/**
  * `community.access_mode` — how a member gets IN, which is a different question
  * from `status` (whether the page is open at all).
  *

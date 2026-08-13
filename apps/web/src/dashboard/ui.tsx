@@ -2,7 +2,12 @@ import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react
 import { Link, NavLink } from "react-router-dom";
 import { apiFetch } from "./apiClient";
 import { subscribeToAuth } from "./auth";
-import { communityStatusExplanation, communityStatusLabel, publicCheckoutUrl } from "./format";
+import {
+  communityStatusExplanation,
+  communityStatusLabel,
+  publicCheckoutUrl,
+  publicLinkLabel,
+} from "./format";
 import { ensurePaymentAccountStatusLoaded, getPaymentAccountState } from "./paymentAccount";
 import type { AiStatus, Community, StreamingStatus } from "./types";
 
@@ -296,9 +301,6 @@ export function LiveStreamingNavLink({ communityId }: { communityId: string }) {
 
 export function CheckoutLink({ community }: { community: Community }) {
   return (
-    <CopyableLink
-      url={publicCheckoutUrl(community.slug)}
-      label="Tautan checkout publik — sebarkan ini ke calon anggota"
-    />
+    <CopyableLink url={publicCheckoutUrl(community.slug)} label={publicLinkLabel(community)} />
   );
 }

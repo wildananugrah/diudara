@@ -371,3 +371,77 @@ describe("CommunityOverviewPage — access mode (free communities, Task 8)", () 
     expect((screen.getByLabelText("Cara bergabung") as HTMLSelectElement).value).toBe("paid");
   });
 });
+
+/**
+ * The gate's item C. A free community has no checkout, no price and no payment,
+ * so every sentence containing "checkout", "dibeli" or "pembayaran" is false for
+ * one. The worst was the day-one empty state, which told a free-community
+ * creator their numbers would appear "setelah pembayaran pertama berhasil" — a
+ * payment that can never happen there.
+ */
+describe("CommunityOverviewPage — copy that assumed a purchase (gate fix round)", () => {
+  const FREE = { ...TEST_COMMUNITY, accessMode: "request" };
+  const EMPTY_METRICS = {
+    members: { active: 0, pastDue: 0, churned: 0 },
+    grossRevenueAmount: 0,
+    tierDistribution: [],
+  };
+
+  function stubFree(metrics: unknown = METRICS) {
+    return stubFetch([
+      { path: COMMUNITY_PATH, body: FREE },
+      { path: METRICS_PATH, body: metrics },
+    ]);
+  }
+
+  it("does not promise a free community its numbers after a first payment", async () => {
+    stubFree(EMPTY_METRICS);
+
+    render();
+    await screen.findByTestId("metrics-empty");
+
+    const text = screen.getByTestId("metrics-empty").textContent ?? "";
+    expect(text).not.toMatch(/pembayaran/i);
+    expect(text).toMatch(/menyetujui permintaan pertama/i);
+  });
+
+  it("still promises a PAID community its numbers after a first payment", async () => {
+    stubFetch([
+      { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
+      { path: METRICS_PATH, body: EMPTY_METRICS },
+    ]);
+
+    render();
+    await screen.findByTestId("metrics-empty");
+
+    expect(screen.getByTestId("metrics-empty").textContent).toMatch(/pembayaran pertama/i);
+  });
+
+  it("calls a free community's public link a registration link, not a checkout link", async () => {
+    stubFree();
+
+    render();
+    await screen.findByText("Kelas Bimbel Budi");
+
+    expect(screen.getByText(/Tautan pendaftaran publik/)).toBeTruthy();
+    expect(screen.queryAllByText(/Tautan checkout publik/).length).toBe(0);
+  });
+
+  it("still calls a paid community's link a checkout link", async () => {
+    stub();
+
+    render();
+    await screen.findByText("Kelas Bimbel Budi");
+
+    expect(screen.getByText(/Tautan checkout publik/)).toBeTruthy();
+  });
+
+  it("does not tell a free community its tiers are for buying", async () => {
+    stubFree(EMPTY_METRICS);
+
+    render();
+    await screen.findByTestId("metrics-empty");
+
+    expect(screen.getByText(/tidak menawarkan apa pun untuk diikuti/i)).toBeTruthy();
+  });
+});

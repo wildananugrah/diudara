@@ -2,7 +2,13 @@ import { useEffect, useState, useSyncExternalStore, type FormEvent } from "react
 import { Link } from "react-router-dom";
 import { apiFetch, DashboardApiError } from "../apiClient";
 import { subscribeToAuth } from "../auth";
-import { ACCESS_MODES, accessModeLabel, publicCheckoutUrl, REQUEST_ONLY } from "../format";
+import {
+  ACCESS_MODES,
+  accessModeLabel,
+  publicCheckoutUrl,
+  publicLinkLabel,
+  REQUEST_ONLY,
+} from "../format";
 import {
   ensurePaymentAccountStatusLoaded,
   getPaymentsAvailable,
@@ -77,10 +83,7 @@ function CommunityCard({ community }: { community: Community }) {
         <StatusBadge status={community.status} />
       </div>
       <StatusExplanation status={community.status} />
-      <CopyableLink
-        url={publicCheckoutUrl(community.slug)}
-        label="Tautan checkout publik — sebarkan ini ke calon anggota"
-      />
+      <CopyableLink url={publicCheckoutUrl(community.slug)} label={publicLinkLabel(community)} />
     </article>
   );
 }

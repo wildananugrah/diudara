@@ -177,3 +177,40 @@ describe("TiersPage", () => {
     expect(await screen.findByText(/Komunitas tidak ditemukan/)).toBeTruthy();
   });
 });
+
+/** The gate's item C, on this screen: a request-mode community has no checkout,
+    so "tidak bisa dibeli" and "sudah membeli paket itu" are both false for one. */
+describe("TiersPage — copy that assumed a purchase (gate fix round)", () => {
+  const FREE: StubRoute = {
+    path: COMMUNITY_PATH,
+    body: { ...TEST_COMMUNITY, accessMode: "request" },
+  };
+
+  it("does not say a free community's inactive tiers cannot be BOUGHT", async () => {
+    stubFetch([CONNECTED, FREE, { path: TIERS_PATH, body: [BASIC] }]);
+
+    render();
+    await screen.findByText("Basic");
+
+    expect(screen.getByText(/tidak bisa diminta/i)).toBeTruthy();
+    expect(screen.queryAllByText(/tidak bisa dibeli/i).length).toBe(0);
+  });
+
+  it("still says exactly that for a PAID community", async () => {
+    stubFetch([CONNECTED, COMMUNITY, { path: TIERS_PATH, body: [BASIC] }]);
+
+    render();
+    await screen.findByText("Basic");
+
+    expect(screen.getByText(/tidak bisa dibeli/i)).toBeTruthy();
+  });
+
+  it("does not point a free community with no tiers at a checkout page", async () => {
+    stubFetch([CONNECTED, FREE, { path: TIERS_PATH, body: [] }]);
+
+    render();
+
+    expect(await screen.findByText(/halaman pendaftaran Anda/i)).toBeTruthy();
+    expect(screen.queryAllByText(/halaman checkout Anda/i).length).toBe(0);
+  });
+});

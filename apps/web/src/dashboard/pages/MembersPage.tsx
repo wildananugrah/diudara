@@ -255,25 +255,6 @@ function joinRequestLabel(request: JoinRequestRow): string {
 }
 
 /**
- * THE ONLY 409 THAT MEANS "STALE ROW" — the exact string
- * `DecideJoinRequest` throws when its conditional UPDATE finds the row is no
- * longer `pending` (apps/api/src/application/use-cases/decide-join-request.ts:108).
- *
- * `DecideJoinRequest` throws `ConflictError` from THREE other call sites too
- * — a deactivated tier (`:77`, which explicitly tells the owner to reject
- * instead) and an already-active member, twice (`:93` pre-check, `:136` the
- * real unique-constraint guarantee). Every one of those leaves the request
- * genuinely still `pending` in the database. Treating all four alike used to
- * remove the row and print a made-up "decided elsewhere" sentence over the
- * API's own actionable Indonesian message — which also silently defeated
- * commit `38de515`, the one that made a deactivated-tier request rejectable
- * in the first place, since after that bug an owner had no button left that
- * would not immediately vanish. Matched by exact string because the API
- * gives no other signal (no error code) to tell these apart.
- */
-
-
-/**
  * One row per pending request, with the owner's two decisions.
  *
  * APPROVE SENDS IMMEDIATELY; REJECT ASKS FIRST. Deliberately asymmetric:
@@ -346,10 +327,25 @@ function JoinRequestTable({
           onSettled(request.id);
         } else {
           // A deactivated tier, or the member already holding an active
-          // subscription for this tier — the request is STILL PENDING, and
-          // the API's own message already says what to do (the deactivated-
-          // tier one literally ends "...atau tolak permintaan ini"). The row
-          // MUST stay, or that instruction has no button left to act on.
+          // subscription for this tier. The API's own message already says
+          // what to do (the deactivated-tier one literally ends "...atau tolak
+          // permintaan ini"), so the row stays and the message is rendered
+          // under it — remove the row and that instruction has no button left
+          // to act on.
+          //
+          // MOSTLY, BUT NOT ALWAYS, STILL PENDING. This comment used to claim
+          // "the request is STILL PENDING" outright, and the phase-gate review
+          // found one case where it is not: approving twice in a row answers
+          // the second call with ALREADY_ACTIVE_MEMBER_MESSAGE rather than
+          // JOIN_REQUEST_ALREADY_DECIDED_MESSAGE, because `DecideJoinRequest`'s
+          // already-active PRE-CHECK runs before the transaction that would
+          // have reported "already decided". So a settled row is kept here.
+          //
+          // Left as it is on purpose: that is the SAFE direction of Task 7's
+          // Critical. Keeping a stale row costs one more click that answers
+          // with the same 409; the bug that Critical fixed destroyed a row that
+          // was genuinely still pending and still actionable. Guessing wrong in
+          // the other direction is the expensive one.
           setRowErrors((previous) => {
             const next = new Map(previous);
             next.set(request.id, err.message);

@@ -5,6 +5,7 @@ import {
   ACCESS_MODES,
   accessModeExplanation,
   accessModeLabel,
+  isRequestMode,
   communityStatusLabel,
   formatRupiah,
   memberStatusExplanation,
@@ -137,6 +138,7 @@ function MetricsPanel({ community }: { community: Community }) {
   }
 
   const metrics = load.data;
+  const freeCommunity = isRequestMode(community);
   const { active, pastDue, churned } = metrics.members;
   // "How many people can currently see my group" and "how many are paid up" are
   // different questions, which is exactly why the API reports past-due separately
@@ -155,12 +157,21 @@ function MetricsPanel({ community }: { community: Community }) {
     return (
       <div className="section stack">
         <div data-testid="metrics-empty">
+          {/* A free community can NEVER have a first payment, so the paid
+              wording here told its creator to wait for something that will
+              never happen. */}
           <EmptyState
-            title="Belum ada anggota dan belum ada pembayaran"
-            action="Sebarkan tautan checkout di bawah ke calon anggota. Angka keanggotaan dan pendapatan muncul di sini setelah pembayaran pertama berhasil."
+            title={
+              freeCommunity ? "Belum ada anggota" : "Belum ada anggota dan belum ada pembayaran"
+            }
+            action={
+              freeCommunity
+                ? "Sebarkan tautan pendaftaran di bawah ke calon anggota. Angka keanggotaan muncul di sini setelah Anda menyetujui permintaan pertama."
+                : "Sebarkan tautan checkout di bawah ke calon anggota. Angka keanggotaan dan pendapatan muncul di sini setelah pembayaran pertama berhasil."
+            }
           />
         </div>
-        <TierDistribution tiers={metrics.tierDistribution} />
+        <TierDistribution tiers={metrics.tierDistribution} community={community} />
       </div>
     );
   }
@@ -200,7 +211,7 @@ function MetricsPanel({ community }: { community: Community }) {
         />
       </div>
 
-      <TierDistribution tiers={metrics.tierDistribution} />
+      <TierDistribution tiers={metrics.tierDistribution} community={community} />
     </div>
   );
 }
@@ -214,14 +225,20 @@ function MetricsPanel({ community }: { community: Community }) {
  */
 function TierDistribution({
   tiers,
+  community,
 }: {
   tiers: CommunityMetrics["tierDistribution"];
+  community: Community;
 }) {
   if (tiers.length === 0) {
     return (
       <EmptyState
         title="Belum ada paket"
-        action="Buat paket di tab “Paket”. Tanpa paket aktif, halaman checkout Anda tidak menawarkan apa pun untuk dibeli."
+        action={
+          isRequestMode(community)
+            ? "Buat paket di tab “Paket”. Tanpa paket aktif, halaman pendaftaran Anda tidak menawarkan apa pun untuk diikuti."
+            : "Buat paket di tab “Paket”. Tanpa paket aktif, halaman checkout Anda tidak menawarkan apa pun untuk dibeli."
+        }
       />
     );
   }

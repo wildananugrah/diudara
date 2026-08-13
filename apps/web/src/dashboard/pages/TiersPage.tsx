@@ -1,7 +1,12 @@
 import { useState, type FormEvent } from "react";
 import { useParams } from "react-router-dom";
 import { apiFetch, DashboardApiError } from "../apiClient";
-import { billingCycleLabel, billingCycleOptionLabel, formatRupiah } from "../format";
+import {
+  billingCycleLabel,
+  billingCycleOptionLabel,
+  formatRupiah,
+  isRequestMode,
+} from "../format";
 import {
   CommunityHeader,
   EmptyState,
@@ -62,6 +67,8 @@ export default function TiersPage() {
   if (communityLoad.kind === "error") return <ErrorPanel message={communityLoad.message} />;
   if (communityLoad.data === null) return <NotFoundPanel />;
 
+  const freeCommunity = isRequestMode(communityLoad.data);
+
   return (
     <section>
       <CommunityHeader community={communityLoad.data} />
@@ -79,11 +86,16 @@ export default function TiersPage() {
             {tiersLoad.data.length === 0 ? (
               <EmptyState
                 title="Belum ada paket"
-                action="Tambahkan satu paket di bawah. Sebelum ada paket aktif, halaman checkout Anda tidak menawarkan apa pun untuk dibeli."
+                action={
+                  freeCommunity
+                    ? "Tambahkan satu paket di bawah. Sebelum ada paket aktif, halaman pendaftaran Anda tidak menawarkan apa pun untuk diikuti."
+                    : "Tambahkan satu paket di bawah. Sebelum ada paket aktif, halaman checkout Anda tidak menawarkan apa pun untuk dibeli."
+                }
               />
             ) : (
               <TierTable
                 tiers={tiersLoad.data}
+                freeCommunity={freeCommunity}
                 communityId={communityId!}
                 onUpdated={(tier) =>
                   tiersHandle.update(tiersLoad.data.map((t) => (t.id === tier.id ? tier : t)))
@@ -104,10 +116,13 @@ export default function TiersPage() {
 function TierTable({
   tiers,
   communityId,
+  freeCommunity,
   onUpdated,
 }: {
   tiers: Tier[];
   communityId: string;
+  /** A request-mode community has no checkout, so "dibeli" is false for it. */
+  freeCommunity: boolean;
   onUpdated: (tier: Tier) => void;
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -169,8 +184,9 @@ function TierTable({
         </table>
       </div>
       <p className="hint">
-        Paket nonaktif tidak muncul di halaman checkout dan tidak bisa dibeli. Anggota yang sudah
-        membeli paket itu tidak terpengaruh dan tetap diperpanjang.
+        {freeCommunity
+          ? "Paket nonaktif tidak muncul di halaman pendaftaran dan tidak bisa diminta. Anggota yang sudah disetujui untuk paket itu tidak terpengaruh dan tetap punya akses."
+          : "Paket nonaktif tidak muncul di halaman checkout dan tidak bisa dibeli. Anggota yang sudah membeli paket itu tidak terpengaruh dan tetap diperpanjang."}
       </p>
       {error !== null ? (
         <p className="form-error" role="alert">
