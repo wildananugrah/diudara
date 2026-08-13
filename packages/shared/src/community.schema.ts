@@ -145,3 +145,22 @@ export type UpdateTierInput = z.infer<typeof updateTierSchema>;
 export type ConnectChannelInput = z.infer<typeof connectChannelSchema>;
 export type StartCheckoutInput = z.infer<typeof startCheckoutSchema>;
 export type JoinRequestInput = z.infer<typeof joinRequestSchema>;
+
+/**
+ * The message `DecideJoinRequest` throws when a join request has ALREADY been
+ * decided — the only 409 from that endpoint that means "this row is stale, drop it".
+ *
+ * It lives here, in the one package both sides import, because the owner's queue in
+ * `apps/web` must tell that case apart from the OTHER two 409s the same endpoint
+ * throws (a deactivated tier, and a member who already holds the tier actively).
+ * Those two leave the request `pending` and still actionable, and their messages
+ * already tell the owner what to do.
+ *
+ * Collapsing them was a Critical: the queue reported every 409 as "decided in
+ * another tab" and deleted a row that was still pending in the database, so the
+ * owner believed it was handled and the member waited forever. Discriminating on a
+ * string duplicated in two workspaces would have re-armed that the moment somebody
+ * reworded either copy — with each side's tests asserting its own copy and neither
+ * noticing. One definition, imported by both, is the guard.
+ */
+export const JOIN_REQUEST_ALREADY_DECIDED_MESSAGE = "permintaan ini sudah diproses";

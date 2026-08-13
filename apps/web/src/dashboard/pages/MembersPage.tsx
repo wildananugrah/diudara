@@ -1,3 +1,4 @@
+import { JOIN_REQUEST_ALREADY_DECIDED_MESSAGE } from "@diudara/shared";
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import {
@@ -228,7 +229,7 @@ function joinRequestLabel(request: JoinRequestRow): string {
  * would not immediately vanish. Matched by exact string because the API
  * gives no other signal (no error code) to tell these apart.
  */
-const ALREADY_DECIDED_MESSAGE = "permintaan ini sudah diproses";
+
 
 /**
  * One row per pending request, with the owner's two decisions.
@@ -292,7 +293,7 @@ function JoinRequestTable({
         );
         onSettled(request.id);
       } else if (err instanceof DashboardApiError && err.status === 409) {
-        if (err.message === ALREADY_DECIDED_MESSAGE) {
+        if (err.message === JOIN_REQUEST_ALREADY_DECIDED_MESSAGE) {
           // Decided in another tab already (the owner's own open-elsewhere
           // case the brief calls out) — the row is stale, not actionable.
           // Removing it and refreshing the roster is safer than leaving it

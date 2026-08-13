@@ -1,3 +1,4 @@
+import { JOIN_REQUEST_ALREADY_DECIDED_MESSAGE } from "@diudara/shared";
 import { ConflictError, NotFoundError, UniqueRule, UniqueViolationError } from "../errors";
 import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "../ports/membership-tier-repository.port";
@@ -105,7 +106,7 @@ export class DecideJoinRequest {
       // `status = 'pending'`, so this is the database arbitrating a race
       // between two clicks (or two tabs), not a read-then-write check.
       if (!decided) {
-        throw new ConflictError("permintaan ini sudah diproses");
+        throw new ConflictError(JOIN_REQUEST_ALREADY_DECIDED_MESSAGE);
       }
 
       let subscriptionId: string | null = null;
