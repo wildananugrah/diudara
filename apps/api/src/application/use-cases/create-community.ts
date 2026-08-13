@@ -12,14 +12,49 @@ import type {
  */
 const MAX_SLUG_ATTEMPTS = 8;
 
+export interface CreateCommunityOptions {
+  /**
+   * Whether this process has a real payment path — `payments !== null` from
+   * `selectPaymentProvider` (see bootstrap.ts). Defaults to `true` so every
+   * existing caller/test that predates `access_mode` and never passes this
+   * option keeps its old, unguarded behaviour.
+   *
+   * When `false`, a community created with `accessMode: "paid"` — OR with no
+   * `accessMode` at all, since `communities.access_mode` defaults to `"paid"`
+   * in the database — would have no join path whatsoever: `StartCheckout` is
+   * not even constructed on a box with payments disabled, and (by design) a
+   * `paid` community never falls back to the free request form either. Refusing
+   * the create up front is the only way to avoid silently producing a
+   * community nobody can ever join.
+   */
+  paymentsEnabled?: boolean;
+}
+
 export class CreateCommunity {
-  constructor(private readonly communities: CommunityRepositoryPort) {}
+  private readonly paymentsEnabled: boolean;
+
+  constructor(
+    private readonly communities: CommunityRepositoryPort,
+    options: CreateCommunityOptions = {}
+  ) {
+    this.paymentsEnabled = options.paymentsEnabled ?? true;
+  }
 
   async execute(input: {
     creatorId: string;
     name: string;
     niche?: string;
+    accessMode?: "paid" | "request";
   }): Promise<CommunityRecord> {
+    // Missing accessMode is treated the same as "paid": that is what the
+    // database column defaults to, and a silent "request" fallback here would
+    // hand out free memberships nobody asked for.
+    if (!this.paymentsEnabled && input.accessMode !== "request") {
+      throw new ConflictError(
+        "pembayaran belum dikonfigurasi di server ini, jadi komunitas berbayar belum bisa dibuat"
+      );
+    }
+
     const base = slugify(input.name);
 
     // `slugExists` + `create` is check-then-act: concurrent creates of the same

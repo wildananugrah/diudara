@@ -977,8 +977,14 @@ the state `0003` needs.
 - **Creator-scoped reads return 404, not 403**, so a stranger cannot confirm that a
   community exists.
 - `NODE_ENV` is an **allowlist**: only exactly `development` or `test` may relax a guard.
-  Anything else — including unset — refuses to start. That is why a box with no Xendit or
-  messaging tokens fails loudly instead of quietly using fakes.
+  Anything else — including unset — refuses to start. That is why a box with no messaging
+  tokens fails loudly instead of quietly using fakes. **Xendit is the one exception** (Task 2,
+  free communities): absent Xendit keys outside the allowlist no longer refuse to boot —
+  `selectPaymentProvider` returns `null`, `POST /c/:slug/checkout` is not even registered
+  (404s, not a fake invoice), and a community can only be `access_mode = "paid"` when a real
+  payment provider is configured. See `apps/api/.env.example`'s Xendit block for the full
+  table. Partial Xendit configuration (one key set, the other not) still refuses to start in
+  every environment, unchanged.
 - **Member-facing strings are Indonesian.** This is an Indonesian product.
 
 

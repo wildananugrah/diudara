@@ -91,7 +91,16 @@ export type DatabasePing = (
 export interface Dependencies {
   creatorRepository: CreatorRepositoryPort;
   tokenIssuer: TokenIssuerPort;
-  payments: PaymentProviderPort;
+  /**
+   * The payment adapter THIS process selected — `null` when
+   * `selectPaymentProvider` decided the box has no payment provider at all
+   * (see that function's own docstring). Exposed for the same reason
+   * `messaging`/`aiProvider` are: a test must be able to prove what a given
+   * environment actually wired. `null` here is why `startCheckout` and
+   * `createPaymentAccount` below are themselves optional — there is nothing
+   * to construct either against.
+   */
+  payments: PaymentProviderPort | null;
   registerCreator: RegisterCreator;
   authenticateCreator: AuthenticateCreator;
   createCommunity: CreateCommunity;
@@ -109,7 +118,15 @@ export interface Dependencies {
   updateTier: UpdateTier;
   connectChannel: ConnectChannel;
   listChannels: ListChannels;
-  createPaymentAccount: CreatePaymentAccount;
+  /**
+   * `POST /payment-account`. `undefined` EXACTLY when `payments` is `null` —
+   * mirrors `sendAiMessage`'s undefined-ness: there is no `PaymentProviderPort`
+   * to construct this against when payments are disabled, so connecting a
+   * creator to one makes no sense on this box. `routes/payment-account.ts`
+   * checks this the same way `routes/ai.ts` checks `sendAiMessage` and answers
+   * 503 rather than crashing on a null provider it was never handed.
+   */
+  createPaymentAccount: CreatePaymentAccount | undefined;
   /**
    * `GET /payment-account` (Phase 7 carry-forward from Phase 6): whether the
    * AUTHENTICATED creator has connected payments, read from
@@ -126,7 +143,17 @@ export interface Dependencies {
    */
   getPaymentAccountStatus: GetPaymentAccountStatus;
   getPublicCommunity: GetPublicCommunity;
-  startCheckout: StartCheckout;
+  /**
+   * `POST /c/:slug/checkout`. `undefined` EXACTLY when `payments` is `null` —
+   * this use-case's constructor requires a real `PaymentProviderPort`, so
+   * there is nothing to construct it against when payments are disabled (see
+   * `selectPaymentProvider`). `routes/public-community.ts` does NOT register
+   * the checkout route at all in that case (mirrors `scheduleLiveSession`'s
+   * own undefined-ness, not `listLiveSessions`'s), so the route 404s through
+   * the ordinary not-found path rather than answering with a 503 from a route
+   * that does exist.
+   */
+  startCheckout: StartCheckout | undefined;
   getSubscriptionStatus: GetSubscriptionStatus;
   handlePaymentWebhook: HandlePaymentWebhook;
   /**
@@ -443,7 +470,8 @@ function presentOrUndefined(value: string | undefined): string | undefined {
 }
 
 /**
- * Chooses the payment adapter, refusing to start rather than taking fake money.
+ * Chooses the payment adapter — or chooses to have no payment path at all,
+ * rather than ever taking fake money for real.
  *
  * The fake adapter settles nothing while looking, from the outside, exactly
  * like it did. Worse, `CreatePaymentAccount` writes its `fake-acct-*` id into
@@ -455,18 +483,37 @@ function presentOrUndefined(value: string | undefined): string | undefined {
  *   1. PARTIAL configuration throws in EVERY environment. A set secret key with
  *      an unset split rule id is never intentional; it is a typo that makes an
  *      operator believe payments are live.
- *   2. ABSENT configuration throws UNLESS `NODE_ENV` is one of
- *      `RELAXED_NODE_ENVS` — an allowlist, so `undefined`, `"staging"`,
- *      `"prod"` and `"PRODUCTION"` all throw. See RELAXED_NODE_ENVS for why the
- *      denylist this replaced never fired.
+ *   2. ABSENT configuration selects the fake adapter ONLY when `NODE_ENV` is
+ *      one of `RELAXED_NODE_ENVS` — an allowlist, so `undefined`, `"staging"`,
+ *      `"prod"` and `"PRODUCTION"` never get it. See RELAXED_NODE_ENVS for why
+ *      the denylist this replaced never fired.
  *
- * Mirrors `assertUsableJwtSecret` above in shape and error wording.
+ * Outside that allowlist, absent configuration used to make this THROW —
+ * refusing to boot at all. Free communities (`community.access_mode =
+ * "request"`) changed that: a box can now be entirely useful with no payment
+ * provider, so refusing to start over it stopped being the safe choice and
+ * became the unhelpful one. `null` — see the return type — is what replaced
+ * the throw:
+ *
+ *   - The fake adapter writes unrecoverable `fake-acct-*` ids into
+ *     `creator.xendit_account_id`, so falling back to it here (`?? new
+ *     FakePaymentAdapter()`, or any other stand-in that answers real calls)
+ *     would ship exactly the disaster the original throw existed to prevent
+ *     — a box that LOOKS like it takes payments and only takes fake ones.
+ *   - `null` is genuinely absent instead: `bootstrap()` does not construct
+ *     `StartCheckout` when this returns `null`, and `POST /c/:slug/checkout`
+ *     is never registered, so it 404s through the ordinary not-found path.
+ *     There is nothing left in the process for a caller to reach that would
+ *     pretend to take a payment.
+ *
+ * Mirrors `assertUsableJwtSecret` above in shape and error wording for the
+ * two cases that still throw.
  */
 export function selectPaymentProvider(env: {
   secretKey: string | undefined;
   splitRuleId: string | undefined;
   nodeEnv: string | undefined;
-}): PaymentProviderPort {
+}): PaymentProviderPort | null {
   const secretKey = presentOrUndefined(env.secretKey);
   const splitRuleId = presentOrUndefined(env.splitRuleId);
 
@@ -490,14 +537,17 @@ export function selectPaymentProvider(env: {
   }
 
   if (!isRelaxedNodeEnv(env.nodeEnv)) {
-    throw new Error(
-      "XENDIT_SECRET_KEY and XENDIT_SPLIT_RULE_ID are not set, and NODE_ENV is " +
-        `${describeNodeEnv(env.nodeEnv)}. The fake payment adapter is permitted ONLY ` +
-        `when NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}. Add the keys to ` +
-        "apps/api/.env — see .env.example — or set NODE_ENV=development. Refusing to " +
-        "start rather than taking fake payments and writing unrecoverable fake-acct-* " +
-        "ids into creator.xendit_account_id."
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] payments provider: none — payments are DISABLED " +
+        "(XENDIT_SECRET_KEY/XENDIT_SPLIT_RULE_ID not set, and NODE_ENV is " +
+        `${describeNodeEnv(env.nodeEnv)}, outside ${RELAXED_NODE_ENVS_LIST}). ` +
+        "POST /c/:slug/checkout is not registered and 404s; communities on this " +
+        'box must use access_mode = "request". Set both Xendit keys to enable ' +
+        "real payments, or NODE_ENV=development/test to boot with the fake " +
+        "adapter instead."
     );
+    return null;
   }
 
   logProviderChoice(
@@ -855,9 +905,11 @@ export function assertUsableStreamingSecret(name: string, secret: string): void 
  *      above for why this is not a second gate).
  *   4. NONE set, OUTSIDE `RELAXED_NODE_ENVS` -> `undefined`. THE FEATURE IS
  *      DISABLED, NOT THE BOOT — same divergence `selectAiProvider` makes
- *      from `selectPaymentProvider`/`selectMessagingProviders`, and for the
- *      same reason: nothing is on the line if streaming is simply
- *      unavailable.
+ *      from `selectMessagingProviders` (which still throws here), and for
+ *      the same reason: nothing is on the line if streaming is simply
+ *      unavailable. `selectPaymentProvider` joined this side of the
+ *      divergence too, once free communities gave payments a genuinely
+ *      disabled state (`null`, not a throw) — see its own docstring.
  *
  * Case 4 is the one this project has paid for twice already (Phase 3,
  * `RELAXED_NODE_ENVS`'s own docstring): a guard that is correct in isolation
@@ -935,7 +987,7 @@ export function selectStreamingProvider(env: {
     "[bootstrap] streaming provider: none — live streaming is DISABLED " +
       "(MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WHIP_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/" +
       `STREAM_TOKEN_SECRET not set, and NODE_ENV is ${describeNodeEnv(env.nodeEnv)}, outside ` +
-      `${RELAXED_NODE_ENVS_LIST}). Unlike payments/messaging this does NOT block boot: the ` +
+      `${RELAXED_NODE_ENVS_LIST}). Unlike messaging this does NOT block boot: the ` +
       "creator's streaming UI stays hidden. Set all five env vars to enable it."
   );
   return undefined;
@@ -967,11 +1019,18 @@ export const TEST_CALLBACK_TOKEN = "test-callback-token";
  *      it charges is ever activated. Same reasoning as the half-configured
  *      check in `selectPaymentProvider`, extended to the third variable.
  *   3. ABSENT configuration returns `undefined` when `NODE_ENV` is one of
- *      `RELAXED_NODE_ENVS`, and throws for EVERYTHING else — `undefined`,
- *      `"staging"`, `"prod"`, `"PRODUCTION"`. A developer must be able to
- *      `bun run dev` without setting a variable for an endpoint they may never
- *      exercise locally, exactly as they can without the Xendit keys; nobody
- *      else gets that.
+ *      `RELAXED_NODE_ENVS`, OR when XENDIT_SECRET_KEY/XENDIT_SPLIT_RULE_ID are
+ *      ALSO both absent — the free-communities addition: if `selectPaymentProvider`
+ *      has already decided this box has no payment provider at all, no Xendit
+ *      invoice will ever exist for this webhook to authenticate, so refusing to
+ *      boot over a token for a callback that can never arrive would defeat the
+ *      entire point of that `null` (see its own docstring). Throws for
+ *      EVERYTHING else outside `RELAXED_NODE_ENVS` — a box with EITHER Xendit
+ *      key set (which is real or half-configured, both handled above/below)
+ *      still needs this token. A developer must be able to `bun run dev`
+ *      without setting a variable for an endpoint they may never exercise
+ *      locally, exactly as they can without the Xendit keys; nobody else gets
+ *      that.
  *   4. A configured token shorter than `MIN_CALLBACK_TOKEN_LENGTH` throws in
  *      every environment, exactly as a short `JWT_SECRET` does.
  *
@@ -1035,6 +1094,23 @@ export function resolveCallbackToken(env: {
   }
 
   if (!isRelaxedNodeEnv(env.nodeEnv)) {
+    // Mirrors selectPaymentProvider's own disabled branch: if Xendit itself is
+    // fully unconfigured, this box has no payment provider (selectPaymentProvider
+    // already returned null for it), so there is no invoice this webhook could
+    // ever be asked to authenticate. Throwing here anyway would refuse to boot a
+    // box that free communities made genuinely payment-free — the exact outcome
+    // selectPaymentProvider's null was introduced to avoid.
+    if (!presentOrUndefined(env.secretKey) && !presentOrUndefined(env.splitRuleId)) {
+      logProviderChoice(
+        env.nodeEnv,
+        "[bootstrap] XENDIT_CALLBACK_TOKEN not set — payments are disabled on this box " +
+          "(XENDIT_SECRET_KEY/XENDIT_SPLIT_RULE_ID not set either, and NODE_ENV is " +
+          `${describeNodeEnv(env.nodeEnv)}), so POST /webhooks/xendit will reject every ` +
+          "delivery. This does not block boot."
+      );
+      return undefined;
+    }
+
     throw new Error(
       "XENDIT_CALLBACK_TOKEN is not set, and NODE_ENV is " +
         `${describeNodeEnv(env.nodeEnv)}. Booting without it is permitted ONLY when ` +
@@ -1256,9 +1332,7 @@ export function bootstrap(): Dependencies {
   );
 
   const communityRepository = new DrizzleCommunityRepository(db);
-  const createCommunity = new CreateCommunity(communityRepository);
   const listCommunities = new ListCommunities(communityRepository);
-  const updateCommunity = new UpdateCommunity(communityRepository);
   const getCommunity = new GetCommunity(communityRepository);
 
   const tierRepository = new DrizzleMembershipTierRepository(db);
@@ -1270,12 +1344,29 @@ export function bootstrap(): Dependencies {
   const connectChannel = new ConnectChannel(communityRepository, channelRepository);
   const listChannels = new ListChannels(communityRepository, channelRepository);
 
-  const payments: PaymentProviderPort = selectPaymentProvider({
+  const payments: PaymentProviderPort | null = selectPaymentProvider({
     secretKey: process.env.XENDIT_SECRET_KEY,
     splitRuleId: process.env.XENDIT_SPLIT_RULE_ID,
     nodeEnv: process.env.NODE_ENV,
   });
-  const createPaymentAccount = new CreatePaymentAccount(creatorRepository, payments);
+  // `createCommunity`/`updateCommunity` are constructed here, after `payments`
+  // is known, rather than up with `communityRepository` above: both need to
+  // know whether this box has a payment provider at all, to refuse
+  // `accessMode: "paid"` — see CreateCommunity/UpdateCommunity's own
+  // docstrings — while `payments` itself has to be resolved here anyway
+  // (see the `xenditCallbackToken` comment below for why THIS position is
+  // fixed).
+  const createCommunity = new CreateCommunity(communityRepository, {
+    paymentsEnabled: payments !== null,
+  });
+  const updateCommunity = new UpdateCommunity(communityRepository, {
+    paymentsEnabled: payments !== null,
+  });
+  // `undefined` EXACTLY when `payments` is `null` — see `createPaymentAccount`'s
+  // own field docstring on `Dependencies`.
+  const createPaymentAccount = payments
+    ? new CreatePaymentAccount(creatorRepository, payments)
+    : undefined;
   const getPaymentAccountStatus = new GetPaymentAccountStatus(creatorRepository);
   // After selectPaymentProvider on purpose: on a production box with nothing
   // configured at all, "you are about to take fake money" is the more urgent of
@@ -1305,16 +1396,22 @@ export function bootstrap(): Dependencies {
   // calling `Date.now()`, so the renewal window and the settlement date a member's next
   // period is measured from are both observable in a test.
   const clock = new SystemClock();
-  const startCheckout = new StartCheckout(
-    communityRepository,
-    tierRepository,
-    memberRepository,
-    subscriptionRepository,
-    creatorRepository,
-    payments,
-    clock,
-    { appBaseUrl }
-  );
+  // `undefined` EXACTLY when `payments` is `null` — see this field's own
+  // docstring on `Dependencies`. `routes/public-community.ts` does not
+  // register `POST /c/:slug/checkout` at all when this is `undefined`, so a
+  // request to it 404s through the ordinary not-found path.
+  const startCheckout = payments
+    ? new StartCheckout(
+        communityRepository,
+        tierRepository,
+        memberRepository,
+        subscriptionRepository,
+        creatorRepository,
+        payments,
+        clock,
+        { appBaseUrl }
+      )
+    : undefined;
   // Task 8's watch link. Read directly off `process.env` here (rather than
   // derived from `streamingProvider`'s truthiness) for the exact reason
   // `authoriseStream`/`mediamtxWebhookSecret` do this further down: by the

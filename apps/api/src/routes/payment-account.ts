@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { requireAuth, type AuthVariables } from "../http/auth.middleware";
+import { ServiceUnavailableError } from "../application/errors";
 import type { Dependencies } from "../bootstrap";
 
 export function paymentAccountRoutes(
@@ -20,6 +21,14 @@ export function paymentAccountRoutes(
   });
 
   app.post("/", async (c) => {
+    // `undefined` EXACTLY when this box has no payment provider at all — see
+    // `createPaymentAccount`'s own docstring on `Dependencies`. Same 503, not
+    // a 500: this box is fine, there is just nothing to connect a creator's
+    // account to (`routes/ai.ts`'s `sendAiMessage` guard is the model this
+    // mirrors).
+    if (!deps.createPaymentAccount) {
+      throw new ServiceUnavailableError("pembayaran belum dikonfigurasi di server ini.");
+    }
     const result = await deps.createPaymentAccount.execute(c.get("creatorId"));
     return c.json(result, 201);
   });
