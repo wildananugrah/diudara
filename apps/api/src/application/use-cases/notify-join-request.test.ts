@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "bun:test";
-import { eq } from "drizzle-orm";
+import { and, eq, lte, sql } from "drizzle-orm";
 import { db } from "../../db/client";
 import {
   activityLogs,
@@ -32,6 +32,42 @@ const activityLogRepository = new DrizzleActivityLogRepository(db);
 
 function buildUseCase(notifier: FakeMessagingAdapter) {
   return new NotifyJoinRequest(joinRequestRepository, activityLogRepository, notifier);
+}
+
+/**
+ * Block until POSTGRES agrees the row is due for another attempt.
+ *
+ * TWO CLOCKS, AND THEY DISAGREE. `ProcessOutbox` computes `next_attempt_at` in
+ * this process (`new Date(Date.now() + backoff)`), while `claimBatch` selects on
+ * `next_attempt_at <= now()` — `now()` being POSTGRES's clock, in the Docker VM.
+ * Measured on this machine, that clock runs up to ~1.2 ms BEHIND the host's. With
+ * `baseBackoffMs: 0` the whole margin is those few milliseconds, so a second pass
+ * issued immediately can find the row "not yet due" and claim nothing.
+ *
+ * That is a clock artefact, not the behaviour under test — the test is about the
+ * row being RETRIED rather than consumed, and about a later pass delivering it.
+ * Asking the database for its own verdict removes the artefact without weakening
+ * either claim. (Production never sees this: `DEFAULT_BASE_BACKOFF_MS` is 30 s,
+ * where a millisecond of skew is irrelevant.)
+ *
+ * This is the same host-clock-vs-Postgres-clock mechanism behind the three
+ * long-standing `updatedAt`-vs-`createdAt` flakes named in `docs/` — those
+ * compare a JS-written `updated_at` against a Postgres-defaulted `created_at`
+ * and miss by the same 1-3 ms.
+ */
+async function waitUntilDue(outboxRowId: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const due = await db
+      .select({ id: outbox.id })
+      .from(outbox)
+      .where(and(eq(outbox.id, outboxRowId), lte(outbox.nextAttemptAt, sql`now()`)));
+    if (due.length > 0) return;
+    if (Date.now() > deadline) {
+      throw new Error(`outbox row ${outboxRowId} never became due within ${timeoutMs}ms`);
+    }
+    await Bun.sleep(2);
+  }
 }
 
 let seedCounter = 0;
@@ -255,6 +291,8 @@ describe("a failed send retries through the outbox", () => {
     expect(await activityRowsFor(request.id)).toHaveLength(0);
 
     // The retry, once the provider is healthy again, actually delivers.
+    // See `waitUntilDue` for why this is not simply a second `execute()`.
+    await waitUntilDue(id);
     const delivered = await processOutbox.execute();
 
     expect(delivered.sent).toBe(1);
