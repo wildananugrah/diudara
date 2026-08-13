@@ -92,13 +92,35 @@ export default function CheckoutPage() {
   return <TierPicker community={community} />;
 }
 
+/**
+ * `RequestToJoin`'s 409s (`"permintaan Anda sudah menunggu persetujuan..."`,
+ * `"Anda sudah menjadi anggota komunitas ini..."`) are already Indonesian and
+ * safe to show verbatim — see request-to-join.ts. Everything else is not:
+ * a 404 when the community or tier disappeared between page load and submit
+ * (accessMode flipped to paid, the community paused, the tier deactivated —
+ * all reachable in ordinary use, not hypothetical) throws `NotFoundError`
+ * with an English internal message ("community not found", "tier not
+ * found") never meant for a member to read, and a 500 or network failure is
+ * no better. One Indonesian line a member can act on covers all of those.
+ */
+function requestErrorMessage(err: unknown): string {
+  if (err instanceof ApiError && err.status === 409) {
+    return err.message;
+  }
+  return "Permintaan gagal dikirim. Coba lagi, atau muat ulang halaman ini.";
+}
+
 function TierPicker({ community }: { community: PublicCommunity }) {
   const isRequestMode = community.accessMode === REQUEST_ACCESS_MODE;
-  // A community with exactly one active tier answers a question that has
-  // only one answer — the tier is picked automatically and no picker
-  // renders at all, in either mode. With two or more, a picker shows,
-  // but request mode's picker (below) never renders a price.
-  const showPicker = community.tiers.length > 1;
+  // In REQUEST mode only: a community with exactly one active tier answers a
+  // question that has only one answer, so the tier is picked automatically
+  // and no picker renders. Paid mode always shows the picker regardless of
+  // tier count — unlike request mode, price is the one thing a paid member
+  // must see before pressing "Lanjutkan pembayaran", and price only ever
+  // renders inside this picker. Gating this on tier count alone (rather than
+  // "|| !isRequestMode") once meant a single-tier PAID community rendered a
+  // purchase form with no price and no tier name at all — caught in review.
+  const showPicker = community.tiers.length > 1 || !isRequestMode;
   const [tierId, setTierId] = useState<string>(community.tiers[0]!.id);
   const [payerName, setPayerName] = useState("");
   const [payerWhatsappNumber, setPayerWhatsappNumber] = useState("");
@@ -120,7 +142,11 @@ function TierPicker({ community }: { community: PublicCommunity }) {
       window.location.href = result.invoiceUrl;
     } catch (err) {
       setSubmitting(false);
-      setError(err instanceof Error ? err.message : "checkout gagal, coba lagi");
+      if (isRequestMode) {
+        setError(requestErrorMessage(err));
+      } else {
+        setError(err instanceof Error ? err.message : "checkout gagal, coba lagi");
+      }
     }
   }
 
@@ -128,7 +154,7 @@ function TierPicker({ community }: { community: PublicCommunity }) {
     <main style={styles.page}>
       <h1 style={styles.heading}>{community.name}</h1>
       {community.niche ? <p style={styles.niche}>{community.niche}</p> : null}
-      {isRequestMode ? <h2 style={styles.heading}>Ajukan bergabung</h2> : null}
+      {isRequestMode ? <h2 style={styles.requestHeading}>Ajukan bergabung</h2> : null}
 
       <form onSubmit={handleSubmit} style={styles.form}>
         {showPicker ? (
@@ -244,6 +270,16 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#555",
     marginTop: 0,
     marginBottom: 24,
+  },
+  // Deliberately smaller and muted, not styles.heading verbatim — with a
+  // null niche, an identically-sized heading 4px below the community name
+  // reads as two competing titles instead of a section label under one.
+  requestHeading: {
+    fontSize: "1.1rem",
+    fontWeight: 600,
+    color: "#333",
+    marginTop: 0,
+    marginBottom: 16,
   },
   form: {
     display: "flex",

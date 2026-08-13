@@ -16,6 +16,16 @@ const COMMUNITY = {
   ],
 };
 
+const PAID_COMMUNITY_ONE_TIER = {
+  id: "community-4",
+  name: "Kelas Berbayar Satu Paket",
+  niche: "bimbel",
+  slug: "kelas-berbayar-satu",
+  acceptingNewMembers: true,
+  accessMode: "paid",
+  tiers: [{ id: "tier-paid-1", name: "Basic", priceAmount: 50000, billingCycle: "monthly" }],
+};
+
 const FREE_COMMUNITY_ONE_TIER = {
   id: "community-2",
   name: "Komunitas Gratis Satu Paket",
@@ -144,6 +154,21 @@ describe("CheckoutPage", () => {
     expect(await screen.findByText(/tidak ditemukan/)).toBeTruthy();
   });
 
+  // Regression: `showPicker` was briefly gated on tier count alone, which
+  // (since price only ever renders inside the picker) meant a single-tier
+  // PAID community rendered a purchase form with no price and no tier name
+  // at all. The picker must always show in paid mode, regardless of count.
+  it("still shows the tier name and price for a paid community with exactly one tier", async () => {
+    global.fetch = mock(async () => jsonResponse(PAID_COMMUNITY_ONE_TIER)) as unknown as typeof fetch;
+
+    renderAt("kelas-berbayar-satu");
+
+    expect(await screen.findByText("Kelas Berbayar Satu Paket")).toBeTruthy();
+    expect(screen.getByText("Basic")).toBeTruthy();
+    expect(screen.getByText(/Rp 50\.000/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Lanjutkan pembayaran/ })).toBeTruthy();
+  });
+
   describe("accessMode = request (free communities, Task 6)", () => {
     it("renders the join-request form, with no tier picker and no price, when the community has exactly one active tier", async () => {
       global.fetch = mock(async () => jsonResponse(FREE_COMMUNITY_ONE_TIER)) as unknown as typeof fetch;
@@ -210,6 +235,59 @@ describe("CheckoutPage", () => {
       expect(body).toEqual({ tierId: "tier-free-1", payerName: "Siti", payerWhatsappNumber: "+6281234567890" });
 
       expect(await screen.findByText("landed on request status page")).toBeTruthy();
+    });
+
+    it("shows the API's own Indonesian message for a 409 (already pending / already a member)", async () => {
+      global.fetch = mock(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          return jsonResponse({ error: "permintaan Anda sudah menunggu persetujuan pemilik komunitas" }, 409);
+        }
+        return jsonResponse(FREE_COMMUNITY_ONE_TIER);
+      }) as unknown as typeof fetch;
+
+      renderAt("komunitas-gratis");
+      await screen.findByText("Komunitas Gratis Satu Paket");
+      fireEvent.change(screen.getByLabelText("Nama"), { target: { value: "Siti" } });
+      fireEvent.change(screen.getByLabelText("Nomor WhatsApp"), { target: { value: "+6281234567890" } });
+      fireEvent.click(screen.getByRole("button", { name: "Kirim permintaan" }));
+
+      expect(await screen.findByText("permintaan Anda sudah menunggu persetujuan pemilik komunitas")).toBeTruthy();
+    });
+
+    it("shows a generic Indonesian message, never the raw API text, for a 404 (e.g. the tier was deactivated after page load)", async () => {
+      global.fetch = mock(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          return jsonResponse({ error: "tier not found" }, 404);
+        }
+        return jsonResponse(FREE_COMMUNITY_ONE_TIER);
+      }) as unknown as typeof fetch;
+
+      renderAt("komunitas-gratis");
+      await screen.findByText("Komunitas Gratis Satu Paket");
+      fireEvent.change(screen.getByLabelText("Nama"), { target: { value: "Siti" } });
+      fireEvent.change(screen.getByLabelText("Nomor WhatsApp"), { target: { value: "+6281234567890" } });
+      fireEvent.click(screen.getByRole("button", { name: "Kirim permintaan" }));
+
+      expect(await screen.findByText("Permintaan gagal dikirim. Coba lagi, atau muat ulang halaman ini.")).toBeTruthy();
+      expect(screen.queryAllByText("tier not found").length).toBe(0);
+    });
+
+    it("shows a generic Indonesian message, never the raw API text, for a 500", async () => {
+      global.fetch = mock(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          return jsonResponse({ error: "internal server error" }, 500);
+        }
+        return jsonResponse(FREE_COMMUNITY_ONE_TIER);
+      }) as unknown as typeof fetch;
+
+      renderAt("komunitas-gratis");
+      await screen.findByText("Komunitas Gratis Satu Paket");
+      fireEvent.change(screen.getByLabelText("Nama"), { target: { value: "Siti" } });
+      fireEvent.change(screen.getByLabelText("Nomor WhatsApp"), { target: { value: "+6281234567890" } });
+      fireEvent.click(screen.getByRole("button", { name: "Kirim permintaan" }));
+
+      expect(await screen.findByText("Permintaan gagal dikirim. Coba lagi, atau muat ulang halaman ini.")).toBeTruthy();
+      expect(screen.queryAllByText("internal server error").length).toBe(0);
     });
   });
 });
