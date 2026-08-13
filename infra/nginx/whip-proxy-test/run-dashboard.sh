@@ -140,6 +140,16 @@ curl -s -o /dev/null "http://localhost:${API_PORT}/streaming/status" || {
   exit 1
 }
 
+# Drop vite's dep-optimizer cache before starting. It pins ABSOLUTE paths into
+# node_modules/.vite/deps/_metadata.json, and it does not always notice that a
+# dependency was upgraded underneath it — after a react 18 -> 19 bump it kept
+# serving the 18 bundles, and the page died on load with "Cannot read
+# properties of undefined (reading 'ReactCurrentDispatcher')" while the unit
+# suite stayed fully green. That failure looks exactly like a real regression
+# in the code this harness exists to check, so it costs a full diagnosis cycle
+# to rule out. A few seconds of re-optimization is the cheaper trade.
+rm -rf "$REPO_ROOT/apps/web/node_modules/.vite"
+
 echo "==> starting apps/web's real dev server on :${WEB_PORT}"
 (cd "$REPO_ROOT/apps/web" && exec bun run dev > "$WORKDIR/web.log" 2>&1) &
 WEB_PID=$!
