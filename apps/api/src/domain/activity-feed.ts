@@ -235,6 +235,25 @@ const DESCRIBERS: Record<string, Describer> = {
     label: "PERLU TINDAKAN: anggota harus dikeluarkan dari grup secara manual",
     severity: "warning",
   }),
+
+  // ===================================================================
+  // FREE COMMUNITIES, TASK 4: the owner's decision on a join request.
+  // Written by `DecideJoinRequest` either way, in the same transaction as the
+  // decision itself.
+  //
+  // `join_request_rejected` is the one entry in this table with no OTHER
+  // trace anywhere: rejection is silent BY DESIGN (no outbox row, no message
+  // — see `DecideJoinRequest`'s own docstring), so this row is the only
+  // record that a request was ever declined. `join_request_approved` is less
+  // load-bearing in the same way `joined`/`channel_access_granted` already
+  // are not the ONLY record of a paid join — `channel_access_granted` fires
+  // too, once `grant_access` is processed — but it is included anyway, for
+  // the same reason `joined` is: a creator watching their own dashboard wants
+  // to see the decision land, not just its downstream effect.
+  // ===================================================================
+  join_request_approved: () => ({ label: "Permintaan bergabung disetujui", severity: "info" }),
+
+  join_request_rejected: () => ({ label: "Permintaan bergabung ditolak", severity: "info" }),
 };
 
 /**
