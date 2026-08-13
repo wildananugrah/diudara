@@ -436,6 +436,26 @@ describe("CommunityOverviewPage — copy that assumed a purchase (gate fix round
     expect(screen.getByText(/Tautan checkout publik/)).toBeTruthy();
   });
 
+  it("does not say a free community's page is a checkout where packages are bought", async () => {
+    stubFree();
+
+    render();
+    await screen.findByText("Kelas Bimbel Budi");
+
+    const explanation = screen.getByTestId("status-explanation").textContent ?? "";
+    expect(explanation).toMatch(/pendaftaran|mengajukan permintaan/i);
+    expect(explanation).not.toMatch(/checkout|dibeli/i);
+  });
+
+  it("still says exactly that for a paid community", async () => {
+    stub();
+
+    render();
+    await screen.findByText("Kelas Bimbel Budi");
+
+    expect(screen.getByTestId("status-explanation").textContent).toMatch(/checkout|dibeli/i);
+  });
+
   it("does not tell a free community its tiers are for buying", async () => {
     stubFree(EMPTY_METRICS);
 

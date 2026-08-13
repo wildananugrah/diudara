@@ -168,20 +168,30 @@ export function accessModeExplanation(accessMode: string): string {
  * believing either that the link is dead or that sales continue, and both are
  * wrong. See `VISIBLE_STATUSES` in apps/api/src/application/use-cases/get-public-community.ts.
  */
-export function communityStatusExplanation(status: string): string {
+export function communityStatusExplanation(status: string, accessMode = "paid"): string {
+  // A request-mode community has no checkout page, no purchase and no
+  // "pembelian baru ditolak" — all three sentences below are false for one, and
+  // the `active` one is on screen twice (the community card and the overview)
+  // for every free community. `accessMode` defaults to "paid" so the many
+  // callers that predate it are unchanged.
+  const free = accessMode === REQUEST_ACCESS_MODE;
   switch (status) {
     case "active":
-      return "Halaman checkout terbuka dan paket Anda bisa dibeli.";
+      return free
+        ? "Halaman pendaftaran terbuka dan calon anggota bisa mengajukan permintaan."
+        : "Halaman checkout terbuka dan paket Anda bisa dibeli.";
     case "paused":
-      return (
-        "Halaman checkout tetap terbuka — setiap tautan yang sudah Anda sebarkan masih hidup — " +
-        "tetapi pembelian baru ditolak. Anggota yang sudah ada tidak terpengaruh."
-      );
+      return free
+        ? "Halaman pendaftaran tetap terbuka — setiap tautan yang sudah Anda sebarkan masih hidup — " +
+            "tetapi permintaan baru ditolak. Anggota yang sudah ada tidak terpengaruh."
+        : "Halaman checkout tetap terbuka — setiap tautan yang sudah Anda sebarkan masih hidup — " +
+            "tetapi pembelian baru ditolak. Anggota yang sudah ada tidak terpengaruh.";
     case "archived":
-      return (
-        "Halaman checkout tidak dapat dibuka lagi (404 bagi pengunjung). Anggota yang sudah ada " +
-        "tidak dikeluarkan, dan pengingat perpanjangan tidak dikirim."
-      );
+      return free
+        ? "Halaman pendaftaran tidak dapat dibuka lagi (404 bagi pengunjung). Anggota yang sudah " +
+            "ada tidak dikeluarkan."
+        : "Halaman checkout tidak dapat dibuka lagi (404 bagi pengunjung). Anggota yang sudah ada " +
+            "tidak dikeluarkan, dan pengingat perpanjangan tidak dikirim.";
     default:
       return `Status "${status}" tidak dikenali oleh dasbor ini.`;
   }

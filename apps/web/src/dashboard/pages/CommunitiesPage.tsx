@@ -82,7 +82,7 @@ function CommunityCard({ community }: { community: Community }) {
         </div>
         <StatusBadge status={community.status} />
       </div>
-      <StatusExplanation status={community.status} />
+      <StatusExplanation status={community.status} accessMode={community.accessMode} />
       <CopyableLink url={publicCheckoutUrl(community.slug)} label={publicLinkLabel(community)} />
     </article>
   );

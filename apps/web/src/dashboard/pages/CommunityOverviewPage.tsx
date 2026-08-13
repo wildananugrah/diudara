@@ -63,7 +63,7 @@ export default function CommunityOverviewPage() {
       <div className="section card stack">
         <div>
           <h2>Status: {communityStatusLabel(community.status)}</h2>
-          <StatusExplanation status={community.status} />
+          <StatusExplanation status={community.status} accessMode={community.accessMode} />
         </div>
         <CheckoutLink community={community} />
       </div>

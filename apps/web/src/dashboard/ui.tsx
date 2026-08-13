@@ -206,10 +206,17 @@ export function CommunityHeader({ community }: { community: Community }) {
 }
 
 /** The community's status, and what that status actually does. */
-export function StatusExplanation({ status }: { status: string }) {
+export function StatusExplanation({
+  status,
+  accessMode,
+}: {
+  status: string;
+  /** Omitted means "paid" — see `communityStatusExplanation`. */
+  accessMode?: string;
+}) {
   return (
     <p className="muted" data-testid="status-explanation">
-      {communityStatusExplanation(status)}
+      {communityStatusExplanation(status, accessMode)}
     </p>
   );
 }
