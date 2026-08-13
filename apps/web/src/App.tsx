@@ -3,6 +3,7 @@ import LandingPage from "./pages/LandingPage";
 import NotFoundPage from "./pages/NotFoundPage";
 import CheckoutPage from "./pages/CheckoutPage";
 import StatusPage from "./pages/StatusPage";
+import RequestStatusPage from "./pages/RequestStatusPage";
 import WatchPage from "./pages/WatchPage";
 import DashboardLayout from "./dashboard/DashboardLayout";
 import LoginPage from "./dashboard/LoginPage";
@@ -27,6 +28,10 @@ export function AppRoutes() {
           /c/:slug for a URL like /c/kelas-budi/status/sub-1 — listed first
           here only for readability, not because order is load-bearing. */}
       <Route path="/c/:slug/status/:subscriptionId" element={<StatusPage />} />
+      {/* The free-community counterpart: where a member lands right after
+          asking to join instead of paying (Task 6). Same 3-segment
+          specificity as the route above, for the same reason. */}
+      <Route path="/c/:slug/request/:joinRequestId" element={<RequestStatusPage />} />
       <Route path="/c/:slug" element={<CheckoutPage />} />
 
       {/* Task 8: the member watch page. A bare, standalone route — not

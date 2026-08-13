@@ -1,6 +1,17 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { useParams } from "react-router-dom";
-import { ApiError, fetchCommunity, formatRupiah, startCheckout, type PublicCommunity, type PublicTier } from "../api";
+import { useNavigate, useParams } from "react-router-dom";
+import {
+  ApiError,
+  fetchCommunity,
+  formatRupiah,
+  startCheckout,
+  submitJoinRequest,
+  type PublicCommunity,
+  type PublicTier,
+} from "../api";
+
+/** `community.accessMode` value that accepts a free join request instead of a purchase. */
+const REQUEST_ACCESS_MODE = "request";
 
 type LoadState =
   | { status: "loading" }
@@ -82,17 +93,29 @@ export default function CheckoutPage() {
 }
 
 function TierPicker({ community }: { community: PublicCommunity }) {
+  const isRequestMode = community.accessMode === REQUEST_ACCESS_MODE;
+  // A community with exactly one active tier answers a question that has
+  // only one answer — the tier is picked automatically and no picker
+  // renders at all, in either mode. With two or more, a picker shows,
+  // but request mode's picker (below) never renders a price.
+  const showPicker = community.tiers.length > 1;
   const [tierId, setTierId] = useState<string>(community.tiers[0]!.id);
   const [payerName, setPayerName] = useState("");
   const [payerWhatsappNumber, setPayerWhatsappNumber] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     setSubmitting(true);
     try {
+      if (isRequestMode) {
+        const result = await submitJoinRequest(community.slug, { tierId, payerName, payerWhatsappNumber });
+        navigate(`/c/${community.slug}/request/${result.joinRequestId}`);
+        return;
+      }
       const result = await startCheckout(community.slug, { tierId, payerName, payerWhatsappNumber });
       window.location.href = result.invoiceUrl;
     } catch (err) {
@@ -105,14 +128,23 @@ function TierPicker({ community }: { community: PublicCommunity }) {
     <main style={styles.page}>
       <h1 style={styles.heading}>{community.name}</h1>
       {community.niche ? <p style={styles.niche}>{community.niche}</p> : null}
+      {isRequestMode ? <h2 style={styles.heading}>Ajukan bergabung</h2> : null}
 
       <form onSubmit={handleSubmit} style={styles.form}>
-        <fieldset style={styles.fieldset}>
-          <legend style={styles.legend}>Pilih paket</legend>
-          {community.tiers.map((tier) => (
-            <TierOption key={tier.id} tier={tier} selected={tier.id === tierId} onSelect={() => setTierId(tier.id)} />
-          ))}
-        </fieldset>
+        {showPicker ? (
+          <fieldset style={styles.fieldset}>
+            <legend style={styles.legend}>Pilih paket</legend>
+            {community.tiers.map((tier) => (
+              <TierOption
+                key={tier.id}
+                tier={tier}
+                selected={tier.id === tierId}
+                onSelect={() => setTierId(tier.id)}
+                showPrice={!isRequestMode}
+              />
+            ))}
+          </fieldset>
+        ) : null}
 
         <label style={styles.label}>
           Nama
@@ -142,21 +174,33 @@ function TierPicker({ community }: { community: PublicCommunity }) {
         {error ? <p style={styles.error}>{error}</p> : null}
 
         <button type="submit" disabled={submitting} style={styles.button}>
-          {submitting ? "Memproses..." : "Lanjutkan pembayaran"}
+          {submitting ? "Memproses..." : isRequestMode ? "Kirim permintaan" : "Lanjutkan pembayaran"}
         </button>
       </form>
     </main>
   );
 }
 
-function TierOption({ tier, selected, onSelect }: { tier: PublicTier; selected: boolean; onSelect: () => void }) {
+function TierOption({
+  tier,
+  selected,
+  onSelect,
+  showPrice,
+}: {
+  tier: PublicTier;
+  selected: boolean;
+  onSelect: () => void;
+  showPrice: boolean;
+}) {
   return (
     <label style={styles.tierOption}>
       <input type="radio" name="tier" checked={selected} onChange={onSelect} />
       <span style={styles.tierName}>{tier.name}</span>
-      <span style={styles.tierPrice}>
-        {formatRupiah(tier.priceAmount)} / {billingCycleLabel(tier.billingCycle)}
-      </span>
+      {showPrice ? (
+        <span style={styles.tierPrice}>
+          {formatRupiah(tier.priceAmount)} / {billingCycleLabel(tier.billingCycle)}
+        </span>
+      ) : null}
     </label>
   );
 }
