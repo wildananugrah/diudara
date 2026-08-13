@@ -42,9 +42,19 @@ export class DrizzleJoinRequestRepository implements JoinRequestRepositoryPort {
    * `target` + `where` are given explicitly, matching
    * `join_request_community_member_pending_unique`'s own partial predicate exactly.
    * Postgres only infers a PARTIAL unique index as the arbiter when the `ON
-   * CONFLICT` clause's `WHERE` matches the index's `WHERE` — a bare
-   * `onConflictDoNothing()` would not infer this index at all and would raise "no
-   * unique or exclusion constraint matching the ON CONFLICT specification" instead.
+   * CONFLICT` clause's `WHERE` matches the index's `WHERE`, so BOTH must be kept in
+   * step with the index in `db/schema.ts` if either ever changes.
+   *
+   * Two failure modes, and only one of them is loud — which is why both arguments
+   * stay. Give a `target` whose predicate does NOT match the index and Postgres
+   * refuses the statement outright with `42P10`, "no unique or exclusion constraint
+   * matching the ON CONFLICT specification"; that mistake cannot ship. But drop the
+   * `target` AND the `where` together, and a bare `ON CONFLICT DO NOTHING` is
+   * perfectly legal: it silently swallows a conflict on ANY constraint of this table,
+   * so a future column with its own unique index would start returning `null` here as
+   * though a duplicate pending request had been refused. Verified against a real
+   * Postgres rather than assumed. There is no error to catch in that case, and no
+   * test would necessarily notice.
    */
   async createPending(input: {
     communityId: string;
