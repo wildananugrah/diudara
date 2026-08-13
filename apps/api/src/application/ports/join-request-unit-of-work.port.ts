@@ -1,6 +1,7 @@
 import type { ActivityLogRepositoryPort } from "./activity-log-repository.port";
 import type { JoinRequestRepositoryPort } from "./join-request-repository.port";
 import type { OutboxRepositoryPort } from "./outbox-repository.port";
+import type { SubscriptionRepositoryPort } from "./subscription-repository.port";
 
 /** The repositories a join request's creation and its notification must share. */
 export interface JoinRequestRepositories {
@@ -21,6 +22,16 @@ export interface JoinRequestRepositories {
    * instant a request is decided.
    */
   activityLog: ActivityLogRepositoryPort;
+  /**
+   * Task 4's addition: `DecideJoinRequest` calls `createActiveWithoutBilling`
+   * from INSIDE this same transaction, alongside `joinRequests.decide` and the
+   * `grant_access` enqueue — an approval that flipped the request's status but
+   * failed to create the subscription (or vice versa) would strand a member who
+   * thinks they were let in with nothing to show for it. Bound to the
+   * transaction for the same reason every other field here is: a write born
+   * alongside a durable fact must commit or roll back with it, not after it.
+   */
+  subscriptions: SubscriptionRepositoryPort;
 }
 
 /**

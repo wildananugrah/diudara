@@ -165,6 +165,16 @@ export const UniqueRule = {
   creatorEmail: "creator_email",
   communitySlug: "community_slug",
   channelPlatformGroup: "channel_platform_group",
+  /**
+   * `subscription_member_tier_active_unique` — a member may hold at most one
+   * `active` subscription per tier. `DecideJoinRequest` (free communities) is
+   * the first caller to hit this from an INSERT: an already-approved member
+   * can file a fresh pending request (the partial index on `join_request`
+   * only covers `pending` rows), and approving it a second time would
+   * otherwise raise a raw `23505`. See `DrizzleSubscriptionRepository.
+   * createActiveWithoutBilling`.
+   */
+  subscriptionMemberTierActive: "subscription_member_tier_active",
 } as const;
 
 export type UniqueRuleName = (typeof UniqueRule)[keyof typeof UniqueRule];

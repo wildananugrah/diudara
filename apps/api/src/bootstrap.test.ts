@@ -49,6 +49,7 @@ import { GetPublicCommunity } from "./application/use-cases/get-public-community
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
+import { DecideJoinRequest, ListJoinRequests } from "./application/use-cases/decide-join-request";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
 import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
@@ -352,6 +353,9 @@ const fakeJoinRequestUnitOfWork: JoinRequestUnitOfWorkPort = {
       joinRequests: fakeJoinRequestRepository,
       outbox: fakeOutboxRepository,
       activityLog: fakeActivityLogRepository,
+      // Task 4's addition to the port — `createActiveWithoutBilling` runs in
+      // the same transaction as `joinRequests.decide` now.
+      subscriptions: fakeSubscriptionRepository,
     });
   },
 };
@@ -514,6 +518,14 @@ describe("Dependencies (composition root contract)", () => {
         fakeJoinRequestRepository,
         fakeSubscriptionRepository
       ),
+      listJoinRequests: new ListJoinRequests(fakeCommunityRepository, fakeJoinRequestRepository),
+      decideJoinRequest: new DecideJoinRequest(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository,
+        fakeJoinRequestRepository,
+        fakeSubscriptionRepository,
+        fakeJoinRequestUnitOfWork
+      ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
         streamTokenSecret: undefined,
       }),
@@ -664,6 +676,14 @@ describe("Dependencies (composition root contract)", () => {
         fakeCommunityRepository,
         fakeJoinRequestRepository,
         fakeSubscriptionRepository
+      ),
+      listJoinRequests: new ListJoinRequests(fakeCommunityRepository, fakeJoinRequestRepository),
+      decideJoinRequest: new DecideJoinRequest(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository,
+        fakeJoinRequestRepository,
+        fakeSubscriptionRepository,
+        fakeJoinRequestUnitOfWork
       ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
         streamTokenSecret: undefined,

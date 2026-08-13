@@ -6,6 +6,7 @@ import type {
 import { DrizzleActivityLogRepository } from "./drizzle-activity-log.repository";
 import { DrizzleJoinRequestRepository } from "./drizzle-join-request.repository";
 import { DrizzleOutboxRepository } from "./drizzle-outbox.repository";
+import { DrizzleSubscriptionRepository } from "./drizzle-subscription.repository";
 
 export class DrizzleJoinRequestUnitOfWork implements JoinRequestUnitOfWorkPort {
   /**
@@ -31,6 +32,10 @@ export class DrizzleJoinRequestUnitOfWork implements JoinRequestUnitOfWorkPort {
         // discards it along with everything else.
         outbox: new DrizzleOutboxRepository(tx),
         activityLog: new DrizzleActivityLogRepository(tx),
+        // Task 4: `createActiveWithoutBilling` must run in the SAME transaction
+        // as `joinRequests.decide` and the `grant_access` enqueue — see
+        // `JoinRequestRepositories.subscriptions`'s own docstring.
+        subscriptions: new DrizzleSubscriptionRepository(tx),
       })
     );
   }

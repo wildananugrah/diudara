@@ -250,6 +250,11 @@ function harness(
         throw new Error("not used: RequestToJoin writes no activity_log entry — only the owner's decision does");
       },
     },
+    // Task 4's addition to the port. RequestToJoin never reaches into
+    // `repositories.subscriptions` (it only calls the pooled `subscriptions`
+    // above, via `hasLiveSubscriptionInCommunity`), so reusing that same fake
+    // here just satisfies the type.
+    subscriptions,
   });
 
   const requestToJoin = new RequestToJoin(communities, tiers, members, subscriptions, unitOfWork);

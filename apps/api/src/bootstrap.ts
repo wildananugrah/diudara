@@ -22,6 +22,7 @@ import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-acc
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
+import { DecideJoinRequest, ListJoinRequests } from "./application/use-cases/decide-join-request";
 import { DrizzleJoinRequestRepository } from "./infrastructure/repositories/drizzle-join-request.repository";
 import { DrizzleJoinRequestUnitOfWork } from "./infrastructure/repositories/drizzle-join-request-unit-of-work";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
@@ -167,6 +168,18 @@ export interface Dependencies {
   requestToJoin: RequestToJoin;
   /** `GET /c/:slug/request/:joinRequestId`. See `GetJoinRequestStatus`'s own docstring. */
   getJoinRequestStatus: GetJoinRequestStatus;
+  /**
+   * Task 4's `GET /communities/:communityId/join-requests` — the owner's
+   * pending-requests dashboard list.
+   */
+  listJoinRequests: ListJoinRequests;
+  /**
+   * Task 4's `POST /communities/:communityId/join-requests/:requestId/approve`
+   * and `.../reject`. ONE use case for both decisions — see its own docstring
+   * for why splitting it into two would let the ownership check, the
+   * already-decided check and the `activity_log` write drift apart.
+   */
+  decideJoinRequest: DecideJoinRequest;
   getSubscriptionStatus: GetSubscriptionStatus;
   handlePaymentWebhook: HandlePaymentWebhook;
   /**
@@ -1467,6 +1480,20 @@ export function bootstrap(): Dependencies {
     joinRequestRepository,
     subscriptionRepository
   );
+  // Task 4: the owner's decisions. `decideJoinRequest` shares
+  // `joinRequestUnitOfWork` with `requestToJoin` above — same transaction
+  // mechanism, different use of it — and reads `joinRequestRepository`/
+  // `subscriptionRepository` off the pool for its pre-transaction checks
+  // (ownership, the request lookup, the tier-active check, and the graceful
+  // already-active pre-check), exactly like `requestToJoin` does.
+  const listJoinRequests = new ListJoinRequests(communityRepository, joinRequestRepository);
+  const decideJoinRequest = new DecideJoinRequest(
+    communityRepository,
+    tierRepository,
+    joinRequestRepository,
+    subscriptionRepository,
+    joinRequestUnitOfWork
+  );
 
   // Task 8's watch link. Read directly off `process.env` here (rather than
   // derived from `streamingProvider`'s truthiness) for the exact reason
@@ -1687,6 +1714,8 @@ export function bootstrap(): Dependencies {
     startCheckout,
     requestToJoin,
     getJoinRequestStatus,
+    listJoinRequests,
+    decideJoinRequest,
     getSubscriptionStatus,
     handlePaymentWebhook,
     getCommunityMetrics,
