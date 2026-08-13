@@ -73,6 +73,12 @@ export class CreateCommunity {
           name: input.name,
           slug,
           niche: input.niche,
+          // Forwarded through, not hardcoded: the guard above already refused
+          // anything that would resolve to "paid" while disabled, so whatever
+          // reaches here is safe to persist as-is. Omitted (rather than an
+          // explicit "paid") when the caller never sent one, so the column's
+          // own DEFAULT does the same job it always did.
+          accessMode: input.accessMode,
         });
       } catch (err) {
         const lostTheRace =

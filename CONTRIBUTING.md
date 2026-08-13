@@ -985,6 +985,16 @@ the state `0003` needs.
   payment provider is configured. See `apps/api/.env.example`'s Xendit block for the full
   table. Partial Xendit configuration (one key set, the other not) still refuses to start in
   every environment, unchanged.
+  **`resolveCallbackToken` (`XENDIT_CALLBACK_TOKEN`, the only thing authenticating
+  `POST /webhooks/xendit`) follows the exact same exception, for the exact same reason:**
+  once `XENDIT_SECRET_KEY`/`XENDIT_SPLIT_RULE_ID` are BOTH absent, no Xendit invoice will
+  ever exist for that webhook to authenticate, so an absent callback token no longer blocks
+  boot either — it returns `undefined` outside the allowlist instead of throwing, and
+  `POST /webhooks/xendit` then rejects every delivery the same way it already did on a
+  `development`/`test` box with no token set (`verifyCallbackToken` refuses an unset
+  `expected` value before comparing anything). This is scoped narrowly: a box with EITHER
+  Xendit key set (real or half-configured) still requires the callback token exactly as
+  before, in every environment.
 - **Member-facing strings are Indonesian.** This is an Indonesian product.
 
 

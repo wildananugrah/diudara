@@ -19,6 +19,9 @@ function fakeRepository(existingSlugs: string[] = []) {
         slug: input.slug,
         niche: input.niche ?? null,
         status: "active",
+        // Mirrors DrizzleCommunityRepository: omitted input defaults to
+        // "paid", the same as the database column's own DEFAULT.
+        accessMode: input.accessMode ?? "paid",
         createdAt: new Date(),
       };
       rows.push(row);
@@ -126,18 +129,25 @@ describe("CreateCommunity", () => {
       });
 
       expect(created.slug).toBe("kelas-budi");
+      expect(created.accessMode).toBe("request");
       expect(rows).toHaveLength(1);
     });
   });
 
   describe("payments enabled", () => {
-    it("allows accessMode: paid", async () => {
+    it("allows accessMode: paid, and actually forwards it to the repository", async () => {
       const { repository, rows } = fakeRepository();
       const useCase = new CreateCommunity(repository, { paymentsEnabled: true });
 
-      await useCase.execute({ creatorId: "creator-1", name: "Kelas Budi", accessMode: "paid" });
+      const created = await useCase.execute({
+        creatorId: "creator-1",
+        name: "Kelas Budi",
+        accessMode: "paid",
+      });
 
+      expect(created.accessMode).toBe("paid");
       expect(rows).toHaveLength(1);
+      expect(rows[0].accessMode).toBe("paid");
     });
 
     // The default for a caller (like every test above this describe block)

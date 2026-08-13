@@ -18,6 +18,7 @@ function community(overrides: Partial<CommunityRecord> = {}): CommunityRecord {
     slug: "kelas-bimbel-budi",
     niche: "bimbel",
     status: "active",
+    accessMode: "paid",
     createdAt: new Date(0),
     ...overrides,
   };

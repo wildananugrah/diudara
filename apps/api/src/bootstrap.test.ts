@@ -1204,18 +1204,28 @@ describe("bootstrap() payment provider selection", () => {
   // isolation: `deps.startCheckout` must be `undefined` (not constructed) and
   // `deps.payments` must be `null`, never a fake.
   //
-  // Every OTHER provider is fully configured here (messaging in particular —
-  // mirrors the "boots with the co-builder disabled..." isolation pattern
-  // further down this file), because `selectMessagingProviders` ALSO throws
-  // outside the allowlist when unconfigured (unaffected by this task, and
-  // that guard stays), and an unconfigured messaging setup would make
-  // bootstrap() throw for an unrelated reason — pinning the WRONG guard.
-  // Verified by probe: before this isolation, `expect(() =>
-  // bootstrap()).toThrow(/NODE_ENV is production/)` against a Xendit-only
-  // override PASSED even after the selectPaymentProvider fix, because it was
-  // actually catching selectMessagingProviders' own "TELEGRAM_BOT_TOKEN and
-  // FONNTE_API_TOKEN are not set, and NODE_ENV is production" throw, not
-  // testing payments at all.
+  // CORRECTION (fix round 1): an earlier version of this comment claimed the
+  // original test (a Xendit-only `withEnv` override asserting `.toThrow(/NODE_ENV
+  // is production/)`) "was never testing payments at all". That is FALSE —
+  // verified by mutation at the pre-Task-2 commit (`a2047ea`): changing only
+  // selectPaymentProvider's own throw message made that exact test fail, with the
+  // received message coming from selectPaymentProvider (it runs before
+  // selectMessagingProviders in bootstrap()'s call order, `bootstrap.ts:1347` vs
+  // `:1459` at that commit), so it genuinely and correctly pinned payments'
+  // pre-fix throw.
+  //
+  // The real, narrower problem is that the assertion was too LOOSE to stay
+  // meaningful once selectPaymentProvider stopped throwing for this case:
+  // `selectMessagingProviders` ALSO throws outside the allowlist when
+  // unconfigured (unaffected by this task, and that guard stays), with a message
+  // that happens to also match `/NODE_ENV is production/` — so a version of this
+  // test left unchanged after the fix would keep "passing" whether or not the
+  // fix actually landed, unable to distinguish the two. That is a real weakness,
+  // and rewriting it — fully configuring every OTHER provider (messaging in
+  // particular, mirroring the "boots with the co-builder disabled..." isolation
+  // pattern further down this file) and asserting the specific fields below — is
+  // strictly stronger. It does not mean the guard this replaced was ever
+  // meaningless.
   it("boots a production process with no Xendit configuration — payments disabled, not the fake adapter", () => {
     withJwtSecret("x".repeat(32), () => {
       withEnv(

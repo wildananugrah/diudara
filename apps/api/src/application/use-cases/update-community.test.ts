@@ -42,6 +42,7 @@ function community(overrides: Partial<CommunityRecord> = {}): CommunityRecord {
     slug: "kelas-budi",
     niche: null,
     status: "active",
+    accessMode: "paid",
     createdAt: new Date(),
     ...overrides,
   };
@@ -143,7 +144,7 @@ describe("UpdateCommunity", () => {
         patch: { accessMode: "request" },
       });
 
-      expect((updated as CommunityRecord & { accessMode?: string }).accessMode).toBe("request");
+      expect(updated.accessMode).toBe("request");
       expect(rows).toHaveLength(1);
     });
 
@@ -176,7 +177,7 @@ describe("UpdateCommunity", () => {
         patch: { accessMode: "paid" },
       });
 
-      expect((updated as CommunityRecord & { accessMode?: string }).accessMode).toBe("paid");
+      expect(updated.accessMode).toBe("paid");
     });
 
     // The default for a caller (like every test above this describe block)
@@ -193,7 +194,7 @@ describe("UpdateCommunity", () => {
         patch: { accessMode: "paid" },
       });
 
-      expect((updated as CommunityRecord & { accessMode?: string }).accessMode).toBe("paid");
+      expect(updated.accessMode).toBe("paid");
     });
   });
 });

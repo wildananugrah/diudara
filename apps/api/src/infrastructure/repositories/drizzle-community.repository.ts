@@ -17,6 +17,7 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
     name: string;
     slug: string;
     niche?: string;
+    accessMode?: string;
   }): Promise<CommunityRecord> {
     try {
       const [row] = await this.db
@@ -26,6 +27,12 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
           name: input.name,
           slug: input.slug,
           niche: input.niche,
+          // Omitted entirely (rather than passed through as `undefined`) when
+          // not provided, so the column's own `DEFAULT 'paid'` applies —
+          // exactly the CreateCommunity-with-no-accessMode case a
+          // payments-disabled box must still refuse before ever reaching
+          // this line (see CreateCommunity's own guard).
+          ...(input.accessMode !== undefined ? { accessMode: input.accessMode } : {}),
         })
         .returning();
       return row;

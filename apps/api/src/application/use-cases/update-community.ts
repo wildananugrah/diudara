@@ -28,7 +28,7 @@ export class UpdateCommunity {
   async execute(input: {
     communityId: string;
     creatorId: string;
-    patch: CommunityPatch & { accessMode?: "paid" | "request" };
+    patch: CommunityPatch;
   }): Promise<CommunityRecord> {
     const existing = await this.communities.findByIdForCreator(
       input.communityId,

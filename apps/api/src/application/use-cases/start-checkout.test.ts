@@ -78,6 +78,7 @@ describe("StartCheckout — funds routing", () => {
           slug,
           niche: null,
           status: "active",
+          accessMode: "paid",
           createdAt: new Date(0),
         };
       },
@@ -477,6 +478,7 @@ function harness(
         slug: options.canonicalSlug ?? slug,
         niche: null,
         status: "active",
+        accessMode: "paid",
         createdAt: new Date(0),
       };
     },

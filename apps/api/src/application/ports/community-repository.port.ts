@@ -5,6 +5,15 @@ export interface CommunityRecord {
   slug: string;
   niche: string | null;
   status: string;
+  /**
+   * `"paid"` or `"request"` — validated against that allowlist at the HTTP
+   * edge (`z.enum` in `packages/shared/src/community.schema.ts`), the same
+   * way `status` is, not by a database CHECK constraint (the column is a
+   * plain `varchar(16)`, see `db/schema.ts`). Plain `string` here rather than
+   * a literal union for the same reason `status` is: this type is what a
+   * Drizzle row actually is, and the allowlist already lives at the edge.
+   */
+  accessMode: string;
   createdAt: Date;
 }
 
@@ -13,6 +22,8 @@ export interface CommunityPatch {
   niche?: string;
   slug?: string;
   status?: string;
+  /** See `CommunityRecord.accessMode`. */
+  accessMode?: string;
 }
 
 /**
@@ -29,6 +40,8 @@ export interface CommunityRepositoryPort {
     name: string;
     slug: string;
     niche?: string;
+    /** Omitted means the database's own default (`"paid"`) applies. */
+    accessMode?: string;
   }): Promise<CommunityRecord>;
   findByIdForCreator(id: string, creatorId: string): Promise<CommunityRecord | null>;
   listByCreator(creatorId: string): Promise<CommunityRecord[]>;

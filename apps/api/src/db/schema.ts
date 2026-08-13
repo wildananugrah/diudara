@@ -49,9 +49,13 @@ export const communities = pgTable(
     niche: varchar("niche", { length: 128 }),
     status: varchar("status", { length: 32 }).notNull().default("active"),
     /**
-     * `paid` | `free`. Default `paid` means existing rows keep today's
+     * `paid` | `request`. Default `paid` means existing rows keep today's
      * behaviour with no backfill: a member can only join by paying through
-     * Xendit unless a creator explicitly switches a community to `free`.
+     * Xendit unless a creator explicitly switches a community to `request`
+     * (free — a member asks to join and the owner approves). Validated
+     * against that allowlist at the HTTP edge, not by a CHECK constraint —
+     * see `z.enum` in `packages/shared/src/community.schema.ts` — the same
+     * convention every other status column here follows.
      */
     accessMode: varchar("access_mode", { length: 16 }).notNull().default("paid"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

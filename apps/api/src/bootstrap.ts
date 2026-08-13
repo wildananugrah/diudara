@@ -227,11 +227,15 @@ export interface Dependencies {
   /**
    * The static token Xendit sends as `X-CALLBACK-TOKEN`, the ONLY thing
    * authenticating the webhook route. `undefined` when the box is not
-   * configured for webhooks (never in production — `resolveCallbackToken`
-   * throws there), in which case `verifyCallbackToken` rejects every delivery
-   * rather than accepting any. Deliberately NOT narrowed to `string`: that
-   * would force a `?? ""` at the call site, and an empty expected token used to
-   * match an empty header.
+   * configured for webhooks — either because `NODE_ENV` is `development`/
+   * `test` (see `RELAXED_NODE_ENVS`), OR — the free-communities addition —
+   * because `XENDIT_SECRET_KEY`/`XENDIT_SPLIT_RULE_ID` are BOTH absent too,
+   * in which case `resolveCallbackToken` no longer throws even in production
+   * (see that function's own docstring: no invoice will ever exist for this
+   * webhook to authenticate). Either way `verifyCallbackToken` rejects every
+   * delivery rather than accepting any. Deliberately NOT narrowed to
+   * `string`: that would force a `?? ""` at the call site, and an empty
+   * expected token used to match an empty header.
    */
   xenditCallbackToken: string | undefined;
   /**
@@ -421,7 +425,13 @@ export function assertUsableJwtSecret(secret: string | undefined): string {
  * `NODE_ENV` unset and taken the unsafe branch — booting the fake adapter,
  * writing unrecoverable `fake-acct-*` ids into `creator.xendit_account_id`, and
  * rejecting every webhook delivery. `"staging"`, `"prod"` and `"PRODUCTION"`
- * were unsafe for the same reason. Under this allowlist all four throw.
+ * were unsafe for the same reason. Under this allowlist, all four used to throw
+ * for payments — free communities changed that specifically for
+ * `selectPaymentProvider`/`resolveCallbackToken` (see their own docstrings:
+ * absent Xendit configuration now boots with payments DISABLED rather than
+ * refusing to start), which is why this file has TWO shapes of "outside the
+ * allowlist" today, not one. Messaging (`selectMessagingProviders`) and
+ * streaming's partial-configuration case are unaffected and still throw.
  *
  * `"test"` is in here because `bun test` sets it (the same mechanism
  * `resetDatabase()` relies on) and the whole suite depends on the fake adapter.
@@ -1368,9 +1378,22 @@ export function bootstrap(): Dependencies {
     ? new CreatePaymentAccount(creatorRepository, payments)
     : undefined;
   const getPaymentAccountStatus = new GetPaymentAccountStatus(creatorRepository);
-  // After selectPaymentProvider on purpose: on a production box with nothing
-  // configured at all, "you are about to take fake money" is the more urgent of
-  // the two messages, and the existing test pins that wording.
+  // After selectPaymentProvider on purpose — two reasons, one of them dated.
+  //
+  // STILL TRUE: `createCommunity`/`updateCommunity`/`createPaymentAccount` above
+  // all need `payments` already resolved, so this call has to happen no later
+  // than it does regardless of anything below it.
+  //
+  // NO LONGER TRUE (fix round 1 correction): this comment used to say the order
+  // matters because "you are about to take fake money" is the more urgent of two
+  // COMPETING throw messages, and that an existing test pinned that wording. Free
+  // communities removed that competition: `selectPaymentProvider` and
+  // `resolveCallbackToken` no longer have any input combination where BOTH would
+  // throw for this process to choose between (see each function's own
+  // docstring — resolveCallbackToken's own disabled branch mirrors
+  // selectPaymentProvider's null exactly, for exactly the absent-Xendit case that
+  // used to race here). No test today asserts an ordering between these two
+  // functions' messages, because there is no longer a message to race.
   const xenditCallbackToken = resolveCallbackToken({
     callbackToken: process.env.XENDIT_CALLBACK_TOKEN,
     secretKey: process.env.XENDIT_SECRET_KEY,

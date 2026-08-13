@@ -70,4 +70,65 @@ describe("DrizzleCommunityRepository", () => {
     const stillThere = await repository.findByIdForCreator(created.id, owner.id);
     expect(stillThere?.name).toBe("Asli");
   });
+
+  /**
+   * Task 2 fix round 1 (review Critical/Important #2): a fake repository that
+   * echoes its input proves only that the fake echoes — it was never evidence
+   * that `access_mode` actually reaches Postgres. These three go through the
+   * REAL repository against a REAL database and re-read the row with a FRESH
+   * query (`findByIdForCreator`, not the value `create`/`update` handed back),
+   * so a column mapped wrong, a silently dropped write, or a stale in-memory
+   * return value would all show up here.
+   */
+  describe("access_mode persistence", () => {
+    it("defaults a newly created community to paid when accessMode is omitted", async () => {
+      const repository = new DrizzleCommunityRepository(db);
+      const creator = await makeCreator("default-access-mode@example.com");
+
+      const created = await repository.create({
+        creatorId: creator.id,
+        name: "Kelas Default",
+        slug: "kelas-default",
+      });
+      expect(created.accessMode).toBe("paid");
+
+      const reread = await repository.findByIdForCreator(created.id, creator.id);
+      expect(reread?.accessMode).toBe("paid");
+    });
+
+    it("persists accessMode: request through create, readable back from Postgres", async () => {
+      const repository = new DrizzleCommunityRepository(db);
+      const creator = await makeCreator("create-request@example.com");
+
+      const created = await repository.create({
+        creatorId: creator.id,
+        name: "Kelas Gratis",
+        slug: "kelas-gratis",
+        accessMode: "request",
+      });
+      expect(created.accessMode).toBe("request");
+
+      const reread = await repository.findByIdForCreator(created.id, creator.id);
+      expect(reread?.accessMode).toBe("request");
+    });
+
+    it("persists an accessMode change through update, readable back from Postgres", async () => {
+      const repository = new DrizzleCommunityRepository(db);
+      const creator = await makeCreator("update-access-mode@example.com");
+      const created = await repository.create({
+        creatorId: creator.id,
+        name: "Kelas Berbayar",
+        slug: "kelas-berbayar",
+      });
+      expect(created.accessMode).toBe("paid");
+
+      const updated = await repository.update(created.id, creator.id, {
+        accessMode: "request",
+      });
+      expect(updated?.accessMode).toBe("request");
+
+      const reread = await repository.findByIdForCreator(created.id, creator.id);
+      expect(reread?.accessMode).toBe("request");
+    });
+  });
 });
