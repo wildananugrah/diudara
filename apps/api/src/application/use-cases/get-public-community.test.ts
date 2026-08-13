@@ -36,7 +36,11 @@ function tier(overrides: Partial<TierRecord> = {}): TierRecord {
   };
 }
 
-function useCase(row: CommunityRecord | null, tiers: TierRecord[] = [tier()]) {
+function useCase(
+  row: CommunityRecord | null,
+  tiers: TierRecord[] = [tier()],
+  options: { paymentsEnabled?: boolean } = {}
+) {
   const communities: CommunityRepositoryPort = {
     async create() {
       throw new Error("not used in these tests");
@@ -70,7 +74,7 @@ function useCase(row: CommunityRecord | null, tiers: TierRecord[] = [tier()]) {
     },
   };
 
-  return new GetPublicCommunity(communities, membershipTiers);
+  return new GetPublicCommunity(communities, membershipTiers, options);
 }
 
 /**
@@ -140,5 +144,62 @@ describe("GetPublicCommunity — accessMode", () => {
       "kelas-bimbel-budi"
     );
     expect(result.accessMode).toBe("request");
+  });
+});
+
+/**
+ * A `paid` community on a box with NO payment provider had `acceptingNewMembers:
+ * true`, so `CheckoutPage` rendered a price and a buy button whose checkout route
+ * is not even registered — `POST /c/:slug/checkout` answers Hono's plain-text
+ * `404 Not Found`, which the page surfaced as raw English `checkout failed (404)`.
+ *
+ * Design spec §2 is explicit that such a community must have "no join path at
+ * all... It reads as 'not accepting new members right now.'"
+ *
+ * BLAST RADIUS is what makes this the phase's worst defect rather than a corner:
+ * migration 0017 sets `access_mode = 'paid'` on EVERY pre-existing community, so
+ * the first operator to run production without Xendit breaks every public
+ * community page at once.
+ */
+describe("GetPublicCommunity — a paid community on a payments-disabled box", () => {
+  it("refuses new members, so the page reads as 'not accepting' instead of offering a dead purchase", async () => {
+    const result = await useCase(community({ accessMode: "paid" }), [tier()], {
+      paymentsEnabled: false,
+    }).execute("kelas-bimbel-budi");
+
+    expect(result.acceptingNewMembers).toBe(false);
+    // Still RENDERS — the page is not a 404, exactly like a paused community.
+    expect(result.name).toBe("Kelas Bimbel Budi");
+    expect(result.accessMode).toBe("paid");
+  });
+
+  it("leaves a REQUEST community accepting members on the same box — that is the whole point of the mode", async () => {
+    const result = await useCase(community({ accessMode: "request" }), [tier()], {
+      paymentsEnabled: false,
+    }).execute("kelas-bimbel-budi");
+
+    expect(result.acceptingNewMembers).toBe(true);
+  });
+
+  it("leaves a paid community accepting members when payments ARE configured", async () => {
+    const result = await useCase(community({ accessMode: "paid" }), [tier()], {
+      paymentsEnabled: true,
+    }).execute("kelas-bimbel-budi");
+
+    expect(result.acceptingNewMembers).toBe(true);
+  });
+
+  it("defaults to payments-enabled, so nothing changes for a box that never passes the option", async () => {
+    const result = await useCase(community({ accessMode: "paid" })).execute("kelas-bimbel-budi");
+
+    expect(result.acceptingNewMembers).toBe(true);
+  });
+
+  it("still refuses a PAUSED request-mode community — status and mode are separate reasons", async () => {
+    const result = await useCase(community({ accessMode: "request", status: "paused" }), [tier()], {
+      paymentsEnabled: false,
+    }).execute("kelas-bimbel-budi");
+
+    expect(result.acceptingNewMembers).toBe(false);
   });
 });

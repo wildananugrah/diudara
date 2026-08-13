@@ -395,3 +395,80 @@ describe("POST /c/:slug/checkout, payments disabled", () => {
     );
   });
 });
+
+/**
+ * The gate's CRITICAL 2. The test above proves the checkout ROUTE is gone on a
+ * payments-disabled box; nothing proved what the member's own page then says.
+ * It said "come and buy": `acceptingNewMembers: true` with a priced tier, so
+ * `CheckoutPage` rendered a price and a buy button whose POST answers Hono's
+ * plain-text `404 Not Found` — surfaced to the member as raw English
+ * `checkout failed (404)`.
+ *
+ * Migration 0017 sets `access_mode = 'paid'` on EVERY pre-existing community, so
+ * this was every public community page on the first Xendit-less production boot.
+ */
+describe("GET /c/:slug, payments disabled", () => {
+  it("reports a PAID community as not accepting new members, so no purchase is offered", async () => {
+    const seedApp = app();
+    const { community } = await seedCommunity(seedApp);
+
+    // Sanity: on the payments-ENABLED app that seeded it, it accepts members.
+    const enabled = await seedApp.request(`/c/${community.slug}`);
+    expect(await enabled.json()).toMatchObject({
+      acceptingNewMembers: true,
+      accessMode: "paid",
+    });
+
+    await withEnv(
+      {
+        NODE_ENV: "production",
+        APP_BASE_URL: "http://localhost:5173",
+        XENDIT_SECRET_KEY: undefined,
+        XENDIT_SPLIT_RULE_ID: undefined,
+        XENDIT_CALLBACK_TOKEN: undefined,
+        TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+        FONNTE_API_TOKEN: "real-fonnte-token",
+        TELEGRAM_WEBHOOK_SECRET: "tg_" + "S".repeat(40),
+      },
+      async () => {
+        const disabledApp = createApp(bootstrap());
+        const res = await disabledApp.request(`/c/${community.slug}`);
+
+        // Still 200 — the page renders, exactly like a paused community. It is
+        // the join path that is gone, not the community.
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({
+          acceptingNewMembers: false,
+          accessMode: "paid",
+        });
+      }
+    );
+  });
+
+  it("leaves a REQUEST community accepting new members on the same box", async () => {
+    const seedApp = app();
+    const { community } = await seedFreeCommunity(seedApp);
+
+    await withEnv(
+      {
+        NODE_ENV: "production",
+        APP_BASE_URL: "http://localhost:5173",
+        XENDIT_SECRET_KEY: undefined,
+        XENDIT_SPLIT_RULE_ID: undefined,
+        XENDIT_CALLBACK_TOKEN: undefined,
+        TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+        FONNTE_API_TOKEN: "real-fonnte-token",
+        TELEGRAM_WEBHOOK_SECRET: "tg_" + "S".repeat(40),
+      },
+      async () => {
+        const disabledApp = createApp(bootstrap());
+        const res = await disabledApp.request(`/c/${community.slug}`);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({
+          acceptingNewMembers: true,
+          accessMode: "request",
+        });
+      }
+    );
+  });
+});

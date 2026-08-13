@@ -1427,7 +1427,14 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
-  const getPublicCommunity = new GetPublicCommunity(communityRepository, tierRepository);
+  // `paymentsEnabled` for the same reason `createCommunity`/`updateCommunity`
+  // take it, and it MUST be the same `payments !== null` they read: that is what
+  // decides whether `POST /c/:slug/checkout` is registered, so it is also what
+  // decides whether a `paid` community has any join path on this box. Without
+  // it, such a community advertised a price and a buy button whose route 404s.
+  const getPublicCommunity = new GetPublicCommunity(communityRepository, tierRepository, {
+    paymentsEnabled: payments !== null,
+  });
 
   const memberRepository = new DrizzleMemberRepository(db);
   const subscriptionRepository = new DrizzleSubscriptionRepository(db);
