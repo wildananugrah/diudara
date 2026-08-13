@@ -11,6 +11,7 @@ import {
   subscriptions,
   channelMemberships,
   channels,
+  joinRequests,
   membershipTiers,
   communities,
   members,
@@ -76,6 +77,9 @@ export async function resetDatabase() {
   await db.delete(channelMemberships);
   await db.delete(outbox);
   await db.delete(channels);
+  // joinRequests references community, membership_tier, member and creator, so it
+  // must clear before all four.
+  await db.delete(joinRequests);
   await db.delete(membershipTiers);
   await db.delete(communities);
   await db.delete(members);

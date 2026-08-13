@@ -125,7 +125,7 @@ describe("CommunitiesPage", () => {
     expect(await screen.findByText("Kelas Malam")).toBeTruthy();
     const post = stub.calls.find((c) => c.method === "POST")!;
     expect(post.url).toBe("/communities");
-    expect(post.body).toEqual({ name: "Kelas Malam", niche: "bimbel" });
+    expect(post.body).toEqual({ name: "Kelas Malam", niche: "bimbel", accessMode: "paid" });
   });
 
   it("omits an empty niche rather than sending an empty string", async () => {
@@ -141,7 +141,10 @@ describe("CommunitiesPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Buat komunitas" }));
 
     await waitFor(() => expect(stub.calls.some((c) => c.method === "POST")).toBe(true));
-    expect(stub.calls.find((c) => c.method === "POST")!.body).toEqual({ name: "Kelas Malam" });
+    expect(stub.calls.find((c) => c.method === "POST")!.body).toEqual({
+      name: "Kelas Malam",
+      accessMode: "paid",
+    });
   });
 
   it("renders a 400 as a field-level message and keeps what was typed", async () => {
@@ -174,5 +177,176 @@ describe("CommunitiesPage", () => {
     render();
 
     expect(await screen.findByText(/Gagal memuat/)).toBeTruthy();
+  });
+});
+
+/**
+ * The gate's CRITICAL 1. `AccessModeForm` (added in `10a9c21`) lives on
+ * `CommunityOverviewPage`, routed as `c/:communityId` — reachable only for a
+ * community that ALREADY EXISTS. But on a payments-disabled box no community
+ * can be created at all: this form sent `{name, niche?}`, and `CreateCommunity`
+ * refuses anything not explicitly `"request"` when payments are off. So the only
+ * control that sets request mode required a community, and creating one required
+ * request mode.
+ *
+ * Driven against a real production box with no Xendit keys:
+ *   POST /communities {"name":"..."}                        -> 409
+ *   POST /communities {"name":"...","niche":"bimbel"}       -> 409   (what this form sent)
+ *   POST /communities {"name":"...","accessMode":"request"} -> 201   (what it could not send)
+ */
+describe("CommunitiesPage — access mode on the create form (gate fix round)", () => {
+  const CONNECTED_UNAVAILABLE: StubRoute = {
+    path: "/payment-account",
+    body: { connected: false, provisioning: false, available: false },
+  };
+  const CONNECTED_AVAILABLE: StubRoute = {
+    path: "/payment-account",
+    body: { connected: true, provisioning: false, available: true },
+  };
+
+  it("defaults to 'berbayar' when the server takes payments, preserving today's behaviour", async () => {
+    const stub = stubFetch([
+      CONNECTED_AVAILABLE,
+      { path: "/communities", body: [] },
+      { method: "POST", path: "/communities", status: 201, body: TEST_COMMUNITY },
+    ]);
+
+    render();
+    await screen.findByText(/Belum ada komunitas/);
+
+    await waitFor(() =>
+      expect((screen.getByLabelText("Cara bergabung") as HTMLSelectElement).value).toBe("paid")
+    );
+    fireEvent.change(screen.getByLabelText("Nama komunitas"), { target: { value: "Kelas Malam" } });
+    fireEvent.click(screen.getByRole("button", { name: "Buat komunitas" }));
+
+    await waitFor(() => expect(stub.calls.some((c) => c.method === "POST")).toBe(true));
+    expect(stub.calls.find((c) => c.method === "POST")!.body).toEqual({
+      name: "Kelas Malam",
+      accessMode: "paid",
+    });
+  });
+
+  it("creates a REQUEST community, which the form previously could not express at all", async () => {
+    const stub = stubFetch([
+      CONNECTED_AVAILABLE,
+      { path: "/communities", body: [] },
+      {
+        method: "POST",
+        path: "/communities",
+        status: 201,
+        body: { ...TEST_COMMUNITY, accessMode: "request" },
+      },
+    ]);
+
+    render();
+    await screen.findByText(/Belum ada komunitas/);
+
+    fireEvent.change(screen.getByLabelText("Nama komunitas"), { target: { value: "Kelas Gratis" } });
+    fireEvent.change(screen.getByLabelText("Cara bergabung"), { target: { value: "request" } });
+    fireEvent.click(screen.getByRole("button", { name: "Buat komunitas" }));
+
+    await waitFor(() => expect(stub.calls.some((c) => c.method === "POST")).toBe(true));
+    expect(stub.calls.find((c) => c.method === "POST")!.body).toEqual({
+      name: "Kelas Gratis",
+      accessMode: "request",
+    });
+  });
+
+  it("does not OFFER a paid community on a server with no payment provider", async () => {
+    stubFetch([CONNECTED_UNAVAILABLE, { path: "/communities", body: [] }]);
+
+    render();
+    await screen.findByText(/Belum ada komunitas/);
+
+    // The trap one level down: offering an option the server can only 409.
+    await waitFor(() => {
+      const select = screen.getByLabelText("Cara bergabung") as HTMLSelectElement;
+      expect([...select.options].map((o) => o.value)).toEqual(["request"]);
+      expect(select.value).toBe("request");
+    });
+    // …and it says WHY, rather than silently dropping an option.
+    expect(screen.getByTestId("payments-unavailable-hint").textContent).toMatch(
+      /pembayaran|berbayar/i
+    );
+  });
+
+  it("still sends accessMode: request from that server, so creation actually succeeds", async () => {
+    const stub = stubFetch([
+      CONNECTED_UNAVAILABLE,
+      { path: "/communities", body: [] },
+      {
+        method: "POST",
+        path: "/communities",
+        status: 201,
+        body: { ...TEST_COMMUNITY, accessMode: "request" },
+      },
+    ]);
+
+    render();
+    await screen.findByText(/Belum ada komunitas/);
+    await waitFor(() =>
+      expect((screen.getByLabelText("Cara bergabung") as HTMLSelectElement).value).toBe("request")
+    );
+
+    fireEvent.change(screen.getByLabelText("Nama komunitas"), { target: { value: "Kelas Gratis" } });
+    fireEvent.click(screen.getByRole("button", { name: "Buat komunitas" }));
+
+    await waitFor(() => expect(stub.calls.some((c) => c.method === "POST")).toBe(true));
+    expect(stub.calls.find((c) => c.method === "POST")!.body).toEqual({
+      name: "Kelas Gratis",
+      accessMode: "request",
+    });
+  });
+
+  it("offers both modes when the server never reports availability, rather than hiding one", async () => {
+    // An older server omits `available`. Failing toward "hidden" would stop a
+    // creator making the community they came to make, with no error to explain
+    // it; failing toward "offered" costs at most one clearly-worded 409.
+    stubFetch([
+      { path: "/payment-account", body: { connected: true, provisioning: false } },
+      { path: "/communities", body: [] },
+    ]);
+
+    render();
+    await screen.findByText(/Belum ada komunitas/);
+
+    const select = screen.getByLabelText("Cara bergabung") as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).toEqual(["paid", "request"]);
+  });
+});
+
+/** The last false sentence on a free community's screens: the payments warning
+    told a creator to press a button that answers 503 on a server with no
+    payment provider, and described purchases that are not on offer there. */
+describe("PaymentAccountNotice — a server with no payment provider (gate fix round)", () => {
+  it("does not tell the creator to go and connect payments they cannot connect", async () => {
+    stubFetch([
+      { path: "/payment-account", body: { connected: false, provisioning: false, available: false } },
+      { path: "/communities", body: [] },
+    ]);
+
+    render();
+    await screen.findByText(/Belum ada komunitas/);
+
+    const notice = await screen.findByTestId("payment-account-notice");
+    expect(notice.textContent).toMatch(/tidak menerima pembayaran/i);
+    expect(notice.textContent).not.toMatch(/Hubungkan pembayaran/i);
+    expect(notice.textContent).not.toMatch(/dibeli/i);
+    // Still says free communities work, so the screen is not just a dead end.
+    expect(notice.textContent).toMatch(/gratis/i);
+  });
+
+  it("keeps the ordinary 'connect your payments' warning on a server that HAS a provider", async () => {
+    stubFetch([
+      { path: "/payment-account", body: { connected: false, provisioning: false, available: true } },
+      { path: "/communities", body: [] },
+    ]);
+
+    render();
+    await screen.findByText(/Belum ada komunitas/);
+
+    const notice = await screen.findByTestId("payment-account-notice");
+    expect(notice.textContent).toMatch(/Hubungkan pembayaran/i);
   });
 });

@@ -1,4 +1,4 @@
-import type { StartCheckoutInput } from "@diudara/shared";
+import type { JoinRequestInput, StartCheckoutInput } from "@diudara/shared";
 
 // Mirrors apps/api/src/application/use-cases/get-public-community.ts and
 // start-checkout.ts. Those response shapes are not (yet) exported from
@@ -20,6 +20,15 @@ export interface PublicCommunity {
   niche: string | null;
   slug: string;
   acceptingNewMembers: boolean;
+  /**
+   * `"paid"` or `"request"`, verbatim off `community.accessMode` — see
+   * apps/api/src/application/use-cases/get-public-community.ts's own
+   * docstring for why this is a plain `string` rather than a literal union:
+   * the Drizzle schema never narrows the column, so typing it stricter here
+   * breaks typecheck at every comparison site. Compare against the string
+   * values ("paid" / "request"); do not "fix" the type.
+   */
+  accessMode: string;
   tiers: PublicTier[];
 }
 
@@ -27,6 +36,27 @@ export interface CheckoutResult {
   invoiceUrl: string;
   subscriptionId: string;
   transactionId: string;
+}
+
+/** Mirrors apps/api/src/application/use-cases/request-to-join.ts's `RequestToJoin` success shape. */
+export interface JoinRequestResult {
+  joinRequestId: string;
+}
+
+/**
+ * Mirrors apps/api/src/application/use-cases/request-to-join.ts's
+ * `JoinRequestStatus`. Deliberately narrow — no payer name, no WhatsApp
+ * number — because this id travels in a public, unauthenticated URL the same
+ * way a subscription id does; see that file's docstring on
+ * `GetJoinRequestStatus` for why. `subscriptionId` is non-null only once
+ * `status === "approved"` AND the member still holds a current subscription
+ * for the requested tier — it is resolved live, not stored, so it goes back
+ * to `null` if an approved member's subscription is later revoked.
+ */
+export interface JoinRequestStatus {
+  status: string;
+  communitySlug: string;
+  subscriptionId: string | null;
 }
 
 /**
@@ -89,6 +119,27 @@ export async function startCheckout(slug: string, input: StartCheckoutInput): Pr
     throw new ApiError(await readErrorMessage(res, `checkout failed (${res.status})`), res.status);
   }
   return (await res.json()) as CheckoutResult;
+}
+
+/** Mirrors `startCheckout` exactly — see `POST /c/:slug/join-request`. */
+export async function submitJoinRequest(slug: string, input: JoinRequestInput): Promise<JoinRequestResult> {
+  const res = await fetch(`/c/${encodeURIComponent(slug)}/join-request`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    throw new ApiError(await readErrorMessage(res, `join request failed (${res.status})`), res.status);
+  }
+  return (await res.json()) as JoinRequestResult;
+}
+
+export async function fetchJoinRequestStatus(slug: string, joinRequestId: string): Promise<JoinRequestStatus> {
+  const res = await fetch(`/c/${encodeURIComponent(slug)}/request/${encodeURIComponent(joinRequestId)}`);
+  if (!res.ok) {
+    throw new ApiError(await readErrorMessage(res, `failed to load request status (${res.status})`), res.status);
+  }
+  return (await res.json()) as JoinRequestStatus;
 }
 
 export async function fetchSubscriptionStatus(subscriptionId: string): Promise<SubscriptionStatus> {

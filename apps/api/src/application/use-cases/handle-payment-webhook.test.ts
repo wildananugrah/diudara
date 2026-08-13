@@ -127,6 +127,9 @@ function harness(
     async createPending() {
       throw new Error("not used");
     },
+    async createActiveWithoutBilling() {
+      throw new Error("not used");
+    },
     async findCurrentSubscriptionForTier() {
       return null;
     },

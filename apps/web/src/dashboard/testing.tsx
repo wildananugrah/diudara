@@ -20,6 +20,7 @@ export const TEST_COMMUNITY = {
   slug: "kelas-bimbel-budi",
   niche: "bimbel",
   status: "active",
+  accessMode: "paid",
   createdAt: "2026-08-01T02:00:00.000Z",
 };
 
@@ -29,7 +30,24 @@ export interface StubRoute {
   /** Matched against the request URL with `startsWith`, so query strings are fine. */
   path: string;
   status?: number;
-  body: unknown;
+  body?: unknown;
+  /**
+   * An alternative to a fixed `body`, for a route whose response needs to
+   * change partway through a single test — e.g. the roster before and after
+   * a join request is approved, so a test can assert the approved member
+   * actually appears on screen rather than only that a second fetch fired.
+   *
+   * Called FRESH on every matching request rather than keyed by call count:
+   * `renderPage`'s `<StrictMode>` wrapper double-invokes the initial mount
+   * effect (see that function's own docstring), so a route can legitimately
+   * be hit more times than a test author would naively expect before any
+   * user action happens at all. A counter would attribute one of those extra
+   * mount-time calls to "after the action" and serve the wrong body; a plain
+   * closure the TEST controls (flipping its own local flag exactly when the
+   * test wants to, not when some incidental extra fetch happens to land)
+   * cannot be thrown off that way.
+   */
+  bodyFn?: () => unknown;
 }
 
 export interface FetchStub {
@@ -69,10 +87,11 @@ export function stubFetch(routes: StubRoute[]): FetchStub {
       throw new Error(`unstubbed request: ${method} ${url}`);
     }
     const status = route.status ?? 200;
-    if (typeof route.body === "string") {
-      return new Response(route.body, { status, headers: { "Content-Type": "text/csv" } });
+    const body = route.bodyFn !== undefined ? route.bodyFn() : route.body;
+    if (typeof body === "string") {
+      return new Response(body, { status, headers: { "Content-Type": "text/csv" } });
     }
-    return new Response(JSON.stringify(route.body), {
+    return new Response(JSON.stringify(body), {
       status,
       headers: { "Content-Type": "application/json" },
     });

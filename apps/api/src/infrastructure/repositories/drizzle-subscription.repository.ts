@@ -16,6 +16,8 @@ import type {
   TransactionRecord,
 } from "../../application/ports/subscription-repository.port";
 import { computeNextBillingDate } from "../../domain/billing-cycle";
+import { UniqueRule } from "../../application/errors";
+import { rethrowUniqueViolation } from "./pg-errors";
 
 /**
  * Matches the canonical 8-4-4-4-12 hex form Postgres accepts for `uuid`.
@@ -199,6 +201,50 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
       .values({ memberId: input.memberId, tierId: input.tierId })
       .returning();
     return row;
+  }
+
+  /**
+   * See the port docstring. `nextBillingDate` is omitted, not set to null
+   * explicitly — the column has no default, so an omitted insert value is
+   * already null, which is what keeps this row out of `findDueForRenewal`
+   * (an explicit `isNotNull` there) and therefore out of the churn pass that
+   * follows it. `startedAt` IS set, same as a first payment: this is the day
+   * the free membership began, and churn timing elsewhere in the system reads
+   * it the same way regardless of how the subscription became active.
+   */
+  async createActiveWithoutBilling(input: {
+    memberId: string;
+    tierId: string;
+  }): Promise<SubscriptionRecord> {
+    const now = new Date();
+    try {
+      const [row] = await this.db
+        .insert(subscriptions)
+        .values({
+          memberId: input.memberId,
+          tierId: input.tierId,
+          status: ACTIVE_SUBSCRIPTION,
+          startedAt: now,
+        })
+        .returning();
+      return row;
+    } catch (err) {
+      // Unlike `markPaid` (an UPDATE the caller can predicate on the row's own
+      // current status), this is a bare INSERT: nothing here can see whether the
+      // member already holds an active row for this tier before attempting it.
+      // `subscription_member_tier_active_unique` is the only thing that can catch
+      // it, and it is REACHABLE — an already-approved member can file a fresh
+      // `join_request` (its partial unique index only covers `pending` rows), and
+      // `DecideJoinRequest` approving it a second time lands exactly here. Mapped
+      // rather than left raw so the caller gets a typed `UniqueViolationError`
+      // instead of a driver error carrying this statement's bound parameters.
+      rethrowUniqueViolation(err, {
+        subscription_member_tier_active_unique: {
+          rule: UniqueRule.subscriptionMemberTierActive,
+          message: "member already holds an active subscription to this tier",
+        },
+      });
+    }
   }
 
   async createTransaction(input: {

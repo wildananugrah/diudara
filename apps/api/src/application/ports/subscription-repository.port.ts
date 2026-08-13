@@ -179,6 +179,16 @@ export type MarkPaidOutcome =
 export interface SubscriptionRepositoryPort {
   createPending(input: { memberId: string; tierId: string }): Promise<SubscriptionRecord>;
   /**
+   * An approved FREE membership. `next_billing_date` is deliberately null: it is
+   * what makes this row invisible to `findDueForRenewal` (which carries an
+   * explicit `isNotNull`) and therefore to the churn pass that follows it. A free
+   * membership lasts until the owner revokes it.
+   */
+  createActiveWithoutBilling(input: {
+    memberId: string;
+    tierId: string;
+  }): Promise<SubscriptionRecord>;
+  /**
    * The member's CURRENT subscription to this tier — `active` or `past_due` — or null.
    *
    * Read by `StartCheckout`, which has to tell three cases apart and cannot do it with a

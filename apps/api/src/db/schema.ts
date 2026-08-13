@@ -48,6 +48,16 @@ export const communities = pgTable(
     slug: varchar("slug", { length: 120 }).notNull().unique(),
     niche: varchar("niche", { length: 128 }),
     status: varchar("status", { length: 32 }).notNull().default("active"),
+    /**
+     * `paid` | `request`. Default `paid` means existing rows keep today's
+     * behaviour with no backfill: a member can only join by paying through
+     * Xendit unless a creator explicitly switches a community to `request`
+     * (free — a member asks to join and the owner approves). Validated
+     * against that allowlist at the HTTP edge, not by a CHECK constraint —
+     * see `z.enum` in `packages/shared/src/community.schema.ts` — the same
+     * convention every other status column here follows.
+     */
+    accessMode: varchar("access_mode", { length: 16 }).notNull().default("paid"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("community_creator_id_idx").on(table.creatorId)],
@@ -208,6 +218,42 @@ export const subscriptions = pgTable(
     // to miss.
     index("subscription_status_grace_ends_at_idx").on(table.status, table.graceEndsAt),
     // ===================================================================
+  ],
+);
+
+/**
+ * A member's request to join a FREE community. The owner approves or rejects
+ * it; there is no payment involved, ever — a `join_request` never produces a
+ * `transaction` row.
+ */
+export const joinRequests = pgTable(
+  "join_request",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    communityId: uuid("community_id")
+      .notNull()
+      .references(() => communities.id),
+    tierId: uuid("tier_id")
+      .notNull()
+      .references(() => membershipTiers.id),
+    memberId: uuid("member_id")
+      .notNull()
+      .references(() => members.id),
+    status: varchar("status", { length: 16 }).notNull().default("pending"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decidedBy: uuid("decided_by").references(() => creators.id),
+  },
+  (table) => [
+    // ONE open request per member per community, arbitrated by the DATABASE rather
+    // than by a read-then-write — the same reason `subscription_member_tier_active_unique`
+    // is a partial unique index. Two submits in the same instant cannot both win.
+    // Decided rows are deliberately outside the index: they are the audit trail, and
+    // rejection being silent makes them the only account of what happened.
+    uniqueIndex("join_request_community_member_pending_unique")
+      .on(table.communityId, table.memberId)
+      .where(sql`${table.status} = 'pending'`),
+    index("join_request_community_status_idx").on(table.communityId, table.status),
   ],
 );
 

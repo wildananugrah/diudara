@@ -99,6 +99,25 @@ export const OUTBOX_REVOKE_SUBSCRIPTION_ACCESS = "revoke_subscription_access";
  */
 export const OUTBOX_NOTIFY_STREAM_LIVE = "notify_stream_live";
 
+/**
+ * The `event_type` of the row `RequestToJoin` (Task 3) queues the instant a free
+ * community's member asks to join: "tell this community's owner someone wants in".
+ *
+ * Enqueued INSIDE THE SAME TRANSACTION as `join_request.createPending` — see
+ * `JoinRequestUnitOfWorkPort` — for the reason every outbox row born alongside a
+ * durable fact is: a request that exists with no notification queued would strand
+ * the owner's only way to hear about it, since the pending-requests dashboard list
+ * is documented as the FALLBACK for an undeliverable WhatsApp, not the primary
+ * channel.
+ *
+ * The payload carries `joinRequestId` only. The handler (Task 5) re-resolves the
+ * community, member and tier fresh at send time — the same reason
+ * `OUTBOX_NOTIFY_STREAM_LIVE`'s payload carries ids and not a snapshot: a request
+ * can sit queued long enough for the community's slug or the creator's own
+ * WhatsApp number to have changed underneath it.
+ */
+export const OUTBOX_NOTIFY_JOIN_REQUEST = "notify_join_request";
+
 /** A row handed to a worker by `claimBatch`, already marked as being processed. */
 export interface ClaimedOutboxRow {
   id: string;

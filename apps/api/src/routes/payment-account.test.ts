@@ -24,7 +24,7 @@ describe("GET /payment-account", () => {
     const res = await a.request("/payment-account", { headers: bearer(token) });
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ connected: false, provisioning: false });
+    expect(await res.json()).toEqual({ connected: false, provisioning: false, available: true });
   });
 
   // Setting up "connected"/"provisioning" state WITHOUT calling POST
@@ -43,7 +43,7 @@ describe("GET /payment-account", () => {
     const res = await a.request("/payment-account", { headers: bearer(token) });
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ connected: false, provisioning: true });
+    expect(await res.json()).toEqual({ connected: false, provisioning: true, available: true });
   });
 
   it("reports connected once the column holds a real account id", async () => {
@@ -56,7 +56,7 @@ describe("GET /payment-account", () => {
     const res = await a.request("/payment-account", { headers: bearer(token) });
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ connected: true, provisioning: false });
+    expect(await res.json()).toEqual({ connected: true, provisioning: false, available: true });
   });
 
   it("keeps each creator's status independent of another creator's", async () => {
@@ -70,10 +70,86 @@ describe("GET /payment-account", () => {
     const ownerRes = await a.request("/payment-account", { headers: bearer(owner.token) });
     const strangerRes = await a.request("/payment-account", { headers: bearer(stranger.token) });
 
-    expect(await ownerRes.json()).toEqual({ connected: true, provisioning: false });
-    expect(await strangerRes.json()).toEqual({ connected: false, provisioning: false });
+    expect(await ownerRes.json()).toEqual({ connected: true, provisioning: false, available: true });
+    expect(await strangerRes.json()).toEqual({ connected: false, provisioning: false, available: true });
   });
 });
+
+/**
+ * The gate's CRITICAL 1. `connected: false, provisioning: false` used to mean
+ * two different things — "this server takes payments, you have not connected"
+ * and "this server has no payment provider at all" — and the dashboard could
+ * not tell them apart. It therefore offered a "berbayar" community on a box
+ * where `CreateCommunity` refuses one, i.e. a form that can only ever 409.
+ */
+describe("GET /payment-account, payments disabled on the server", () => {
+  it("reports available: false, distinguishing 'not configured here' from 'not connected yet'", async () => {
+    const seedApp = app();
+    const { token } = await signupAndGetToken(seedApp);
+
+    // Same creator, same column, same two booleans — only `available` moves.
+    expect(await (await seedApp.request("/payment-account", { headers: bearer(token) })).json())
+      .toEqual({ connected: false, provisioning: false, available: true });
+
+    await withEnv(
+      {
+        NODE_ENV: "production",
+        APP_BASE_URL: "http://localhost:5173",
+        XENDIT_SECRET_KEY: undefined,
+        XENDIT_SPLIT_RULE_ID: undefined,
+        XENDIT_CALLBACK_TOKEN: undefined,
+        TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+        FONNTE_API_TOKEN: "real-fonnte-token",
+        TELEGRAM_WEBHOOK_SECRET: "tg_" + "S".repeat(40),
+      },
+      async () => {
+        const disabledApp = createApp(bootstrap());
+        const res = await disabledApp.request("/payment-account", { headers: bearer(token) });
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({
+          connected: false,
+          provisioning: false,
+          available: false,
+        });
+
+        // And it agrees with the POST's own 503 on the same box — one signal.
+        const post = await disabledApp.request("/payment-account", {
+          method: "POST",
+          headers: bearer(token),
+        });
+        expect(post.status).toBe(503);
+      }
+    );
+  });
+});
+
+/** Swaps env vars for one async block and restores them, exactly as
+    `public-community.test.ts`'s own copy does. */
+async function withEnv(vars: Record<string, string | undefined>, fn: () => Promise<void>) {
+  const originals: Record<string, string | undefined> = {};
+  for (const key of Object.keys(vars)) {
+    originals[key] = process.env[key];
+  }
+  try {
+    for (const [key, value] of Object.entries(vars)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    await fn();
+  } finally {
+    for (const [key, value] of Object.entries(originals)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
 
 describe("POST /payment-account", () => {
   it("rejects an unauthenticated request with 401", async () => {

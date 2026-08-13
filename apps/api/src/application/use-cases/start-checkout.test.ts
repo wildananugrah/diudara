@@ -78,6 +78,7 @@ describe("StartCheckout — funds routing", () => {
           slug,
           niche: null,
           status: "active",
+          accessMode: "paid",
           createdAt: new Date(0),
         };
       },
@@ -134,6 +135,9 @@ describe("StartCheckout — funds routing", () => {
           createdAt: new Date(0),
           updatedAt: new Date(0),
         };
+      },
+      async createActiveWithoutBilling() {
+        throw new Error("not used");
       },
       async createTransaction(input) {
         return {
@@ -474,6 +478,7 @@ function harness(
         slug: options.canonicalSlug ?? slug,
         niche: null,
         status: "active",
+        accessMode: "paid",
         createdAt: new Date(0),
       };
     },
@@ -525,6 +530,9 @@ function harness(
         createdAt: new Date(0),
         updatedAt: new Date(0),
       };
+    },
+    async createActiveWithoutBilling() {
+      throw new Error("not used");
     },
     async createTransaction(input) {
       transactionSubscriptionIds.push(input.subscriptionId);

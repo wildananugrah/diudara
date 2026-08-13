@@ -1,6 +1,14 @@
+import { JOIN_REQUEST_ALREADY_DECIDED_MESSAGE } from "@diudara/shared";
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { apiFetch, apiRequest, DashboardApiError } from "../apiClient";
+import {
+  apiFetch,
+  apiRequest,
+  approveJoinRequest,
+  DashboardApiError,
+  listJoinRequests,
+  rejectJoinRequest,
+} from "../apiClient";
 import {
   formatDate,
   formatDateTime,
@@ -11,7 +19,19 @@ import {
 import { CommunityHeader, EmptyState, ErrorPanel, NotFoundPanel } from "../ui";
 import { useCommunity } from "../useCommunity";
 import { useLoad } from "../useLoad";
-import type { Community, MemberRosterPage, MemberRow, RevokeResult } from "../types";
+import type {
+  Community,
+  JoinRequestRow,
+  MemberRosterPage,
+  MemberRow,
+  RevokeResult,
+} from "../types";
+
+/**
+ * `community.accessMode` value that accepts a free join request instead of a
+ * purchase — mirrors `CheckoutPage.tsx`'s own constant of the same name.
+ */
+const REQUEST_ACCESS_MODE = "request";
 
 /** Rows per request. The API's own default, and its cap is 100. */
 const PAGE_LIMIT = 25;
@@ -82,24 +102,379 @@ type CsvState =
 export default function MembersPage() {
   const { communityId } = useParams<{ communityId: string }>();
   const [communityLoad] = useCommunity(communityId);
+  /** Bumped after every join-request decision, so `Roster` refetches — see
+      `Roster`'s own `refreshToken` dependency below. */
+  const [rosterVersion, setRosterVersion] = useState(0);
 
   if (communityLoad.kind === "loading") return <p className="muted">Memuat...</p>;
   if (communityLoad.kind === "error") return <ErrorPanel message={communityLoad.message} />;
   if (communityLoad.data === null) return <NotFoundPanel />;
 
+  const community = communityLoad.data;
+
   return (
     <section>
-      <CommunityHeader community={communityLoad.data} />
+      <CommunityHeader community={community} />
+      {/* Rendered for EVERY community, not just request-mode ones — see
+          `JoinRequests`' docstring for the orphaned rows that made the old
+          `accessMode === "request"` gate here a real bug. The component itself
+          decides what to show once it knows whether anything is pending. */}
+      <JoinRequests community={community} onDecided={() => setRosterVersion((v) => v + 1)} />
       <h2>Anggota</h2>
-      <Roster community={communityLoad.data} />
+      <Roster community={community} refreshToken={rosterVersion} />
     </section>
   );
 }
 
-function Roster({ community }: { community: Community }) {
+/**
+ * The owner's inbox of pending free-community join requests.
+ *
+ * WHAT IT SHOWS DEPENDS ON THE MODE, and it is the ROW COUNT — not the mode —
+ * that decides whether there is anything to act on:
+ *
+ *   request mode : always rendered, including at zero. A request-mode community
+ *                  legitimately has an empty queue, and "Permintaan bergabung (0)"
+ *                  with "Tidak ada permintaan yang menunggu" is honest.
+ *   paid mode    : rendered ONLY when rows are actually pending. An empty paid
+ *                  community shows nothing, so it never implies it has requests
+ *                  waiting — which is what the old gate was protecting.
+ *
+ * THIS USED TO BE GATED ON `accessMode === "request"` BY THE CALLER, and its
+ * docstring asserted "a paid community has no `join_request` rows at all."
+ * That is false, and was falsified by execution at the phase gate: switching a
+ * community from `request` back to `paid` leaves every PENDING row exactly where
+ * it was. `GET .../join-requests` still returns them, `DecideJoinRequest` still
+ * decides them (it never looks at `accessMode`), and the member's own status page
+ * still reads "menunggu persetujuan" — but the owner's dashboard stopped showing
+ * them, so the request could never be answered and the member waited forever.
+ * Nothing is lost (switching back recovers it), but the owner has no way to know
+ * that, which is what made it worth fixing rather than documenting.
+ *
+ * The cost is that a paid community now issues one `GET .../join-requests` per
+ * visit to this screen. That is the price of not silently stranding rows; the
+ * request is cheap and indexed (`join_request_community_status_idx`).
+ */
+function JoinRequests({
+  community,
+  onDecided,
+}: {
+  community: Community;
+  onDecided: () => void;
+}) {
+  const [load, handle] = useLoad(() => listJoinRequests(community.id), [community.id]);
+  /**
+   * A row-removing decision's aftermath — a request decided elsewhere (409)
+   * or a request that no longer exists at all (404). Both are reported here
+   * rather than as a per-row message, because both REMOVE the row: see
+   * `JoinRequestTable`'s `decide` for the full breakdown of which outcomes
+   * remove a row and which keep it.
+   *
+   * LIVES HERE, NOT IN `JoinRequestTable` — the notice always arrives in the
+   * same state update that removes the request's row, and when that removal
+   * empties the list this component stops rendering `JoinRequestTable` at
+   * all. State kept inside the table would vanish in the very same render
+   * that was supposed to show it; kept here, it survives the table
+   * unmounting underneath it.
+   *
+   * DISMISSIBLE BY THE OWNER (the "Tutup" button below) rather than only
+   * clearable by the next decision: the earlier version cleared this only at
+   * the top of `decide`, which never runs again once the queue is empty and
+   * `JoinRequestTable` has nothing left to click — leaving the notice glued
+   * to the screen until a manual reload.
+   */
+  const [notice, setNotice] = useState<string | null>(null);
+
+  if (load.kind === "loading") {
+    return <p className="muted">Memuat permintaan bergabung...</p>;
+  }
+  if (load.kind === "error") {
+    return <ErrorPanel message={load.message} onRetry={handle.reload} />;
+  }
+
+  const requests = load.data;
+  const isRequestMode = community.accessMode === REQUEST_ACCESS_MODE;
+
+  // A paid community with nothing pending has no queue to speak of — see this
+  // component's own docstring for why the ROW COUNT, not the mode, is what
+  // decides. Placed after the loading/error branches so a slow or failed fetch
+  // on a paid community stays silent rather than flashing a section.
+  if (!isRequestMode && requests.length === 0) {
+    return null;
+  }
+
+  /** Drops one settled request from the list in place — the same shortcut
+      `Roster.loadMore` uses via `handle.update`, so a decision does not cost
+      a second round trip to see its own row disappear. */
+  function removeRequest(id: string) {
+    handle.update(requests.filter((request) => request.id !== id));
+  }
+
+  return (
+    <div className="stack join-requests">
+      <h2>Permintaan bergabung ({requests.length})</h2>
+      {isRequestMode ? null : (
+        // Only reachable by switching a community from "Gratis" back to
+        // "Berbayar" with requests still pending, which is rare enough that an
+        // owner meeting this queue on a paid community would otherwise have no
+        // idea where it came from or why both buttons still work.
+        <p className="muted" data-testid="join-requests-orphaned">
+          Komunitas ini sekarang <strong>berbayar</strong>, tetapi permintaan di bawah ini
+          dikirim ketika masih gratis dan belum Anda putuskan. Menyetujui tetap memberi akses{" "}
+          <strong>tanpa pembayaran</strong>. Pengirimnya tidak diberi tahu apa pun sampai Anda
+          memutuskan.
+        </p>
+      )}
+      {notice !== null ? (
+        <div className="notice notice-info" data-testid="join-request-conflict" role="status">
+          <p>{notice}</p>
+          <button type="button" className="button-quiet" onClick={() => setNotice(null)}>
+            Tutup
+          </button>
+        </div>
+      ) : null}
+      {requests.length === 0 ? (
+        <p className="muted">Tidak ada permintaan yang menunggu saat ini.</p>
+      ) : (
+        <JoinRequestTable
+          community={community}
+          requests={requests}
+          onSettled={(id) => {
+            removeRequest(id);
+            onDecided();
+          }}
+          onNotice={setNotice}
+        />
+      )}
+    </div>
+  );
+}
+
+/** A join request's own version of `memberLabel` (below) — same fallback, same reasoning. */
+function joinRequestLabel(request: JoinRequestRow): string {
+  return request.memberName ?? request.memberWhatsappNumber;
+}
+
+/**
+ * One row per pending request, with the owner's two decisions.
+ *
+ * APPROVE SENDS IMMEDIATELY; REJECT ASKS FIRST. Deliberately asymmetric:
+ * approval is recoverable (the owner can revoke the member afterwards through
+ * `MemberTable`'s existing flow on this same page), but a rejection is
+ * SILENT BY DESIGN — the member is never told, so a mis-tap is invisible to
+ * everyone, including the owner, and there is no "undo" to reach for. The
+ * confirmation dialog below follows `MemberTable`'s own `revoke-confirm`
+ * pattern rather than inventing a second one.
+ */
+function JoinRequestTable({
+  community,
+  requests,
+  onSettled,
+  onNotice,
+}: {
+  community: Community;
+  requests: JoinRequestRow[];
+  onSettled: (id: string) => void;
+  /** Reports a row-removing outcome's message up to `JoinRequests` (or
+      clears it with `null`) — see that component's docstring on `notice`
+      for why the message cannot live here. */
+  onNotice: (message: string | null) => void;
+}) {
+  /** The request awaiting reject confirmation, or null. */
+  const [confirming, setConfirming] = useState<JoinRequestRow | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  /** Per-request error text for a decision that failed but left the request
+      genuinely still pending — the row stays, so the owner can read the
+      API's own instruction and act on it (reject a deactivated-tier request,
+      try again, etc). */
+  const [rowErrors, setRowErrors] = useState<ReadonlyMap<string, string>>(new Map());
+
+  async function decide(request: JoinRequestRow, decision: "approve" | "reject") {
+    setBusyId(request.id);
+    setRowErrors((previous) => {
+      if (!previous.has(request.id)) return previous;
+      const next = new Map(previous);
+      next.delete(request.id);
+      return next;
+    });
+    try {
+      if (decision === "approve") {
+        await approveJoinRequest(community.id, request.id);
+      } else {
+        await rejectJoinRequest(community.id, request.id);
+      }
+      onSettled(request.id);
+    } catch (err) {
+      if (err instanceof DashboardApiError && err.status === 404) {
+        // The request itself is gone, or never belonged to this community —
+        // `DecideJoinRequest` throws a plain English "join request not
+        // found" here (see its own comment: 404 is also how ownership is
+        // hidden from a stranger), and English text is deliberate for THAT
+        // case but must never reach a creator verbatim. The row cannot be
+        // acted on again either way, so it comes out.
+        onNotice(
+          `${joinRequestLabel(request)}: permintaan ini sudah tidak ada — muat ulang halaman ini.`
+        );
+        onSettled(request.id);
+      } else if (err instanceof DashboardApiError && err.status === 409) {
+        if (err.message === JOIN_REQUEST_ALREADY_DECIDED_MESSAGE) {
+          // Decided in another tab already (the owner's own open-elsewhere
+          // case the brief calls out) — the row is stale, not actionable.
+          // Removing it and refreshing the roster is safer than leaving it
+          // for the owner to click again and hit the same 409.
+          onNotice(
+            `${joinRequestLabel(request)}: permintaan ini sudah diproses di tab atau perangkat lain.`
+          );
+          onSettled(request.id);
+        } else {
+          // A deactivated tier, or the member already holding an active
+          // subscription for this tier. The API's own message already says
+          // what to do (the deactivated-tier one literally ends "...atau tolak
+          // permintaan ini"), so the row stays and the message is rendered
+          // under it — remove the row and that instruction has no button left
+          // to act on.
+          //
+          // MOSTLY, BUT NOT ALWAYS, STILL PENDING. This comment used to claim
+          // "the request is STILL PENDING" outright, and the phase-gate review
+          // found one case where it is not: approving twice in a row answers
+          // the second call with ALREADY_ACTIVE_MEMBER_MESSAGE rather than
+          // JOIN_REQUEST_ALREADY_DECIDED_MESSAGE, because `DecideJoinRequest`'s
+          // already-active PRE-CHECK runs before the transaction that would
+          // have reported "already decided". So a settled row is kept here.
+          //
+          // Left as it is on purpose: that is the SAFE direction of Task 7's
+          // Critical. Keeping a stale row costs one more click that answers
+          // with the same 409; the bug that Critical fixed destroyed a row that
+          // was genuinely still pending and still actionable. Guessing wrong in
+          // the other direction is the expensive one.
+          setRowErrors((previous) => {
+            const next = new Map(previous);
+            next.set(request.id, err.message);
+            return next;
+          });
+        }
+      } else {
+        setRowErrors((previous) => {
+          const next = new Map(previous);
+          next.set(
+            request.id,
+            err instanceof Error ? err.message : "gagal memproses permintaan"
+          );
+          return next;
+        });
+      }
+    } finally {
+      setBusyId(null);
+      setConfirming(null);
+    }
+  }
+
+  return (
+    <>
+      {confirming !== null ? (
+        <div className="notice notice-warning" data-testid="reject-confirm" role="alertdialog">
+          <h3>Tolak permintaan {joinRequestLabel(confirming)}?</h3>
+          <p>
+            Anggota ini TIDAK diberi tahu bahwa permintaannya ditolak — tidak ada pesan yang
+            dikirim ke mereka. Pastikan Anda yakin sebelum melanjutkan; tindakan ini tidak bisa
+            dibatalkan dari dasbor.
+          </p>
+          <div className="row">
+            <button
+              type="button"
+              className="button-danger"
+              onClick={() => decide(confirming, "reject")}
+              disabled={busyId !== null}
+            >
+              Ya, tolak permintaan
+            </button>
+            <button
+              type="button"
+              className="button-quiet"
+              onClick={() => setConfirming(null)}
+              disabled={busyId !== null}
+            >
+              Batal
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Nama</th>
+              <th>WhatsApp</th>
+              <th>Paket</th>
+              {/* "terlama di atas" turns `listPendingForCommunity`'s existing
+                  `ORDER BY created_at ASC` (drizzle-join-request.repository.ts)
+                  into a visible promise instead of an accidental side effect —
+                  the most-neglected request is always the top row, and this
+                  is the one line of copy that says so. */}
+              <th>Menunggu sejak (terlama di atas)</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {requests.map((request) => {
+              const rowError = rowErrors.get(request.id);
+              return (
+                <tr key={request.id}>
+                  <td>
+                    {request.memberName === null ? (
+                      <span className="muted">Tanpa nama ({request.memberWhatsappNumber})</span>
+                    ) : (
+                      request.memberName
+                    )}
+                  </td>
+                  <td>{request.memberWhatsappNumber}</td>
+                  <td>{request.tierName}</td>
+                  <td>{formatDateTime(request.createdAt)}</td>
+                  <td>
+                    <div className="row">
+                      <button
+                        type="button"
+                        className="button-primary"
+                        onClick={() => decide(request, "approve")}
+                        disabled={busyId !== null || confirming !== null}
+                      >
+                        Setujui
+                      </button>
+                      <button
+                        type="button"
+                        className="button-danger"
+                        onClick={() => setConfirming(request)}
+                        disabled={busyId !== null || confirming !== null}
+                      >
+                        Tolak
+                      </button>
+                    </div>
+                    {rowError !== undefined ? (
+                      <p className="form-error" role="alert">
+                        {rowError}
+                      </p>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+function Roster({
+  community,
+  refreshToken,
+}: {
+  community: Community;
+  refreshToken: number;
+}) {
   const [load, handle] = useLoad(
     () => apiFetch<MemberRosterPage>(`/communities/${community.id}/members?limit=${PAGE_LIMIT}`),
-    [community.id]
+    [community.id, refreshToken]
   );
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
@@ -303,7 +678,12 @@ function MemberTable({ community, members }: { community: Community; members: Me
               const outcome = outcomes.get(member.memberId);
               return (
               <tr key={member.subscriptionId}>
-                <td>{member.name ?? "(tanpa nama)"}</td>
+                {/* "Tanpa nama" — same wording, casing and punctuation as the
+                    join-request queue's placeholder above (Ruling 1 on this
+                    file's own null-name handling): the WhatsApp column sits
+                    directly beside this one, so nothing here needs to repeat
+                    the number the way that queue's cell does. */}
+                <td>{member.name ?? "Tanpa nama"}</td>
                 <td>{member.whatsappNumber}</td>
                 <td>{member.tierName}</td>
                 <td>

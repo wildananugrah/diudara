@@ -8,9 +8,20 @@ const slug = z
   .max(120)
   .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "slug must be lowercase alphanumeric words separated by single hyphens");
 
+/**
+ * `access_mode` is a plain `varchar(16)` with no database CHECK constraint
+ * (see `apps/api/src/db/schema.ts`) — exactly like `status` below — so the
+ * allowlist has to live here, at the edge, the same reason
+ * `RENEWABLE_STATUSES` exists for `subscription.status`. `z.enum`, not a bare
+ * string: an unrecognised value must be rejected at the HTTP boundary, not
+ * silently accepted and written to a column nothing else validates.
+ */
+const accessMode = z.enum(["paid", "request"]);
+
 export const createCommunitySchema = z.object({
   name: z.string().trim().min(1).max(255),
   niche: z.string().trim().max(128).optional(),
+  accessMode: accessMode.optional(),
 });
 
 export const updateCommunitySchema = z
@@ -19,6 +30,7 @@ export const updateCommunitySchema = z
     niche: z.string().trim().max(128).optional(),
     slug: slug.optional(),
     status: z.enum(["active", "paused", "archived"]).optional(),
+    accessMode: accessMode.optional(),
   })
   .refine((v) => Object.values(v).some((x) => x !== undefined), { message: "at least one field is required" });
 
@@ -112,9 +124,43 @@ export const startCheckoutSchema = z.object({
   payerWhatsappNumber: z.string().trim().min(8).max(20).regex(/^[+0-9][0-9]{7,19}$/),
 });
 
+/**
+ * `POST /c/:slug/join-request` — a free community's version of
+ * `startCheckoutSchema`, mirrored FIELD FOR FIELD (including the WhatsApp
+ * regex's tolerance for a leading 0 or +62) so the two forms validate
+ * identically. A member never sees which one their community uses until they
+ * submit; the two schemas disagreeing about what counts as a valid name or
+ * number would be a difference with no reason behind it.
+ */
+export const joinRequestSchema = z.object({
+  tierId: z.string().uuid(),
+  payerName: z.string().trim().min(1).max(255),
+  payerWhatsappNumber: z.string().trim().min(8).max(20).regex(/^[+0-9][0-9]{7,19}$/),
+});
+
 export type CreateCommunityInput = z.infer<typeof createCommunitySchema>;
 export type UpdateCommunityInput = z.infer<typeof updateCommunitySchema>;
 export type CreateTierInput = z.infer<typeof createTierSchema>;
 export type UpdateTierInput = z.infer<typeof updateTierSchema>;
 export type ConnectChannelInput = z.infer<typeof connectChannelSchema>;
 export type StartCheckoutInput = z.infer<typeof startCheckoutSchema>;
+export type JoinRequestInput = z.infer<typeof joinRequestSchema>;
+
+/**
+ * The message `DecideJoinRequest` throws when a join request has ALREADY been
+ * decided — the only 409 from that endpoint that means "this row is stale, drop it".
+ *
+ * It lives here, in the one package both sides import, because the owner's queue in
+ * `apps/web` must tell that case apart from the OTHER two 409s the same endpoint
+ * throws (a deactivated tier, and a member who already holds the tier actively).
+ * Those two leave the request `pending` and still actionable, and their messages
+ * already tell the owner what to do.
+ *
+ * Collapsing them was a Critical: the queue reported every 409 as "decided in
+ * another tab" and deleted a row that was still pending in the database, so the
+ * owner believed it was handled and the member waited forever. Discriminating on a
+ * string duplicated in two workspaces would have re-armed that the moment somebody
+ * reworded either copy — with each side's tests asserting its own copy and neither
+ * noticing. One definition, imported by both, is the guard.
+ */
+export const JOIN_REQUEST_ALREADY_DECIDED_MESSAGE = "permintaan ini sudah diproses";

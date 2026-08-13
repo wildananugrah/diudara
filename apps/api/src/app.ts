@@ -5,6 +5,7 @@ import { communityRoutes } from "./routes/communities";
 import { tierRoutes } from "./routes/tiers";
 import { channelRoutes } from "./routes/channels";
 import { membershipRoutes } from "./routes/memberships";
+import { joinRequestRoutes } from "./routes/join-requests";
 import { analyticsRoutes } from "./routes/analytics";
 import { paymentAccountRoutes } from "./routes/payment-account";
 import { publicCommunityRoutes } from "./routes/public-community";
@@ -51,6 +52,11 @@ export function createApp(deps: Dependencies) {
   app.route("/communities/:communityId/tiers", tierRoutes(deps));
   app.route("/communities/:communityId/channels", channelRoutes(deps));
   app.route("/communities/:communityId/members", membershipRoutes(deps));
+  // Task 4 of free communities: the owner's decisions on free-community join
+  // requests. Same reason as tiers/channels/members above: it must be
+  // registered before the catch-all /communities mount so this more specific
+  // path matches first.
+  app.route("/communities/:communityId/join-requests", joinRequestRoutes(deps));
   // Task 3's scheduling endpoint. Same reason as tiers/channels above: it must
   // be registered before the catch-all /communities mount so this more
   // specific path matches first.

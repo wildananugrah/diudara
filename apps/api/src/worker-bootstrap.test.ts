@@ -7,6 +7,7 @@ import {
   communities,
   creators,
   events,
+  joinRequests,
   members,
   membershipTiers,
   outbox,
@@ -18,6 +19,7 @@ import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import {
   OUTBOX_GRANT_ACCESS,
+  OUTBOX_NOTIFY_JOIN_REQUEST,
   OUTBOX_NOTIFY_STREAM_LIVE,
   OUTBOX_REVOKE_ACCESS,
   OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
@@ -251,6 +253,40 @@ async function seedLiveEventWithActiveMember() {
 }
 
 /**
+ * A creator with a real WhatsApp number → free community → tier → member →
+ * pending join request — the minimum `NotifyJoinRequest` (Task 5) needs to
+ * send exactly one WhatsApp message to the OWNER.
+ */
+async function seedPendingJoinRequest() {
+  const [creator] = await db
+    .insert(creators)
+    .values({ name: "Rina", whatsappNumber: `+6281395${Date.now() % 100000}` })
+    .returning();
+  const [community] = await db
+    .insert(communities)
+    .values({
+      creatorId: creator.id,
+      name: "Kelas Rina",
+      slug: `kelas-join-${Date.now()}`,
+      accessMode: "request",
+    })
+    .returning();
+  const [tier] = await db
+    .insert(membershipTiers)
+    .values({ communityId: community.id, name: "Free", priceAmount: 0, billingCycle: "monthly" })
+    .returning();
+  const [member] = await db
+    .insert(members)
+    .values({ whatsappNumber: `+6281396${Date.now() % 100000}`, name: "Siti" })
+    .returning();
+  const [request] = await db
+    .insert(joinRequests)
+    .values({ communityId: community.id, tierId: tier.id, memberId: member.id })
+    .returning();
+  return { creator, community, tier, member, request };
+}
+
+/**
  * A gating adapter this root selected, narrowed to the fake. An `instanceof` check
  * rather than a cast, for the same reason as `fakeNotifierOf`.
  */
@@ -474,6 +510,39 @@ describe("bootstrapWorker", () => {
       if (original === undefined) delete process.env.STREAM_TOKEN_SECRET;
       else process.env.STREAM_TOKEN_SECRET = original;
     }
+  });
+
+  /**
+   * Task 5, free communities. `RequestToJoin` (in `apps/api`'s own join-request
+   * route) enqueues these; an unregistered handler here would mean every
+   * `notify_join_request` row failing five times and then permanently, with the
+   * owner never told a member asked to join — Task 7's dashboard list is the
+   * documented FALLBACK for an undeliverable WhatsApp, not the primary channel,
+   * so this wiring is what makes the primary channel real.
+   *
+   * Unlike `notify_stream_live`, no environment variable gates this handler's
+   * registration — see `WorkerDependencies.notifyJoinRequest`'s own docstring —
+   * so this test needs no STREAM_TOKEN_SECRET-style setup/teardown.
+   */
+  it("dispatches a real notify_join_request row to NotifyJoinRequest, not to nothing", async () => {
+    const { creator, request } = await seedPendingJoinRequest();
+    const { id } = await new DrizzleOutboxRepository(db).enqueue({
+      eventType: OUTBOX_NOTIFY_JOIN_REQUEST,
+      payload: { joinRequestId: request.id },
+    });
+    const worker = bootstrapWorker();
+    const notifier = fakeNotifierOf(worker);
+
+    const result = await worker.processOutbox.execute();
+
+    expect(result.claimed).toBe(1);
+    expect(result.sent).toBe(1);
+    const row = await rowById(id);
+    expect(row.status).toBe("sent");
+    expect(row.lastError).toBeNull();
+    // The OWNER was actually messaged, over WhatsApp, by THIS process.
+    expect(notifier.notifications).toHaveLength(1);
+    expect(notifier.notifications[0].toWhatsappNumber).toBe(creator.whatsappNumber!);
   });
 
   /**

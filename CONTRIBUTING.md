@@ -977,8 +977,24 @@ the state `0003` needs.
 - **Creator-scoped reads return 404, not 403**, so a stranger cannot confirm that a
   community exists.
 - `NODE_ENV` is an **allowlist**: only exactly `development` or `test` may relax a guard.
-  Anything else — including unset — refuses to start. That is why a box with no Xendit or
-  messaging tokens fails loudly instead of quietly using fakes.
+  Anything else — including unset — refuses to start. That is why a box with no messaging
+  tokens fails loudly instead of quietly using fakes. **Xendit is the one exception** (Task 2,
+  free communities): absent Xendit keys outside the allowlist no longer refuse to boot —
+  `selectPaymentProvider` returns `null`, `POST /c/:slug/checkout` is not even registered
+  (404s, not a fake invoice), and a community can only be `access_mode = "paid"` when a real
+  payment provider is configured. See `apps/api/.env.example`'s Xendit block for the full
+  table. Partial Xendit configuration (one key set, the other not) still refuses to start in
+  every environment, unchanged.
+  **`resolveCallbackToken` (`XENDIT_CALLBACK_TOKEN`, the only thing authenticating
+  `POST /webhooks/xendit`) follows the exact same exception, for the exact same reason:**
+  once `XENDIT_SECRET_KEY`/`XENDIT_SPLIT_RULE_ID` are BOTH absent, no Xendit invoice will
+  ever exist for that webhook to authenticate, so an absent callback token no longer blocks
+  boot either — it returns `undefined` outside the allowlist instead of throwing, and
+  `POST /webhooks/xendit` then rejects every delivery the same way it already did on a
+  `development`/`test` box with no token set (`verifyCallbackToken` refuses an unset
+  `expected` value before comparing anything). This is scoped narrowly: a box with EITHER
+  Xendit key set (real or half-configured) still requires the callback token exactly as
+  before, in every environment.
 - **Member-facing strings are Indonesian.** This is an Indonesian product.
 
 

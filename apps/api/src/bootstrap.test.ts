@@ -48,6 +48,8 @@ import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-acc
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
+import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
+import { DecideJoinRequest, ListJoinRequests } from "./application/use-cases/decide-join-request";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
 import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
@@ -75,6 +77,8 @@ import type { MessagingProviderPort } from "./application/ports/messaging-provid
 import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
 import type { EventRepositoryPort } from "./application/ports/event-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
+import type { JoinRequestRepositoryPort } from "./application/ports/join-request-repository.port";
+import type { JoinRequestUnitOfWorkPort } from "./application/ports/join-request-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -204,6 +208,9 @@ const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   async createPending() {
     throw new Error("not used");
   },
+  async createActiveWithoutBilling() {
+    throw new Error("not used");
+  },
   async findCurrentSubscriptionForTier() {
     return null;
   },
@@ -320,6 +327,38 @@ const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
       webhookEvents: fakeWebhookEventRepository,
       activityLog: fakeActivityLogRepository,
       outbox: fakeOutboxRepository,
+    });
+  },
+};
+
+const fakeJoinRequestRepository: JoinRequestRepositoryPort = {
+  async createPending() {
+    return null;
+  },
+  async findById() {
+    return null;
+  },
+  async listPendingForCommunity() {
+    return [];
+  },
+  async findNotificationContext() {
+    return null;
+  },
+  async decide() {
+    return false;
+  },
+};
+
+/** Runs the work inline — no real transaction is needed to satisfy the type. */
+const fakeJoinRequestUnitOfWork: JoinRequestUnitOfWorkPort = {
+  async run(work) {
+    return work({
+      joinRequests: fakeJoinRequestRepository,
+      outbox: fakeOutboxRepository,
+      activityLog: fakeActivityLogRepository,
+      // Task 4's addition to the port — `createActiveWithoutBilling` runs in
+      // the same transaction as `joinRequests.decide` now.
+      subscriptions: fakeSubscriptionRepository,
     });
   },
 };
@@ -470,6 +509,26 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
+      requestToJoin: new RequestToJoin(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository,
+        fakeMemberRepository,
+        fakeSubscriptionRepository,
+        fakeJoinRequestUnitOfWork
+      ),
+      getJoinRequestStatus: new GetJoinRequestStatus(
+        fakeCommunityRepository,
+        fakeJoinRequestRepository,
+        fakeSubscriptionRepository
+      ),
+      listJoinRequests: new ListJoinRequests(fakeCommunityRepository, fakeJoinRequestRepository),
+      decideJoinRequest: new DecideJoinRequest(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository,
+        fakeJoinRequestRepository,
+        fakeSubscriptionRepository,
+        fakeJoinRequestUnitOfWork
+      ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
         streamTokenSecret: undefined,
       }),
@@ -608,6 +667,26 @@ describe("Dependencies (composition root contract)", () => {
         fakePaymentProvider,
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
+      ),
+      requestToJoin: new RequestToJoin(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository,
+        fakeMemberRepository,
+        fakeSubscriptionRepository,
+        fakeJoinRequestUnitOfWork
+      ),
+      getJoinRequestStatus: new GetJoinRequestStatus(
+        fakeCommunityRepository,
+        fakeJoinRequestRepository,
+        fakeSubscriptionRepository
+      ),
+      listJoinRequests: new ListJoinRequests(fakeCommunityRepository, fakeJoinRequestRepository),
+      decideJoinRequest: new DecideJoinRequest(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository,
+        fakeJoinRequestRepository,
+        fakeSubscriptionRepository,
+        fakeJoinRequestUnitOfWork
       ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
         streamTokenSecret: undefined,
@@ -1037,19 +1116,26 @@ describe("selectPaymentProvider", () => {
     });
   });
 
-  // CRITICAL, verified by probe before the fix: NODE_ENV=production with no
-  // Xendit config returned a FakePaymentAdapter. POST /payment-account then
-  // writes `fake-acct-1-<uuid>` into creator.xendit_account_id, and
-  // CreatePaymentAccount 409s forever after — the creator can never connect a
-  // real sub-account without manual SQL.
-  it("refuses to start in production with no Xendit configuration", () => {
-    expect(() =>
-      selectPaymentProvider({
+  // Task 2 (free communities): this used to THROW — refusing to boot at all.
+  // Free communities (`access_mode = "request"`) made that the wrong default:
+  // a box can be entirely useful with no payment provider, so this now
+  // returns `null` and the box boots with payments disabled instead. The
+  // NEGATIVE assertion is the one that matters here, not just the `null`: a
+  // future "helpful" fallback to the fake adapter must not satisfy this test
+  // (see the CRITICAL comment above this describe block's predecessor tests
+  // — `FakePaymentAdapter` writes unrecoverable `fake-acct-*` ids into
+  // `creator.xendit_account_id`).
+  it("disables payments (returns null, never the fake adapter) in production with no Xendit configuration", () => {
+    const logs = captureConsoleLog(() => {
+      const provider = selectPaymentProvider({
         secretKey: undefined,
         splitRuleId: undefined,
         nodeEnv: "production",
-      })
-    ).toThrow(/NODE_ENV is production/);
+      });
+      expect(provider).toBeNull();
+      expect(provider).not.toBeInstanceOf(FakePaymentAdapter);
+    });
+    expect(logs.some((line) => /payments are DISABLED/.test(line))).toBe(true);
   });
 
   // CRITICAL, second pass. The `nodeEnv === "production"` denylist above was
@@ -1057,33 +1143,40 @@ describe("selectPaymentProvider", () => {
   // NODE_ENV (no `start` script, no Dockerfile, no API service in
   // infra/docker-compose.yml), so `bun -e 'console.log(process.env.NODE_ENV)'`
   // printed `undefined` and the guard silently returned FakePaymentAdapter.
-  // The allowlist is what closes that: anything not explicitly relaxed throws.
-  it("refuses to start for ANY nodeEnv outside the allowlist, including unset", () => {
-    for (const nodeEnv of [
-      undefined,
-      "staging",
-      "prod",
-      "PRODUCTION",
-      "Production",
-      "dev",
-      "development ",
-      "",
-    ]) {
-      expect(() =>
-        selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv })
-      ).toThrow(/fake payment adapter is permitted ONLY/);
-    }
+  // The allowlist is what closes that: anything not explicitly relaxed gets
+  // `null` (disabled), never the fake.
+  it("returns null (never the fake adapter) for ANY nodeEnv outside the allowlist, including unset", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [
+        undefined,
+        "staging",
+        "prod",
+        "PRODUCTION",
+        "Production",
+        "dev",
+        "development ",
+        "",
+      ]) {
+        const provider = selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv });
+        expect(provider).toBeNull();
+        expect(provider).not.toBeInstanceOf(FakePaymentAdapter);
+      }
+    });
   });
 
-  it("says whether NODE_ENV was unset or merely unrecognised", () => {
+  it("says whether NODE_ENV was unset or merely unrecognised, in the disabled log line", () => {
     // An operator staring at "NODE_ENV is production" when they never set it
-    // would look in the wrong place.
-    expect(() =>
-      selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv: undefined })
-    ).toThrow(/NODE_ENV is not set/);
-    expect(() =>
-      selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv: "staging" })
-    ).toThrow(/NODE_ENV is staging/);
+    // would look in the wrong place. There is no throw to carry this any
+    // more, so it has to survive in the log message instead.
+    const unset = captureConsoleLog(() => {
+      selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv: undefined });
+    });
+    expect(unset.some((line) => /NODE_ENV is not set/.test(line))).toBe(true);
+
+    const staging = captureConsoleLog(() => {
+      selectPaymentProvider({ secretKey: undefined, splitRuleId: undefined, nodeEnv: "staging" });
+    });
+    expect(staging.some((line) => /NODE_ENV is staging/.test(line))).toBe(true);
   });
 
   it("still starts on the allowlist when Xendit IS configured, whatever nodeEnv says", () => {
@@ -1104,9 +1197,11 @@ describe("selectPaymentProvider", () => {
 
   it("treats empty-string configuration as unset in production", () => {
     // `XENDIT_SECRET_KEY=` in a .env file arrives as "", not undefined.
-    expect(() =>
-      selectPaymentProvider({ secretKey: "", splitRuleId: "", nodeEnv: "production" })
-    ).toThrow(/NODE_ENV is production/);
+    captureConsoleLog(() => {
+      const provider = selectPaymentProvider({ secretKey: "", splitRuleId: "", nodeEnv: "production" });
+      expect(provider).toBeNull();
+      expect(provider).not.toBeInstanceOf(FakePaymentAdapter);
+    });
   });
 
   it("refuses to start on partial configuration in EVERY environment", () => {
@@ -1179,18 +1274,59 @@ describe("bootstrap() payment provider selection", () => {
     });
   });
 
-  it("refuses to boot a production process with no Xendit configuration", () => {
-    // Reads NODE_ENV from the environment, so this pins the wiring too — not
-    // just selectPaymentProvider in isolation.
+  // Task 2 (free communities): used to throw here — see selectPaymentProvider's
+  // own rewritten tests above for the full reasoning. Reads NODE_ENV from the
+  // environment, so this pins the WIRING too, not just selectPaymentProvider in
+  // isolation: `deps.startCheckout` must be `undefined` (not constructed) and
+  // `deps.payments` must be `null`, never a fake.
+  //
+  // CORRECTION (fix round 1): an earlier version of this comment claimed the
+  // original test (a Xendit-only `withEnv` override asserting `.toThrow(/NODE_ENV
+  // is production/)`) "was never testing payments at all". That is FALSE —
+  // verified by mutation at the pre-Task-2 commit (`a2047ea`): changing only
+  // selectPaymentProvider's own throw message made that exact test fail, with the
+  // received message coming from selectPaymentProvider (it runs before
+  // selectMessagingProviders in bootstrap()'s call order, `bootstrap.ts:1347` vs
+  // `:1459` at that commit), so it genuinely and correctly pinned payments'
+  // pre-fix throw.
+  //
+  // The real, narrower problem is that the assertion was too LOOSE to stay
+  // meaningful once selectPaymentProvider stopped throwing for this case:
+  // `selectMessagingProviders` ALSO throws outside the allowlist when
+  // unconfigured (unaffected by this task, and that guard stays), with a message
+  // that happens to also match `/NODE_ENV is production/` — so a version of this
+  // test left unchanged after the fix would keep "passing" whether or not the
+  // fix actually landed, unable to distinguish the two. That is a real weakness,
+  // and rewriting it — fully configuring every OTHER provider (messaging in
+  // particular, mirroring the "boots with the co-builder disabled..." isolation
+  // pattern further down this file) and asserting the specific fields below — is
+  // strictly stronger. It does not mean the guard this replaced was ever
+  // meaningless.
+  it("boots a production process with no Xendit configuration — payments disabled, not the fake adapter", () => {
     withJwtSecret("x".repeat(32), () => {
       withEnv(
         {
           NODE_ENV: "production",
+          APP_BASE_URL: "http://localhost:5173",
           XENDIT_SECRET_KEY: undefined,
           XENDIT_SPLIT_RULE_ID: undefined,
+          XENDIT_CALLBACK_TOKEN: undefined,
+          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+          FONNTE_API_TOKEN: "real-fonnte-token",
+          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
         },
         () => {
-          expect(() => bootstrap()).toThrow(/NODE_ENV is production/);
+          captureConsoleLog(() => {
+            let deps: Dependencies;
+            expect(() => {
+              deps = bootstrap();
+            }).not.toThrow();
+            expect(deps!.payments).toBeNull();
+            expect(deps!.payments).not.toBeInstanceOf(FakePaymentAdapter);
+            expect(deps!.startCheckout).toBeUndefined();
+            expect(deps!.createPaymentAccount).toBeUndefined();
+            expect(deps!.xenditCallbackToken).toBeUndefined();
+          });
         }
       );
     });
@@ -1279,33 +1415,44 @@ describe("resolveCallbackToken", () => {
   });
 
   // CRITICAL, second pass — the same relocation as selectPaymentProvider's
-  // guard. "staging" and an UNSET NODE_ENV used to boot happily with no
-  // callback token, and an unset NODE_ENV is what a real deployment has,
-  // because nothing in this repository sets it. Every delivery would then be
-  // rejected: money taken, nobody activated, and no loud failure to say so.
-  it("refuses to boot without a token for ANY nodeEnv outside the allowlist", () => {
-    for (const nodeEnv of [
-      undefined,
-      "staging",
-      "prod",
-      "PRODUCTION",
-      "Production",
-      "dev",
-      "",
-    ]) {
-      expect(() =>
-        resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv })
-      ).toThrow(/permitted ONLY when NODE_ENV is exactly/);
-    }
+  // guard used to require. "staging" and an UNSET NODE_ENV used to boot
+  // happily with no callback token, and an unset NODE_ENV is what a real
+  // deployment has, because nothing in this repository sets it. That danger —
+  // money taken, nobody activated, no loud failure — only exists when Xendit
+  // itself is actually configured; `NO_XENDIT` here means it is not, so
+  // Task 2 (free communities) changed this case from a throw to `undefined`:
+  // mirrors selectPaymentProvider's own null branch, because with no Xendit
+  // keys at all there is no invoice this webhook could ever be asked to
+  // authenticate. The PARTIAL-configuration throw right below this block is
+  // untouched — that is the case where the danger is real.
+  it("returns undefined (not a throw) for ANY nodeEnv outside the allowlist, once Xendit itself is unconfigured", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [
+        undefined,
+        "staging",
+        "prod",
+        "PRODUCTION",
+        "Production",
+        "dev",
+        "",
+      ]) {
+        expect(
+          resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv })
+        ).toBeUndefined();
+      }
+    });
   });
 
-  it("distinguishes an unset NODE_ENV from an unrecognised one here too", () => {
-    expect(() =>
-      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: undefined })
-    ).toThrow(/NODE_ENV is not set/);
-    expect(() =>
-      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "staging" })
-    ).toThrow(/NODE_ENV is staging/);
+  it("distinguishes an unset NODE_ENV from an unrecognised one in the disabled log line too", () => {
+    const unset = captureConsoleLog(() => {
+      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: undefined });
+    });
+    expect(unset.some((line) => /NODE_ENV is not set/.test(line))).toBe(true);
+
+    const staging = captureConsoleLog(() => {
+      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "staging" });
+    });
+    expect(staging.some((line) => /NODE_ENV is staging/.test(line))).toBe(true);
   });
 
   it("says so out loud in development, and stays quiet under test", () => {
@@ -1320,10 +1467,12 @@ describe("resolveCallbackToken", () => {
     expect(quiet).toEqual([]);
   });
 
-  it("refuses to start in production with no callback token", () => {
-    expect(() =>
-      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "production" })
-    ).toThrow(/NODE_ENV is production/);
+  it("boots in production with no callback token, once Xendit itself is disabled too", () => {
+    captureConsoleLog(() => {
+      expect(
+        resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "production" })
+      ).toBeUndefined();
+    });
   });
 
   it("refuses to start on PARTIAL configuration in every environment", () => {
@@ -1340,14 +1489,19 @@ describe("resolveCallbackToken", () => {
   it("treats empty and whitespace-only configuration as unset", () => {
     // `XENDIT_CALLBACK_TOKEN=` in a .env file arrives as "", and a value pasted
     // out of a dashboard with a trailing newline is not configuration either.
-    for (const blank of ["", "   ", "\t", "\n"]) {
-      expect(() =>
-        resolveCallbackToken({ callbackToken: blank, ...NO_XENDIT, nodeEnv: "production" })
-      ).toThrow(/NODE_ENV is production/);
-      expect(
-        resolveCallbackToken({ callbackToken: blank, ...NO_XENDIT, nodeEnv: "test" })
-      ).toBe(TEST_CALLBACK_TOKEN);
-    }
+    captureConsoleLog(() => {
+      for (const blank of ["", "   ", "\t", "\n"]) {
+        // Xendit itself is also unconfigured (NO_XENDIT), so this is the
+        // disabled case: undefined, not a throw — see the rewritten tests
+        // above.
+        expect(
+          resolveCallbackToken({ callbackToken: blank, ...NO_XENDIT, nodeEnv: "production" })
+        ).toBeUndefined();
+        expect(
+          resolveCallbackToken({ callbackToken: blank, ...NO_XENDIT, nodeEnv: "test" })
+        ).toBe(TEST_CALLBACK_TOKEN);
+      }
+    });
   });
 
   it("refuses the committed test token outside tests", () => {
@@ -1374,8 +1528,21 @@ describe("resolveCallbackToken", () => {
   });
 
   it("mentions the file an operator has to edit", () => {
+    // NO_XENDIT no longer throws here (see the rewritten tests above) — the
+    // remaining throw in this branch needs Xendit to be MIXED, not absent: one
+    // key set is neither "fully configured" (selectPaymentProvider's own job)
+    // nor "fully disabled", so this box genuinely still needs the callback
+    // token. In practice selectPaymentProvider would already have refused to
+    // boot over the same half-configured Xendit before bootstrap() ever calls
+    // this function — this exercises resolveCallbackToken defensively, in
+    // isolation.
     expect(() =>
-      resolveCallbackToken({ callbackToken: undefined, ...NO_XENDIT, nodeEnv: "production" })
+      resolveCallbackToken({
+        callbackToken: undefined,
+        secretKey: "sk_live_x",
+        splitRuleId: undefined,
+        nodeEnv: "production",
+      })
     ).toThrow(/apps\/api\/\.env/);
   });
 });
@@ -1483,6 +1650,15 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
         }
       );
 
+      // Task 2 (free communities): this used to assert a throw here too — with
+      // NOTHING configured at all, `selectPaymentProvider` used to speak
+      // first ("you are about to take fake money") before this guard ever
+      // got a turn. Now that Xendit-absent boots with payments disabled
+      // (see selectPaymentProvider's own rewritten tests), this box boots —
+      // provided messaging is still configured, since THAT guard is
+      // unaffected by this task and still throws when absent outside the
+      // allowlist. `xenditCallbackToken` is asserted `undefined` directly,
+      // which is what this test is actually about.
       withEnv(
         {
           NODE_ENV: "production",
@@ -1490,12 +1666,19 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           XENDIT_SECRET_KEY: undefined,
           XENDIT_SPLIT_RULE_ID: undefined,
           XENDIT_CALLBACK_TOKEN: undefined,
+          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+          FONNTE_API_TOKEN: "real-fonnte-token",
+          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
         },
         () => {
-          // selectPaymentProvider still speaks first here: with nothing
-          // configured at all, "you are about to take fake money" is the more
-          // urgent message, and this pins that ordering.
-          expect(() => bootstrap()).toThrow(/NODE_ENV is production/);
+          captureConsoleLog(() => {
+            let deps: Dependencies;
+            expect(() => {
+              deps = bootstrap();
+            }).not.toThrow();
+            expect(deps!.xenditCallbackToken).toBeUndefined();
+            expect(deps!.payments).toBeNull();
+          });
         }
       );
     });

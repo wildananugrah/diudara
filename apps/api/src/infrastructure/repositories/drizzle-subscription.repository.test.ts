@@ -13,8 +13,14 @@ import {
   transactions,
 } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
+import { UniqueRule, UniqueViolationError } from "../../application/errors";
 import type { MarkPaidResult } from "../../application/ports/subscription-repository.port";
+import { ProcessRenewals } from "../../application/use-cases/process-renewals";
+import { FixedClock } from "../clock/fixed.clock";
 import { ArrivalLatch } from "../../test-support/arrival-latch";
+import { DrizzleActivityLogRepository } from "./drizzle-activity-log.repository";
+import { DrizzleOutboxRepository } from "./drizzle-outbox.repository";
+import { DrizzleRenewalReminderRepository } from "./drizzle-renewal-reminder.repository";
 import { DrizzleSubscriptionRepository } from "./drizzle-subscription.repository";
 
 beforeEach(resetDatabase);
@@ -1158,5 +1164,146 @@ describe("DrizzleSubscriptionRepository.markPastDue", () => {
     );
 
     expect(outcomes.filter((moved) => moved)).toHaveLength(1);
+  });
+});
+
+describe("DrizzleSubscriptionRepository.createActiveWithoutBilling", () => {
+  /** A member and a tier, with no pending subscription or transaction — the free path never creates either. */
+  async function seedMemberAndTier() {
+    seedCounter += 1;
+    const [creator] = await db.insert(creators).values({ name: "Nadia" }).returning();
+    const [community] = await db
+      .insert(communities)
+      .values({
+        creatorId: creator.id,
+        name: "Komunitas Nadia",
+        slug: `komunitas-nadia-${seedCounter}`,
+        accessMode: "free",
+      })
+      .returning();
+    const [tier] = await db
+      .insert(membershipTiers)
+      .values({ communityId: community.id, name: "Free", priceAmount: 0, billingCycle: "monthly" })
+      .returning();
+    const [member] = await db
+      .insert(members)
+      .values({
+        whatsappNumber: `+62812000${String(seedCounter).padStart(4, "0")}`,
+        name: "Dewi",
+      })
+      .returning();
+    return { creator, community, tier, member };
+  }
+
+  it("creates an ACTIVE subscription with no next_billing_date", async () => {
+    const { member, tier } = await seedMemberAndTier();
+
+    const subscription = await repo.createActiveWithoutBilling({
+      memberId: member.id,
+      tierId: tier.id,
+    });
+
+    expect(subscription.status).toBe("active");
+    expect(subscription.nextBillingDate).toBeNull();
+    expect(subscription.memberId).toBe(member.id);
+    expect(subscription.tierId).toBe(tier.id);
+    expect(subscription.startedAt).not.toBeNull();
+  });
+
+  /**
+   * Task 4 (free communities): `DecideJoinRequest` approving a member for a tier
+   * they already hold actively lands exactly here — a bare INSERT, unlike
+   * `markPaid`'s UPDATE, has no status to predicate on, so
+   * `subscription_member_tier_active_unique` is the ONLY thing that can catch
+   * it. Seeding the conflicting `active` row directly (bypassing every
+   * application-level guard, the same way the `markPaid` "arbitrated by the
+   * database" test above does) proves the DATABASE is what refuses this, not a
+   * predicate this method could have gotten wrong.
+   */
+  it("maps the unique-constraint violation to UniqueViolationError rather than a raw driver error", async () => {
+    const { member, tier } = await seedMemberAndTier();
+    await repo.createActiveWithoutBilling({ memberId: member.id, tierId: tier.id });
+
+    const error = (await repo
+      .createActiveWithoutBilling({ memberId: member.id, tierId: tier.id })
+      .catch((e) => e)) as UniqueViolationError;
+
+    expect(error).toBeInstanceOf(UniqueViolationError);
+    expect(error.rule).toBe(UniqueRule.subscriptionMemberTierActive);
+
+    // Exactly the one row from the first, successful call — the refused
+    // second INSERT created nothing.
+    const rows = await db
+      .select()
+      .from(subscriptions)
+      .where(eq(subscriptions.memberId, member.id));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("permits a second ACTIVE subscription for a DIFFERENT tier — the constraint is per (member, tier)", async () => {
+    const { member, tier, community } = await seedMemberAndTier();
+    const [otherTier] = await db
+      .insert(membershipTiers)
+      .values({ communityId: community.id, name: "VIP", priceAmount: 0, billingCycle: "monthly" })
+      .returning();
+
+    await repo.createActiveWithoutBilling({ memberId: member.id, tierId: tier.id });
+    const second = await repo.createActiveWithoutBilling({
+      memberId: member.id,
+      tierId: otherTier.id,
+    });
+
+    expect(second.status).toBe("active");
+    const rows = await db
+      .select()
+      .from(subscriptions)
+      .where(eq(subscriptions.memberId, member.id));
+    expect(rows).toHaveLength(2);
+  });
+
+  it("a free subscription is invisible to findDueForRenewal, so the renewal pass never touches it", async () => {
+    const { member, tier } = await seedMemberAndTier();
+    const free = await repo.createActiveWithoutBilling({ memberId: member.id, tierId: tier.id });
+    expect(free.status).toBe("active");
+    expect(free.nextBillingDate).toBeNull();
+
+    // `findDueForRenewal` returns `DueRenewalRecord[]`, which NESTS the row as
+    // `subscription: SubscriptionRecord` — there is no flat `subscriptionId` on it.
+    //
+    // A far-future date is used deliberately: it proves the row is excluded because
+    // its due date is NULL, not because the date has not arrived. If a later change
+    // ever gave free subscriptions a due date, this test would start failing.
+    const due = await repo.findDueForRenewal({
+      dueOnOrBefore: "2099-01-01",
+      limit: 100,
+    });
+    expect(due.some((r) => r.subscription.id === free.id)).toBe(false);
+
+    // THE SECOND LINK, PROVEN TRANSITIVELY RATHER THAN ASSERTED DIRECTLY.
+    // `markPastDue` — the only thing that can write `past_due` — has exactly one
+    // production caller, and that caller is fed only from `findDueForRenewal`'s
+    // result (see `ProcessRenewals.execute`). So asserting `findPastGraceDeadline`
+    // excludes this row would be structurally unfailable for anything
+    // `createActiveWithoutBilling` can produce: that method never writes `past_due`
+    // in the first place, so there is nothing `findPastGraceDeadline`'s
+    // `status = 'past_due'` predicate could ever have matched here — the assertion
+    // would pass even with an arbitrary `graceEndsAt` sitting on the row.
+    //
+    // What actually has to hold is that running the REAL renewal pass over this row
+    // leaves it alone, since that pass is the only path that could ever reach
+    // `markPastDue` for it. This is the link nobody would think to re-check after
+    // changing `ProcessRenewals` or `findDueForRenewal`.
+    const pass = new ProcessRenewals(
+      repo,
+      new DrizzleRenewalReminderRepository(db),
+      new DrizzleOutboxRepository(db),
+      new DrizzleActivityLogRepository(db),
+      new FixedClock(new Date("2099-01-01T00:00:00Z"))
+    );
+    await pass.execute();
+
+    const reloaded = await repo.findById(free.id);
+    expect(reloaded?.status).toBe("active");
+    expect(reloaded?.graceEndsAt).toBeNull();
   });
 });

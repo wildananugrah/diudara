@@ -1,7 +1,7 @@
 /**
  * WHAT A CREATOR SEES IN THEIR ACTIVITY FEED, AND WHAT THEY DO NOT.
  *
- * `activity_log` holds 18 event types and MOST OF THEM ARE INTERNAL DIAGNOSTICS.
+ * `activity_log` holds 21 event types and MOST OF THEM ARE INTERNAL DIAGNOSTICS.
  * A raw feed of `access_not_revoked` and `churn_revoke_skipped` rows is noise at
  * best and alarming at worst: they describe a retry deciding not to act, which the
  * system then handles by itself. So this module is an ALLOWLIST, not a denylist —
@@ -108,6 +108,22 @@ const STREAM_NOTIFY_SKIP_REASON_LABELS: Record<string, string> = {
   // community — so it must not share `subscription_not_active`'s label, which
   // would tell a creator an active member is inactive.
   subscription_wrong_community: "anggota bukan bagian dari komunitas ini",
+};
+
+/**
+ * Why the OWNER did not get a "someone wants to join" message, in Indonesian.
+ * Same lookup-not-interpolation rule as `STREAM_NOTIFY_SKIP_REASON_LABELS` —
+ * the `reason` field is written by `NotifyJoinRequest`, a use-case in a
+ * different file (its `CREATOR_WHATSAPP_MISSING_REASON` constant is the only
+ * key today), and a value it starts writing tomorrow must not appear here as
+ * a raw snake_case string. Fix round 1: this used to be baked directly into
+ * the describer below, which was correct only because exactly one reason
+ * existed to write this event — a second reason would have silently reused
+ * this label instead of failing to compile or renders as a raw key, the same
+ * shape mistake `subscription_wrong_community` above was split out to avoid.
+ */
+const JOIN_REQUEST_NOTIFY_SKIP_REASON_LABELS: Record<string, string> = {
+  creator_whatsapp_missing: "nomor WhatsApp sendiri belum diatur",
 };
 
 /** Appends ` (detail)` when there is a detail, and nothing otherwise. */
@@ -234,6 +250,52 @@ const DESCRIBERS: Record<string, Describer> = {
   revocation_manual_required: () => ({
     label: "PERLU TINDAKAN: anggota harus dikeluarkan dari grup secara manual",
     severity: "warning",
+  }),
+
+  // ===================================================================
+  // FREE COMMUNITIES, TASK 4: the owner's decision on a join request.
+  // Written by `DecideJoinRequest` either way, in the same transaction as the
+  // decision itself.
+  //
+  // `join_request_rejected` is the one entry in this table with no OTHER
+  // trace anywhere: rejection is silent BY DESIGN (no outbox row, no message
+  // — see `DecideJoinRequest`'s own docstring), so this row is the only
+  // record that a request was ever declined. `join_request_approved` is less
+  // load-bearing in the same way `joined`/`channel_access_granted` already
+  // are not the ONLY record of a paid join — `channel_access_granted` fires
+  // too, once `grant_access` is processed — but it is included anyway, for
+  // the same reason `joined` is: a creator watching their own dashboard wants
+  // to see the decision land, not just its downstream effect.
+  // ===================================================================
+  join_request_approved: () => ({ label: "Permintaan bergabung disetujui", severity: "info" }),
+
+  join_request_rejected: () => ({ label: "Permintaan bergabung ditolak", severity: "info" }),
+
+  // ===================================================================
+  // FREE COMMUNITIES, TASK 5: `NotifyJoinRequest`'s one skip case worth
+  // recording. Unlike `join_request_approved`/`_rejected`, there is no
+  // corresponding "sent" event: a successful send has no `activity_log` row
+  // of its own (the WhatsApp message itself is the record), the same
+  // asymmetry `channel_access_granted` (written) vs. a plain successful
+  // `notify` (not) already has elsewhere in this codebase.
+  //
+  // `info`, not a warning like `access_manual_required`: Task 7's
+  // pending-requests dashboard is the real fallback for this case (see
+  // `NotifyJoinRequest`'s own docstring) and shows every open request whether
+  // or not the owner was ever messaged about it, so there is nothing this
+  // entry alone leaves the owner unable to act on.
+  // ===================================================================
+  join_request_notify_skipped: (metadata) => ({
+    // Fix round 1: the reason is looked up, not baked into this literal — see
+    // `JOIN_REQUEST_NOTIFY_SKIP_REASON_LABELS`. Also disambiguated: "nomor
+    // WhatsApp sendiri" (their OWN number), not left bare — a creator reading
+    // this in their own feed could otherwise reasonably take a bare "nomor
+    // WhatsApp belum diatur" as being about the MEMBER's number instead.
+    label: withDetail(
+      "Pemilik belum diberi tahu tentang permintaan bergabung",
+      JOIN_REQUEST_NOTIFY_SKIP_REASON_LABELS[stringField(metadata, "reason") ?? ""]
+    ),
+    severity: "info",
   }),
 };
 

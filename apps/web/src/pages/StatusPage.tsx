@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ApiError, fetchSubscriptionStatus } from "../api";
+import { ApiError, fetchCommunity, fetchSubscriptionStatus } from "../api";
+
+/** `community.accessMode` value whose members joined by asking, not by paying. */
+const REQUEST_ACCESS_MODE = "request";
 
 /** How often to re-check the subscription's status. */
 const DEFAULT_POLL_INTERVAL_MS = 3000;
@@ -29,8 +32,46 @@ export default function StatusPage({
   pollIntervalMs?: number;
   timeoutMs?: number;
 } = {}) {
-  const { subscriptionId } = useParams<{ subscriptionId: string }>();
+  const { slug, subscriptionId } = useParams<{ slug: string; subscriptionId: string }>();
   const [phase, setPhase] = useState<Phase>({ name: "checking" });
+  /**
+   * WAS THIS MEMBERSHIP PAID FOR, OR APPROVED FOR FREE?
+   *
+   * Every string on this page used to assume a payment. `RequestStatusPage`
+   * deliberately links an APPROVED FREE MEMBER here ("Lihat status
+   * keanggotaan"), so they were told "Pembayaran berhasil!" about a payment
+   * they never made — deterministic for every one of them, since their
+   * subscription is `active` on the very first poll. "Menunggu pembayaran..."
+   * is on the same path, rendered before that poll resolves.
+   *
+   * Read from the COMMUNITY, whose slug is already in this page's own route
+   * (`/c/:slug/status/:subscriptionId`), rather than from the subscription
+   * endpoint: `GetSubscriptionStatus` deliberately returns nothing but the
+   * status and an optional watch URL, and widening that contract to answer a
+   * copy question would be the wrong trade. `accessMode` is already public on
+   * `GET /c/:slug`.
+   *
+   * `null` means "not known" and takes the PAID wording — the wording this page
+   * has always used. An archived community 404s its public page, and a paying
+   * member is overwhelmingly the likelier reader of a status URL in that state.
+   */
+  const [accessMode, setAccessMode] = useState<string | null>(null);
+  const isFree = accessMode === REQUEST_ACCESS_MODE;
+
+  useEffect(() => {
+    if (!slug) return;
+    let cancelled = false;
+    fetchCommunity(slug)
+      .then((community) => {
+        if (!cancelled) setAccessMode(community.accessMode);
+      })
+      // Deliberately silent: this lookup only chooses between two wordings, and
+      // failing it must never disturb the status this page exists to report.
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
 
   useEffect(() => {
     if (!subscriptionId) {
@@ -139,15 +180,21 @@ export default function StatusPage({
     <main style={styles.page}>
       {phase.name === "checking" ? (
         <>
-          <h1 style={styles.heading}>Menunggu pembayaran...</h1>
-          <p>Kami sedang memeriksa status pembayaran Anda. Halaman ini akan memperbarui otomatis.</p>
+          <h1 style={styles.heading}>
+            {isFree ? "Menunggu persetujuan..." : "Menunggu pembayaran..."}
+          </h1>
+          <p>
+            {isFree
+              ? "Kami sedang memeriksa status keanggotaan Anda. Halaman ini akan memperbarui otomatis."
+              : "Kami sedang memeriksa status pembayaran Anda. Halaman ini akan memperbarui otomatis."}
+          </p>
           <Spinner />
         </>
       ) : null}
 
       {phase.name === "active" ? (
         <>
-          <h1 style={styles.heading}>Pembayaran berhasil!</h1>
+          <h1 style={styles.heading}>{isFree ? "Keanggotaan aktif!" : "Pembayaran berhasil!"}</h1>
           <p>Keanggotaan Anda sudah aktif. Anda akan segera menerima akses melalui WhatsApp.</p>
           {phase.watchUrl ? (
             <p>
@@ -161,11 +208,27 @@ export default function StatusPage({
 
       {phase.name === "timed-out" ? (
         <>
-          <h1 style={styles.heading}>Pembayaran belum kami terima</h1>
+          <h1 style={styles.heading}>
+            {isFree ? "Keanggotaan ini belum aktif" : "Pembayaran belum kami terima"}
+          </h1>
           <p>
-            Jika Anda sudah membayar, mohon tunggu beberapa menit — konfirmasi dari bank terkadang
-            butuh waktu. Jika belum membayar, silakan coba lagi lewat tautan checkout yang sama.
-            Jika masalah berlanjut, hubungi penyelenggara komunitas melalui WhatsApp.
+            {isFree ? (
+              // A free member reaches this only if their membership is not
+              // active — approved and since revoked, or never approved. There is
+              // no checkout for them to retry, so sending them to one (as this
+              // page used to) is an instruction they cannot follow.
+              <>
+                Keanggotaan Anda di komunitas ini sedang tidak aktif. Hubungi penyelenggara
+                komunitas melalui WhatsApp untuk menanyakan status keanggotaan Anda.
+              </>
+            ) : (
+              <>
+                Jika Anda sudah membayar, mohon tunggu beberapa menit — konfirmasi dari bank
+                terkadang butuh waktu. Jika belum membayar, silakan coba lagi lewat tautan
+                checkout yang sama. Jika masalah berlanjut, hubungi penyelenggara komunitas
+                melalui WhatsApp.
+              </>
+            )}
           </p>
         </>
       ) : null}

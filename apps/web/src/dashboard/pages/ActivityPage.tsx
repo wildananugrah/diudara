@@ -14,9 +14,10 @@ const PAGE_LIMIT = 25;
  * What has happened in a community, newest first.
  *
  * THIS PAGE FILTERS NOTHING AND LABELS NOTHING. Both decisions live in
- * `apps/api/src/domain/activity-feed.ts`: which of the 14 event types a creator
- * sees at all (an allowlist — `renewal_reminder_queued` is off it, so ONE reminder
- * produces ONE entry rather than two), and what each one says in Indonesian. A
+ * `apps/api/src/domain/activity-feed.ts`: which of the 21 event types that module
+ * knows about (`ALL_EVENT_TYPES` in its own test) a creator sees at all — an
+ * allowlist of 15, so `renewal_reminder_queued` is off it and ONE reminder
+ * produces ONE entry rather than two — and what each one says in Indonesian. A
  * second copy of either rule here would be a second place for them to drift, and
  * the failure mode of drift is a creator counting twice as many reminders as were
  * sent, or reading a raw `access_not_revoked` and panicking.

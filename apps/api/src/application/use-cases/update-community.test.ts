@@ -42,6 +42,7 @@ function community(overrides: Partial<CommunityRecord> = {}): CommunityRecord {
     slug: "kelas-budi",
     niche: null,
     status: "active",
+    accessMode: "paid",
     createdAt: new Date(),
     ...overrides,
   };
@@ -102,5 +103,98 @@ describe("UpdateCommunity", () => {
 
     expect(updated.slug).toBe("kelas-budi");
     expect(updated.name).toBe("Nama Baru");
+  });
+
+  describe("payments disabled", () => {
+    it("refuses accessMode: paid with the exact ConflictError message", async () => {
+      const { repository } = fakeRepository([community()]);
+      const useCase = new UpdateCommunity(repository, { paymentsEnabled: false });
+
+      await expect(
+        useCase.execute({
+          communityId: "community-1",
+          creatorId: "creator-1",
+          patch: { accessMode: "paid" },
+        })
+      ).rejects.toThrow(
+        "pembayaran belum dikonfigurasi di server ini, jadi komunitas berbayar belum bisa dibuat"
+      );
+    });
+
+    it("refuses accessMode: paid as a ConflictError, specifically", async () => {
+      const { repository } = fakeRepository([community()]);
+      const useCase = new UpdateCommunity(repository, { paymentsEnabled: false });
+
+      await expect(
+        useCase.execute({
+          communityId: "community-1",
+          creatorId: "creator-1",
+          patch: { accessMode: "paid" },
+        })
+      ).rejects.toBeInstanceOf(ConflictError);
+    });
+
+    it("always allows accessMode: request, even with payments disabled", async () => {
+      const { repository, rows } = fakeRepository([community()]);
+      const useCase = new UpdateCommunity(repository, { paymentsEnabled: false });
+
+      const updated = await useCase.execute({
+        communityId: "community-1",
+        creatorId: "creator-1",
+        patch: { accessMode: "request" },
+      });
+
+      expect(updated.accessMode).toBe("request");
+      expect(rows).toHaveLength(1);
+    });
+
+    // Unlike CreateCommunity, an OMITTED accessMode on a patch means "leave it
+    // as it is" — ordinary patch semantics — so a patch that never mentions
+    // accessMode at all must not be refused just because payments happen to
+    // be disabled on this box.
+    it("allows a patch that never touches accessMode at all", async () => {
+      const { repository } = fakeRepository([community()]);
+      const useCase = new UpdateCommunity(repository, { paymentsEnabled: false });
+
+      const updated = await useCase.execute({
+        communityId: "community-1",
+        creatorId: "creator-1",
+        patch: { name: "Nama Baru" },
+      });
+
+      expect(updated.name).toBe("Nama Baru");
+    });
+  });
+
+  describe("payments enabled", () => {
+    it("allows accessMode: paid", async () => {
+      const { repository } = fakeRepository([community()]);
+      const useCase = new UpdateCommunity(repository, { paymentsEnabled: true });
+
+      const updated = await useCase.execute({
+        communityId: "community-1",
+        creatorId: "creator-1",
+        patch: { accessMode: "paid" },
+      });
+
+      expect(updated.accessMode).toBe("paid");
+    });
+
+    // The default for a caller (like every test above this describe block)
+    // that never passes the options object at all — existing behaviour must
+    // not change just because UpdateCommunity now takes a second constructor
+    // argument.
+    it("defaults to enabled when the options argument is omitted entirely", async () => {
+      const { repository } = fakeRepository([community()]);
+      const useCase = new UpdateCommunity(repository);
+
+      const updated = await useCase.execute({
+        communityId: "community-1",
+        creatorId: "creator-1",
+        patch: { accessMode: "paid" },
+      });
+
+      expect(updated.accessMode).toBe("paid");
+    });
   });
 });

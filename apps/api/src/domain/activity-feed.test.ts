@@ -10,6 +10,11 @@ import {
 } from "../application/use-cases/notify-stream-live";
 import { CHURNED, CHURN_REVOKE_SKIPPED } from "../application/use-cases/process-churn";
 import {
+  JOIN_REQUEST_APPROVED_EVENT,
+  JOIN_REQUEST_REJECTED_EVENT,
+} from "../application/use-cases/decide-join-request";
+import { JOIN_REQUEST_NOTIFY_SKIPPED_EVENT } from "../application/use-cases/notify-join-request";
+import {
   RENEWAL_REMINDER_QUEUED,
   RENEWAL_REMINDER_SKIPPED,
 } from "../application/use-cases/process-renewals";
@@ -49,6 +54,9 @@ const ALL_EVENT_TYPES = [
   STREAM_ENDED_EVENT,
   STREAM_LIVE_NOTIFIED_EVENT,
   STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
+  JOIN_REQUEST_APPROVED_EVENT,
+  JOIN_REQUEST_REJECTED_EVENT,
+  JOIN_REQUEST_NOTIFY_SKIPPED_EVENT,
 ] as const;
 
 /** Internal diagnostics. A creator reading these learns nothing and worries anyway. */
@@ -62,11 +70,11 @@ const HIDDEN_EVENT_TYPES = [
 ] as const;
 
 describe("CREATOR_VISIBLE_EVENTS", () => {
-  it("covers all 18 event types, with every one either shown or hidden", () => {
+  it("covers all 21 event types, with every one either shown or hidden", () => {
     // The point is that there is no third category. A new event type must be
     // classified, not defaulted — a default of "show" puts diagnostics in front of
     // creators, and a default of "hide" loses a real event silently.
-    expect(ALL_EVENT_TYPES).toHaveLength(18);
+    expect(ALL_EVENT_TYPES).toHaveLength(21);
 
     const visible = new Set<string>(CREATOR_VISIBLE_EVENTS);
     const hidden = new Set<string>(HIDDEN_EVENT_TYPES);
@@ -79,7 +87,7 @@ describe("CREATOR_VISIBLE_EVENTS", () => {
     expect(both).toEqual([]);
   });
 
-  it("shows exactly the ten ordinary events and the two warnings", () => {
+  it("shows exactly the thirteen ordinary events and the two warnings", () => {
     expect([...CREATOR_VISIBLE_EVENTS].sort()).toEqual(
       [
         "access_manual_required",
@@ -94,6 +102,9 @@ describe("CREATOR_VISIBLE_EVENTS", () => {
         STREAM_LIVE_EVENT,
         STREAM_LIVE_NOTIFIED_EVENT,
         STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
+        JOIN_REQUEST_APPROVED_EVENT,
+        JOIN_REQUEST_REJECTED_EVENT,
+        JOIN_REQUEST_NOTIFY_SKIPPED_EVENT,
       ].sort()
     );
   });
@@ -204,6 +215,9 @@ describe("describeActivityEvent", () => {
       STREAM_ENDED_EVENT,
       STREAM_LIVE_NOTIFIED_EVENT,
       STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
+      JOIN_REQUEST_APPROVED_EVENT,
+      JOIN_REQUEST_REJECTED_EVENT,
+      JOIN_REQUEST_NOTIFY_SKIPPED_EVENT,
     ]) {
       expect(describeActivityEvent(eventType, null)!.severity).toBe("info");
     }
@@ -239,6 +253,28 @@ describe("describeActivityEvent", () => {
       reason: "some_future_reason",
     })!;
     expect(described.label).toContain("Anggota tidak diberi tahu tentang siaran langsung");
+    expect(described.label).not.toContain("some_future_reason");
+  });
+
+  /**
+   * Fix round 1. The reason used to be baked into the label literal — this pins
+   * that it is now LOOKED UP (same shape as `STREAM_NOTIFY_SKIP_REASON_LABELS`),
+   * and that the label is unambiguous about WHOSE WhatsApp number is missing:
+   * this is shown to the pemilik themselves, and a bare "nomor WhatsApp belum
+   * diatur" could otherwise read as being about the requesting member's number.
+   */
+  it("names why the owner was not told about a join request, unambiguously as their OWN number", () => {
+    const label = describeActivityEvent(JOIN_REQUEST_NOTIFY_SKIPPED_EVENT, {
+      reason: "creator_whatsapp_missing",
+    })!.label;
+    expect(label).toContain("nomor WhatsApp sendiri belum diatur");
+  });
+
+  it("falls back to the plain label for a join-request-skip reason it does not recognise", () => {
+    const described = describeActivityEvent(JOIN_REQUEST_NOTIFY_SKIPPED_EVENT, {
+      reason: "some_future_reason",
+    })!;
+    expect(described.label).toContain("Pemilik belum diberi tahu tentang permintaan bergabung");
     expect(described.label).not.toContain("some_future_reason");
   });
 

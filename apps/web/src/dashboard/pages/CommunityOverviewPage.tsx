@@ -2,6 +2,10 @@ import { useState, type FormEvent } from "react";
 import { useParams } from "react-router-dom";
 import { apiFetch, DashboardApiError } from "../apiClient";
 import {
+  ACCESS_MODES,
+  accessModeExplanation,
+  accessModeLabel,
+  isRequestMode,
   communityStatusLabel,
   formatRupiah,
   memberStatusExplanation,
@@ -24,8 +28,21 @@ import type { Community, CommunityMetrics } from "../types";
 const STATUSES = ["active", "paused", "archived"] as const;
 
 /**
+ * WHY `ACCESS_MODES` (imported from ../format) IS RENDERED HERE AT ALL.
+ *
+ * Without a control bound to these, the whole free-communities phase is
+ * unreachable: `access_mode` defaults to `paid` on every row, `CreateCommunity`
+ * treats a missing value as `paid`, and no other screen in this app writes the
+ * field — so a creator could never reach the request-mode checkout page
+ * (`CheckoutPage.tsx`) or the join-request queue (`MembersPage.tsx`) that both
+ * branch on it. Found by driving the real dashboard in a browser at the phase
+ * gate, not by any test: every test on both of those screens supplies the mode
+ * it wants as a fixture, so a green suite said nothing about whether anything
+ * could produce it.
+ */
+/**
  * One community's overview: the numbers, what state it is in, the link to share,
- * and the two settings a creator actually changes.
+ * and the three settings a creator actually changes.
  */
 export default function CommunityOverviewPage() {
   const { communityId } = useParams<{ communityId: string }>();
@@ -46,13 +63,14 @@ export default function CommunityOverviewPage() {
       <div className="section card stack">
         <div>
           <h2>Status: {communityStatusLabel(community.status)}</h2>
-          <StatusExplanation status={community.status} />
+          <StatusExplanation status={community.status} accessMode={community.accessMode} />
         </div>
         <CheckoutLink community={community} />
       </div>
 
       <div className="section card">
         <h2>Pengaturan</h2>
+        <AccessModeForm community={community} onSaved={handle.update} />
         <StatusForm community={community} onSaved={handle.update} />
         <SlugForm community={community} onSaved={handle.update} />
       </div>
@@ -120,6 +138,7 @@ function MetricsPanel({ community }: { community: Community }) {
   }
 
   const metrics = load.data;
+  const freeCommunity = isRequestMode(community);
   const { active, pastDue, churned } = metrics.members;
   // "How many people can currently see my group" and "how many are paid up" are
   // different questions, which is exactly why the API reports past-due separately
@@ -138,12 +157,21 @@ function MetricsPanel({ community }: { community: Community }) {
     return (
       <div className="section stack">
         <div data-testid="metrics-empty">
+          {/* A free community can NEVER have a first payment, so the paid
+              wording here told its creator to wait for something that will
+              never happen. */}
           <EmptyState
-            title="Belum ada anggota dan belum ada pembayaran"
-            action="Sebarkan tautan checkout di bawah ke calon anggota. Angka keanggotaan dan pendapatan muncul di sini setelah pembayaran pertama berhasil."
+            title={
+              freeCommunity ? "Belum ada anggota" : "Belum ada anggota dan belum ada pembayaran"
+            }
+            action={
+              freeCommunity
+                ? "Sebarkan tautan pendaftaran di bawah ke calon anggota. Angka keanggotaan muncul di sini setelah Anda menyetujui permintaan pertama."
+                : "Sebarkan tautan checkout di bawah ke calon anggota. Angka keanggotaan dan pendapatan muncul di sini setelah pembayaran pertama berhasil."
+            }
           />
         </div>
-        <TierDistribution tiers={metrics.tierDistribution} />
+        <TierDistribution tiers={metrics.tierDistribution} community={community} />
       </div>
     );
   }
@@ -183,7 +211,7 @@ function MetricsPanel({ community }: { community: Community }) {
         />
       </div>
 
-      <TierDistribution tiers={metrics.tierDistribution} />
+      <TierDistribution tiers={metrics.tierDistribution} community={community} />
     </div>
   );
 }
@@ -197,14 +225,20 @@ function MetricsPanel({ community }: { community: Community }) {
  */
 function TierDistribution({
   tiers,
+  community,
 }: {
   tiers: CommunityMetrics["tierDistribution"];
+  community: Community;
 }) {
   if (tiers.length === 0) {
     return (
       <EmptyState
         title="Belum ada paket"
-        action="Buat paket di tab “Paket”. Tanpa paket aktif, halaman checkout Anda tidak menawarkan apa pun untuk dibeli."
+        action={
+          isRequestMode(community)
+            ? "Buat paket di tab “Paket”. Tanpa paket aktif, halaman pendaftaran Anda tidak menawarkan apa pun untuk diikuti."
+            : "Buat paket di tab “Paket”. Tanpa paket aktif, halaman checkout Anda tidak menawarkan apa pun untuk dibeli."
+        }
       />
     );
   }
@@ -233,8 +267,10 @@ function TierDistribution({
         </table>
       </div>
       <p className="hint">
-        Hanya anggota berstatus aktif yang dihitung di sini. Paket yang menunjukkan 0 anggota belum
-        pernah dibeli siapa pun.
+        Hanya anggota berstatus aktif yang dihitung di sini.{" "}
+        {isRequestMode(community)
+          ? "Paket yang menunjukkan 0 anggota belum pernah disetujui untuk siapa pun."
+          : "Paket yang menunjukkan 0 anggota belum pernah dibeli siapa pun."}
       </p>
     </div>
   );
@@ -249,6 +285,83 @@ async function patchCommunity(
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+}
+
+/**
+ * THE CONTROL THAT MAKES FREE COMMUNITIES REACHABLE. See `ACCESS_MODES` above
+ * for what was broken without it.
+ *
+ * Shows the explanation for the mode CURRENTLY SELECTED IN THE SELECT, not the
+ * one currently saved — a creator reading "what happens if I do this" before
+ * pressing Simpan is the whole point, and `StatusForm`'s own separate
+ * `StatusExplanation` (which reports the saved value up beside the heading) is
+ * a different job at a different place on the page.
+ *
+ * A 409 here is the payments-disabled server refusing `paid`
+ * (`CreateCommunity`/`UpdateCommunity`, apps/api) and its message is already
+ * Indonesian and already actionable, so it is rendered verbatim rather than
+ * replaced — the same call `MembersPage`'s join-request queue makes for the two
+ * 409s it does not recognise.
+ */
+function AccessModeForm({
+  community,
+  onSaved,
+}: {
+  community: Community;
+  onSaved: (next: Community) => void;
+}) {
+  const [accessMode, setAccessMode] = useState(community.accessMode);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setMessage(null);
+    setSaving(true);
+    try {
+      onSaved(await patchCommunity(community.id, { accessMode }));
+    } catch (err) {
+      // The creator's choice is deliberately NOT reverted — they have to change
+      // something to get past a refusal, and resetting the select would hide
+      // what they just tried, exactly as `SlugForm` reasons about its own field.
+      setMessage(err instanceof Error ? err.message : "gagal menyimpan cara bergabung");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="stack" noValidate>
+      <div className="inline-form">
+        <Field label="Cara bergabung" name="access-mode">
+          <select
+            id="field-access-mode"
+            value={accessMode}
+            onChange={(e) => setAccessMode(e.target.value)}
+          >
+            {ACCESS_MODES.map((value) => (
+              <option key={value} value={value}>
+                {accessModeLabel(value)}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+      <p className="muted" data-testid="access-mode-explanation">
+        {accessModeExplanation(accessMode)}
+      </p>
+      {message !== null ? (
+        <p className="form-error" role="alert">
+          {message}
+        </p>
+      ) : null}
+      <div>
+        <button type="submit" className="button-secondary" disabled={saving}>
+          {saving ? "Menyimpan..." : "Simpan cara bergabung"}
+        </button>
+      </div>
+    </form>
+  );
 }
 
 function StatusForm({

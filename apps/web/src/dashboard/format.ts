@@ -69,6 +69,97 @@ export function communityStatusLabel(status: string): string {
 }
 
 /**
+ * `updateCommunitySchema`/`createCommunitySchema`'s `accessMode` enum. Offering
+ * anything else earns a 400.
+ *
+ * Lives here, beside the two functions that describe these values, because BOTH
+ * the create form (`CommunitiesPage`) and the settings form
+ * (`CommunityOverviewPage`) render a select over it — and a second copy is how
+ * the two silently stop offering the same set.
+ */
+export const ACCESS_MODES = ["paid", "request"] as const;
+
+/**
+ * What the create form offers when the SERVER has no payment provider: the only
+ * value `CreateCommunity` will accept there. Named rather than inlined so the
+ * relationship to `ACCESS_MODES` above is visible at both call sites.
+ */
+export const REQUEST_ONLY = ["request"] as const;
+
+/**
+ * `community.access_mode` value whose join path is a request, not a purchase.
+ *
+ * Exported because four screens' COPY depends on it, not just their behaviour:
+ * a request-mode community has no checkout, no price and no payment, so every
+ * sentence containing "checkout", "dibeli" or "pembayaran" is false for one.
+ * The gate found a free-community creator being told their numbers would appear
+ * "setelah pembayaran pertama berhasil" — a payment that can never happen.
+ */
+export const REQUEST_ACCESS_MODE = "request";
+
+/** True when this community's members join by asking rather than by paying. */
+export function isRequestMode(community: { accessMode: string }): boolean {
+  return community.accessMode === REQUEST_ACCESS_MODE;
+}
+
+/**
+ * The label above a community's public link. It is a CHECKOUT link only for a
+ * paid community; for a free one it opens a join-request form and calling it a
+ * checkout misdescribes the single most-shared thing in the product.
+ */
+export function publicLinkLabel(community: { accessMode: string }): string {
+  return isRequestMode(community)
+    ? "Tautan pendaftaran publik — sebarkan ini ke calon anggota"
+    : "Tautan checkout publik — sebarkan ini ke calon anggota";
+}
+
+/**
+ * `community.access_mode` — how a member gets IN, which is a different question
+ * from `status` (whether the page is open at all).
+ *
+ * Only the two values `updateCommunitySchema`'s `z.enum(["paid", "request"])`
+ * accepts are named; anything else falls through to the raw string rather than
+ * being quietly relabelled, the same way `communityStatusLabel` handles a value
+ * this dashboard does not know.
+ */
+export function accessModeLabel(accessMode: string): string {
+  switch (accessMode) {
+    case "paid":
+      return "Berbayar — anggota membayar untuk bergabung";
+    case "request":
+      return "Gratis — anggota mengajukan permintaan, Anda menyetujui";
+    default:
+      return accessMode;
+  }
+}
+
+/**
+ * WHAT THE MODE ACTUALLY DOES, the same job `communityStatusExplanation` does
+ * for `status`, and for the same reason: "Gratis" alone does not tell a creator
+ * that switching turns their prices off and puts every new member behind their
+ * own approval, nor that the public page stops offering a purchase entirely
+ * (`RequestToJoin` 404s a `paid` community's join route and `StartCheckout` is
+ * never reached for a `request` one — apps/api).
+ */
+export function accessModeExplanation(accessMode: string): string {
+  switch (accessMode) {
+    case "paid":
+      return (
+        "Halaman publik menampilkan harga dan anggota membayar lewat Xendit untuk bergabung. " +
+        "Harga paket Anda berlaku."
+      );
+    case "request":
+      return (
+        "Halaman publik tidak menampilkan harga. Calon anggota mengisi nama dan nomor WhatsApp, " +
+        "lalu menunggu Anda menyetujui atau menolak di tab \u201cAnggota\u201d. Tidak ada pembayaran " +
+        "sama sekali, dan paket berbayar Anda tidak bisa dibeli selama mode ini aktif."
+      );
+    default:
+      return `Cara bergabung "${accessMode}" tidak dikenali oleh dasbor ini.`;
+  }
+}
+
+/**
  * WHAT THE STATUS ACTUALLY DOES, not just its name.
  *
  * `paused` is the one a creator cannot guess: the checkout page still RENDERS, so
@@ -77,20 +168,30 @@ export function communityStatusLabel(status: string): string {
  * believing either that the link is dead or that sales continue, and both are
  * wrong. See `VISIBLE_STATUSES` in apps/api/src/application/use-cases/get-public-community.ts.
  */
-export function communityStatusExplanation(status: string): string {
+export function communityStatusExplanation(status: string, accessMode = "paid"): string {
+  // A request-mode community has no checkout page, no purchase and no
+  // "pembelian baru ditolak" — all three sentences below are false for one, and
+  // the `active` one is on screen twice (the community card and the overview)
+  // for every free community. `accessMode` defaults to "paid" so the many
+  // callers that predate it are unchanged.
+  const free = accessMode === REQUEST_ACCESS_MODE;
   switch (status) {
     case "active":
-      return "Halaman checkout terbuka dan paket Anda bisa dibeli.";
+      return free
+        ? "Halaman pendaftaran terbuka dan calon anggota bisa mengajukan permintaan."
+        : "Halaman checkout terbuka dan paket Anda bisa dibeli.";
     case "paused":
-      return (
-        "Halaman checkout tetap terbuka — setiap tautan yang sudah Anda sebarkan masih hidup — " +
-        "tetapi pembelian baru ditolak. Anggota yang sudah ada tidak terpengaruh."
-      );
+      return free
+        ? "Halaman pendaftaran tetap terbuka — setiap tautan yang sudah Anda sebarkan masih hidup — " +
+            "tetapi permintaan baru ditolak. Anggota yang sudah ada tidak terpengaruh."
+        : "Halaman checkout tetap terbuka — setiap tautan yang sudah Anda sebarkan masih hidup — " +
+            "tetapi pembelian baru ditolak. Anggota yang sudah ada tidak terpengaruh.";
     case "archived":
-      return (
-        "Halaman checkout tidak dapat dibuka lagi (404 bagi pengunjung). Anggota yang sudah ada " +
-        "tidak dikeluarkan, dan pengingat perpanjangan tidak dikirim."
-      );
+      return free
+        ? "Halaman pendaftaran tidak dapat dibuka lagi (404 bagi pengunjung). Anggota yang sudah " +
+            "ada tidak dikeluarkan."
+        : "Halaman checkout tidak dapat dibuka lagi (404 bagi pengunjung). Anggota yang sudah ada " +
+            "tidak dikeluarkan, dan pengingat perpanjangan tidak dikirim.";
     default:
       return `Status "${status}" tidak dikenali oleh dasbor ini.`;
   }
