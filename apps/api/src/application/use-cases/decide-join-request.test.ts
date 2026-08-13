@@ -235,6 +235,9 @@ function harness(
     async listPendingForCommunity() {
       throw new Error("not used in these tests");
     },
+    async findNotificationContext() {
+      throw new Error("not used in these tests");
+    },
     async decide(input) {
       decideCalls.push({ id: input.id, status: input.status, decidedBy: input.decidedBy });
       const result = decideResults[decideCallIndex] ?? decideResults[decideResults.length - 1];
@@ -589,6 +592,9 @@ describe("ListJoinRequests", () => {
       async listPendingForCommunity(communityId) {
         listCalls.push(communityId);
         return options.rows ?? [];
+      },
+      async findNotificationContext() {
+        throw new Error("not used in these tests");
       },
       async decide() {
         throw new Error("not used in these tests");

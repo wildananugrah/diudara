@@ -254,6 +254,25 @@ const DESCRIBERS: Record<string, Describer> = {
   join_request_approved: () => ({ label: "Permintaan bergabung disetujui", severity: "info" }),
 
   join_request_rejected: () => ({ label: "Permintaan bergabung ditolak", severity: "info" }),
+
+  // ===================================================================
+  // FREE COMMUNITIES, TASK 5: `NotifyJoinRequest`'s one skip case worth
+  // recording. Unlike `join_request_approved`/`_rejected`, there is no
+  // corresponding "sent" event: a successful send has no `activity_log` row
+  // of its own (the WhatsApp message itself is the record), the same
+  // asymmetry `channel_access_granted` (written) vs. a plain successful
+  // `notify` (not) already has elsewhere in this codebase.
+  //
+  // `info`, not a warning like `access_manual_required`: Task 7's
+  // pending-requests dashboard is the real fallback for this case (see
+  // `NotifyJoinRequest`'s own docstring) and shows every open request whether
+  // or not the owner was ever messaged about it, so there is nothing this
+  // entry alone leaves the owner unable to act on.
+  // ===================================================================
+  join_request_notify_skipped: () => ({
+    label: "Pemilik belum diberi tahu — nomor WhatsApp belum diatur",
+    severity: "info",
+  }),
 };
 
 /**

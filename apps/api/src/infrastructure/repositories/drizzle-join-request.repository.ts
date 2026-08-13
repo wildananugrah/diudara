@@ -1,7 +1,8 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { joinRequests, members, membershipTiers } from "../../db/schema";
+import { communities, creators, joinRequests, members, membershipTiers } from "../../db/schema";
 import type {
+  JoinRequestNotificationContext,
   JoinRequestRecord,
   JoinRequestRepositoryPort,
   PendingJoinRequestRow,
@@ -114,6 +115,39 @@ export class DrizzleJoinRequestRepository implements JoinRequestRepositoryPort {
       .innerJoin(membershipTiers, eq(joinRequests.tierId, membershipTiers.id))
       .where(and(eq(joinRequests.communityId, communityId), eq(joinRequests.status, PENDING)))
       .orderBy(asc(joinRequests.createdAt));
+  }
+
+  /**
+   * See `JoinRequestNotificationContext`. Four INNER JOINs, deliberately: a
+   * miss anywhere in the chain (a join request that no longer resolves to a
+   * real community, creator, member or tier) collapses into the same `null`
+   * `NotifyJoinRequest` treats as "consume, do not retry" — there is no need
+   * to tell those cases apart, since none of them is fixable by a retry.
+   */
+  async findNotificationContext(id: string): Promise<JoinRequestNotificationContext | null> {
+    if (!UUID_PATTERN.test(id)) {
+      return null;
+    }
+    const [row] = await this.db
+      .select({
+        id: joinRequests.id,
+        communityId: joinRequests.communityId,
+        communityName: communities.name,
+        memberId: joinRequests.memberId,
+        // Reported verbatim, including null — same rule as `listPendingForCommunity`'s
+        // `memberName` above.
+        memberName: members.name,
+        tierName: membershipTiers.name,
+        creatorWhatsappNumber: creators.whatsappNumber,
+      })
+      .from(joinRequests)
+      .innerJoin(communities, eq(joinRequests.communityId, communities.id))
+      .innerJoin(creators, eq(communities.creatorId, creators.id))
+      .innerJoin(members, eq(joinRequests.memberId, members.id))
+      .innerJoin(membershipTiers, eq(joinRequests.tierId, membershipTiers.id))
+      .where(eq(joinRequests.id, id))
+      .limit(1);
+    return row ?? null;
   }
 
   /**

@@ -35,6 +35,42 @@ export interface PendingJoinRequestRow {
 }
 
 /**
+ * Everything `NotifyJoinRequest` (Task 5) needs to tell the owner about ONE
+ * request, resolved in a single join rather than four round trips (community,
+ * creator, member, tier) — the same reason `listPendingForCommunity` joins
+ * instead of n+1-ing.
+ *
+ * `findNotificationContext` returns `null` when ANY link of that chain is
+ * missing — the join request itself, its community, the community's creator,
+ * its member, or its tier. Every one of those is a foreign key today, with no
+ * delete path in this codebase, so a genuine miss should not happen — but
+ * `NotifyJoinRequest` treats a miss as a row it can never succeed at (consumed,
+ * not retried) rather than as a bug to surface, unlike `NotifyStreamLive`'s
+ * throw on a similarly "impossible" miss. See that class's own docstring for
+ * why this one intentionally reads differently.
+ */
+export interface JoinRequestNotificationContext {
+  id: string;
+  communityId: string;
+  communityName: string;
+  memberId: string;
+  /**
+   * `member.name`, verbatim — including null. Same rule as
+   * `PendingJoinRequestRow.memberName`: this is a repository, one layer below
+   * anyone who knows what the string is for, so it reports the fact rather
+   * than choosing a placeholder.
+   */
+  memberName: string | null;
+  tierName: string;
+  /**
+   * `creator.whatsapp_number`, verbatim — including null. A creator who never
+   * set one cannot be reached here; `NotifyJoinRequest` is what decides what
+   * that means.
+   */
+  creatorWhatsappNumber: string | null;
+}
+
+/**
  * FREE-community membership requests: a member asks to join, the owner
  * approves or rejects. See `join_request_community_member_pending_unique` in
  * `db/schema.ts` for why the database, not a read-then-write, is what
@@ -58,6 +94,8 @@ export interface JoinRequestRepositoryPort {
   }): Promise<JoinRequestRecord | null>;
   findById(id: string): Promise<JoinRequestRecord | null>;
   listPendingForCommunity(communityId: string): Promise<PendingJoinRequestRow[]>;
+  /** See `JoinRequestNotificationContext`. */
+  findNotificationContext(id: string): Promise<JoinRequestNotificationContext | null>;
   /** Returns false when the row was already decided — the caller turns that into 409. */
   decide(input: {
     id: string;

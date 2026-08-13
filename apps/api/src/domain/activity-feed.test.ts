@@ -13,6 +13,7 @@ import {
   JOIN_REQUEST_APPROVED_EVENT,
   JOIN_REQUEST_REJECTED_EVENT,
 } from "../application/use-cases/decide-join-request";
+import { JOIN_REQUEST_NOTIFY_SKIPPED_EVENT } from "../application/use-cases/notify-join-request";
 import {
   RENEWAL_REMINDER_QUEUED,
   RENEWAL_REMINDER_SKIPPED,
@@ -55,6 +56,7 @@ const ALL_EVENT_TYPES = [
   STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
   JOIN_REQUEST_APPROVED_EVENT,
   JOIN_REQUEST_REJECTED_EVENT,
+  JOIN_REQUEST_NOTIFY_SKIPPED_EVENT,
 ] as const;
 
 /** Internal diagnostics. A creator reading these learns nothing and worries anyway. */
@@ -68,11 +70,11 @@ const HIDDEN_EVENT_TYPES = [
 ] as const;
 
 describe("CREATOR_VISIBLE_EVENTS", () => {
-  it("covers all 20 event types, with every one either shown or hidden", () => {
+  it("covers all 21 event types, with every one either shown or hidden", () => {
     // The point is that there is no third category. A new event type must be
     // classified, not defaulted — a default of "show" puts diagnostics in front of
     // creators, and a default of "hide" loses a real event silently.
-    expect(ALL_EVENT_TYPES).toHaveLength(20);
+    expect(ALL_EVENT_TYPES).toHaveLength(21);
 
     const visible = new Set<string>(CREATOR_VISIBLE_EVENTS);
     const hidden = new Set<string>(HIDDEN_EVENT_TYPES);
@@ -85,7 +87,7 @@ describe("CREATOR_VISIBLE_EVENTS", () => {
     expect(both).toEqual([]);
   });
 
-  it("shows exactly the twelve ordinary events and the two warnings", () => {
+  it("shows exactly the thirteen ordinary events and the two warnings", () => {
     expect([...CREATOR_VISIBLE_EVENTS].sort()).toEqual(
       [
         "access_manual_required",
@@ -102,6 +104,7 @@ describe("CREATOR_VISIBLE_EVENTS", () => {
         STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
         JOIN_REQUEST_APPROVED_EVENT,
         JOIN_REQUEST_REJECTED_EVENT,
+        JOIN_REQUEST_NOTIFY_SKIPPED_EVENT,
       ].sort()
     );
   });

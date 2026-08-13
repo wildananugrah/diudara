@@ -11,6 +11,7 @@ import { DrizzleActivityLogRepository } from "./infrastructure/repositories/driz
 import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
 import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
 import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
+import { DrizzleJoinRequestRepository } from "./infrastructure/repositories/drizzle-join-request.repository";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import { DrizzleRenewalReminderRepository } from "./infrastructure/repositories/drizzle-renewal-reminder.repository";
@@ -35,9 +36,14 @@ import {
   NotifyStreamLive,
   notifyStreamLiveOutboxHandler,
 } from "./application/use-cases/notify-stream-live";
+import {
+  NotifyJoinRequest,
+  notifyJoinRequestOutboxHandler,
+} from "./application/use-cases/notify-join-request";
 import { ProcessOutbox, type OutboxHandler } from "./application/use-cases/process-outbox";
 import {
   OUTBOX_GRANT_ACCESS,
+  OUTBOX_NOTIFY_JOIN_REQUEST,
   OUTBOX_NOTIFY_STREAM_LIVE,
   OUTBOX_REVOKE_ACCESS,
   OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
@@ -104,6 +110,16 @@ export interface WorkerDependencies {
    * that a handler is registered under the right string.
    */
   notifyStreamLive: NotifyStreamLive | undefined;
+  /**
+   * Task 5's `notify_join_request` consumer — the free-community counterpart to
+   * `NotifyStreamLive`. Unlike that field, this is never `undefined`: it depends
+   * only on `messaging.notifier`, which `selectMessagingProviders` guarantees
+   * whenever `bootstrapWorker()` returns at all (no separate secret gates it the
+   * way `STREAM_TOKEN_SECRET` gates streaming). Exposed for the same reason as
+   * `grantChannelAccess`: a test must be able to prove the worker can actually
+   * notify an owner, not only that a handler is registered under the right string.
+   */
+  notifyJoinRequest: NotifyJoinRequest;
   messaging: MessagingProviders;
 }
 
@@ -266,6 +282,20 @@ export function bootstrapWorker(): WorkerDependencies {
       )
     : undefined;
 
+  // Task 5's `notify_join_request` consumer: a member asked to join a free
+  // community, and the owner gets told. No optional config gates it — it needs
+  // only `messaging.notifier`, which is always present by the time
+  // `bootstrapWorker()` returns (see `WorkerDependencies.notifyJoinRequest`'s own
+  // docstring for why that differs from `notifyStreamLive` below) — so it is
+  // constructed and registered unconditionally, the same as `grantChannelAccess`.
+  const notifyJoinRequest = new NotifyJoinRequest(
+    new DrizzleJoinRequestRepository(db),
+    new DrizzleActivityLogRepository(db),
+    // The WhatsApp provider, never the gating one — same rule as every other
+    // notifier in this root: `TelegramBotAdapter.notify` throws.
+    messaging.notifier
+  );
+
   const handlers = new Map<string, OutboxHandler>([
     [OUTBOX_GRANT_ACCESS, grantAccessOutboxHandler(grantChannelAccess)],
     [OUTBOX_REVOKE_ACCESS, revokeAccessOutboxHandler(retryChannelAccessRevocation)],
@@ -274,6 +304,7 @@ export function bootstrapWorker(): WorkerDependencies {
       OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
       revokeSubscriptionAccessOutboxHandler(revokeChannelAccessForSystem),
     ],
+    [OUTBOX_NOTIFY_JOIN_REQUEST, notifyJoinRequestOutboxHandler(notifyJoinRequest)],
   ]);
   // Registered ONLY when configured — an unregistered event type is not silent:
   // `ProcessOutbox` fails the row (bounded retry, then permanent), which is the
@@ -293,6 +324,7 @@ export function bootstrapWorker(): WorkerDependencies {
     sendRenewalReminder,
     revokeChannelAccessForSystem,
     notifyStreamLive,
+    notifyJoinRequest,
     messaging,
   };
 }

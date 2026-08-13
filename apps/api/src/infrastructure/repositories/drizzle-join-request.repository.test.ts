@@ -273,3 +273,117 @@ describe("DrizzleJoinRequestRepository.listPendingForCommunity", () => {
     expect(rows[0].memberName).toBeNull();
   });
 });
+
+describe("DrizzleJoinRequestRepository.findNotificationContext", () => {
+  /**
+   * Like `seedFreeCommunity`, but with a configurable `creator.whatsapp_number`
+   * — this describe block is the one place that column's nullability matters.
+   */
+  async function seedWithCreatorWhatsapp(creatorWhatsappNumber: string | null) {
+    seedCounter += 1;
+    const [creator] = await db
+      .insert(creators)
+      .values({
+        name: "Rina",
+        email: `rina-notify-${seedCounter}@example.com`,
+        whatsappNumber: creatorWhatsappNumber ?? undefined,
+      })
+      .returning();
+    const [community] = await db
+      .insert(communities)
+      .values({
+        creatorId: creator.id,
+        name: "Kelas Rina",
+        slug: `kelas-rina-notify-${seedCounter}`,
+        accessMode: "request",
+      })
+      .returning();
+    const [tier] = await db
+      .insert(membershipTiers)
+      .values({ communityId: community.id, name: "Free", priceAmount: 0, billingCycle: "monthly" })
+      .returning();
+    const [member] = await db
+      .insert(members)
+      .values({
+        whatsappNumber: `+62812000${String(seedCounter).padStart(4, "0")}`,
+        name: "Siti",
+      })
+      .returning();
+    const [request] = await db
+      .insert(joinRequests)
+      .values({ communityId: community.id, tierId: tier.id, memberId: member.id })
+      .returning();
+    return { creator, community, tier, member, request };
+  }
+
+  it("resolves the community, member, tier and creator names in one join", async () => {
+    const { creator, community, tier, member, request } = await seedWithCreatorWhatsapp(
+      "+628130001111"
+    );
+
+    const context = await repo.findNotificationContext(request.id);
+
+    expect(context).toEqual({
+      id: request.id,
+      communityId: community.id,
+      communityName: community.name,
+      memberId: member.id,
+      memberName: member.name,
+      tierName: tier.name,
+      creatorWhatsappNumber: creator.whatsappNumber,
+    });
+  });
+
+  it("reports a NULL creator whatsapp_number as null, verbatim", async () => {
+    const { request } = await seedWithCreatorWhatsapp(null);
+
+    const context = await repo.findNotificationContext(request.id);
+
+    expect(context).not.toBeNull();
+    expect(context!.creatorWhatsappNumber).toBeNull();
+  });
+
+  it("reports a NULL member name as null, same rule as listPendingForCommunity", async () => {
+    seedCounter += 1;
+    const [creator] = await db
+      .insert(creators)
+      .values({ name: "Rina", email: `rina-notify-nullname-${seedCounter}@example.com` })
+      .returning();
+    const [community] = await db
+      .insert(communities)
+      .values({
+        creatorId: creator.id,
+        name: "Kelas Rina",
+        slug: `kelas-rina-notify-nullname-${seedCounter}`,
+        accessMode: "request",
+      })
+      .returning();
+    const [tier] = await db
+      .insert(membershipTiers)
+      .values({ communityId: community.id, name: "Free", priceAmount: 0, billingCycle: "monthly" })
+      .returning();
+    const [member] = await db
+      .insert(members)
+      .values({ whatsappNumber: `+62812111${String(seedCounter).padStart(4, "0")}`, name: null })
+      .returning();
+    const [request] = await db
+      .insert(joinRequests)
+      .values({ communityId: community.id, tierId: tier.id, memberId: member.id })
+      .returning();
+
+    const context = await repo.findNotificationContext(request.id);
+
+    expect(context).not.toBeNull();
+    expect(context!.memberName).toBeNull();
+  });
+
+  it("returns null for an id with no join request", async () => {
+    expect(
+      await repo.findNotificationContext("3f1c9e0a-1111-4222-8333-444455556666")
+    ).toBeNull();
+  });
+
+  it("reports a malformed id as a miss, not a driver error", async () => {
+    expect(await repo.findNotificationContext("not-a-uuid")).toBeNull();
+  });
+});

@@ -341,6 +341,9 @@ const fakeJoinRequestRepository: JoinRequestRepositoryPort = {
   async listPendingForCommunity() {
     return [];
   },
+  async findNotificationContext() {
+    return null;
+  },
   async decide() {
     return false;
   },

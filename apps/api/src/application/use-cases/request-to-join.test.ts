@@ -208,6 +208,9 @@ function harness(
     async listPendingForCommunity() {
       throw new Error("not used in these tests");
     },
+    async findNotificationContext() {
+      throw new Error("not used in these tests");
+    },
     async decide() {
       throw new Error("not used in these tests");
     },
@@ -445,6 +448,9 @@ describe("GetJoinRequestStatus", () => {
         return joinRequestRecord(options.request);
       },
       async listPendingForCommunity(): Promise<PendingJoinRequestRow[]> {
+        throw new Error("not used in these tests");
+      },
+      async findNotificationContext() {
         throw new Error("not used in these tests");
       },
       async decide() {
