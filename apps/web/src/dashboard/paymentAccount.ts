@@ -39,6 +39,35 @@ export type PaymentAccountState = "loading" | "connected" | "provisioning" | "no
 interface PaymentAccountStatusResponse {
   connected: boolean;
   provisioning: boolean;
+  /** Absent on an older server; see `paymentsAvailable` below for the default. */
+  available?: boolean;
+}
+
+/**
+ * WHETHER THIS SERVER HAS A PAYMENT PROVIDER AT ALL — a property of the
+ * deployment, not of the creator, which is why it is a module-level value and
+ * not keyed by creator id the way the cache above is.
+ *
+ * Comes from `GET /payment-account`'s `available`, which the route derives from
+ * the same `createPaymentAccount !== undefined` that makes its own POST answer
+ * 503. Needed because `connected: false, provisioning: false` on its own is
+ * ambiguous: "you have not connected yet" and "there is nothing here to connect
+ * to" look identical, and only the first is fixable by pressing a button.
+ *
+ * FAILS TOWARD "AVAILABLE" — the OPPOSITE direction from `PaymentAccountNotice`,
+ * and deliberately so. The only consumer is `CreateCommunityForm`, which uses it
+ * to decide whether to OFFER a paid community. Wrongly hiding that option on a
+ * box where payments work would stop a creator making the community they came to
+ * make, with no error to explain it; wrongly offering it on a box where they do
+ * not costs one 409 whose message is already Indonesian and already says exactly
+ * what happened. Between an unexplained missing option and a clear refusal, the
+ * clear refusal is the better failure.
+ */
+let paymentsAvailable: "unknown" | "available" | "unavailable" = "unknown";
+
+/** `useSyncExternalStore`'s snapshot for `paymentsAvailable`. Never fetches. */
+export function getPaymentsAvailable(): "unknown" | "available" | "unavailable" {
+  return paymentsAvailable;
 }
 
 function fromResponse(body: PaymentAccountStatusResponse): PaymentAccountState {
@@ -98,6 +127,13 @@ export function ensurePaymentAccountStatusLoaded(): void {
   inFlight = apiFetch<PaymentAccountStatusResponse>("/payment-account")
     .then((body) => {
       if (generation !== startedGeneration || currentCreatorId() !== id) return;
+      // `available` is a server fact, so it is recorded even though the
+      // per-creator cache below is guarded — but only when the response
+      // actually carried it. An older server omits the field, and treating a
+      // missing key as `false` would silently hide the paid option everywhere.
+      if (typeof body.available === "boolean") {
+        paymentsAvailable = body.available ? "available" : "unavailable";
+      }
       setCached(id, fromResponse(body));
     })
     .catch((err) => {
@@ -153,4 +189,5 @@ export function resetPaymentAccountCacheForTesting(): void {
   cacheByCreator = new Map();
   generation = 0;
   inFlight = null;
+  paymentsAvailable = "unknown";
 }

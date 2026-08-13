@@ -69,6 +69,24 @@ export function communityStatusLabel(status: string): string {
 }
 
 /**
+ * `updateCommunitySchema`/`createCommunitySchema`'s `accessMode` enum. Offering
+ * anything else earns a 400.
+ *
+ * Lives here, beside the two functions that describe these values, because BOTH
+ * the create form (`CommunitiesPage`) and the settings form
+ * (`CommunityOverviewPage`) render a select over it — and a second copy is how
+ * the two silently stop offering the same set.
+ */
+export const ACCESS_MODES = ["paid", "request"] as const;
+
+/**
+ * What the create form offers when the SERVER has no payment provider: the only
+ * value `CreateCommunity` will accept there. Named rather than inlined so the
+ * relationship to `ACCESS_MODES` above is visible at both call sites.
+ */
+export const REQUEST_ONLY = ["request"] as const;
+
+/**
  * `community.access_mode` — how a member gets IN, which is a different question
  * from `status` (whether the page is open at all).
  *

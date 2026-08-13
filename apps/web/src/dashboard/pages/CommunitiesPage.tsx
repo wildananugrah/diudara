@@ -1,7 +1,12 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, useSyncExternalStore, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, DashboardApiError } from "../apiClient";
-import { publicCheckoutUrl } from "../format";
+import { subscribeToAuth } from "../auth";
+import { ACCESS_MODES, accessModeLabel, publicCheckoutUrl, REQUEST_ONLY } from "../format";
+import {
+  ensurePaymentAccountStatusLoaded,
+  getPaymentsAvailable,
+} from "../paymentAccount";
 import {
   CopyableLink,
   EmptyState,
@@ -86,6 +91,31 @@ function CreateCommunityForm({ onCreated }: { onCreated: (created: Community) =>
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  /**
+   * Whether this SERVER has a payment provider at all — not whether this
+   * creator has connected one. See `paymentAccount.ts`'s `paymentsAvailable`
+   * for why the two are different questions and why the unknown case fails
+   * toward offering both modes.
+   *
+   * Loaded here rather than relying on `PaymentAccountNotice` being mounted
+   * alongside: the guards inside `ensurePaymentAccountStatusLoaded` make N
+   * callers cost at most one request, so asking for it directly is free and
+   * removes a dependency on another component's lifecycle.
+   */
+  const paymentsAvailable = useSyncExternalStore(subscribeToAuth, getPaymentsAvailable);
+  useEffect(() => {
+    ensurePaymentAccountStatusLoaded();
+  }, []);
+  const paidPossible = paymentsAvailable !== "unavailable";
+  /**
+   * `"paid"` normally — the same value `CreateCommunity` assumes for a missing
+   * `accessMode`, so the default behaviour of this form does not change. On a
+   * box with no payment provider, `"request"` is the ONLY thing that can be
+   * created (`CreateCommunity` 409s everything else), so that is both the
+   * default and the only option offered.
+   */
+  const [accessMode, setAccessMode] = useState<string>("paid");
+  const effectiveAccessMode = paidPossible ? accessMode : "request";
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -98,7 +128,16 @@ function CreateCommunityForm({ onCreated }: { onCreated: (created: Community) =>
         // An OMITTED niche, not an empty string: `createCommunitySchema` treats the
         // field as optional, and `""` would be stored as an empty niche that then
         // renders as a blank line under every community's name.
-        body: JSON.stringify({ name, ...(niche.trim() === "" ? {} : { niche: niche.trim() }) }),
+        //
+        // `accessMode` is sent EXPLICITLY, including when it is `"paid"`. It was
+        // omitted before, which `CreateCommunity` reads as `"paid"` — identical on
+        // a payments-enabled box, and a guaranteed 409 on one without payments,
+        // where "not explicitly request" is exactly what it refuses.
+        body: JSON.stringify({
+          name,
+          ...(niche.trim() === "" ? {} : { niche: niche.trim() }),
+          accessMode: effectiveAccessMode,
+        }),
       });
       setName("");
       setNiche("");
@@ -143,7 +182,32 @@ function CreateCommunityForm({ onCreated }: { onCreated: (created: Community) =>
               placeholder="bimbel, ternak lele, trading"
             />
           </Field>
+          <Field
+            label="Cara bergabung"
+            name="access-mode"
+            hint="Bisa diubah kapan saja di halaman komunitas."
+          >
+            <select
+              id="field-access-mode"
+              value={effectiveAccessMode}
+              onChange={(e) => setAccessMode(e.target.value)}
+              disabled={!paidPossible}
+            >
+              {(paidPossible ? ACCESS_MODES : REQUEST_ONLY).map((value) => (
+                <option key={value} value={value}>
+                  {accessModeLabel(value)}
+                </option>
+              ))}
+            </select>
+          </Field>
         </div>
+        {paidPossible ? null : (
+          <p className="muted" data-testid="payments-unavailable-hint">
+            Server ini belum dikonfigurasi untuk menerima pembayaran, jadi komunitas berbayar
+            belum bisa dibuat di sini. Komunitas gratis — anggota mengajukan permintaan dan Anda
+            menyetujui — tetap bisa.
+          </p>
+        )}
         {message !== null ? (
           <p className="form-error" role="alert">
             {message}

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useParams } from "react-router-dom";
 import { apiFetch, DashboardApiError } from "../apiClient";
 import {
+  ACCESS_MODES,
   accessModeExplanation,
   accessModeLabel,
   communityStatusLabel,
@@ -26,7 +27,7 @@ import type { Community, CommunityMetrics } from "../types";
 const STATUSES = ["active", "paused", "archived"] as const;
 
 /**
- * `updateCommunitySchema`'s OTHER enum (`accessMode`), same rule as `STATUSES`.
+ * WHY `ACCESS_MODES` (imported from ../format) IS RENDERED HERE AT ALL.
  *
  * Without a control bound to these, the whole free-communities phase is
  * unreachable: `access_mode` defaults to `paid` on every row, `CreateCommunity`
@@ -38,8 +39,6 @@ const STATUSES = ["active", "paused", "archived"] as const;
  * it wants as a fixture, so a green suite said nothing about whether anything
  * could produce it.
  */
-const ACCESS_MODES = ["paid", "request"] as const;
-
 /**
  * One community's overview: the numbers, what state it is in, the link to share,
  * and the three settings a creator actually changes.
