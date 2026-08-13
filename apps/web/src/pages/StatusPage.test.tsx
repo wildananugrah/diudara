@@ -174,10 +174,14 @@ describe("StatusPage", () => {
     });
 
     it("stays on the success screen even if a later poll (while waiting for a watchUrl) errors", async () => {
-      let call = 0;
-      global.fetch = mock(async () => {
-        call += 1;
-        if (call === 1) return jsonResponse({ status: "active" });
+      // Keyed on the URL rather than on a call counter: StatusPage also looks
+      // up its community once (to choose paid vs free wording), and a counter
+      // would score that lookup as one of the polls this test is arranging.
+      let polls = 0;
+      global.fetch = mock(async (url: string) => {
+        if (!url.startsWith("/c/subscription/")) return jsonResponse({ accessMode: "paid" });
+        polls += 1;
+        if (polls === 1) return jsonResponse({ status: "active" });
         throw new Error("transient network blip");
       }) as unknown as typeof fetch;
 
@@ -189,5 +193,81 @@ describe("StatusPage", () => {
       expect(screen.queryAllByText(/berhasil/i).length).toBe(1);
       expect(screen.queryAllByText(/gagal memeriksa status/i).length).toBe(0);
     });
+  });
+});
+
+/**
+ * The gate's item A. `RequestStatusPage` deliberately links an APPROVED free
+ * member here ("Lihat status keanggotaan"), and this page then told them a
+ * payment they never made had succeeded — deterministic for every approved free
+ * member, not a corner case: `GET /c/subscription/<id>/status` returns
+ * `{"status":"active"}` and the first poll renders the `active` phase.
+ *
+ * The `checking` phase is on the same common path: it renders before the first
+ * poll resolves, so a free member sees "Menunggu pembayaran..." every time too.
+ */
+describe("StatusPage — a member who joined for free (gate fix round)", () => {
+  /** Answers the subscription poll and the community lookup separately. */
+  function stubBoth(subscriptionBody: unknown, community: unknown, communityStatus = 200) {
+    global.fetch = mock(async (url: string) => {
+      if (url.startsWith("/c/subscription/")) return jsonResponse(subscriptionBody);
+      return jsonResponse(community, communityStatus);
+    }) as unknown as typeof fetch;
+  }
+
+  const FREE = { accessMode: "request", name: "Kelas Gratis", slug: "kelas-budi", tiers: [] };
+  const PAID = { accessMode: "paid", name: "Kelas Budi", slug: "kelas-budi", tiers: [] };
+
+  it("never claims a payment succeeded for a free membership", async () => {
+    stubBoth({ status: "active" }, FREE);
+
+    renderAt("sub-1");
+
+    expect(await screen.findByText(/keanggotaan anda sudah aktif/i)).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryAllByText(/pembayaran berhasil/i).length).toBe(0);
+    });
+  });
+
+  it("still says a payment succeeded for a PAID membership", async () => {
+    stubBoth({ status: "active" }, PAID);
+
+    renderAt("sub-1");
+
+    expect(await screen.findByText(/pembayaran berhasil/i)).toBeTruthy();
+  });
+
+  it("does not say 'menunggu pembayaran' to a free member while the first poll is in flight", async () => {
+    stubBoth({ status: "pending" }, FREE);
+
+    renderAt("sub-1");
+
+    expect(await screen.findByText(/menunggu persetujuan/i)).toBeTruthy();
+    expect(screen.queryAllByText(/menunggu pembayaran/i).length).toBe(0);
+  });
+
+  it("does not tell a free member to go and pay after the timeout", async () => {
+    stubBoth({ status: "churned" }, FREE);
+
+    renderAt("sub-1", { pollIntervalMs: 5, timeoutMs: 20 });
+
+    // Wait for the timed-out phase itself first — asserting on absence while the
+    // page is still in `checking` would pass for the wrong reason.
+    expect(await screen.findByText(/keanggotaan ini belum aktif/i)).toBeTruthy();
+    expect(screen.getByText(/hubungi penyelenggara komunitas/i)).toBeTruthy();
+    // The instruction a free member cannot follow: there is no checkout to retry.
+    expect(screen.queryAllByText(/tautan checkout/i).length).toBe(0);
+    expect(screen.queryAllByText(/sudah membayar/i).length).toBe(0);
+  });
+
+  it("falls back to the paid wording when the community cannot be read at all", async () => {
+    // An archived community 404s its public page. A PAYING member is the
+    // overwhelmingly likely reader of a status URL in that state, so the paid
+    // wording is the safer default — and it is what this page always said.
+    stubBoth({ status: "active" }, { error: "community not found" }, 404);
+
+    renderAt("sub-1");
+
+    expect(await screen.findByText(/pembayaran berhasil/i)).toBeTruthy();
   });
 });
