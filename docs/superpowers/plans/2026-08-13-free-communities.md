@@ -211,6 +211,19 @@ A far-future date is used deliberately: it proves the row is excluded because it
 
 **Wiring:** when `selectPaymentProvider` returns `null`, `StartCheckout` is **not constructed** and `POST /c/:slug/checkout` is **not registered**, so it 404s through the normal not-found path rather than returning a stub or a 500.
 
+**Wire `accessMode` end to end first, or the guard cannot be satisfied.** `createCommunitySchema` is `z.object({ name, niche })` and **Zod strips unknown keys**, so an `accessMode` sent by a client never reaches the use case — which means a guard reading `input.accessMode !== "request"` refuses *every* create on a payments-disabled box. Wire all five, in this task:
+
+- `accessMode: "paid" | "request"` on `CommunityRecord`
+- `accessMode?` on `CommunityRepositoryPort.create`, and `DrizzleCommunityRepository.create` must actually write it
+- `accessMode?` on `CommunityPatch` — note `UpdateCommunity` passes its patch to a Drizzle `.set(patch)`, so an undeclared key currently persists **off-contract**; declaring it fixes that rather than leaving it working by accident
+- `accessMode: z.enum(["paid", "request"]).optional()` on **both** `createCommunitySchema` and `updateCommunitySchema`
+
+Use `z.enum`, not a bare string: `access_mode` is a plain `varchar(16)` with no CHECK constraint, like every other status column here, and this codebase's convention is an allowlist at the edge — the same reason `RENEWABLE_STATUSES` exists.
+
+Add to this task's file list: `apps/api/src/application/ports/community-repository.port.ts`, `apps/api/src/infrastructure/repositories/drizzle-community.repository.ts`, `packages/shared/src/community.schema.ts`.
+
+**Prove persistence through the real repository, not a fake.** A fake that `Object.assign`s its input and echoes it back is not evidence that a column was written. The test must go through Drizzle and read the row back from Postgres.
+
 **The creator guard:** `CreateCommunity` and `UpdateCommunity` refuse `accessMode: "paid"` when payments are disabled, with `ConflictError`:
 
 ```
