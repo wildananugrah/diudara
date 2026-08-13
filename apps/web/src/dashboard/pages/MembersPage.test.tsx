@@ -89,13 +89,34 @@ function revokeFromRow(name: string): void {
 }
 
 /** The community lookup every community screen makes, plus whatever the test needs. */
+/**
+ * The caller's routes come FIRST and the defaults last, because `stubFetch`
+ * sorts by path length and JavaScript's sort is stable — so for two entries with
+ * the SAME path (a test overriding `JOIN_REQUESTS` below) the caller's wins.
+ *
+ * `JOIN_REQUESTS` is defaulted to `[]` for the same reason `CommunitiesPage`'s
+ * tests default `/payment-account`: `MembersPage` now loads it for EVERY
+ * community, not just request-mode ones (see `JoinRequests`' docstring), so a
+ * test that does not care about the queue should not have to think about it.
+ * Note that it cannot simply go unstubbed — `COMMUNITY_PATH` is a prefix of it,
+ * so an unstubbed call would be answered with the community object rather than
+ * failing loudly.
+ */
 function stub(routes: StubRoute[]) {
-  return stubFetch([{ path: COMMUNITY_PATH, body: TEST_COMMUNITY }, ...routes]);
+  return stubFetch([
+    ...routes,
+    { path: COMMUNITY_PATH, body: TEST_COMMUNITY },
+    { path: JOIN_REQUESTS, body: [] },
+  ]);
 }
 
 /** Same as `stub`, but the community accepts free join requests. */
 function stubRequestMode(routes: StubRoute[]) {
-  return stubFetch([{ path: COMMUNITY_PATH, body: REQUEST_COMMUNITY }, ...routes]);
+  return stubFetch([
+    ...routes,
+    { path: COMMUNITY_PATH, body: REQUEST_COMMUNITY },
+    { path: JOIN_REQUESTS, body: [] },
+  ]);
 }
 
 /** How many times the roster itself (not the community lookup) has been fetched so far. */
@@ -464,16 +485,19 @@ describe("MembersPage", () => {
 });
 
 describe("MembersPage — join requests (free communities, Task 7)", () => {
-  it("does not fetch or show a join-request section for a paid community", async () => {
-    const stubbed = stub([{ path: ROSTER, body: { members: [], nextCursor: null } }]);
+  it("shows no join-request section for a paid community with nothing pending", async () => {
+    stub([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [] },
+    ]);
 
     render();
     await screen.findByText(/Belum ada anggota/);
 
+    // An EMPTY paid community shows nothing, so it never implies it has
+    // requests waiting. It IS asked for now — see the "switched back to paid"
+    // tests below for the orphaned rows that made not asking a bug.
     expect(screen.queryAllByText(/Permintaan bergabung/).length).toBe(0);
-    // Not merely hidden — never asked for, so a paid community cannot even
-    // momentarily imply it has requests waiting.
-    expect(stubbed.calls.some((c) => c.url.includes("/join-requests"))).toBe(false);
   });
 
   it("shows the pending queue for a request-mode community, with a count in the heading", async () => {
@@ -789,5 +813,72 @@ describe("MembersPage — join requests (free communities, Task 7)", () => {
       expect(rowText).toMatch(/Aktif/);
       expect(rowText.includes(RINA.memberWhatsappNumber)).toBe(true);
     });
+  });
+});
+
+/**
+ * The gate's IMPORTANT 3. `MembersPage` rendered the queue only when
+ * `accessMode === "request"`, and `JoinRequests`' own docstring asserted "a paid
+ * community has no `join_request` rows at all" — falsified by execution.
+ *
+ * Switching a community from `request` back to `paid` leaves its PENDING rows
+ * exactly where they were. The API still returns them, `DecideJoinRequest` still
+ * decides them (it never looks at `accessMode`), and the member's own page still
+ * says "menunggu persetujuan" — but the owner's dashboard stopped showing them,
+ * so nobody could act. Recoverable only by switching back, which an owner has no
+ * way to know.
+ */
+describe("MembersPage — join requests orphaned by a switch back to paid (gate fix round)", () => {
+  it("still shows pending requests on a PAID community, so they can be decided", async () => {
+    stub([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+    ]);
+
+    render();
+
+    expect(await screen.findByText("Permintaan bergabung (1)")).toBeTruthy();
+    expect(screen.getByText("Rina Wulandari")).toBeTruthy();
+    // Both decisions are genuinely available: DecideJoinRequest never checks
+    // accessMode, so neither button is a dead end.
+    expect(screen.getByRole("button", { name: "Setujui" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Tolak" })).toBeTruthy();
+  });
+
+  it("explains WHY a paid community has a queue at all, rather than just showing one", async () => {
+    stub([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+    ]);
+
+    render();
+    await screen.findByText("Permintaan bergabung (1)");
+
+    expect(screen.getByTestId("join-requests-orphaned").textContent).toMatch(/berbayar/i);
+  });
+
+  it("does not show that explanation on a request-mode community, where a queue is normal", async () => {
+    stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+    ]);
+
+    render();
+    await screen.findByText("Permintaan bergabung (1)");
+
+    expect(screen.queryAllByTestId("join-requests-orphaned").length).toBe(0);
+  });
+
+  it("keeps the honest zero-count section on a REQUEST community with nothing pending", async () => {
+    stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [] },
+    ]);
+
+    render();
+
+    // Unchanged from Task 7: a request-mode community legitimately has an empty
+    // queue, and saying "(0)" is honest. Only the PAID+empty case renders nothing.
+    expect(await screen.findByText("Permintaan bergabung (0)")).toBeTruthy();
   });
 });

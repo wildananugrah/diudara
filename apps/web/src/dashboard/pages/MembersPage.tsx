@@ -115,9 +115,11 @@ export default function MembersPage() {
   return (
     <section>
       <CommunityHeader community={community} />
-      {community.accessMode === REQUEST_ACCESS_MODE ? (
-        <JoinRequests community={community} onDecided={() => setRosterVersion((v) => v + 1)} />
-      ) : null}
+      {/* Rendered for EVERY community, not just request-mode ones — see
+          `JoinRequests`' docstring for the orphaned rows that made the old
+          `accessMode === "request"` gate here a real bug. The component itself
+          decides what to show once it knows whether anything is pending. */}
+      <JoinRequests community={community} onDecided={() => setRosterVersion((v) => v + 1)} />
       <h2>Anggota</h2>
       <Roster community={community} refreshToken={rosterVersion} />
     </section>
@@ -127,11 +129,30 @@ export default function MembersPage() {
 /**
  * The owner's inbox of pending free-community join requests.
  *
- * Rendered by the caller ONLY when `community.accessMode === "request"` — a
- * paid community has no `join_request` rows at all, and a section that always
- * rendered (even empty) would imply otherwise. Nothing here fetches unless
- * that condition already held, so a paid community never even calls
- * `GET .../join-requests`.
+ * WHAT IT SHOWS DEPENDS ON THE MODE, and it is the ROW COUNT — not the mode —
+ * that decides whether there is anything to act on:
+ *
+ *   request mode : always rendered, including at zero. A request-mode community
+ *                  legitimately has an empty queue, and "Permintaan bergabung (0)"
+ *                  with "Tidak ada permintaan yang menunggu" is honest.
+ *   paid mode    : rendered ONLY when rows are actually pending. An empty paid
+ *                  community shows nothing, so it never implies it has requests
+ *                  waiting — which is what the old gate was protecting.
+ *
+ * THIS USED TO BE GATED ON `accessMode === "request"` BY THE CALLER, and its
+ * docstring asserted "a paid community has no `join_request` rows at all."
+ * That is false, and was falsified by execution at the phase gate: switching a
+ * community from `request` back to `paid` leaves every PENDING row exactly where
+ * it was. `GET .../join-requests` still returns them, `DecideJoinRequest` still
+ * decides them (it never looks at `accessMode`), and the member's own status page
+ * still reads "menunggu persetujuan" — but the owner's dashboard stopped showing
+ * them, so the request could never be answered and the member waited forever.
+ * Nothing is lost (switching back recovers it), but the owner has no way to know
+ * that, which is what made it worth fixing rather than documenting.
+ *
+ * The cost is that a paid community now issues one `GET .../join-requests` per
+ * visit to this screen. That is the price of not silently stranding rows; the
+ * request is cheap and indexed (`join_request_community_status_idx`).
  */
 function JoinRequests({
   community,
@@ -171,6 +192,15 @@ function JoinRequests({
   }
 
   const requests = load.data;
+  const isRequestMode = community.accessMode === REQUEST_ACCESS_MODE;
+
+  // A paid community with nothing pending has no queue to speak of — see this
+  // component's own docstring for why the ROW COUNT, not the mode, is what
+  // decides. Placed after the loading/error branches so a slow or failed fetch
+  // on a paid community stays silent rather than flashing a section.
+  if (!isRequestMode && requests.length === 0) {
+    return null;
+  }
 
   /** Drops one settled request from the list in place — the same shortcut
       `Roster.loadMore` uses via `handle.update`, so a decision does not cost
@@ -182,6 +212,18 @@ function JoinRequests({
   return (
     <div className="stack join-requests">
       <h2>Permintaan bergabung ({requests.length})</h2>
+      {isRequestMode ? null : (
+        // Only reachable by switching a community from "Gratis" back to
+        // "Berbayar" with requests still pending, which is rare enough that an
+        // owner meeting this queue on a paid community would otherwise have no
+        // idea where it came from or why both buttons still work.
+        <p className="muted" data-testid="join-requests-orphaned">
+          Komunitas ini sekarang <strong>berbayar</strong>, tetapi permintaan di bawah ini
+          dikirim ketika masih gratis dan belum Anda putuskan. Menyetujui tetap memberi akses{" "}
+          <strong>tanpa pembayaran</strong>. Pengirimnya tidak diberi tahu apa pun sampai Anda
+          memutuskan.
+        </p>
+      )}
       {notice !== null ? (
         <div className="notice notice-info" data-testid="join-request-conflict" role="status">
           <p>{notice}</p>
