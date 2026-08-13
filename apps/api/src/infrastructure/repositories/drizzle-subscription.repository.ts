@@ -201,6 +201,32 @@ export class DrizzleSubscriptionRepository implements SubscriptionRepositoryPort
     return row;
   }
 
+  /**
+   * See the port docstring. `nextBillingDate` is omitted, not set to null
+   * explicitly — the column has no default, so an omitted insert value is
+   * already null, which is what keeps this row out of `findDueForRenewal`
+   * (an explicit `isNotNull` there) and therefore out of the churn pass that
+   * follows it. `startedAt` IS set, same as a first payment: this is the day
+   * the free membership began, and churn timing elsewhere in the system reads
+   * it the same way regardless of how the subscription became active.
+   */
+  async createActiveWithoutBilling(input: {
+    memberId: string;
+    tierId: string;
+  }): Promise<SubscriptionRecord> {
+    const now = new Date();
+    const [row] = await this.db
+      .insert(subscriptions)
+      .values({
+        memberId: input.memberId,
+        tierId: input.tierId,
+        status: ACTIVE_SUBSCRIPTION,
+        startedAt: now,
+      })
+      .returning();
+    return row;
+  }
+
   async createTransaction(input: {
     subscriptionId: string;
     amount: number;

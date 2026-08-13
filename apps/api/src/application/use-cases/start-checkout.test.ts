@@ -135,6 +135,9 @@ describe("StartCheckout — funds routing", () => {
           updatedAt: new Date(0),
         };
       },
+      async createActiveWithoutBilling() {
+        throw new Error("not used");
+      },
       async createTransaction(input) {
         return {
           id: "transaction-1",
@@ -525,6 +528,9 @@ function harness(
         createdAt: new Date(0),
         updatedAt: new Date(0),
       };
+    },
+    async createActiveWithoutBilling() {
+      throw new Error("not used");
     },
     async createTransaction(input) {
       transactionSubscriptionIds.push(input.subscriptionId);

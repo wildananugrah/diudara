@@ -1160,3 +1160,73 @@ describe("DrizzleSubscriptionRepository.markPastDue", () => {
     expect(outcomes.filter((moved) => moved)).toHaveLength(1);
   });
 });
+
+describe("DrizzleSubscriptionRepository.createActiveWithoutBilling", () => {
+  /** A member and a tier, with no pending subscription or transaction — the free path never creates either. */
+  async function seedMemberAndTier() {
+    seedCounter += 1;
+    const [creator] = await db.insert(creators).values({ name: "Nadia" }).returning();
+    const [community] = await db
+      .insert(communities)
+      .values({
+        creatorId: creator.id,
+        name: "Komunitas Nadia",
+        slug: `komunitas-nadia-${seedCounter}`,
+        accessMode: "free",
+      })
+      .returning();
+    const [tier] = await db
+      .insert(membershipTiers)
+      .values({ communityId: community.id, name: "Free", priceAmount: 0, billingCycle: "monthly" })
+      .returning();
+    const [member] = await db
+      .insert(members)
+      .values({
+        whatsappNumber: `+62812000${String(seedCounter).padStart(4, "0")}`,
+        name: "Dewi",
+      })
+      .returning();
+    return { creator, community, tier, member };
+  }
+
+  it("creates an ACTIVE subscription with no next_billing_date", async () => {
+    const { member, tier } = await seedMemberAndTier();
+
+    const subscription = await repo.createActiveWithoutBilling({
+      memberId: member.id,
+      tierId: tier.id,
+    });
+
+    expect(subscription.status).toBe("active");
+    expect(subscription.nextBillingDate).toBeNull();
+    expect(subscription.memberId).toBe(member.id);
+    expect(subscription.tierId).toBe(tier.id);
+    expect(subscription.startedAt).not.toBeNull();
+  });
+
+  it("a free subscription is invisible to the renewal and churn passes", async () => {
+    const { member, tier } = await seedMemberAndTier();
+    const free = await repo.createActiveWithoutBilling({ memberId: member.id, tierId: tier.id });
+    expect(free.status).toBe("active");
+    expect(free.nextBillingDate).toBeNull();
+
+    // `findDueForRenewal` and `findPastGraceDeadline` both return `DueRenewalRecord[]`,
+    // which NESTS the row as `subscription: SubscriptionRecord` — there is no flat
+    // `subscriptionId` on it.
+    //
+    // A far-future date is used deliberately: it proves the row is excluded because
+    // its due date is NULL, not because the date has not arrived. If a later change
+    // ever gave free subscriptions a due date, this test would start failing.
+    const due = await repo.findDueForRenewal({
+      dueOnOrBefore: "2099-01-01",
+      limit: 100,
+    });
+    expect(due.some((r) => r.subscription.id === free.id)).toBe(false);
+
+    const past = await repo.findPastGraceDeadline({
+      now: new Date("2099-01-01T00:00:00Z"),
+      limit: 100,
+    });
+    expect(past.some((r) => r.subscription.id === free.id)).toBe(false);
+  });
+});
