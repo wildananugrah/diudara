@@ -342,13 +342,13 @@ Order:
 
 1. `communities.findByIdForCreator(communityId, creatorId)` — **404** if null. Note the argument order: the id comes first. A stranger must not learn the community exists.
 2. `joinRequests.findById(requestId)` — 404 if null **or** if its `communityId` differs. Never trust the id alone; the path's community is the authority.
-3. tier must still be active — else `ConflictError("tier ini sudah tidak aktif. Aktifkan kembali tier tersebut atau tolak permintaan ini.")`
+3. **On an approval only**, the tier must still be active — else `ConflictError("tier ini sudah tidak aktif. Aktifkan kembali tier tersebut atau tolak permintaan ini.")`. Scoping this to approvals is load-bearing: applying it to rejections too makes the message advise an action the same code path forbids, and the only escape is to reactivate a retired tier, which republishes it publicly while strangers can join.
 4. **In one transaction:** `decide(...)`; if it returns `false`, throw `ConflictError("permintaan ini sudah diproses")`. On `approved`, `createActiveWithoutBilling` then `outbox.enqueue({ eventType: OUTBOX_GRANT_ACCESS, payload: { subscriptionId } })`. Write an `activity_log` row either way.
 5. Return `{ subscriptionId }` — `null` for a rejection.
 
 **Rejection sends nothing.** No outbox row, no message. That is the design, not an omission.
 
-- [ ] **Step 1: Write the failing tests.** Cover, at minimum: approve creates an `active` subscription with a null `next_billing_date` and enqueues exactly one `grant_access` row; **approving twice enqueues exactly one** `grant_access` row and the second call 409s; reject enqueues **nothing** and sends nothing; a creator who does not own the community gets **404, not 403**; a request whose id belongs to another community gets 404; a request whose tier was deactivated gets 409; both decisions write an `activity_log` row.
+- [ ] **Step 1: Write the failing tests.** Cover, at minimum: approve creates an `active` subscription with a null `next_billing_date` and enqueues exactly one `grant_access` row; **approving twice enqueues exactly one** `grant_access` row and the second call 409s; reject enqueues **nothing** and sends nothing; a creator who does not own the community gets **404, not 403**; a request whose id belongs to another community gets 404; a request whose tier was deactivated gets 409 **on approve** and **succeeds on reject**; both decisions write an `activity_log` row.
 
 - [ ] **Step 2: Write the failing route tests** — `GET …/join-requests` lists pending requests for the owner and 404s for a stranger; both `POST` routes return 200 for the owner and 404 for a stranger.
 
