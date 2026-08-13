@@ -280,3 +280,94 @@ describe("CommunityOverviewPage", () => {
     expect(screen.getByRole("button", { name: "Simpan status" })).toBeTruthy();
   });
 });
+
+/**
+ * Task 8 (the phase gate) found the free-communities feature UNREACHABLE from
+ * the product's own UI: `accessMode` was wired end to end through the API
+ * (Task 2), read by the public checkout page (Task 6) and by the owner's
+ * join-request queue (Task 7) — but NOTHING in `apps/web` ever WROTE it. The
+ * create form takes only a name and a niche, and this settings card offered
+ * only Status and Slug, so no creator could put a community into `request`
+ * mode and the whole phase was dead code behind a column nobody could set.
+ *
+ * These tests pin the control that closes that gap.
+ */
+describe("CommunityOverviewPage — access mode (free communities, Task 8)", () => {
+  it("shows the community's current access mode", async () => {
+    stubFetch([
+      { path: COMMUNITY_PATH, body: { ...TEST_COMMUNITY, accessMode: "request" } },
+      { path: METRICS_PATH, body: METRICS },
+    ]);
+
+    render();
+    await screen.findByText("Kelas Bimbel Budi");
+
+    expect((screen.getByLabelText("Cara bergabung") as HTMLSelectElement).value).toBe("request");
+  });
+
+  it("switches a paid community to request mode with a PATCH", async () => {
+    const stubbed = stub([
+      {
+        method: "PATCH",
+        path: `/communities/${TEST_COMMUNITY.id}`,
+        body: { ...TEST_COMMUNITY, accessMode: "request" },
+      },
+    ]);
+
+    render();
+    await screen.findByText("Kelas Bimbel Budi");
+
+    fireEvent.change(screen.getByLabelText("Cara bergabung"), { target: { value: "request" } });
+    fireEvent.click(screen.getByRole("button", { name: "Simpan cara bergabung" }));
+
+    await waitFor(() => expect(stubbed.calls.some((c) => c.method === "PATCH")).toBe(true));
+    const patch = stubbed.calls.find((c) => c.method === "PATCH")!;
+    expect(patch.url).toBe(`/communities/${TEST_COMMUNITY.id}`);
+    // ONLY the field being changed, never the whole record — the same
+    // discipline `StatusForm` and `SlugForm` already follow.
+    expect(patch.body).toEqual({ accessMode: "request" });
+  });
+
+  it("says what each mode MEANS, not just its name", async () => {
+    stub();
+
+    render();
+    await screen.findByText("Kelas Bimbel Budi");
+
+    const explanation = screen.getByTestId("access-mode-explanation").textContent ?? "";
+    expect(explanation).toMatch(/membayar|dibeli/);
+
+    fireEvent.change(screen.getByLabelText("Cara bergabung"), { target: { value: "request" } });
+
+    const next = screen.getByTestId("access-mode-explanation").textContent ?? "";
+    expect(next).toMatch(/menyetujui|persetujuan|permintaan/);
+    expect(next).not.toBe(explanation);
+  });
+
+  it("renders the 409 a payments-disabled server answers with, in Indonesian", async () => {
+    stubFetch([
+      { path: COMMUNITY_PATH, body: { ...TEST_COMMUNITY, accessMode: "request" } },
+      { path: METRICS_PATH, body: METRICS },
+      {
+        method: "PATCH",
+        path: `/communities/${TEST_COMMUNITY.id}`,
+        status: 409,
+        body: {
+          error:
+            "pembayaran belum dikonfigurasi di server ini, jadi komunitas berbayar belum bisa dibuat",
+        },
+      },
+    ]);
+
+    render();
+    await screen.findByText("Kelas Bimbel Budi");
+
+    fireEvent.change(screen.getByLabelText("Cara bergabung"), { target: { value: "paid" } });
+    fireEvent.click(screen.getByRole("button", { name: "Simpan cara bergabung" }));
+
+    expect(await screen.findByText(/pembayaran belum dikonfigurasi/)).toBeTruthy();
+    // The creator's choice is NOT reverted: they have to change something to
+    // get past this, and resetting the select hides what they just tried.
+    expect((screen.getByLabelText("Cara bergabung") as HTMLSelectElement).value).toBe("paid");
+  });
+});
