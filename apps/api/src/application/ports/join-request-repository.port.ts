@@ -17,7 +17,17 @@ export interface JoinRequestRecord {
 export interface PendingJoinRequestRow {
   id: string;
   memberId: string;
-  memberName: string;
+  /**
+   * `member.name`, verbatim — including null. A WhatsApp-only signup may have none.
+   *
+   * Deliberately NOT coalesced to `''` here: this is a repository, one layer below
+   * anyone who knows what the string is FOR. A WhatsApp message built from an empty
+   * string reads as a broken sentence with a doubled space and no error anywhere;
+   * a dashboard table cell might reasonably render "(tanpa nama)" instead. Each
+   * caller that knows its medium chooses its own honest placeholder — reporting
+   * `null` here is what lets it.
+   */
+  memberName: string | null;
   memberWhatsappNumber: string;
   tierId: string;
   tierName: string;

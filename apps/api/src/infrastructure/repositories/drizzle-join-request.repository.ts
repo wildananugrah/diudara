@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { joinRequests, members, membershipTiers } from "../../db/schema";
 import type {
@@ -49,7 +49,7 @@ export class DrizzleJoinRequestRepository implements JoinRequestRepositoryPort {
           memberId: input.memberId,
         })
         .returning();
-      return row;
+      return row ?? null;
     } catch (err) {
       if (uniqueViolationConstraint(err) === PENDING_UNIQUE_CONSTRAINT) {
         return null;
@@ -83,10 +83,9 @@ export class DrizzleJoinRequestRepository implements JoinRequestRepositoryPort {
       .select({
         id: joinRequests.id,
         memberId: joinRequests.memberId,
-        // `member.name` is nullable (a WhatsApp-only signup may have none), but the
-        // owner's decision screen always needs SOMETHING to show — coalesced here
-        // rather than left null so a caller cannot forget to guard it.
-        memberName: sql<string>`coalesce(${members.name}, '')`,
+        // Reported verbatim, including null — see `PendingJoinRequestRow.memberName`
+        // for why this repository does not choose a placeholder.
+        memberName: members.name,
         memberWhatsappNumber: members.whatsappNumber,
         tierId: joinRequests.tierId,
         tierName: membershipTiers.name,
