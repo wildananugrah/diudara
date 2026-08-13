@@ -48,6 +48,7 @@ import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-acc
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
+import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
 import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
@@ -75,6 +76,8 @@ import type { MessagingProviderPort } from "./application/ports/messaging-provid
 import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
 import type { EventRepositoryPort } from "./application/ports/event-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
+import type { JoinRequestRepositoryPort } from "./application/ports/join-request-repository.port";
+import type { JoinRequestUnitOfWorkPort } from "./application/ports/join-request-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -327,6 +330,32 @@ const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
   },
 };
 
+const fakeJoinRequestRepository: JoinRequestRepositoryPort = {
+  async createPending() {
+    return null;
+  },
+  async findById() {
+    return null;
+  },
+  async listPendingForCommunity() {
+    return [];
+  },
+  async decide() {
+    return false;
+  },
+};
+
+/** Runs the work inline — no real transaction is needed to satisfy the type. */
+const fakeJoinRequestUnitOfWork: JoinRequestUnitOfWorkPort = {
+  async run(work) {
+    return work({
+      joinRequests: fakeJoinRequestRepository,
+      outbox: fakeOutboxRepository,
+      activityLog: fakeActivityLogRepository,
+    });
+  },
+};
+
 /**
  * `RevokeChannelAccess` is a concrete class with private members, so — like the
  * other use-cases above — the fake is a REAL instance wrapping hand-written fake
@@ -473,6 +502,18 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
+      requestToJoin: new RequestToJoin(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository,
+        fakeMemberRepository,
+        fakeSubscriptionRepository,
+        fakeJoinRequestUnitOfWork
+      ),
+      getJoinRequestStatus: new GetJoinRequestStatus(
+        fakeCommunityRepository,
+        fakeJoinRequestRepository,
+        fakeSubscriptionRepository
+      ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
         streamTokenSecret: undefined,
       }),
@@ -611,6 +652,18 @@ describe("Dependencies (composition root contract)", () => {
         fakePaymentProvider,
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
+      ),
+      requestToJoin: new RequestToJoin(
+        fakeCommunityRepository,
+        fakeMembershipTierRepository,
+        fakeMemberRepository,
+        fakeSubscriptionRepository,
+        fakeJoinRequestUnitOfWork
+      ),
+      getJoinRequestStatus: new GetJoinRequestStatus(
+        fakeCommunityRepository,
+        fakeJoinRequestRepository,
+        fakeSubscriptionRepository
       ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
         streamTokenSecret: undefined,

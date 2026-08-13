@@ -25,6 +25,15 @@ export interface PublicCommunity {
    * `suspended`) must not become part of the public contract by accident.
    */
   acceptingNewMembers: boolean;
+  /**
+   * `"paid"` or `"request"`, verbatim off `community.accessMode` — see that
+   * field's own docstring on `CommunityRecord` for why it is plain `string`
+   * rather than a literal union. The frontend (`CheckoutPage`) reads this to
+   * decide whether to render a purchase form or a join-request form; the API
+   * re-checks the same value server-side in `RequestToJoin` rather than
+   * trusting whatever this response said.
+   */
+  accessMode: string;
   tiers: PublicTier[];
 }
 
@@ -70,6 +79,7 @@ export class GetPublicCommunity {
       niche: community.niche,
       slug: community.slug,
       acceptingNewMembers: community.status === "active",
+      accessMode: community.accessMode,
       tiers: all
         .filter((t) => t.isActive)
         .map((t) => ({

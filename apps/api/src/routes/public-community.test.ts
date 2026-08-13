@@ -1,6 +1,9 @@
 import { describe, expect, it, beforeEach } from "bun:test";
+import { eq } from "drizzle-orm";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
+import { db } from "../db/client";
+import { outbox } from "../db/schema";
 import { resetDatabase } from "../db/test-helpers";
 import { bearer, signupAndGetToken } from "./test-support";
 
@@ -24,6 +27,26 @@ async function seedCommunity(a: ReturnType<typeof app>) {
       method: "POST",
       headers: bearer(token),
       body: JSON.stringify({ name: "Basic", priceAmount: 50000, billingCycle: "monthly" }),
+    })
+  ).json();
+  return { token, community, tier };
+}
+
+/** The same chain as `seedCommunity`, but `accessMode: "request"` and a free tier. */
+async function seedFreeCommunity(a: ReturnType<typeof app>) {
+  const { token } = await signupAndGetToken(a);
+  const community = await (
+    await a.request("/communities", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ name: "Kelas Gratis Rina", niche: "belajar", accessMode: "request" }),
+    })
+  ).json();
+  const tier = await (
+    await a.request(`/communities/${community.id}/tiers`, {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ name: "Gratis", priceAmount: 0, billingCycle: "monthly" }),
     })
   ).json();
   return { token, community, tier };
@@ -74,6 +97,24 @@ describe("GET /c/:slug", () => {
     expect(body.acceptingNewMembers).toBe(true);
   });
 
+  // Task 3: `CheckoutPage` needs this to decide between a purchase form and a
+  // join-request form.
+  it("includes accessMode: paid for a community created with no accessMode", async () => {
+    const a = app();
+    const { community } = await seedCommunity(a);
+
+    const body = await (await a.request(`/c/${community.slug}`)).json();
+    expect(body.accessMode).toBe("paid");
+  });
+
+  it("includes accessMode: request for a free community", async () => {
+    const a = app();
+    const { community } = await seedFreeCommunity(a);
+
+    const body = await (await a.request(`/c/${community.slug}`)).json();
+    expect(body.accessMode).toBe("request");
+  });
+
   // Spec §9.1: a creator pausing for a holiday keeps every checkout link they
   // have already broadcast into WhatsApp working. Before this, `paused`
   // collapsed into `archived` and the page 404'd.
@@ -108,6 +149,159 @@ describe("GET /c/:slug", () => {
     });
 
     expect((await a.request(`/c/${community.slug}`)).status).toBe(404);
+  });
+});
+
+describe("POST /c/:slug/join-request", () => {
+  it("returns 201 with a joinRequestId for a free community", async () => {
+    const a = app();
+    const { community, tier } = await seedFreeCommunity(a);
+
+    const res = await a.request(`/c/${community.slug}/join-request`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tierId: tier.id,
+        payerName: "Siti",
+        payerWhatsappNumber: "+6281234567890",
+      }),
+    });
+    expect(res.status).toBe(201);
+
+    const body = await res.json();
+    expect(typeof body.joinRequestId).toBe("string");
+    expect(body.joinRequestId.length).toBeGreaterThan(0);
+  });
+
+  // THE guard this whole phase exists for: a `paid` community must never
+  // accept a free join, whatever this deployment's payment configuration is.
+  it("returns 404 for a paid community", async () => {
+    const a = app();
+    const { community, tier } = await seedCommunity(a);
+
+    const res = await a.request(`/c/${community.slug}/join-request`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tierId: tier.id,
+        payerName: "Siti",
+        payerWhatsappNumber: "+6281234567890",
+      }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 409 for a second pending request from the same WhatsApp number", async () => {
+    const a = app();
+    const { community, tier } = await seedFreeCommunity(a);
+    const payload = JSON.stringify({
+      tierId: tier.id,
+      payerName: "Siti",
+      payerWhatsappNumber: "+6281234567890",
+    });
+
+    const first = await a.request(`/c/${community.slug}/join-request`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+    });
+    expect(first.status).toBe(201);
+
+    const second = await a.request(`/c/${community.slug}/join-request`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+    });
+    expect(second.status).toBe(409);
+
+    // THE assertion the brief calls out explicitly: the refused duplicate
+    // must enqueue NO outbox row. An orphaned `notify_join_request` for a
+    // request that does not exist would tell the owner about something they
+    // can never find — only the FIRST request's row may exist.
+    const notifyRows = await db
+      .select()
+      .from(outbox)
+      .where(eq(outbox.eventType, "notify_join_request"));
+    expect(notifyRows).toHaveLength(1);
+  });
+
+  it("returns 400 for an invalid body, mirroring startCheckoutSchema's own rejections", async () => {
+    const a = app();
+    const { community, tier } = await seedFreeCommunity(a);
+
+    const res = await a.request(`/c/${community.slug}/join-request`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tierId: tier.id, payerName: "", payerWhatsappNumber: "123" }),
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("GET /c/:slug/request/:joinRequestId", () => {
+  it("returns the pending status without a name or WhatsApp number", async () => {
+    const a = app();
+    const { community, tier } = await seedFreeCommunity(a);
+
+    const created = await (
+      await a.request(`/c/${community.slug}/join-request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tierId: tier.id,
+          payerName: "Siti",
+          payerWhatsappNumber: "+6281234567890",
+        }),
+      })
+    ).json();
+
+    const res = await a.request(`/c/${community.slug}/request/${created.joinRequestId}`);
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.status).toBe("pending");
+    expect(body.communitySlug).toBe(community.slug);
+    expect(body.subscriptionId).toBeNull();
+
+    // THE assertion that matters: this URL is guessable, exactly like the
+    // subscription status URL, and must never become a lookup for who joined
+    // what.
+    expect(Object.keys(body).sort()).toEqual(["communitySlug", "status", "subscriptionId"]);
+    const text = JSON.stringify(body);
+    expect(text).not.toContain("Siti");
+    expect(text).not.toContain("+6281234567890");
+    expect(text).not.toContain("6281234567890");
+  });
+
+  it("returns 404 for an unknown joinRequestId", async () => {
+    const a = app();
+    const { community } = await seedFreeCommunity(a);
+
+    const res = await a.request(
+      `/c/${community.slug}/request/00000000-0000-0000-0000-000000000000`
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 when the joinRequestId belongs to a different community's slug", async () => {
+    const a = app();
+    const { community: communityA, tier: tierA } = await seedFreeCommunity(a);
+    const { community: communityB } = await seedFreeCommunity(a);
+
+    const created = await (
+      await a.request(`/c/${communityA.slug}/join-request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tierId: tierA.id,
+          payerName: "Siti",
+          payerWhatsappNumber: "+6281234567890",
+        }),
+      })
+    ).json();
+
+    const res = await a.request(`/c/${communityB.slug}/request/${created.joinRequestId}`);
+    expect(res.status).toBe(404);
   });
 });
 

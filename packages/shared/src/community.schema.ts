@@ -124,9 +124,24 @@ export const startCheckoutSchema = z.object({
   payerWhatsappNumber: z.string().trim().min(8).max(20).regex(/^[+0-9][0-9]{7,19}$/),
 });
 
+/**
+ * `POST /c/:slug/join-request` — a free community's version of
+ * `startCheckoutSchema`, mirrored FIELD FOR FIELD (including the WhatsApp
+ * regex's tolerance for a leading 0 or +62) so the two forms validate
+ * identically. A member never sees which one their community uses until they
+ * submit; the two schemas disagreeing about what counts as a valid name or
+ * number would be a difference with no reason behind it.
+ */
+export const joinRequestSchema = z.object({
+  tierId: z.string().uuid(),
+  payerName: z.string().trim().min(1).max(255),
+  payerWhatsappNumber: z.string().trim().min(8).max(20).regex(/^[+0-9][0-9]{7,19}$/),
+});
+
 export type CreateCommunityInput = z.infer<typeof createCommunitySchema>;
 export type UpdateCommunityInput = z.infer<typeof updateCommunitySchema>;
 export type CreateTierInput = z.infer<typeof createTierSchema>;
 export type UpdateTierInput = z.infer<typeof updateTierSchema>;
 export type ConnectChannelInput = z.infer<typeof connectChannelSchema>;
 export type StartCheckoutInput = z.infer<typeof startCheckoutSchema>;
+export type JoinRequestInput = z.infer<typeof joinRequestSchema>;

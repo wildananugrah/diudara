@@ -122,3 +122,23 @@ describe("GetPublicCommunity status semantics", () => {
     expect(JSON.stringify(result)).not.toContain("creator-1");
   });
 });
+
+/**
+ * Task 3: `CheckoutPage` needs `accessMode` to decide between rendering a
+ * purchase form and a join-request form, and `RequestToJoin` needs the SAME
+ * value re-checked server-side — this is the one place both ultimately read
+ * it from.
+ */
+describe("GetPublicCommunity — accessMode", () => {
+  it("projects a paid community's accessMode verbatim", async () => {
+    const result = await useCase(community({ accessMode: "paid" })).execute("kelas-bimbel-budi");
+    expect(result.accessMode).toBe("paid");
+  });
+
+  it("projects a free community's accessMode verbatim", async () => {
+    const result = await useCase(community({ accessMode: "request" })).execute(
+      "kelas-bimbel-budi"
+    );
+    expect(result.accessMode).toBe("request");
+  });
+});

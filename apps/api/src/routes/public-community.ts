@@ -1,17 +1,54 @@
 import { Hono } from "hono";
-import { startCheckoutSchema, type StartCheckoutInput } from "@diudara/shared";
+import {
+  joinRequestSchema,
+  startCheckoutSchema,
+  type JoinRequestInput,
+  type StartCheckoutInput,
+} from "@diudara/shared";
 import { validate } from "../http/validate";
 import type { AuthVariables } from "../http/auth.middleware";
 import type { Dependencies } from "../bootstrap";
 
 /** Public — deliberately NOT behind requireAuth. */
 export function publicCommunityRoutes(
-  deps: Pick<Dependencies, "getPublicCommunity" | "startCheckout">
+  deps: Pick<
+    Dependencies,
+    "getPublicCommunity" | "startCheckout" | "requestToJoin" | "getJoinRequestStatus"
+  >
 ) {
   const app = new Hono<{ Variables: AuthVariables }>();
 
   app.get<"/:slug">("/:slug", async (c) => {
     return c.json(await deps.getPublicCommunity.execute(c.req.param("slug")));
+  });
+
+  // `POST /c/:slug/join-request` — the free-community counterpart to
+  // `/c/:slug/checkout`. Unlike checkout, this is ALWAYS registered: whether
+  // a given community accepts a free join is a per-community setting
+  // (`accessMode`), not a per-deployment one, so `RequestToJoin` itself is
+  // what refuses — with 404 — a `paid` community or one where `accessMode`
+  // is anything else. There is no environment condition under which this
+  // route should not exist.
+  app.post<"/:slug/join-request">(
+    "/:slug/join-request",
+    validate(joinRequestSchema),
+    async (c) => {
+      const input = c.get("validated") as JoinRequestInput;
+      const result = await deps.requestToJoin.execute({ slug: c.req.param("slug"), ...input });
+      return c.json(result, 201);
+    }
+  );
+
+  // `GET /c/:slug/request/:joinRequestId` — where a member lands right after
+  // submitting a request. See `GetJoinRequestStatus`'s own docstring for why
+  // the response is deliberately narrow: status, the community's slug, and a
+  // subscription id once approved — never a name or a WhatsApp number.
+  app.get<"/:slug/request/:joinRequestId">("/:slug/request/:joinRequestId", async (c) => {
+    const result = await deps.getJoinRequestStatus.execute(
+      c.req.param("slug"),
+      c.req.param("joinRequestId")
+    );
+    return c.json(result);
   });
 
   // `undefined` EXACTLY when this box has no payment provider at all — see

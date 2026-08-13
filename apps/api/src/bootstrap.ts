@@ -21,6 +21,9 @@ import { CreatePaymentAccount } from "./application/use-cases/create-payment-acc
 import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
+import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
+import { DrizzleJoinRequestRepository } from "./infrastructure/repositories/drizzle-join-request.repository";
+import { DrizzleJoinRequestUnitOfWork } from "./infrastructure/repositories/drizzle-join-request-unit-of-work";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
@@ -154,6 +157,16 @@ export interface Dependencies {
    * that does exist.
    */
   startCheckout: StartCheckout | undefined;
+  /**
+   * `POST /c/:slug/join-request`. Constructed unconditionally, unlike
+   * `startCheckout` — whether a community accepts a free join is decided by
+   * its own `accessMode`, never by this deployment's payment configuration.
+   * See `RequestToJoin`'s own docstring for the 404 that keeps a `paid`
+   * community from ever falling back to this path.
+   */
+  requestToJoin: RequestToJoin;
+  /** `GET /c/:slug/request/:joinRequestId`. See `GetJoinRequestStatus`'s own docstring. */
+  getJoinRequestStatus: GetJoinRequestStatus;
   getSubscriptionStatus: GetSubscriptionStatus;
   handlePaymentWebhook: HandlePaymentWebhook;
   /**
@@ -1435,6 +1448,26 @@ export function bootstrap(): Dependencies {
         { appBaseUrl }
       )
     : undefined;
+
+  // Task 3 (free communities): constructed UNCONDITIONALLY, unlike
+  // `startCheckout` above — see `Dependencies.requestToJoin`'s own docstring
+  // for why a community's `accessMode`, not this deployment's payment
+  // configuration, is what decides whether a free join is accepted.
+  const joinRequestRepository = new DrizzleJoinRequestRepository(db);
+  const joinRequestUnitOfWork = new DrizzleJoinRequestUnitOfWork(db);
+  const requestToJoin = new RequestToJoin(
+    communityRepository,
+    tierRepository,
+    memberRepository,
+    subscriptionRepository,
+    joinRequestUnitOfWork
+  );
+  const getJoinRequestStatus = new GetJoinRequestStatus(
+    communityRepository,
+    joinRequestRepository,
+    subscriptionRepository
+  );
+
   // Task 8's watch link. Read directly off `process.env` here (rather than
   // derived from `streamingProvider`'s truthiness) for the exact reason
   // `authoriseStream`/`mediamtxWebhookSecret` do this further down: by the
@@ -1652,6 +1685,8 @@ export function bootstrap(): Dependencies {
     getPaymentAccountStatus,
     getPublicCommunity,
     startCheckout,
+    requestToJoin,
+    getJoinRequestStatus,
     getSubscriptionStatus,
     handlePaymentWebhook,
     getCommunityMetrics,
