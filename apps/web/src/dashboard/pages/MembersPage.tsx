@@ -141,16 +141,26 @@ function JoinRequests({
 }) {
   const [load, handle] = useLoad(() => listJoinRequests(community.id), [community.id]);
   /**
-   * Set only on a 409 (decided in another tab already).
+   * A row-removing decision's aftermath — a request decided elsewhere (409)
+   * or a request that no longer exists at all (404). Both are reported here
+   * rather than as a per-row message, because both REMOVE the row: see
+   * `JoinRequestTable`'s `decide` for the full breakdown of which outcomes
+   * remove a row and which keep it.
    *
-   * LIVES HERE, NOT IN `JoinRequestTable` — a conflict always arrives in the
-   * same state update that removes the request's row (see `decide`'s catch
-   * branch below), and when that removal empties the list this component
-   * stops rendering `JoinRequestTable` at all. State kept inside the table
-   * would vanish in the very same render that was supposed to show it; kept
-   * here, it survives the table unmounting underneath it.
+   * LIVES HERE, NOT IN `JoinRequestTable` — the notice always arrives in the
+   * same state update that removes the request's row, and when that removal
+   * empties the list this component stops rendering `JoinRequestTable` at
+   * all. State kept inside the table would vanish in the very same render
+   * that was supposed to show it; kept here, it survives the table
+   * unmounting underneath it.
+   *
+   * DISMISSIBLE BY THE OWNER (the "Tutup" button below) rather than only
+   * clearable by the next decision: the earlier version cleared this only at
+   * the top of `decide`, which never runs again once the queue is empty and
+   * `JoinRequestTable` has nothing left to click — leaving the notice glued
+   * to the screen until a manual reload.
    */
-  const [conflict, setConflict] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   if (load.kind === "loading") {
     return <p className="muted">Memuat permintaan bergabung...</p>;
@@ -171,10 +181,13 @@ function JoinRequests({
   return (
     <div className="stack join-requests">
       <h2>Permintaan bergabung ({requests.length})</h2>
-      {conflict !== null ? (
-        <p className="notice notice-info" data-testid="join-request-conflict" role="status">
-          {conflict}
-        </p>
+      {notice !== null ? (
+        <div className="notice notice-info" data-testid="join-request-conflict" role="status">
+          <p>{notice}</p>
+          <button type="button" className="button-quiet" onClick={() => setNotice(null)}>
+            Tutup
+          </button>
+        </div>
       ) : null}
       {requests.length === 0 ? (
         <p className="muted">Tidak ada permintaan yang menunggu saat ini.</p>
@@ -186,7 +199,7 @@ function JoinRequests({
             removeRequest(id);
             onDecided();
           }}
-          onConflict={setConflict}
+          onNotice={setNotice}
         />
       )}
     </div>
@@ -197,6 +210,25 @@ function JoinRequests({
 function joinRequestLabel(request: JoinRequestRow): string {
   return request.memberName ?? request.memberWhatsappNumber;
 }
+
+/**
+ * THE ONLY 409 THAT MEANS "STALE ROW" — the exact string
+ * `DecideJoinRequest` throws when its conditional UPDATE finds the row is no
+ * longer `pending` (apps/api/src/application/use-cases/decide-join-request.ts:108).
+ *
+ * `DecideJoinRequest` throws `ConflictError` from THREE other call sites too
+ * — a deactivated tier (`:77`, which explicitly tells the owner to reject
+ * instead) and an already-active member, twice (`:93` pre-check, `:136` the
+ * real unique-constraint guarantee). Every one of those leaves the request
+ * genuinely still `pending` in the database. Treating all four alike used to
+ * remove the row and print a made-up "decided elsewhere" sentence over the
+ * API's own actionable Indonesian message — which also silently defeated
+ * commit `38de515`, the one that made a deactivated-tier request rejectable
+ * in the first place, since after that bug an owner had no button left that
+ * would not immediately vanish. Matched by exact string because the API
+ * gives no other signal (no error code) to tell these apart.
+ */
+const ALREADY_DECIDED_MESSAGE = "permintaan ini sudah diproses";
 
 /**
  * One row per pending request, with the owner's two decisions.
@@ -213,26 +245,27 @@ function JoinRequestTable({
   community,
   requests,
   onSettled,
-  onConflict,
+  onNotice,
 }: {
   community: Community;
   requests: JoinRequestRow[];
   onSettled: (id: string) => void;
-  /** Reports a 409's message up to `JoinRequests` (or clears it with `null`)
-      — see that component's docstring on `conflict` for why the message
-      cannot live here. */
-  onConflict: (message: string | null) => void;
+  /** Reports a row-removing outcome's message up to `JoinRequests` (or
+      clears it with `null`) — see that component's docstring on `notice`
+      for why the message cannot live here. */
+  onNotice: (message: string | null) => void;
 }) {
   /** The request awaiting reject confirmation, or null. */
   const [confirming, setConfirming] = useState<JoinRequestRow | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  /** Per-request error text for a decision that failed for a reason OTHER
-      than a 409 — the row stays, so the owner can just try again. */
+  /** Per-request error text for a decision that failed but left the request
+      genuinely still pending — the row stays, so the owner can read the
+      API's own instruction and act on it (reject a deactivated-tier request,
+      try again, etc). */
   const [rowErrors, setRowErrors] = useState<ReadonlyMap<string, string>>(new Map());
 
   async function decide(request: JoinRequestRow, decision: "approve" | "reject") {
     setBusyId(request.id);
-    onConflict(null);
     setRowErrors((previous) => {
       if (!previous.has(request.id)) return previous;
       const next = new Map(previous);
@@ -247,15 +280,39 @@ function JoinRequestTable({
       }
       onSettled(request.id);
     } catch (err) {
-      if (err instanceof DashboardApiError && err.status === 409) {
-        // Decided in another tab already (the owner's own open-elsewhere
-        // case the brief calls out) — the row is stale, not actionable.
-        // Removing it and refreshing the roster is safer than leaving it for
-        // the owner to click again and hit the same 409.
-        onConflict(
-          `${joinRequestLabel(request)}: permintaan ini sudah diproses di tab atau perangkat lain.`
+      if (err instanceof DashboardApiError && err.status === 404) {
+        // The request itself is gone, or never belonged to this community —
+        // `DecideJoinRequest` throws a plain English "join request not
+        // found" here (see its own comment: 404 is also how ownership is
+        // hidden from a stranger), and English text is deliberate for THAT
+        // case but must never reach a creator verbatim. The row cannot be
+        // acted on again either way, so it comes out.
+        onNotice(
+          `${joinRequestLabel(request)}: permintaan ini sudah tidak ada — muat ulang halaman ini.`
         );
         onSettled(request.id);
+      } else if (err instanceof DashboardApiError && err.status === 409) {
+        if (err.message === ALREADY_DECIDED_MESSAGE) {
+          // Decided in another tab already (the owner's own open-elsewhere
+          // case the brief calls out) — the row is stale, not actionable.
+          // Removing it and refreshing the roster is safer than leaving it
+          // for the owner to click again and hit the same 409.
+          onNotice(
+            `${joinRequestLabel(request)}: permintaan ini sudah diproses di tab atau perangkat lain.`
+          );
+          onSettled(request.id);
+        } else {
+          // A deactivated tier, or the member already holding an active
+          // subscription for this tier — the request is STILL PENDING, and
+          // the API's own message already says what to do (the deactivated-
+          // tier one literally ends "...atau tolak permintaan ini"). The row
+          // MUST stay, or that instruction has no button left to act on.
+          setRowErrors((previous) => {
+            const next = new Map(previous);
+            next.set(request.id, err.message);
+            return next;
+          });
+        }
       } else {
         setRowErrors((previous) => {
           const next = new Map(previous);
@@ -310,7 +367,12 @@ function JoinRequestTable({
               <th>Nama</th>
               <th>WhatsApp</th>
               <th>Paket</th>
-              <th>Menunggu sejak</th>
+              {/* "terlama di atas" turns `listPendingForCommunity`'s existing
+                  `ORDER BY created_at ASC` (drizzle-join-request.repository.ts)
+                  into a visible promise instead of an accidental side effect —
+                  the most-neglected request is always the top row, and this
+                  is the one line of copy that says so. */}
+              <th>Menunggu sejak (terlama di atas)</th>
               <th />
             </tr>
           </thead>
@@ -577,7 +639,12 @@ function MemberTable({ community, members }: { community: Community; members: Me
               const outcome = outcomes.get(member.memberId);
               return (
               <tr key={member.subscriptionId}>
-                <td>{member.name ?? "(tanpa nama)"}</td>
+                {/* "Tanpa nama" — same wording, casing and punctuation as the
+                    join-request queue's placeholder above (Ruling 1 on this
+                    file's own null-name handling): the WhatsApp column sits
+                    directly beside this one, so nothing here needs to repeat
+                    the number the way that queue's cell does. */}
+                <td>{member.name ?? "Tanpa nama"}</td>
                 <td>{member.whatsappNumber}</td>
                 <td>{member.tierName}</td>
                 <td>

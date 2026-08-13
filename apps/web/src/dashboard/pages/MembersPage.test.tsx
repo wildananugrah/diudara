@@ -619,4 +619,175 @@ describe("MembersPage — join requests (free communities, Task 7)", () => {
       expect(countRosterGets(stubbed)).toBeGreaterThan(rosterGetsBeforeDecision)
     );
   });
+
+  it("KEEPS THE ROW for a deactivated-tier 409, and shows the API's own actionable message rather than 'decided elsewhere'", async () => {
+    // The exact message `DecideJoinRequest` throws at decide-join-request.ts:77 —
+    // it ends by telling the owner to reject, which only works if the row
+    // is still there afterwards.
+    const DEACTIVATED_TIER_MESSAGE =
+      "tier ini sudah tidak aktif. Aktifkan kembali tier tersebut atau tolak permintaan ini.";
+    const stubbed = stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+      {
+        method: "POST",
+        path: `${JOIN_REQUESTS}/${RINA.id}/approve`,
+        status: 409,
+        body: { error: DEACTIVATED_TIER_MESSAGE },
+      },
+    ]);
+
+    render();
+    await screen.findByText("Rina Wulandari");
+
+    fireEvent.click(screen.getByRole("button", { name: "Setujui" }));
+
+    // The row's own error text, not the "decided elsewhere" banner.
+    const row = await waitFor(() => rowFor("Rina Wulandari"));
+    await waitFor(() => expect(row.textContent).toMatch(/tier ini sudah tidak aktif/));
+    expect(screen.queryAllByTestId("join-request-conflict").length).toBe(0);
+    // The row is STILL THERE, with its buttons — an owner can still act on
+    // the API's own instruction and reject it.
+    expect(screen.getByText("Rina Wulandari")).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Tolak" })).toBeTruthy();
+
+    // Reaching the reject confirmation from here must still work — this is
+    // exactly commit 38de515's guarantee, which a blanket "already decided"
+    // removal would silently defeat. (Not carrying it through to an actual
+    // POST: no reject route is stubbed in this test, and stubFetch records
+    // a call before it throws for an unstubbed one, which would corrupt the
+    // very call log this test would otherwise want to inspect.)
+    fireEvent.click(within(row).getByRole("button", { name: "Tolak" }));
+    expect(screen.getByTestId("reject-confirm").textContent).toMatch(/Rina Wulandari/);
+    expect(stubbed.calls.some((c) => c.method === "POST" && c.url.endsWith("/reject"))).toBe(
+      false
+    );
+  });
+
+  it("shows the row's error text for an already-active-member 409 too, and keeps the row", async () => {
+    const ALREADY_ACTIVE_MESSAGE = "anggota ini sudah menjadi member aktif di tier tersebut.";
+    stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+      {
+        method: "POST",
+        path: `${JOIN_REQUESTS}/${RINA.id}/approve`,
+        status: 409,
+        body: { error: ALREADY_ACTIVE_MESSAGE },
+      },
+    ]);
+
+    render();
+    await screen.findByText("Rina Wulandari");
+
+    fireEvent.click(screen.getByRole("button", { name: "Setujui" }));
+
+    const row = await waitFor(() => rowFor("Rina Wulandari"));
+    await waitFor(() => expect(row.textContent).toMatch(/sudah menjadi member aktif/));
+    expect(screen.queryAllByTestId("join-request-conflict").length).toBe(0);
+  });
+
+  it("translates a 404 (the request no longer exists) into Indonesian and removes the row", async () => {
+    const stubbed = stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+      {
+        method: "POST",
+        path: `${JOIN_REQUESTS}/${RINA.id}/approve`,
+        status: 404,
+        // The API's real, deliberately-English anti-enumeration string —
+        // see decide-join-request.ts:62 — which must never reach the owner.
+        body: { error: "join request not found" },
+      },
+    ]);
+
+    render();
+    await screen.findByText("Rina Wulandari");
+    const rosterGetsBeforeDecision = countRosterGets(stubbed);
+
+    fireEvent.click(screen.getByRole("button", { name: "Setujui" }));
+
+    const notice = await screen.findByTestId("join-request-conflict");
+    expect(notice.textContent).not.toMatch(/join request not found/);
+    expect(notice.textContent).toMatch(/sudah tidak ada|muat ulang/i);
+    await waitFor(() => expect(screen.queryAllByText("Rina Wulandari").length).toBe(0));
+    await waitFor(() =>
+      expect(countRosterGets(stubbed)).toBeGreaterThan(rosterGetsBeforeDecision)
+    );
+  });
+
+  it("lets the owner dismiss the notice banner instead of it staying until reload", async () => {
+    stubRequestMode([
+      { path: ROSTER, body: { members: [], nextCursor: null } },
+      { path: JOIN_REQUESTS, body: [RINA] },
+      {
+        method: "POST",
+        path: `${JOIN_REQUESTS}/${RINA.id}/approve`,
+        status: 409,
+        body: { error: "permintaan ini sudah diproses" },
+      },
+    ]);
+
+    render();
+    await screen.findByText("Rina Wulandari");
+
+    fireEvent.click(screen.getByRole("button", { name: "Setujui" }));
+    await screen.findByTestId("join-request-conflict");
+
+    fireEvent.click(screen.getByRole("button", { name: "Tutup" }));
+    expect(screen.queryAllByTestId("join-request-conflict").length).toBe(0);
+  });
+
+  it("shows the approved member ON THE ROSTER ITSELF, above a populated roster — not just a second fetch", async () => {
+    let approved = false;
+    const approvedRow = {
+      memberId: RINA.memberId,
+      subscriptionId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      name: RINA.memberName,
+      whatsappNumber: RINA.memberWhatsappNumber,
+      tierName: RINA.tierName,
+      status: "active",
+      joinedAt: "2026-08-12T02:00:00.000Z",
+      nextBillingDate: null,
+    };
+    stubRequestMode([
+      {
+        path: ROSTER,
+        bodyFn: () => ({
+          members: approved ? [SITI, approvedRow] : [SITI],
+          nextCursor: null,
+        }),
+      },
+      { path: JOIN_REQUESTS, body: [RINA] },
+      {
+        method: "POST",
+        path: `${JOIN_REQUESTS}/${RINA.id}/approve`,
+        body: { subscriptionId: approvedRow.subscriptionId },
+      },
+    ]);
+
+    render();
+    await screen.findByText("Rina Wulandari");
+    // The queue sits above a REAL, populated roster, not an empty one.
+    expect(screen.getByText("Siti Rahayu")).toBeTruthy();
+
+    approved = true;
+    fireEvent.click(screen.getByRole("button", { name: "Setujui" }));
+
+    // The pending row disappears, then the SAME name reappears — this time
+    // as a roster row, with a status badge, not the pending queue's row.
+    // Checked as ONE snapshot inside a single `waitFor` callback, not a
+    // count-check followed by a separate synchronous read: the two-step
+    // version raced the roster's own refetch settling in between (the
+    // `await waitFor(...)` boundary itself yields to the microtask queue),
+    // so the count could pass transiently against the very state the next
+    // line no longer saw.
+    await waitFor(() => {
+      const matches = screen.queryAllByText("Rina Wulandari");
+      expect(matches.length).toBe(1);
+      const rowText = matches[0]!.closest("tr")?.textContent ?? "";
+      expect(rowText).toMatch(/Aktif/);
+      expect(rowText.includes(RINA.memberWhatsappNumber)).toBe(true);
+    });
+  });
 });
