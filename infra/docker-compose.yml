@@ -46,12 +46,22 @@ services:
       # Read by infra/mediamtx.yml's runOnOnline/runOnOffline wget commands —
       # those ARE shell commands, so they can (and do) send this as a header.
       MEDIAMTX_WEBHOOK_SECRET: ${MEDIAMTX_WEBHOOK_SECRET:?set MEDIAMTX_WEBHOOK_SECRET in infra/.env, matching apps/api/.env}
+      # Read by infra/mediamtx.yml's runOnOnline/runOnOffline wget commands, and by
+      # MTX_AUTHHTTPADDRESS below. NOT optional on a box where apps/api does not use
+      # 3000: this port is how MediaMTX finds the API, and a wrong value points BOTH
+      # the auth check and the lifecycle hooks at whatever else happens to be
+      # listening. On this project's VPS that was a different application entirely,
+      # which answered the lifecycle POST with a 302 to its own /login — so events
+      # never flipped to `live`, no watch token was ever minted, and no member could
+      # watch, with nothing in DIUDARA's own logs to show for it.
+      # Must match apps/api/.env's PORT.
+      API_PORT: ${API_PORT:-3000}
       # authHTTPAddress has NO way to send a header (see mediamtx.yml's own
       # comment on this), so the secret travels as a query parameter
       # instead — baked in HERE, as a container environment variable, rather
       # than into the committed mediamtx.yml file. MTX_<UPPERCASE_KEY> is
       # MediaMTX's own rule for overriding any config key via environment.
-      MTX_AUTHHTTPADDRESS: http://host.docker.internal:3000/webhooks/mediamtx/auth?secret=${MEDIAMTX_WEBHOOK_SECRET:?set MEDIAMTX_WEBHOOK_SECRET in infra/.env, matching apps/api/.env}
+      MTX_AUTHHTTPADDRESS: http://host.docker.internal:${API_PORT:-3000}/webhooks/mediamtx/auth?secret=${MEDIAMTX_WEBHOOK_SECRET:?set MEDIAMTX_WEBHOOK_SECRET in infra/.env, matching apps/api/.env}
       # Task 1 (browser publishing / WHIP): the server's public IP(s), NOT a
       # secret — see mediamtx.yml's own comment on webrtcAdditionalHosts for
       # why this is still an env override rather than a literal value in the

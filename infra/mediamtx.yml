@@ -234,10 +234,10 @@ paths:
       wget -q -O- --header="X-Mediamtx-Secret: $MEDIAMTX_WEBHOOK_SECRET"
       --header="Content-Type: application/json"
       --post-data="{\"hook\":\"online\",\"streamKey\":\"$MTX_PATH\"}"
-      http://host.docker.internal:3000/webhooks/mediamtx/lifecycle
+      http://host.docker.internal:$API_PORT/webhooks/mediamtx/lifecycle
     runOnOnlineRestart: false
     runOnOffline: >
       wget -q -O- --header="X-Mediamtx-Secret: $MEDIAMTX_WEBHOOK_SECRET"
       --header="Content-Type: application/json"
       --post-data="{\"hook\":\"offline\",\"streamKey\":\"$MTX_PATH\"}"
-      http://host.docker.internal:3000/webhooks/mediamtx/lifecycle
+      http://host.docker.internal:$API_PORT/webhooks/mediamtx/lifecycle

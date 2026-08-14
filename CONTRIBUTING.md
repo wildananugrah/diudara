@@ -842,6 +842,20 @@ exists because the alternative is silently truncating your development database.
 
 ## Deployment
 
+**`API_PORT` in `infra/.env` must match `PORT` in `apps/api/.env`.** MediaMTX reaches the
+API on `host.docker.internal:$API_PORT` for both the publish/read authorisation check and
+the `runOnOnline`/`runOnOffline` lifecycle hooks. It defaults to `3000`; set it explicitly
+on any box where the API listens elsewhere.
+
+Getting this wrong fails in the worst possible way — silently, and pointing at someone
+else's software. On this project's VPS the API runs on 3004 while an unrelated application
+listens on 3000, so the lifecycle hook POSTed stream events to that app, which answered
+with a `302` to its own `/login`. Events never flipped to `live`, no watch token was ever
+minted, no member could watch, and nothing in DIUDARA's own logs recorded any of it. The
+only visible trace was one `wget: server returned error` line in MediaMTX's container log.
+
+
+
 `.github/workflows/deploy.yml` runs on a **self-hosted** runner on the production VPS. It
 triggers on a push to `main` and on manual dispatch, and its only job is to run
 `scripts/deploy.sh` from the clone that already lives on that box. It does not check the
