@@ -1009,6 +1009,15 @@ the state `0003` needs.
   `expected` value before comparing anything). This is scoped narrowly: a box with EITHER
   Xendit key set (real or half-configured) still requires the callback token exactly as
   before, in every environment.
+  **`selectEmailProvider` (Task 4, `RESEND_API_KEY`/`EMAIL_FROM`) follows the same
+  exception, for an analogous reason:** absent configuration outside the allowlist
+  returns `null` rather than refusing to boot, because Task 5's password reset falls
+  back to WhatsApp when a user has a number and messaging is configured — email is one
+  of two channels, not the only one, so it is not worth failing boot over. The negative
+  assertion matters here as much as it did for Xendit: `null` must never fall back to
+  `FakeEmailAdapter`, or a box would look like it sends real email while only recording
+  sends nobody reads. Partial email configuration (one of the two set) still refuses to
+  start in every environment, unchanged.
 - **Member-facing strings are Indonesian.** This is an Indonesian product.
 
 

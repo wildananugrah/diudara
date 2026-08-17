@@ -38,6 +38,8 @@ import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
 import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
+import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
+import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
@@ -72,6 +74,7 @@ import type { UserRepositoryPort } from "./application/ports/user-repository.por
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
+import type { EmailProviderPort } from "./application/ports/email-provider.port";
 import type { AiProviderPort } from "./application/ports/ai-provider.port";
 import type { StreamingProviderPort } from "./application/ports/streaming-provider.port";
 
@@ -113,6 +116,17 @@ export interface Dependencies {
    * to construct either against.
    */
   payments: PaymentProviderPort | null;
+  /**
+   * Task 4's email provider — `null` EXACTLY when `selectEmailProvider`
+   * decided this box has no email provider at all (see that function's own
+   * docstring: absent configuration disables email rather than blocking
+   * boot, the same divergence `payments` makes from `messaging`). Exposed
+   * for the same reason every other selected provider is: a test must be
+   * able to prove what a given environment actually wired, and Task 5's
+   * `RequestPasswordReset` needs a real `EmailProviderPort` — not a fake one
+   * this field happens to be `truthy` for — to send a reset link over.
+   */
+  email: EmailProviderPort | null;
   registerCreator: RegisterCreator;
   authenticateCreator: AuthenticateCreator;
   /**
@@ -738,6 +752,91 @@ export function selectMessagingProviders(env: {
     ]),
     notifier: fakeNotifier,
   };
+}
+
+/**
+ * Chooses the email adapter — or chooses to have no email path at all, rather
+ * than ever pretending a real send happened.
+ *
+ * Task 5's password reset is the first consumer, and it is deliberately built
+ * to tolerate email being absent: `RequestPasswordReset` falls back to
+ * WhatsApp when a user has a number and messaging is configured (design spec,
+ * Task 5), and produces no send at all — not an error — when NEITHER channel
+ * is available. That is what makes `selectEmailProvider` shaped like
+ * `selectPaymentProvider` rather than like `selectMessagingProviders`: unlike
+ * an invite nobody can be told about, a missing email provider degrades to a
+ * SECOND, ALREADY-BUILT channel rather than to "the feature does not work at
+ * all", so refusing to boot over it would be the wrong trade — exactly the
+ * reasoning that turned `selectPaymentProvider`'s old throw into today's
+ * `null` once free communities gave it a genuinely payment-free path.
+ *
+ *   1. Both `RESEND_API_KEY` and `EMAIL_FROM` set -> `ResendEmailAdapter`, in
+ *      EVERY environment.
+ *   2. PARTIAL configuration throws in EVERY environment — same reasoning as
+ *      every other half-configured guard in this file: an API key with no
+ *      "from" address (or vice versa) is a typo, never intentional, and an
+ *      operator who set one believes email is live.
+ *   3. ABSENT configuration selects `FakeEmailAdapter` ONLY inside
+ *      `RELAXED_NODE_ENVS` (development/test) — the fake records sends into
+ *      an array instead of making them.
+ *   4. ABSENT configuration OUTSIDE the allowlist returns `null` RATHER THAN
+ *      THROWING, and rather than falling back to the fake: `null` is
+ *      genuinely absent, so `RequestPasswordReset` (Task 5) can see there is
+ *      no email channel and try WhatsApp instead — a fake that silently
+ *      "worked" would tell it there was a channel when there was not, and no
+ *      reset link would ever leave this process.
+ *
+ * `RESEND_API_KEY` is a bearer credential, so the startup line names the
+ * adapter and never the key — same rule as the Telegram/Fonnte tokens above.
+ */
+export function selectEmailProvider(env: {
+  apiKey: string | undefined;
+  from: string | undefined;
+  nodeEnv: string | undefined;
+}): EmailProviderPort | null {
+  const apiKey = presentOrUndefined(env.apiKey);
+  const from = presentOrUndefined(env.from);
+
+  if (apiKey && from) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] email provider: ResendEmailAdapter " +
+        "(RESEND_API_KEY and EMAIL_FROM are set — real email will be sent)"
+    );
+    return new ResendEmailAdapter({ apiKey, from });
+  }
+
+  if (apiKey || from) {
+    const missing = apiKey ? "EMAIL_FROM" : "RESEND_API_KEY";
+    const present = apiKey ? "RESEND_API_KEY" : "EMAIL_FROM";
+    throw new Error(
+      `Email is half-configured: ${present} is set but ${missing} is not. Set both or ` +
+        "neither — see apps/api/.env.example. Refusing to start rather than falling back to " +
+        "the fake email adapter while looking configured."
+    );
+  }
+
+  if (!isRelaxedNodeEnv(env.nodeEnv)) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] email provider: none — email is DISABLED " +
+        "(RESEND_API_KEY/EMAIL_FROM not set, and NODE_ENV is " +
+        `${describeNodeEnv(env.nodeEnv)}, outside ${RELAXED_NODE_ENVS_LIST}). Password reset ` +
+        "(Task 5) falls back to WhatsApp where a user has a number and messaging is " +
+        "configured, and sends nothing when neither channel is available. Set both env vars " +
+        "to enable real email, or NODE_ENV=development/test to boot with the fake adapter " +
+        "instead."
+    );
+    return null;
+  }
+
+  logProviderChoice(
+    env.nodeEnv,
+    "[bootstrap] email provider: FakeEmailAdapter " +
+      "(RESEND_API_KEY/EMAIL_FROM not set — no real email will be sent; set both to switch " +
+      "to the real Resend adapter)"
+  );
+  return new FakeEmailAdapter();
 }
 
 /**
@@ -1432,6 +1531,17 @@ export function bootstrap(): Dependencies {
     splitRuleId: process.env.XENDIT_SPLIT_RULE_ID,
     nodeEnv: process.env.NODE_ENV,
   });
+
+  // Task 4. Resolved here rather than down with `messaging` below: nothing in
+  // THIS task's `Dependencies` depends on it (Task 5's `RequestPasswordReset`
+  // is the first consumer), so its position is not load-bearing the way
+  // `payments`'s is for `createCommunity`/`updateCommunity` above.
+  const email: EmailProviderPort | null = selectEmailProvider({
+    apiKey: process.env.RESEND_API_KEY,
+    from: process.env.EMAIL_FROM,
+    nodeEnv: process.env.NODE_ENV,
+  });
+
   // `createCommunity`/`updateCommunity` are constructed here, after `payments`
   // is known, rather than up with `communityRepository` above: both need to
   // know whether this box has a payment provider at all, to refuse
@@ -1751,6 +1861,7 @@ export function bootstrap(): Dependencies {
     creatorRepository,
     tokenIssuer,
     payments,
+    email,
     registerCreator,
     authenticateCreator,
     userRepository,

@@ -12,6 +12,7 @@ import {
   resolveCallbackToken,
   resolveTelegramWebhookSecret,
   selectAiProvider,
+  selectEmailProvider,
   selectMessagingProviders,
   selectPaymentProvider,
   selectStreamingProvider,
@@ -31,6 +32,8 @@ import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.
 import { createApp } from "./app";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
+import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
+import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter";
 import { RegisterCreator } from "./application/use-cases/register-creator";
 import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
 import { RegisterUser } from "./application/use-cases/register-user";
@@ -513,6 +516,7 @@ describe("Dependencies (composition root contract)", () => {
       creatorRepository: fakeCreatorRepository,
       tokenIssuer: fakeTokenIssuer,
       payments: fakePaymentProvider,
+      email: null,
       registerCreator: new RegisterCreator(
         fakeCreatorRepository,
         fakePasswordHasher,
@@ -682,6 +686,7 @@ describe("Dependencies (composition root contract)", () => {
       creatorRepository: fakeCreatorRepository,
       tokenIssuer: fakeTokenIssuer,
       payments: fakePaymentProvider,
+      email: null,
       registerCreator: new RegisterCreator(
         fakeCreatorRepository,
         fakePasswordHasher,
@@ -1875,6 +1880,210 @@ describe("selectMessagingProviders", () => {
     const printed = lines.join("\n");
     expect(printed).not.toContain("AA-secret-bot-token");
     expect(printed).not.toContain("secret-fonnte-token");
+  });
+});
+
+describe("selectEmailProvider", () => {
+  it("selects ResendEmailAdapter when both env vars are set", () => {
+    const provider = selectEmailProvider({
+      apiKey: "re_live_x",
+      from: "DIUDARA <no-reply@diudara.example>",
+      nodeEnv: "test",
+    });
+    expect(provider).toBeInstanceOf(ResendEmailAdapter);
+  });
+
+  it("selects the real adapter in production when fully configured", () => {
+    const logs = captureConsoleLog(() => {
+      const provider = selectEmailProvider({
+        apiKey: "re_live_x",
+        from: "DIUDARA <no-reply@diudara.example>",
+        nodeEnv: "production",
+      });
+      expect(provider).toBeInstanceOf(ResendEmailAdapter);
+    });
+    expect(logs.some((line) => /ResendEmailAdapter/.test(line))).toBe(true);
+  });
+
+  it("selects FakeEmailAdapter when both env vars are unset in development or test", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of ["test", "development"]) {
+        expect(
+          selectEmailProvider({ apiKey: undefined, from: undefined, nodeEnv })
+        ).toBeInstanceOf(FakeEmailAdapter);
+      }
+    });
+  });
+
+  // CRITICAL — the row a previous phase got wrong. The NEGATIVE assertion is
+  // the one that matters, not just the null: a future "helpful" fallback to
+  // the fake adapter would satisfy a loose `expect(provider).toBeFalsy()` (or
+  // even `toBeNull()`, if the fallback itself returned null on some OTHER
+  // path) while silently reintroducing exactly the hazard this guard exists
+  // to prevent — a box that looks like it sends real email and only records
+  // sends into an array nobody reads.
+  it("disables email (returns null, never the fake adapter) in production with no email configuration", () => {
+    const logs = captureConsoleLog(() => {
+      const provider = selectEmailProvider({
+        apiKey: undefined,
+        from: undefined,
+        nodeEnv: "production",
+      });
+      expect(provider).toBeNull();
+      expect(provider).not.toBeInstanceOf(FakeEmailAdapter);
+    });
+    expect(logs.some((line) => /email is DISABLED/.test(line))).toBe(true);
+  });
+
+  it("returns null (never the fake adapter) for ANY nodeEnv outside the allowlist, including unset", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [
+        undefined,
+        "staging",
+        "prod",
+        "PRODUCTION",
+        "Production",
+        "dev",
+        "development ",
+        "",
+      ]) {
+        const provider = selectEmailProvider({ apiKey: undefined, from: undefined, nodeEnv });
+        expect(provider).toBeNull();
+        expect(provider).not.toBeInstanceOf(FakeEmailAdapter);
+      }
+    });
+  });
+
+  it("still starts on the allowlist when Resend IS configured, whatever nodeEnv says", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [undefined, "staging", "prod", "production"]) {
+        expect(
+          selectEmailProvider({
+            apiKey: "re_live_x",
+            from: "DIUDARA <no-reply@diudara.example>",
+            nodeEnv,
+          })
+        ).toBeInstanceOf(ResendEmailAdapter);
+      }
+    });
+  });
+
+  it("treats empty-string configuration as unset in production", () => {
+    captureConsoleLog(() => {
+      const provider = selectEmailProvider({ apiKey: "", from: "", nodeEnv: "production" });
+      expect(provider).toBeNull();
+      expect(provider).not.toBeInstanceOf(FakeEmailAdapter);
+    });
+  });
+
+  it("refuses to start on partial configuration in EVERY environment", () => {
+    for (const nodeEnv of ["test", "development", "production", undefined]) {
+      expect(() =>
+        selectEmailProvider({ apiKey: "re_live_x", from: undefined, nodeEnv })
+      ).toThrow(/half-configured/);
+      expect(() =>
+        selectEmailProvider({
+          apiKey: undefined,
+          from: "DIUDARA <no-reply@diudara.example>",
+          nodeEnv,
+        })
+      ).toThrow(/half-configured/);
+    }
+  });
+
+  it("treats an empty string as unset when detecting partial configuration", () => {
+    expect(() =>
+      selectEmailProvider({ apiKey: "re_live_x", from: "   ", nodeEnv: "test" })
+    ).toThrow(/half-configured/);
+  });
+
+  it("names the missing variable, not the one that is set", () => {
+    expect(() =>
+      selectEmailProvider({ apiKey: "re_live_x", from: undefined, nodeEnv: "test" })
+    ).toThrow(/RESEND_API_KEY is set but EMAIL_FROM is not/);
+  });
+
+  it("stays silent under NODE_ENV=test and speaks up everywhere else", () => {
+    const quiet = captureConsoleLog(() => {
+      selectEmailProvider({ apiKey: undefined, from: undefined, nodeEnv: "test" });
+    });
+    expect(quiet).toEqual([]);
+
+    const loud = captureConsoleLog(() => {
+      selectEmailProvider({ apiKey: undefined, from: undefined, nodeEnv: "development" });
+    });
+    expect(loud.some((line) => /FakeEmailAdapter/.test(line))).toBe(true);
+  });
+
+  it("keeps the API key out of the startup log line", () => {
+    const lines = captureConsoleLog(() => {
+      selectEmailProvider({
+        apiKey: "re_SUPERSECRET_key",
+        from: "DIUDARA <no-reply@diudara.example>",
+        nodeEnv: "production",
+      });
+    });
+    expect(lines.join("\n")).not.toContain("re_SUPERSECRET_key");
+  });
+});
+
+describe("bootstrap() email provider selection", () => {
+  it("wires ResendEmailAdapter when RESEND_API_KEY and EMAIL_FROM are set", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        { RESEND_API_KEY: "re_live_x", EMAIL_FROM: "DIUDARA <no-reply@diudara.example>" },
+        () => {
+          const deps = bootstrap();
+          expect(deps.email).toBeInstanceOf(ResendEmailAdapter);
+        }
+      );
+    });
+  });
+
+  it("wires FakeEmailAdapter when email env vars are absent", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ RESEND_API_KEY: undefined, EMAIL_FROM: undefined }, () => {
+        const deps = bootstrap();
+        expect(deps.email).toBeInstanceOf(FakeEmailAdapter);
+      });
+    });
+  });
+
+  it("boots a production process with no email configuration — email disabled, not the fake adapter", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "production",
+          APP_BASE_URL: "http://localhost:5173",
+          RESEND_API_KEY: undefined,
+          EMAIL_FROM: undefined,
+          XENDIT_SECRET_KEY: undefined,
+          XENDIT_SPLIT_RULE_ID: undefined,
+          XENDIT_CALLBACK_TOKEN: undefined,
+          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+          FONNTE_API_TOKEN: "real-fonnte-token",
+          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
+        },
+        () => {
+          captureConsoleLog(() => {
+            let deps: Dependencies;
+            expect(() => {
+              deps = bootstrap();
+            }).not.toThrow();
+            expect(deps!.email).toBeNull();
+            expect(deps!.email).not.toBeInstanceOf(FakeEmailAdapter);
+          });
+        }
+      );
+    });
+  });
+
+  it("refuses to boot on partial email configuration", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ RESEND_API_KEY: "re_live_x", EMAIL_FROM: undefined }, () => {
+        expect(() => bootstrap()).toThrow(/half-configured/);
+      });
+    });
   });
 });
 
