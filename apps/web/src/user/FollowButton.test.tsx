@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import FollowButton from "./FollowButton";
@@ -284,5 +286,58 @@ describe("FollowButton — a failed toggle is not silent (item 7)", () => {
       expect(screen.getByRole("button", { name: "Mengikuti" })).toBeTruthy();
     });
     expect(screen.queryAllByRole("alert").length).toBe(0);
+  });
+});
+
+/**
+ * Re-review N4. `FollowButtonProps.viewerFollows`' docstring still described the
+ * guess item 1 deleted — "or the caller's best guess of it — see `FollowRow` in
+ * `JelajahPage.tsx` for the one place that guesses". Correcting the prose is
+ * cheap; what follows pins the CLAIM the corrected prose makes, so it cannot go
+ * stale again the way `getProfileByHandle`'s "a request nothing checks" did —
+ * that comment stayed true-looking for a whole phase after it stopped being
+ * true, and cost this project a Critical.
+ *
+ * The claim: no caller derives `viewerFollows` itself. It is the server's
+ * answer, passed straight through. A ternary or a literal in that prop position
+ * IS the guess coming back, and it is exactly what Phase 3 will be tempted to
+ * write when it renders this button inside a post card.
+ */
+describe("FollowButton — nobody guesses viewerFollows (N4)", () => {
+  it("every call site passes the server's value through, never a literal or a ternary", () => {
+    const offenders: string[] = [];
+    const dir = import.meta.dir;
+
+    for (const entry of readdirSync(dir)) {
+      if (!/\.tsx$/.test(entry) || /\.test\.tsx$/.test(entry)) continue;
+      const source = readFileSync(join(dir, entry), "utf8");
+      for (const match of source.matchAll(/viewerFollows=\{([^}]*)\}/g)) {
+        const value = match[1]!.trim();
+        // A bare identifier or property access is the server's value being
+        // forwarded. Anything containing `?`, `true` or `false` is the caller
+        // deciding — which is the defect.
+        if (/[?]|(^|\W)(true|false|null)(\W|$)/.test(value)) {
+          offenders.push(`${entry}: viewerFollows={${value}}`);
+        }
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("finds the real call sites at all, and detects a guess — guards the guard", () => {
+    const dir = import.meta.dir;
+    const callSites = readdirSync(dir)
+      .filter((entry) => /\.tsx$/.test(entry) && !/\.test\.tsx$/.test(entry))
+      .flatMap((entry) => [...readFileSync(join(dir, entry), "utf8").matchAll(/viewerFollows=\{/g)]);
+    // ProfilePage and JelajahPage's FollowRow, at least.
+    expect(callSites.length).toBeGreaterThan(1);
+
+    // The exact expression item 1 deleted.
+    const guess = "signedIn ? false : null";
+    expect(/[?]|(^|\W)(true|false|null)(\W|$)/.test(guess)).toBe(true);
+    // ...and the forwarding forms must not be flagged.
+    expect(/[?]|(^|\W)(true|false|null)(\W|$)/.test("row.viewerFollows")).toBe(false);
+    expect(/[?]|(^|\W)(true|false|null)(\W|$)/.test("viewerFollowing")).toBe(false);
   });
 });

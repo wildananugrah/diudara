@@ -22,11 +22,23 @@ export interface FollowButtonProps {
   /** The TARGET profile's handle — already normalised (lowercase) by the server, same as every `PublicUserProfile.handle`/`FollowListRow.handle`. */
   handle: string;
   /**
-   * `PublicUserProfile.viewerFollows` (or the caller's best guess of it —
-   * see `FollowRow` in `JelajahPage.tsx` for the one place that guesses).
-   * `null` (signed out) renders a link to `/masuk` instead of a button;
-   * `true`/`false` render the toggle. NEVER collapse `null` to `false` — see
-   * that field's own docstring in `apiClient.ts`.
+   * The SERVER's answer to "does this viewer follow this account?", never a
+   * guess: `PublicUserProfile.viewerFollows` from `/users/by-handle/:handle`,
+   * or `FollowListRow.viewerFollows` from `/explore`, `/:handle/followers` and
+   * `/:handle/following`. `null` (the request carried no usable viewer) renders
+   * a link to `/masuk` instead of a button; `true`/`false` render the toggle.
+   * NEVER collapse `null` to `false` — see that field's own docstring in
+   * `apiClient.ts`.
+   *
+   * This used to read "or the caller's best guess of it — see `FollowRow` in
+   * `JelajahPage.tsx` for the one place that guesses". That guess was
+   * `signedIn ? false : null`, and item 1 deleted it when it widened all three
+   * list endpoints; `FollowRow` now passes `row.viewerFollows` straight through
+   * and no caller guesses anything. Corrected by re-review N4 — a docstring
+   * describing code that no longer exists is the same failure mode as
+   * `getProfileByHandle`'s "a request nothing checks", which stayed true-looking
+   * for a whole phase after it stopped being true and cost this project a
+   * Critical.
    */
   viewerFollows: boolean | null;
   /** Told the RESULTING state after every successful toggle, so a caller showing a follower count (ProfilePage) can update it without a refetch. */
