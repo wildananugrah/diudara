@@ -12,6 +12,7 @@ import {
   resolveCallbackToken,
   resolveTelegramWebhookSecret,
   selectAiProvider,
+  selectEmailProvider,
   selectMessagingProviders,
   selectPaymentProvider,
   selectStreamingProvider,
@@ -31,8 +32,22 @@ import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.
 import { createApp } from "./app";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
+import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
+import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter";
 import { RegisterCreator } from "./application/use-cases/register-creator";
 import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
+import { RegisterUser } from "./application/use-cases/register-user";
+import { AuthenticateUser } from "./application/use-cases/authenticate-user";
+import { GetUserProfile } from "./application/use-cases/get-user-profile";
+import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
+import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
+import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
+import type { PasswordResetRepositoryPort } from "./application/ports/password-reset-repository.port";
+import type {
+  PasswordResetRepositories,
+  PasswordResetUnitOfWorkPort,
+} from "./application/ports/password-reset-unit-of-work.port";
+import type { SignupNoticeRepositoryPort } from "./application/ports/signup-notice-repository.port";
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
@@ -63,6 +78,8 @@ import type {
   CreatorRecord,
   CreatorRepositoryPort,
 } from "./application/ports/creator-repository.port";
+import type { UserRepositoryPort } from "./application/ports/user-repository.port";
+import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "./application/ports/membership-tier-repository.port";
@@ -113,6 +130,39 @@ const fakePasswordHasher: PasswordHasherPort = {
     return `hashed:${plain}`;
   },
   async verify() {
+    return false;
+  },
+};
+
+const fakeUserTokenIssuer: UserTokenIssuerPort = {
+  async issue() {
+    return "fake.user.token.value";
+  },
+  async verify() {
+    return null;
+  },
+};
+
+const fakeUserRepository: UserRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async findByHandle() {
+    return null;
+  },
+  async findById() {
+    return null;
+  },
+  async findByEmail() {
+    return null;
+  },
+  async findCredentialsByEmail() {
+    return null;
+  },
+  async updateProfile() {
+    return null;
+  },
+  async setPasswordAndBumpEpoch() {
     return false;
   },
 };
@@ -202,6 +252,55 @@ const fakeMemberRepository: MemberRepositoryPort = {
  */
 const fakeClock: ClockPort = {
   now: () => new Date("2026-08-09T11:00:00.000Z"),
+};
+
+/**
+ * Task 5's password-reset fakes. Nothing in the two "fully faked
+ * Dependencies" tests below exercises password reset — they only need a
+ * `Dependencies` object that TYPE-CHECKS — so these refuse every method
+ * rather than backing a real in-memory store, the same "not used" shape
+ * every other never-exercised fake in this file follows.
+ */
+const fakePasswordResetRepository: PasswordResetRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async findByHash() {
+    return null;
+  },
+  async countForUserSince() {
+    return 0;
+  },
+  async countForIpSince() {
+    return 0;
+  },
+  async markUsed() {
+    return false;
+  },
+  async markAllOtherOutstandingUsed() {
+    return 0;
+  },
+};
+
+class FakePasswordResetUnitOfWork implements PasswordResetUnitOfWorkPort {
+  async run<T>(work: (repositories: PasswordResetRepositories) => Promise<T>): Promise<T> {
+    return work({ passwordResets: fakePasswordResetRepository, users: fakeUserRepository });
+  }
+}
+
+/**
+ * Review finding F3's rate-limit ledger — same "not used" shape as
+ * `fakePasswordResetRepository` above: nothing in the two "fully faked
+ * Dependencies" tests below signs up against an existing email, so this
+ * only needs to type-check.
+ */
+const fakeSignupNoticeRepository: SignupNoticeRepositoryPort = {
+  async countForUserSince() {
+    return 0;
+  },
+  async record() {
+    // no-op
+  },
 };
 
 const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
@@ -474,6 +573,7 @@ describe("Dependencies (composition root contract)", () => {
       creatorRepository: fakeCreatorRepository,
       tokenIssuer: fakeTokenIssuer,
       payments: fakePaymentProvider,
+      email: null,
       registerCreator: new RegisterCreator(
         fakeCreatorRepository,
         fakePasswordHasher,
@@ -483,6 +583,37 @@ describe("Dependencies (composition root contract)", () => {
         fakeCreatorRepository,
         fakePasswordHasher,
         fakeTokenIssuer
+      ),
+      userRepository: fakeUserRepository,
+      userTokenIssuer: fakeUserTokenIssuer,
+      registerUser: new RegisterUser(
+        fakeUserRepository,
+        fakePasswordHasher,
+        null,
+        fakeMessagingProvider,
+        fakeSignupNoticeRepository,
+        fakeClock
+      ),
+      authenticateUser: new AuthenticateUser(
+        fakeUserRepository,
+        fakePasswordHasher,
+        fakeUserTokenIssuer
+      ),
+      getUserProfile: new GetUserProfile(fakeUserRepository),
+      updateUserProfile: new UpdateUserProfile(fakeUserRepository),
+      requestPasswordReset: new RequestPasswordReset(
+        fakeUserRepository,
+        fakePasswordResetRepository,
+        null,
+        fakeMessagingProvider,
+        fakeClock,
+        { appBaseUrl: "https://app.diudara.test" }
+      ),
+      completePasswordReset: new CompletePasswordReset(
+        fakePasswordResetRepository,
+        fakePasswordHasher,
+        new FakePasswordResetUnitOfWork(),
+        fakeClock
       ),
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),
@@ -633,6 +764,7 @@ describe("Dependencies (composition root contract)", () => {
       creatorRepository: fakeCreatorRepository,
       tokenIssuer: fakeTokenIssuer,
       payments: fakePaymentProvider,
+      email: null,
       registerCreator: new RegisterCreator(
         fakeCreatorRepository,
         fakePasswordHasher,
@@ -642,6 +774,37 @@ describe("Dependencies (composition root contract)", () => {
         fakeCreatorRepository,
         fakePasswordHasher,
         fakeTokenIssuer
+      ),
+      userRepository: fakeUserRepository,
+      userTokenIssuer: fakeUserTokenIssuer,
+      registerUser: new RegisterUser(
+        fakeUserRepository,
+        fakePasswordHasher,
+        null,
+        fakeMessagingProvider,
+        fakeSignupNoticeRepository,
+        fakeClock
+      ),
+      authenticateUser: new AuthenticateUser(
+        fakeUserRepository,
+        fakePasswordHasher,
+        fakeUserTokenIssuer
+      ),
+      getUserProfile: new GetUserProfile(fakeUserRepository),
+      updateUserProfile: new UpdateUserProfile(fakeUserRepository),
+      requestPasswordReset: new RequestPasswordReset(
+        fakeUserRepository,
+        fakePasswordResetRepository,
+        null,
+        fakeMessagingProvider,
+        fakeClock,
+        { appBaseUrl: "https://app.diudara.test" }
+      ),
+      completePasswordReset: new CompletePasswordReset(
+        fakePasswordResetRepository,
+        fakePasswordHasher,
+        new FakePasswordResetUnitOfWork(),
+        fakeClock
       ),
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),
@@ -1816,6 +1979,252 @@ describe("selectMessagingProviders", () => {
     const printed = lines.join("\n");
     expect(printed).not.toContain("AA-secret-bot-token");
     expect(printed).not.toContain("secret-fonnte-token");
+  });
+});
+
+describe("selectEmailProvider", () => {
+  it("selects ResendEmailAdapter when both env vars are set", () => {
+    const provider = selectEmailProvider({
+      apiKey: "re_live_x",
+      from: "DIUDARA <no-reply@diudara.example>",
+      nodeEnv: "test",
+    });
+    expect(provider).toBeInstanceOf(ResendEmailAdapter);
+  });
+
+  it("selects the real adapter in production when fully configured", () => {
+    const logs = captureConsoleLog(() => {
+      const provider = selectEmailProvider({
+        apiKey: "re_live_x",
+        from: "DIUDARA <no-reply@diudara.example>",
+        nodeEnv: "production",
+      });
+      expect(provider).toBeInstanceOf(ResendEmailAdapter);
+    });
+    expect(logs.some((line) => /ResendEmailAdapter/.test(line))).toBe(true);
+  });
+
+  it("selects FakeEmailAdapter when both env vars are unset in development or test", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of ["test", "development"]) {
+        expect(
+          selectEmailProvider({ apiKey: undefined, from: undefined, nodeEnv })
+        ).toBeInstanceOf(FakeEmailAdapter);
+      }
+    });
+  });
+
+  // CRITICAL — the row a previous phase got wrong. The NEGATIVE assertion is
+  // the one that matters, not just the null: a future "helpful" fallback to
+  // the fake adapter would satisfy a loose `expect(provider).toBeFalsy()` (or
+  // even `toBeNull()`, if the fallback itself returned null on some OTHER
+  // path) while silently reintroducing exactly the hazard this guard exists
+  // to prevent — a box that looks like it sends real email and only records
+  // sends into an array nobody reads.
+  it("disables email (returns null, never the fake adapter) in production with no email configuration", () => {
+    const logs = captureConsoleLog(() => {
+      const provider = selectEmailProvider({
+        apiKey: undefined,
+        from: undefined,
+        nodeEnv: "production",
+      });
+      expect(provider).toBeNull();
+      expect(provider).not.toBeInstanceOf(FakeEmailAdapter);
+    });
+    expect(logs.some((line) => /email is DISABLED/.test(line))).toBe(true);
+  });
+
+  it("returns null (never the fake adapter) for ANY nodeEnv outside the allowlist, including unset", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [
+        undefined,
+        "staging",
+        "prod",
+        "PRODUCTION",
+        "Production",
+        "dev",
+        "development ",
+        "",
+      ]) {
+        const provider = selectEmailProvider({ apiKey: undefined, from: undefined, nodeEnv });
+        expect(provider).toBeNull();
+        expect(provider).not.toBeInstanceOf(FakeEmailAdapter);
+      }
+    });
+  });
+
+  it("still starts on the allowlist when Resend IS configured, whatever nodeEnv says", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [undefined, "staging", "prod", "production"]) {
+        expect(
+          selectEmailProvider({
+            apiKey: "re_live_x",
+            from: "DIUDARA <no-reply@diudara.example>",
+            nodeEnv,
+          })
+        ).toBeInstanceOf(ResendEmailAdapter);
+      }
+    });
+  });
+
+  /**
+   * The Task 7 gate finding, pinned at the WIRING rather than only inside the
+   * adapter: `FakeEmailAdapter`'s own test proves `echo: true` prints, but that
+   * proves nothing about the adapter this function actually hands to
+   * `RequestPasswordReset` — and it was precisely a correct-in-isolation,
+   * unwired component that made the reset link unobtainable in local
+   * development in the first place. Both rows matter: `development` must echo
+   * (or dev is broken again) and `test` must NOT (or 100+ suites start printing
+   * message bodies over genuine failure output, the same hazard
+   * `logProviderChoice` avoids).
+   */
+  it("echoes messages in development and stays silent under test", async () => {
+    for (const [nodeEnv, shouldEcho] of [
+      ["development", true],
+      ["test", false],
+    ] as const) {
+      const provider = captureConsoleLogValue(() =>
+        selectEmailProvider({ apiKey: undefined, from: undefined, nodeEnv })
+      );
+      expect(provider).toBeInstanceOf(FakeEmailAdapter);
+
+      const lines: string[] = [];
+      const original = console.log;
+      console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+      try {
+        await (provider as FakeEmailAdapter).send({
+          to: "budi@example.com",
+          subject: "Atur ulang kata sandi DIUDARA",
+          body: "http://localhost:5173/reset/tok-abc",
+        });
+      } finally {
+        console.log = original;
+      }
+
+      expect(lines.length > 0).toBe(shouldEcho);
+      // The link, not merely "something was printed" — that is the whole point.
+      expect(lines.join("\n").includes("http://localhost:5173/reset/tok-abc")).toBe(shouldEcho);
+      // The send is recorded either way, so no existing test depends on the flag.
+      expect((provider as FakeEmailAdapter).sent.length).toBe(1);
+    }
+  });
+
+  it("treats empty-string configuration as unset in production", () => {
+    captureConsoleLog(() => {
+      const provider = selectEmailProvider({ apiKey: "", from: "", nodeEnv: "production" });
+      expect(provider).toBeNull();
+      expect(provider).not.toBeInstanceOf(FakeEmailAdapter);
+    });
+  });
+
+  it("refuses to start on partial configuration in EVERY environment", () => {
+    for (const nodeEnv of ["test", "development", "production", undefined]) {
+      expect(() =>
+        selectEmailProvider({ apiKey: "re_live_x", from: undefined, nodeEnv })
+      ).toThrow(/half-configured/);
+      expect(() =>
+        selectEmailProvider({
+          apiKey: undefined,
+          from: "DIUDARA <no-reply@diudara.example>",
+          nodeEnv,
+        })
+      ).toThrow(/half-configured/);
+    }
+  });
+
+  it("treats an empty string as unset when detecting partial configuration", () => {
+    expect(() =>
+      selectEmailProvider({ apiKey: "re_live_x", from: "   ", nodeEnv: "test" })
+    ).toThrow(/half-configured/);
+  });
+
+  it("names the missing variable, not the one that is set", () => {
+    expect(() =>
+      selectEmailProvider({ apiKey: "re_live_x", from: undefined, nodeEnv: "test" })
+    ).toThrow(/RESEND_API_KEY is set but EMAIL_FROM is not/);
+  });
+
+  it("stays silent under NODE_ENV=test and speaks up everywhere else", () => {
+    const quiet = captureConsoleLog(() => {
+      selectEmailProvider({ apiKey: undefined, from: undefined, nodeEnv: "test" });
+    });
+    expect(quiet).toEqual([]);
+
+    const loud = captureConsoleLog(() => {
+      selectEmailProvider({ apiKey: undefined, from: undefined, nodeEnv: "development" });
+    });
+    expect(loud.some((line) => /FakeEmailAdapter/.test(line))).toBe(true);
+  });
+
+  it("keeps the API key out of the startup log line", () => {
+    const lines = captureConsoleLog(() => {
+      selectEmailProvider({
+        apiKey: "re_SUPERSECRET_key",
+        from: "DIUDARA <no-reply@diudara.example>",
+        nodeEnv: "production",
+      });
+    });
+    expect(lines.join("\n")).not.toContain("re_SUPERSECRET_key");
+  });
+});
+
+describe("bootstrap() email provider selection", () => {
+  it("wires ResendEmailAdapter when RESEND_API_KEY and EMAIL_FROM are set", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        { RESEND_API_KEY: "re_live_x", EMAIL_FROM: "DIUDARA <no-reply@diudara.example>" },
+        () => {
+          const deps = bootstrap();
+          expect(deps.email).toBeInstanceOf(ResendEmailAdapter);
+        }
+      );
+    });
+  });
+
+  it("wires FakeEmailAdapter when email env vars are absent", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ RESEND_API_KEY: undefined, EMAIL_FROM: undefined }, () => {
+        const deps = bootstrap();
+        expect(deps.email).toBeInstanceOf(FakeEmailAdapter);
+      });
+    });
+  });
+
+  it("boots a production process with no email configuration — email disabled, not the fake adapter", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "production",
+          APP_BASE_URL: "http://localhost:5173",
+          RESEND_API_KEY: undefined,
+          EMAIL_FROM: undefined,
+          XENDIT_SECRET_KEY: undefined,
+          XENDIT_SPLIT_RULE_ID: undefined,
+          XENDIT_CALLBACK_TOKEN: undefined,
+          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+          FONNTE_API_TOKEN: "real-fonnte-token",
+          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
+        },
+        () => {
+          captureConsoleLog(() => {
+            let deps: Dependencies;
+            expect(() => {
+              deps = bootstrap();
+            }).not.toThrow();
+            expect(deps!.email).toBeNull();
+            expect(deps!.email).not.toBeInstanceOf(FakeEmailAdapter);
+          });
+        }
+      );
+    });
+  });
+
+  it("refuses to boot on partial email configuration", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ RESEND_API_KEY: "re_live_x", EMAIL_FROM: undefined }, () => {
+        expect(() => bootstrap()).toThrow(/half-configured/);
+      });
+    });
   });
 });
 

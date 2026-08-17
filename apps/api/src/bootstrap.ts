@@ -1,10 +1,21 @@
 import { db, sql } from "./db/client";
 import { DrizzleCreatorRepository } from "./infrastructure/repositories/drizzle-creator.repository";
+import { DrizzleUserRepository } from "./infrastructure/repositories/drizzle-user.repository";
 import { DrizzleCommunityRepository } from "./infrastructure/repositories/drizzle-community.repository";
 import { BunPasswordHasher } from "./infrastructure/auth/bun-password.hasher";
 import { HonoJwtTokenIssuer } from "./infrastructure/auth/hono-jwt.token-issuer";
+import { HonoJwtUserTokenIssuer } from "./infrastructure/auth/hono-jwt.user-token-issuer";
 import { RegisterCreator } from "./application/use-cases/register-creator";
 import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
+import { RegisterUser } from "./application/use-cases/register-user";
+import { AuthenticateUser } from "./application/use-cases/authenticate-user";
+import { GetUserProfile } from "./application/use-cases/get-user-profile";
+import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
+import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
+import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
+import { DrizzlePasswordResetRepository } from "./infrastructure/repositories/drizzle-password-reset.repository";
+import { DrizzlePasswordResetUnitOfWork } from "./infrastructure/repositories/drizzle-password-reset-unit-of-work";
+import { DrizzleSignupNoticeRepository } from "./infrastructure/repositories/drizzle-signup-notice.repository";
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
@@ -32,6 +43,8 @@ import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
 import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
+import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
+import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
@@ -62,8 +75,11 @@ import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lif
 import { ResolveWatchToken } from "./application/use-cases/resolve-watch-token";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
+import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
+import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
+import type { EmailProviderPort } from "./application/ports/email-provider.port";
 import type { AiProviderPort } from "./application/ports/ai-provider.port";
 import type { StreamingProviderPort } from "./application/ports/streaming-provider.port";
 
@@ -105,8 +121,59 @@ export interface Dependencies {
    * to construct either against.
    */
   payments: PaymentProviderPort | null;
+  /**
+   * Task 4's email provider — `null` EXACTLY when `selectEmailProvider`
+   * decided this box has no email provider at all (see that function's own
+   * docstring: absent configuration disables email rather than blocking
+   * boot, the same divergence `payments` makes from `messaging`). Exposed
+   * for the same reason every other selected provider is: a test must be
+   * able to prove what a given environment actually wired, and Task 5's
+   * `RequestPasswordReset` needs a real `EmailProviderPort` — not a fake one
+   * this field happens to be `truthy` for — to send a reset link over.
+   */
+  email: EmailProviderPort | null;
   registerCreator: RegisterCreator;
   authenticateCreator: AuthenticateCreator;
+  /**
+   * Phase 9's personal-account identity, distinct from `creatorRepository`
+   * above. Exposed here for the same reason `creatorRepository` is: a test
+   * must be able to seed/read `app_user` rows through the port rather than
+   * poking Drizzle directly.
+   */
+  userRepository: UserRepositoryPort;
+  /**
+   * Signs and verifies user-session tokens. A SEPARATE class from
+   * `tokenIssuer` even though both share `JWT_SECRET` — see
+   * `HonoJwtUserTokenIssuer`'s own docstring for why the `typ` claim, not a
+   * different secret, is what keeps the two session kinds apart.
+   */
+  userTokenIssuer: UserTokenIssuerPort;
+  /** `POST /users/signup`. Returns `{ ok: true }` only — see the use case's own docstring. */
+  registerUser: RegisterUser;
+  /** `POST /users/login`. */
+  authenticateUser: AuthenticateUser;
+  /**
+   * Task 3's `GET /users/by-handle/:handle` (public) and `GET /users/me`
+   * (behind `requireUserAuth`). One class, two methods — see its own
+   * docstring for why the public projection and the owner's own, wider one
+   * are kept as separate return types rather than one shape with optional
+   * fields.
+   */
+  getUserProfile: GetUserProfile;
+  /** Task 3's `PATCH /users/me`, behind `requireUserAuth`. Handle is not editable — see `updateProfileSchema`. */
+  updateUserProfile: UpdateUserProfile;
+  /**
+   * Task 5's `POST /users/password-reset/request`. Always answers
+   * `{ ok: true }` — see the use-case's own docstring for the enumeration-safety
+   * reasoning behind that shape being non-negotiable.
+   */
+  requestPasswordReset: RequestPasswordReset;
+  /**
+   * Task 5's `POST /users/password-reset/complete`. A missing, expired or
+   * already-used token is a 401 via `UnauthorizedError`, one identical message
+   * for all three — see the use-case's own docstring.
+   */
+  completePasswordReset: CompletePasswordReset;
   createCommunity: CreateCommunity;
   listCommunities: ListCommunities;
   updateCommunity: UpdateCommunity;
@@ -702,6 +769,101 @@ export function selectMessagingProviders(env: {
     ]),
     notifier: fakeNotifier,
   };
+}
+
+/**
+ * Chooses the email adapter — or chooses to have no email path at all, rather
+ * than ever pretending a real send happened.
+ *
+ * Task 5's password reset is the first consumer, and it is deliberately built
+ * to tolerate email being absent: `RequestPasswordReset` falls back to
+ * WhatsApp when a user has a number and messaging is configured (design spec,
+ * Task 5), and produces no send at all — not an error — when NEITHER channel
+ * is available. That is what makes `selectEmailProvider` shaped like
+ * `selectPaymentProvider` rather than like `selectMessagingProviders`: unlike
+ * an invite nobody can be told about, a missing email provider degrades to a
+ * SECOND, ALREADY-BUILT channel rather than to "the feature does not work at
+ * all", so refusing to boot over it would be the wrong trade — exactly the
+ * reasoning that turned `selectPaymentProvider`'s old throw into today's
+ * `null` once free communities gave it a genuinely payment-free path.
+ *
+ *   1. Both `RESEND_API_KEY` and `EMAIL_FROM` set -> `ResendEmailAdapter`, in
+ *      EVERY environment.
+ *   2. PARTIAL configuration throws in EVERY environment — same reasoning as
+ *      every other half-configured guard in this file: an API key with no
+ *      "from" address (or vice versa) is a typo, never intentional, and an
+ *      operator who set one believes email is live.
+ *   3. ABSENT configuration selects `FakeEmailAdapter` ONLY inside
+ *      `RELAXED_NODE_ENVS` (development/test) — the fake records sends into
+ *      an array instead of making them.
+ *   4. ABSENT configuration OUTSIDE the allowlist returns `null` RATHER THAN
+ *      THROWING, and rather than falling back to the fake: `null` is
+ *      genuinely absent, so `RequestPasswordReset` (Task 5) can see there is
+ *      no email channel and try WhatsApp instead — a fake that silently
+ *      "worked" would tell it there was a channel when there was not, and no
+ *      reset link would ever leave this process.
+ *
+ * `RESEND_API_KEY` is a bearer credential, so the startup line names the
+ * adapter and never the key — same rule as the Telegram/Fonnte tokens above.
+ */
+export function selectEmailProvider(env: {
+  apiKey: string | undefined;
+  from: string | undefined;
+  nodeEnv: string | undefined;
+}): EmailProviderPort | null {
+  const apiKey = presentOrUndefined(env.apiKey);
+  const from = presentOrUndefined(env.from);
+
+  if (apiKey && from) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] email provider: ResendEmailAdapter " +
+        "(RESEND_API_KEY and EMAIL_FROM are set — real email will be sent)"
+    );
+    return new ResendEmailAdapter({ apiKey, from });
+  }
+
+  if (apiKey || from) {
+    const missing = apiKey ? "EMAIL_FROM" : "RESEND_API_KEY";
+    const present = apiKey ? "RESEND_API_KEY" : "EMAIL_FROM";
+    throw new Error(
+      `Email is half-configured: ${present} is set but ${missing} is not. Set both or ` +
+        "neither — see apps/api/.env.example. Refusing to start rather than falling back to " +
+        "the fake email adapter while looking configured."
+    );
+  }
+
+  if (!isRelaxedNodeEnv(env.nodeEnv)) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] email provider: none — email is DISABLED " +
+        "(RESEND_API_KEY/EMAIL_FROM not set, and NODE_ENV is " +
+        `${describeNodeEnv(env.nodeEnv)}, outside ${RELAXED_NODE_ENVS_LIST}). Password reset ` +
+        "(Task 5) falls back to WhatsApp where a user has a number and messaging is " +
+        "configured, and sends nothing when neither channel is available. Set both env vars " +
+        "to enable real email, or NODE_ENV=development/test to boot with the fake adapter " +
+        "instead."
+    );
+    return null;
+  }
+
+  // `echo` ONLY under development, never under test — see `FakeEmailAdapter`'s
+  // own docstring for why the fake has to print at all (its `sent` array is
+  // unreachable from outside this process, so local development could not
+  // complete a password reset), and `logProviderChoice` just above for why
+  // `test` is the one environment that must stay silent.
+  const echo = env.nodeEnv === "development";
+  logProviderChoice(
+    env.nodeEnv,
+    "[bootstrap] email provider: FakeEmailAdapter " +
+      "(RESEND_API_KEY/EMAIL_FROM not set — no real email will be sent; set both to switch " +
+      "to the real Resend adapter)" +
+      (echo
+        ? " — every message is printed to this log instead, reset links included, so the " +
+          "password-reset flow can actually be completed locally"
+        : "")
+  );
+  return new FakeEmailAdapter({ echo });
 }
 
 /**
@@ -1367,6 +1529,18 @@ export function bootstrap(): Dependencies {
     tokenIssuer
   );
 
+  // Phase 9's personal accounts. `userTokenIssuer` deliberately reuses the
+  // SAME `jwtSecret` as the creator `tokenIssuer` above — see
+  // `HonoJwtUserTokenIssuer`'s own docstring for why the `typ` claim is what
+  // keeps the two session kinds apart, not a second secret.
+  const userRepository = new DrizzleUserRepository(db);
+  const userTokenIssuer = new HonoJwtUserTokenIssuer(jwtSecret);
+  // `registerUser` is constructed further down, alongside Task 5's password
+  // reset — see the comment there for why it needs to wait for `messaging`.
+  const authenticateUser = new AuthenticateUser(userRepository, passwordHasher, userTokenIssuer);
+  const getUserProfile = new GetUserProfile(userRepository);
+  const updateUserProfile = new UpdateUserProfile(userRepository);
+
   const communityRepository = new DrizzleCommunityRepository(db);
   const listCommunities = new ListCommunities(communityRepository);
   const getCommunity = new GetCommunity(communityRepository);
@@ -1385,6 +1559,17 @@ export function bootstrap(): Dependencies {
     splitRuleId: process.env.XENDIT_SPLIT_RULE_ID,
     nodeEnv: process.env.NODE_ENV,
   });
+
+  // Task 4. Resolved here rather than down with `messaging` below: nothing in
+  // THIS task's `Dependencies` depends on it (Task 5's `RequestPasswordReset`
+  // is the first consumer), so its position is not load-bearing the way
+  // `payments`'s is for `createCommunity`/`updateCommunity` above.
+  const email: EmailProviderPort | null = selectEmailProvider({
+    apiKey: process.env.RESEND_API_KEY,
+    from: process.env.EMAIL_FROM,
+    nodeEnv: process.env.NODE_ENV,
+  });
+
   // `createCommunity`/`updateCommunity` are constructed here, after `payments`
   // is known, rather than up with `communityRepository` above: both need to
   // know whether this box has a payment provider at all, to refuse
@@ -1542,15 +1727,53 @@ export function bootstrap(): Dependencies {
     analyticsRepository
   );
 
-  // Revocation is the ONE messaging call the API process makes; granting happens
-  // in apps/worker. Same allowlist as the payment adapter: on a box with no
-  // tokens and a NODE_ENV outside the allowlist this throws rather than booting a
-  // fake that would report a removal it never performed.
+  // Revocation used to be the ONE messaging call the API process made outside
+  // signup/login (granting happens in apps/worker) — Task 5's password reset and
+  // its existing-email signup notice are the second and third. Same allowlist as
+  // the payment adapter either way: on a box with no tokens and a NODE_ENV
+  // outside the allowlist this throws rather than booting a fake that would
+  // report a send it never performed.
   const messaging = selectMessagingProviders({
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
     fonnteApiToken: process.env.FONNTE_API_TOKEN,
     nodeEnv: process.env.NODE_ENV,
   });
+
+  // Task 5's password reset, and `registerUser`'s existing-email notice.
+  // Constructed HERE, not up with `userRepository`/`authenticateUser` above,
+  // because both need `messaging.notifier` (just resolved) and `email`/
+  // `appBaseUrl`/`clock` (resolved earlier, but this is the first point all
+  // four are available together).
+  const passwordResetRepository = new DrizzlePasswordResetRepository(db);
+  const passwordResetUnitOfWork = new DrizzlePasswordResetUnitOfWork(db);
+  // Review finding F3's rate-limit ledger for `registerUser`'s
+  // existing-email notice — a separate table/repository from
+  // `passwordResetRepository` on purpose, so exhausting one cannot starve
+  // the other. See `signupNotices` in db/schema.ts.
+  const signupNoticeRepository = new DrizzleSignupNoticeRepository(db);
+  const registerUser = new RegisterUser(
+    userRepository,
+    passwordHasher,
+    email,
+    messaging.notifier,
+    signupNoticeRepository,
+    clock
+  );
+  const requestPasswordReset = new RequestPasswordReset(
+    userRepository,
+    passwordResetRepository,
+    email,
+    messaging.notifier,
+    clock,
+    { appBaseUrl }
+  );
+  const completePasswordReset = new CompletePasswordReset(
+    passwordResetRepository,
+    passwordHasher,
+    passwordResetUnitOfWork,
+    clock
+  );
+
   const channelMembershipRepository = new DrizzleChannelMembershipRepository(db);
   const revokeChannelAccess = new RevokeChannelAccess(
     communityRepository,
@@ -1704,8 +1927,17 @@ export function bootstrap(): Dependencies {
     creatorRepository,
     tokenIssuer,
     payments,
+    email,
     registerCreator,
     authenticateCreator,
+    userRepository,
+    userTokenIssuer,
+    registerUser,
+    authenticateUser,
+    getUserProfile,
+    updateUserProfile,
+    requestPasswordReset,
+    completePasswordReset,
     createCommunity,
     listCommunities,
     updateCommunity,

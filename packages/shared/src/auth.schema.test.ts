@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { signupSchema, loginSchema } from "./auth.schema";
+import { signupSchema, loginSchema, updateProfileSchema } from "./auth.schema";
 
 describe("signupSchema", () => {
   it("accepts a valid signup and lowercases the email", () => {
@@ -54,5 +54,32 @@ describe("loginSchema", () => {
   it("accepts valid credentials and lowercases the email", () => {
     const parsed = loginSchema.parse({ email: "BUDI@example.com", password: "whatever1" });
     expect(parsed.email).toBe("budi@example.com");
+  });
+});
+
+describe("updateProfileSchema — whatsappNumber", () => {
+  it("accepts a tolerant Indonesian number, matching userSignupSchema's own regex", () => {
+    const parsed = updateProfileSchema.parse({ whatsappNumber: "081234567890" });
+    expect(parsed.whatsappNumber).toBe("081234567890");
+  });
+
+  it("accepts an explicit null, to clear the number", () => {
+    const parsed = updateProfileSchema.parse({ whatsappNumber: null });
+    expect(parsed.whatsappNumber).toBeNull();
+  });
+
+  it("an absent whatsappNumber does not appear in the parsed patch at all", () => {
+    const parsed = updateProfileSchema.parse({ displayName: "Wildan" });
+    expect("whatsappNumber" in parsed).toBe(false);
+  });
+
+  it("rejects a malformed number", () => {
+    const result = updateProfileSchema.safeParse({ whatsappNumber: "not-a-number" });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an empty string — unlike bio, this is not silently normalised to null", () => {
+    const result = updateProfileSchema.safeParse({ whatsappNumber: "" });
+    expect(result.success).toBe(false);
   });
 });

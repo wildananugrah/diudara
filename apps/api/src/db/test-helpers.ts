@@ -21,6 +21,9 @@ import {
   aiMessages,
   aiConversations,
   aiUsage,
+  appUsers,
+  passwordResetTokens,
+  signupNotices,
 } from "./schema";
 
 /**
@@ -89,4 +92,12 @@ export async function resetDatabase() {
   await db.delete(aiConversations);
   await db.delete(aiUsage);
   await db.delete(creators);
+  // passwordResetTokens and signupNotices both reference app_user, so both
+  // must clear before it — Task 5's additions, same FK-ordering rule as
+  // every other table above.
+  await db.delete(passwordResetTokens);
+  await db.delete(signupNotices);
+  // app_user is a fully independent identity table (Phase 9's pivot) — no FK
+  // relationship to anything above it, so its position here is free.
+  await db.delete(appUsers);
 }

@@ -80,6 +80,29 @@ export default defineConfig({
       // file. Production is unaffected: nginx there proxies every API path
       // to apps/api regardless of this list.
       "/streaming": "http://localhost:3000",
+      // THE THIRD INSTANCE OF THE SAME BUG CLASS (Task 6). Every `/users/...`
+      // call (signup, login, by-handle, /users/me, both password-reset
+      // endpoints — apps/web/src/user/apiClient.ts) had no entry here at
+      // all, so the dev server fell through to its SPA fallback for every
+      // one of them: `GET /users/by-handle/wildan` answered `200
+      // text/html` with `index.html`'s body, not the API's JSON, and
+      // `POST /users/signup` answered a bodiless 404 from Vite itself, never
+      // reaching apps/api. All six Task 6 pages were dead under `vite dev`
+      // until this was added — found by actually starting the dev server
+      // and loading `/@wildan`, `/signup` and `/masuk`, exactly as `/c/`'s
+      // and `/streaming`'s own history above says to. `^/users/` (a regex,
+      // segment-precise with the trailing slash) rather than the string
+      // `/users`, for the same reason `/c` was rewritten to `^/c/` above:
+      // this app's own SPA routes are single path segments
+      // (`/signup`, `/masuk`, `/pengaturan`, `/:handleParam`, …), none of
+      // which begin with `users`, so there is no real collision to guard
+      // against — but a bare string prefix would still be one character
+      // away from accidentally matching a future `/users-something` SPA
+      // route, and the regex costs nothing to make it precise now. No
+      // `bypass`: every one of these paths is reached only by `fetch()` from
+      // the pages in `apps/web/src/user/`, never by a browser navigation —
+      // the same reasoning the dashboard's own paths above rely on.
+      "^/users/": "http://localhost:3000",
     },
   },
 });

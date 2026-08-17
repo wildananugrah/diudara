@@ -884,3 +884,35 @@ tbody tr:last-child td {
   text-align: center;
   padding-top: 4rem;
 }
+
+/* ---------------------------------------------------------------
+   Personal-account pages (Task 6): /signup, /masuk, /pengaturan,
+   /lupa-sandi, /reset/:token and /@:handle. The auth forms reuse
+   .auth-page/.auth-card verbatim (already shared with the creator
+   dashboard's own LoginPage) so signing up or resetting a password
+   looks like the same product, not a bolted-on flow. .user-page is
+   this section's own equivalent of .landing — a narrow single column
+   for the two pages (profile, settings) that are not a centred card.
+   --------------------------------------------------------------- */
+.user-page {
+  max-width: 36rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 4rem;
+}
+
+.profile-page {
+  text-align: left;
+}
+
+.profile-name {
+  margin-bottom: 2px;
+}
+
+.profile-handle {
+  margin-top: 0;
+}
+
+.profile-bio {
+  margin-top: 20px;
+  white-space: pre-wrap;
+}

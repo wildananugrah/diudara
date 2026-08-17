@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { healthRoute } from "./routes/health";
 import { authRoutes } from "./routes/auth";
+import { userRoutes } from "./routes/users";
 import { communityRoutes } from "./routes/communities";
 import { tierRoutes } from "./routes/tiers";
 import { channelRoutes } from "./routes/channels";
@@ -24,6 +25,9 @@ export function createApp(deps: Dependencies) {
   app.onError(errorHandler);
   app.route("/health", healthRoute(deps));
   app.route("/auth", authRoutes(deps));
+  // Phase 9's personal accounts — distinct from creator auth above. A
+  // separate top-level path, so mount order relative to /auth does not matter.
+  app.route("/users", userRoutes(deps));
   app.route("/payment-account", paymentAccountRoutes(deps));
   // Mounted before publicCommunityRoutes: /c/:slug is a single path segment,
   // while this route's literal "subscription"/"watch" prefixes and their

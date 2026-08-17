@@ -127,6 +127,27 @@
       "when": 1786582188066,
       "tag": "0017_left_nighthawk",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1786943336440,
+      "tag": "0018_secret_dark_phoenix",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1786951327269,
+      "tag": "0019_hard_junta",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1786954366402,
+      "tag": "0020_spooky_quasimodo",
+      "breakpoints": true
     }
   ]
 }

@@ -13,6 +13,107 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
+/**
+ * The pivot's third, independent identity table — a user who follows, posts,
+ * goes live and offers memberships. `creator` and `member` are unchanged and
+ * keep both existing login paths working; nothing here migrates them. Named
+ * `app_user`, not `user`: `user` is a reserved SQL keyword that would need
+ * quoting in every hand-written query, and this project debugs through
+ * `psql` constantly.
+ */
+export const appUsers = pgTable(
+  "app_user",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    handle: varchar("handle", { length: 30 }).notNull().unique(),
+    email: varchar("email", { length: 255 }).notNull().unique(),
+    // Nullable: offered at signup, not required. A user without one has
+    // exactly one reset channel — see the spec's §5.
+    whatsappNumber: varchar("whatsapp_number", { length: 32 }),
+    passwordHash: varchar("password_hash", { length: 255 }).notNull(),
+    displayName: varchar("display_name", { length: 255 }).notNull(),
+    bio: varchar("bio", { length: 300 }),
+    // Bumped by a completed password reset. The token carries the value it
+    // was issued under and `requireUserAuth` compares — which is what makes
+    // "a reset ends all sessions" possible at all, since a JWT is stateless
+    // and cannot otherwise be revoked short of rotating JWT_SECRET.
+    sessionEpoch: integer("session_epoch").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+);
+
+/**
+ * Task 5's password reset. One row per issued link.
+ *
+ * `tokenHash` is a sha256 hex digest of the token that was sent, NEVER the
+ * token itself — a database read (a backup, a replica, an operator's SELECT)
+ * must not yield a working reset link. See `domain/reset-token.ts`.
+ *
+ * `requestIpHash` is hashed too, for the same reason, but — review finding
+ * F4 — it is NO LONGER used to enforce a limit. `X-Forwarded-For`'s leftmost
+ * entry is client-supplied, and this repository has no committed nginx
+ * configuration for the general API surface that proves anything ever
+ * overwrites it (`infra/nginx/live-hls.conf.template` is a fragment scoped
+ * to `/live/`, `/whip/` and `/webhooks/mediamtx/` only). A limit keyed on a
+ * value the caller controls is not a limit, and it was ALSO itself an
+ * oracle (F6): since `userId` is `NOT NULL`, only a REAL account's request
+ * can ever produce a row, so a shared per-IP counter let an attacker read
+ * whether some OTHER email exists by watching their own IP's count climb
+ * only on hits. The column stays for forensic/audit value only — see
+ * `RequestPasswordReset`'s own docstring.
+ *
+ * The two indexes below back the counts `RequestPasswordReset` reads: the
+ * per-account one is load-bearing (the rate limit itself); the per-IP one
+ * now backs only ad-hoc audit queries, not a runtime enforcement path.
+ * Without them either count seq-scans this table, the same defect a
+ * previous phase found in the renewal passes.
+ */
+export const passwordResetTokens = pgTable(
+  "password_reset_token",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => appUsers.id),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull().unique(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    requestIpHash: varchar("request_ip_hash", { length: 64 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("password_reset_user_created_idx").on(table.userId, table.createdAt),
+    index("password_reset_ip_created_idx").on(table.requestIpHash, table.createdAt),
+  ]
+);
+
+/**
+ * Task 5 review finding F3's fix. One row per existing-email signup notice
+ * actually sent (`RegisterUser.notifyExistingOwner`) — the rate-limit ledger
+ * for that sender, since it had none: measured, 25 signup attempts against
+ * one address delivered 25 messages, all 201, an unrate-limited amplifier
+ * (paid Fonnte sends, or an inbox flood) triggerable by anyone who knows a
+ * victim's email.
+ *
+ * A SEPARATE TABLE from `password_reset_token`, deliberately, rather than a
+ * shared budget: sharing one counter between "someone tried to sign up as
+ * you" and "you asked to reset your own password" would let an attacker who
+ * exhausts THIS cap by spamming signups also block the real owner's own
+ * password-reset requests — a self-inflicted denial of service this table's
+ * separation avoids entirely.
+ */
+export const signupNotices = pgTable(
+  "signup_notice",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("signup_notice_user_created_idx").on(table.userId, table.createdAt)]
+);
+
 export const creators = pgTable(
   "creator",
   {
