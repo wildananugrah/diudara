@@ -119,7 +119,14 @@ export class DrizzleFollowRepository implements FollowRepositoryPort {
  * every row in the table under a malformed query param. Clamping to zero
  * rows for any non-positive or non-finite input is a defined, tested
  * contract rather than a silent pass-through.
+ *
+ * EXPORTED so `DrizzleUserRepository`'s `searchPublic`/`newestPublic`/
+ * `mostFollowedPublic` (Task 3) share this SAME clamp rather than declaring
+ * their own copy — a second, independently-drifting definition of "what
+ * counts as a valid limit" is exactly the kind of duplication Task 2's
+ * review (`DEFAULT_FOLLOW_LIST_LIMIT`, I1) found sitting untested in this
+ * codebase already.
  */
-function clampLimit(limit: number): number {
+export function clampLimit(limit: number): number {
   return Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 0;
 }

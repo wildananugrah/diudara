@@ -21,6 +21,7 @@ import {
 } from "../http/user-auth.middleware";
 import { ValidationError } from "../application/errors";
 import { DEFAULT_FOLLOW_LIST_LIMIT } from "../application/use-cases/follow-user";
+import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import type { Dependencies } from "../bootstrap";
 
 /**
@@ -48,6 +49,30 @@ function parseFollowListLimit(raw: string | undefined): number {
     );
   }
   return parsed.data.limit ?? DEFAULT_FOLLOW_LIST_LIMIT;
+}
+
+/**
+ * Largest page Jelajah's `?limit=` may ask for, applied to EACH of its three
+ * lists (results/newest/mostFollowed) independently — same value and same
+ * "refuse rather than silently clamp" reasoning as `MAX_FOLLOW_LIST_LIMIT`
+ * above, kept as its own constant rather than reused because the two caps
+ * are free to diverge later without either accidentally moving the other.
+ */
+const MAX_EXPLORE_LIMIT = 100;
+
+const exploreQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_EXPLORE_LIMIT).optional(),
+});
+
+/** `?limit=` for `GET /users/explore`, parsed and defaulted — mirrors `parseFollowListLimit` above. */
+function parseExploreLimit(raw: string | undefined): number {
+  const parsed = exploreQuerySchema.safeParse({
+    ...(raw === undefined || raw === "" ? {} : { limit: raw }),
+  });
+  if (!parsed.success) {
+    throw new ValidationError(`invalid limit: must be an integer between 1 and ${MAX_EXPLORE_LIMIT}`);
+  }
+  return parsed.data.limit ?? DEFAULT_EXPLORE_LIMIT;
 }
 
 /**
@@ -117,6 +142,7 @@ export function userRoutes(
     | "completePasswordReset"
     | "followUser"
     | "listFollows"
+    | "exploreUsers"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -233,6 +259,21 @@ export function userRoutes(
       limit,
     });
     return c.json(rows);
+  });
+
+  // Task 3. Public, like `by-handle`/`followers`/`following` above — Jelajah
+  // is the discovery screen a new user with an empty follow graph lands on,
+  // and there is nothing here a signed-out visitor should not see. A static
+  // path (`/explore`), not `/:handle`, so it cannot collide with any of the
+  // dynamic handle routes above regardless of registration order.
+  //
+  // `q` is optional and may be empty/whitespace-only — `ExploreUsers`
+  // treats that as the screen's default state (empty `results`, both other
+  // lists still populated), not an error. See that class's own docstring.
+  app.get<"/explore">("/explore", async (c) => {
+    const limit = parseExploreLimit(c.req.query("limit"));
+    const result = await deps.exploreUsers.execute({ q: c.req.query("q"), limit });
+    return c.json(result);
   });
 
   return app;

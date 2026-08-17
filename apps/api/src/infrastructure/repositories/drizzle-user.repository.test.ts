@@ -5,6 +5,7 @@ import { resetDatabase } from "../../db/test-helpers";
 import { UniqueRule, UniqueViolationError } from "../../application/errors";
 import { ArrivalLatch } from "../../test-support/arrival-latch";
 import { DrizzleUserRepository } from "./drizzle-user.repository";
+import { DrizzleFollowRepository } from "./drizzle-follow.repository";
 
 beforeEach(resetDatabase);
 
@@ -292,5 +293,185 @@ describe("DrizzleUserRepository.setPasswordAndBumpEpoch", () => {
     expect(
       await repo.setPasswordAndBumpEpoch("00000000-0000-0000-0000-000000000000", "$argon2id$x")
     ).toBe(false);
+  });
+});
+
+/** Asserts the returned row carries ONLY the three `FollowListRow` fields — same discipline `drizzle-follow.repository.test.ts` uses, and the same one Task 2's review found a mutated `select()` slip past `tsc --noEmit` on. */
+function expectPublicRowShape(row: unknown): void {
+  expect(Object.keys(row as object).sort()).toEqual(["bio", "displayName", "handle"]);
+  expect("id" in (row as object)).toBe(false);
+  expect("email" in (row as object)).toBe(false);
+}
+
+describe("DrizzleUserRepository.searchPublic", () => {
+  it("matches a handle prefix, case-insensitively", async () => {
+    await repo.create(seedInput({ handle: "wildana", displayName: "Someone Else" }));
+    const target = await repo.create(seedInput({ handle: "wildanto", displayName: "Wildanto" }));
+    await repo.create(seedInput({ handle: "budi", displayName: "Budi" }));
+
+    const rows = await repo.searchPublic("WILDANT", 10);
+
+    expect(rows.map((r) => r.handle)).toEqual([target.handle]);
+  });
+
+  it("matches a display-name prefix, case-insensitively", async () => {
+    const target = await repo.create(seedInput({ handle: "userx", displayName: "Rina Wijaya" }));
+    await repo.create(seedInput({ handle: "usery", displayName: "Somebody Else" }));
+
+    const rows = await repo.searchPublic("rina wij", 10);
+
+    expect(rows.map((r) => r.handle)).toEqual([target.handle]);
+  });
+
+  it("returns only handle, displayName and bio — never id or email", async () => {
+    await repo.create(seedInput({ handle: "keycheck", displayName: "Key Check" }));
+
+    const rows = await repo.searchPublic("keycheck", 10);
+
+    expect(rows).toHaveLength(1);
+    expectPublicRowShape(rows[0]);
+  });
+
+  it("respects the limit", async () => {
+    await Promise.all(
+      Array.from({ length: 5 }, (_unused, i) =>
+        repo.create(seedInput({ handle: `caplimit${i}`, displayName: `Cap Limit ${i}` }))
+      )
+    );
+
+    const rows = await repo.searchPublic("caplimit", 2);
+
+    expect(rows).toHaveLength(2);
+  });
+
+  it("returns [] when nothing matches", async () => {
+    expect(await repo.searchPublic("nosuchprefixatall", 10)).toEqual([]);
+  });
+
+  // Same clamp contract as FollowRepositoryPort.listFollowers — Task 1 found
+  // Drizzle silently drops a negative LIMIT clause rather than erroring.
+  it("clamps a non-positive limit to zero rows rather than passing it through", async () => {
+    await repo.create(seedInput({ handle: "clamplimit", displayName: "Clamp Limit" }));
+
+    expect(await repo.searchPublic("clamplimit", -1)).toEqual([]);
+    expect(await repo.searchPublic("clamplimit", 0)).toEqual([]);
+  });
+});
+
+/**
+ * THE GUARANTEE THIS TEST HOLDS: search can never be used to test whether an
+ * email address is registered. Phase 1 measured a 215ms timing side-channel
+ * on signup/password-reset and closed it to 1.75ms specifically so neither
+ * flow could answer that question; a search box that matched `email` would
+ * undo all of that in one line, since handles/display names are already
+ * public (`/@handle`) and email is not. Named after the guarantee, not the
+ * mechanism ("does not search the email column"), so the next person to
+ * "improve" search sees immediately why this exists.
+ */
+describe("the guarantee: search can never confirm whether an email address is registered", () => {
+  it("returns zero rows for a registered user's exact email, and for its local part", async () => {
+    await repo.create(
+      seedInput({ handle: "secretive", displayName: "Secretive User", email: "rahasia@example.com" })
+    );
+
+    expect(await repo.searchPublic("rahasia@example.com", 10)).toEqual([]);
+    expect(await repo.searchPublic("rahasia", 10)).toEqual([]);
+  });
+});
+
+describe("DrizzleUserRepository.newestPublic", () => {
+  it("orders by created_at descending", async () => {
+    const first = await repo.create(seedInput({ handle: "newest1", displayName: "First" }));
+    const second = await repo.create(seedInput({ handle: "newest2", displayName: "Second" }));
+
+    const rows = await repo.newestPublic(10);
+    const handles = rows.map((r) => r.handle);
+
+    expect(handles.indexOf(second.handle)).toBeLessThan(handles.indexOf(first.handle));
+  });
+
+  it("returns only handle, displayName and bio — never id or email", async () => {
+    await repo.create(seedInput({ handle: "newestkeys", displayName: "Newest Keys" }));
+
+    const rows = await repo.newestPublic(10);
+
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expectPublicRowShape(row);
+    }
+  });
+
+  it("respects the limit", async () => {
+    await Promise.all(
+      Array.from({ length: 5 }, (_unused, i) =>
+        repo.create(seedInput({ handle: `newestcap${i}`, displayName: `Newest Cap ${i}` }))
+      )
+    );
+
+    const rows = await repo.newestPublic(2);
+
+    expect(rows).toHaveLength(2);
+  });
+
+  it("clamps a non-positive limit to zero rows rather than passing it through", async () => {
+    await repo.create(seedInput({ handle: "newestclamp", displayName: "Newest Clamp" }));
+
+    expect(await repo.newestPublic(-1)).toEqual([]);
+    expect(await repo.newestPublic(0)).toEqual([]);
+  });
+});
+
+describe("DrizzleUserRepository.mostFollowedPublic", () => {
+  it("orders by follower count descending, and users with zero followers come last", async () => {
+    const popular = await repo.create(seedInput({ handle: "popular", displayName: "Popular" }));
+    const middling = await repo.create(seedInput({ handle: "middling", displayName: "Middling" }));
+    const lonely = await repo.create(seedInput({ handle: "lonely", displayName: "Lonely" }));
+    const followerA = await repo.create(seedInput({ handle: "followera", displayName: "Follower A" }));
+    const followerB = await repo.create(seedInput({ handle: "followerb", displayName: "Follower B" }));
+
+    // Follow edges seeded through the real follow repository — the same
+    // `follow_followee_created_idx` `mostFollowedPublic` counts through.
+    const followRepo = new DrizzleFollowRepository(db);
+    await followRepo.follow(followerA.id, popular.id);
+    await followRepo.follow(followerB.id, popular.id);
+    await followRepo.follow(followerA.id, middling.id);
+    // lonely, followerA and followerB all have zero followers of their own.
+
+    const rows = await repo.mostFollowedPublic(10);
+    const handles = rows.map((r) => r.handle);
+
+    expect(handles.indexOf(popular.handle)).toBeLessThan(handles.indexOf(middling.handle));
+    expect(handles.indexOf(middling.handle)).toBeLessThan(handles.indexOf(lonely.handle));
+    expect(handles.indexOf(middling.handle)).toBeLessThan(handles.indexOf(followerA.handle));
+  });
+
+  it("returns only handle, displayName and bio — never id or email", async () => {
+    await repo.create(seedInput({ handle: "mostfollowedkeys", displayName: "Most Followed Keys" }));
+
+    const rows = await repo.mostFollowedPublic(10);
+
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expectPublicRowShape(row);
+    }
+  });
+
+  it("respects the limit", async () => {
+    await Promise.all(
+      Array.from({ length: 5 }, (_unused, i) =>
+        repo.create(seedInput({ handle: `mostfollowedcap${i}`, displayName: `Most Followed Cap ${i}` }))
+      )
+    );
+
+    const rows = await repo.mostFollowedPublic(2);
+
+    expect(rows).toHaveLength(2);
+  });
+
+  it("clamps a non-positive limit to zero rows rather than passing it through", async () => {
+    await repo.create(seedInput({ handle: "mostfollowedclamp", displayName: "Most Followed Clamp" }));
+
+    expect(await repo.mostFollowedPublic(-1)).toEqual([]);
+    expect(await repo.mostFollowedPublic(0)).toEqual([]);
   });
 });

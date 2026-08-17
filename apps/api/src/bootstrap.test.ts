@@ -41,6 +41,7 @@ import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
+import { ExploreUsers } from "./application/use-cases/explore-users";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
 import type { PasswordResetRepositoryPort } from "./application/ports/password-reset-repository.port";
@@ -166,6 +167,15 @@ const fakeUserRepository: UserRepositoryPort = {
   },
   async setPasswordAndBumpEpoch() {
     return false;
+  },
+  async searchPublic() {
+    return [];
+  },
+  async newestPublic() {
+    return [];
+  },
+  async mostFollowedPublic() {
+    return [];
   },
 };
 
@@ -627,6 +637,7 @@ describe("Dependencies (composition root contract)", () => {
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
+      exploreUsers: new ExploreUsers(fakeUserRepository),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,
@@ -820,6 +831,7 @@ describe("Dependencies (composition root contract)", () => {
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
+      exploreUsers: new ExploreUsers(fakeUserRepository),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,

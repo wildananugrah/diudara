@@ -592,6 +592,141 @@ describe("GET /users/:handle/followers and GET /users/:handle/following", () => 
   });
 });
 
+/**
+ * `GET /users/explore` — Jelajah, the discovery screen a new user with an
+ * empty follow graph lands on. Public, unauthenticated, like `by-handle`
+ * and the followers/following lists above.
+ */
+describe("GET /users/explore", () => {
+  it("with no ?q: returns both lists and an empty results — the screen's default state, not an error", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/explore");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.results).toEqual([]);
+    expect(body.newest.length).toBeGreaterThan(0);
+    expect(body.mostFollowed.length).toBeGreaterThan(0);
+  });
+
+  it("a whitespace-only ?q= behaves identically to no ?q at all", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request(`/users/explore?q=${encodeURIComponent("   ")}`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).results).toEqual([]);
+  });
+
+  it("with a ?q, returns matching users in results, alongside both other lists", async () => {
+    const a = app();
+    await tokenForValidUser(a, { handle: "wildan", email: "wildan@example.com" });
+    await tokenForValidUser(a, {
+      handle: "budi",
+      email: "budi@example.com",
+      displayName: "Budi Santoso",
+    });
+
+    const res = await a.request("/users/explore?q=wild");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.results).toHaveLength(1);
+    expect(body.results[0].handle).toBe("wildan");
+    expect(body.newest.length).toBeGreaterThan(0);
+    expect(body.mostFollowed.length).toBeGreaterThan(0);
+  });
+
+  it("returns only the three public fields in every list — no id, no email", async () => {
+    const a = app();
+    await tokenForValidUser(a, { handle: "wildan", email: "wildan@example.com" });
+
+    const res = await a.request("/users/explore?q=wild");
+    const body = await res.json();
+
+    for (const list of [body.results, body.newest, body.mostFollowed]) {
+      expect(list.length).toBeGreaterThan(0);
+      for (const row of list) {
+        expect(Object.keys(row).sort()).toEqual(["bio", "displayName", "handle"]);
+      }
+    }
+  });
+
+  it("requires no session — an anonymous request (no Authorization header) succeeds", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/explore");
+    expect(res.status).toBe(200);
+  });
+
+  /**
+   * THE GUARANTEE, proven end-to-end over real HTTP rather than only inside
+   * the repository test: Jelajah's search box must never become an oracle
+   * for whether an email address is registered. See
+   * `drizzle-user.repository.test.ts`'s identically-named-in-spirit
+   * guarantee test for the full rationale (Phase 1's 215ms->1.75ms timing
+   * closure this would otherwise undo in one line).
+   */
+  it("the guarantee: searching a registered user's email address returns zero results", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...VALID, email: "rahasia@example.com" }),
+    });
+
+    const res = await a.request(`/users/explore?q=${encodeURIComponent("rahasia@example.com")}`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).results).toEqual([]);
+
+    const localPartRes = await a.request("/users/explore?q=rahasia");
+    expect((await localPartRes.json()).results).toEqual([]);
+  });
+
+  it("rejects an out-of-range ?limit= with 400", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/explore?limit=101");
+    expect(res.status).toBe(400);
+  });
+
+  // Same "test both sides of the boundary" discipline as the followers/
+  // following `?limit=100` test above — Task 2's review found the FOURTH
+  // instance of a cap that could be silently lowered with only the
+  // rejection side under test.
+  it("accepts the maximum allowed ?limit=100", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/explore?limit=100");
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("GET /users/me", () => {
   it("requires auth — no Authorization header is a 401", async () => {
     const res = await app().request("/users/me");

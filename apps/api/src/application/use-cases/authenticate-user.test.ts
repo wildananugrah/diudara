@@ -44,6 +44,15 @@ function fakeRepository(rows: UserRecord[], credentials: UserCredentials[]) {
     async setPasswordAndBumpEpoch() {
       throw new Error("not used in these tests");
     },
+    async searchPublic() {
+      throw new Error("not used in these tests");
+    },
+    async newestPublic() {
+      throw new Error("not used in these tests");
+    },
+    async mostFollowedPublic() {
+      throw new Error("not used in these tests");
+    },
   };
   return repository;
 }

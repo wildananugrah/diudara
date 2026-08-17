@@ -58,6 +58,15 @@ function fakeUserRepository(seed: UserRecord[]) {
       hashes.set(id, passwordHash);
       return true;
     },
+    async searchPublic() {
+      throw new Error("not used in these tests");
+    },
+    async newestPublic() {
+      throw new Error("not used in these tests");
+    },
+    async mostFollowedPublic() {
+      throw new Error("not used in these tests");
+    },
   };
   return { repo, rows, hashes };
 }
