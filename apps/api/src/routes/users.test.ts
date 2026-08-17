@@ -297,6 +297,38 @@ describe("GET /users/me", () => {
     expect(body.email).toBe(VALID.email);
     expect(body.handle).toBe("wildan");
   });
+
+  it("401s a token whose sessionEpoch was bumped by a REAL setPasswordAndBumpEpoch call — not a fake", async () => {
+    // The only other place this comparison is exercised is a Task 2 unit
+    // test against a hand-written fake repository, where sessionEpoch is a
+    // plain JS number on both sides. Here it is a Postgres `integer` read
+    // back through Drizzle, compared against a JWT numeric claim — a
+    // serialisation or type mismatch on that path would be invisible to the
+    // fake, and would silently make "a password reset ends every session" a
+    // no-op.
+    const deps = bootstrap();
+    const a = createApp(deps);
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+    const loginRes = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: VALID.email, password: VALID.password }),
+    });
+    const { token, user } = (await loginRes.json()) as { token: string; user: { id: string } };
+
+    const before = await a.request("/users/me", { headers: authed(token) });
+    expect(before.status).toBe(200);
+
+    const bumped = await deps.userRepository.setPasswordAndBumpEpoch(user.id, "irrelevant-hash");
+    expect(bumped).toBe(true);
+
+    const after = await a.request("/users/me", { headers: authed(token) });
+    expect(after.status).toBe(401);
+  });
 });
 
 describe("PATCH /users/me", () => {
@@ -319,10 +351,34 @@ describe("PATCH /users/me", () => {
       body: JSON.stringify({ displayName: "Wildan Baru" }),
     });
     expect(res.status).toBe(200);
-    expect((await res.json()).displayName).toBe("Wildan Baru");
+    const body = await res.json();
+    // Assert on the response body's ACTUAL keys, not on the type — PATCH
+    // returns the widest of the three profile shapes (email AND
+    // whatsappNumber included), so it is the one most exposed by a handler
+    // that spreads instead of projecting. Both GET routes assert this; PATCH
+    // did not, and a handler returning `{ ...updated, sessionEpoch: 7, id:
+    // "leaked" }` passed every existing PATCH test.
+    expect(Object.keys(body).sort()).toEqual([
+      "bio",
+      "createdAt",
+      "displayName",
+      "email",
+      "handle",
+      "whatsappNumber",
+    ]);
+    expect(body.displayName).toBe("Wildan Baru");
 
     const confirm = await a.request("/users/me", { headers: authed(token) });
     expect((await confirm.json()).displayName).toBe("Wildan Baru");
+  });
+
+  it("rejects a garbage bearer token with 401", async () => {
+    const res = await app().request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed("not-a-real-token") },
+      body: JSON.stringify({ displayName: "New Name" }),
+    });
+    expect(res.status).toBe(401);
   });
 
   it("clears the bio with an EXPLICIT null", async () => {
@@ -344,6 +400,25 @@ describe("PATCH /users/me", () => {
     });
     expect(clearBio.status).toBe(200);
     expect((await clearBio.json()).bio).toBeNull();
+  });
+
+  it("normalises a whitespace-only bio to null, not an empty string", async () => {
+    // Otherwise "no bio" has two representations in the column (`null` and
+    // `""`), and a consumer rendering `bio ?? "Belum ada bio"` would show a
+    // blank instead of the fallback.
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ bio: "   " }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).bio).toBeNull();
+
+    const confirm = await a.request("/users/me", { headers: authed(token) });
+    expect((await confirm.json()).bio).toBeNull();
   });
 
   it("an ABSENT bio leaves the existing value alone", async () => {

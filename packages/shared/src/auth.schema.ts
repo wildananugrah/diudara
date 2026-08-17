@@ -57,11 +57,25 @@ export type UserLoginInput = z.infer<typeof userLoginSchema>;
  * (present in the patch, so `updateProfile` sets the column to NULL); an
  * absent `bio` leaves it untouched. Those are two different requests and
  * must stay distinguishable all the way down to `DrizzleUserRepository`.
+ *
+ * An empty or whitespace-only `bio` (after `.trim()`) is normalised to
+ * `null` here, via `.transform`, so "no bio" has exactly one representation
+ * in the column instead of two (`null` AND `""`). A consumer that renders
+ * `bio ?? "Belum ada bio"` would otherwise show a blank instead of the
+ * fallback for a bio of `"   "`. This only collapses an empty STRING to
+ * null; an explicit `null` and an absent `bio` are untouched by it and stay
+ * distinguishable exactly as before.
  */
 export const updateProfileSchema = z
   .object({
     displayName: z.string().trim().min(1).max(255).optional(),
-    bio: z.string().trim().max(300).nullable().optional(),
+    bio: z
+      .string()
+      .trim()
+      .max(300)
+      .nullable()
+      .optional()
+      .transform((value) => (value === "" ? null : value)),
   })
   .refine((patch) => Object.keys(patch).length > 0, {
     message: "at least one field is required",
