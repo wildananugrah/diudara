@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import {
   completePasswordResetSchema,
+  MAX_EXPLORE_QUERY_LENGTH,
   requestPasswordResetSchema,
   updateProfileSchema,
   userLoginSchema,
@@ -60,18 +61,24 @@ function parseFollowListLimit(raw: string | undefined): number {
  */
 const MAX_EXPLORE_LIMIT = 100;
 
-/**
- * Largest `?q=` Jelajah will accept — review round 1, Minor: every other
- * user-supplied string on this router is bounded (`handle` 31,
- * `displayName` 255, `bio` 300 — see `@diudara/shared`'s signup/profile
- * schemas), but `q` had no bound at all on this public, unauthenticated,
- * unrate-limited route. `searchPublic`'s own metacharacter escaping (see
- * its docstring) already makes an arbitrarily long `q` cheap to execute —
- * this is about consistency with the rest of the router, not a
- * vulnerability being closed.
+/*
+ * `MAX_EXPLORE_QUERY_LENGTH` — review round 1, Minor: every other
+ * user-supplied string on this router is bounded (`handle` 31, `displayName`
+ * 255, `bio` 300 — see `@diudara/shared`'s signup/profile schemas), but `q`
+ * had no bound at all on this public, unauthenticated, unrate-limited route.
+ * `searchPublic`'s own metacharacter escaping (see its docstring) already
+ * makes an arbitrarily long `q` cheap to execute — this is about consistency
+ * with the rest of the router, not a vulnerability being closed.
+ *
+ * IT USED TO BE DECLARED HERE, PRIVATELY, and that is what the final review's
+ * I3 turned on: only the server knew the number, so `JelajahPage` neither
+ * bounded its input nor bounded what it sent, and the 400 this schema produces
+ * reached the screen verbatim — in English — taking both discovery rails down
+ * with it. It now lives in `@diudara/shared` alongside the signup/login schemas,
+ * imported by BOTH sides. See that constant's own docstring for why a second
+ * literal on the client would have re-created a defect this project has already
+ * shipped once.
  */
-const MAX_EXPLORE_QUERY_LENGTH = 100;
-
 const exploreQuerySchema = z.object({
   q: z.string().max(MAX_EXPLORE_QUERY_LENGTH).optional(),
   limit: z.coerce.number().int().min(1).max(MAX_EXPLORE_LIMIT).optional(),

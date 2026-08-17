@@ -40,6 +40,28 @@ export const userLoginSchema = z.object({
   password: z.string().min(1).max(200),
 });
 
+/**
+ * Longest `?q=` Jelajah accepts — **the ONE definition, shared by the server
+ * that refuses a longer one and the client that must never send one.**
+ *
+ * It lives here rather than in `apps/api/src/routes/users.ts` (where it was
+ * declared privately) because the final review measured what happens when only
+ * the server knows the number: pasting a long line into the search box produced
+ * `400 {"error":"invalid query: q must be at most 100 characters, ..."}`, which
+ * `readError` lifted verbatim onto the screen — the first user-reachable
+ * ENGLISH string in the member UI — and blanked both discovery rails with it.
+ *
+ * Two literals would have fixed the symptom and re-created a defect this
+ * project has already shipped once: Task 2's review found a limit constant
+ * duplicated between a use case and a route where the TESTED copy was the
+ * UNUSED one. Both sides import this instead. Tests on both sides deliberately
+ * assert the LITERAL `100`, never this constant — asserting against the same
+ * symbol the production code reads moves in lockstep with any regression to it
+ * and passes vacuously, which is the trap Task 3's implementer caught in its
+ * own first attempt.
+ */
+export const MAX_EXPLORE_QUERY_LENGTH = 100;
+
 export type UserSignupInput = z.infer<typeof userSignupSchema>;
 export type UserLoginInput = z.infer<typeof userLoginSchema>;
 
