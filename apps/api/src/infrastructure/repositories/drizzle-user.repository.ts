@@ -1,5 +1,5 @@
 import { eq, sql } from "drizzle-orm";
-import type { db as DbClient } from "../../db/client";
+import type { DatabaseExecutor } from "../../db/client";
 import { appUsers } from "../../db/schema";
 import { UniqueRule } from "../../application/errors";
 import { rethrowUniqueViolation } from "./pg-errors";
@@ -26,7 +26,16 @@ const userColumns = {
 } as const;
 
 export class DrizzleUserRepository implements UserRepositoryPort {
-  constructor(private readonly db: typeof DbClient) {}
+  /**
+   * `DatabaseExecutor`, not the pooled client specifically — Task 5's
+   * `DrizzlePasswordResetUnitOfWork` constructs this against an open
+   * transaction handle (`tx`), exactly the way `DrizzleSubscriptionRepository`
+   * and the rest are constructed inside `DrizzlePaymentActivationUnitOfWork`,
+   * so that `setPasswordAndBumpEpoch` joins the SAME transaction as the token
+   * writes around it. `PgTransaction` satisfies `DatabaseExecutor`, so this
+   * needed no cast — see `db/client.ts`'s own docstring on the type.
+   */
+  constructor(private readonly db: DatabaseExecutor) {}
 
   async create(input: {
     handle: string;
