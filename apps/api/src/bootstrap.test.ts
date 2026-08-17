@@ -33,6 +33,8 @@ import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapt
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { RegisterCreator } from "./application/use-cases/register-creator";
 import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
+import { RegisterUser } from "./application/use-cases/register-user";
+import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
@@ -63,6 +65,8 @@ import type {
   CreatorRecord,
   CreatorRepositoryPort,
 } from "./application/ports/creator-repository.port";
+import type { UserRepositoryPort } from "./application/ports/user-repository.port";
+import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "./application/ports/membership-tier-repository.port";
@@ -113,6 +117,39 @@ const fakePasswordHasher: PasswordHasherPort = {
     return `hashed:${plain}`;
   },
   async verify() {
+    return false;
+  },
+};
+
+const fakeUserTokenIssuer: UserTokenIssuerPort = {
+  async issue() {
+    return "fake.user.token.value";
+  },
+  async verify() {
+    return null;
+  },
+};
+
+const fakeUserRepository: UserRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async findByHandle() {
+    return null;
+  },
+  async findById() {
+    return null;
+  },
+  async findByEmail() {
+    return null;
+  },
+  async findCredentialsByEmail() {
+    return null;
+  },
+  async updateProfile() {
+    return null;
+  },
+  async setPasswordAndBumpEpoch() {
     return false;
   },
 };
@@ -484,6 +521,14 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeTokenIssuer
       ),
+      userRepository: fakeUserRepository,
+      userTokenIssuer: fakeUserTokenIssuer,
+      registerUser: new RegisterUser(fakeUserRepository, fakePasswordHasher),
+      authenticateUser: new AuthenticateUser(
+        fakeUserRepository,
+        fakePasswordHasher,
+        fakeUserTokenIssuer
+      ),
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),
       updateCommunity: new UpdateCommunity(fakeCommunityRepository),
@@ -642,6 +687,14 @@ describe("Dependencies (composition root contract)", () => {
         fakeCreatorRepository,
         fakePasswordHasher,
         fakeTokenIssuer
+      ),
+      userRepository: fakeUserRepository,
+      userTokenIssuer: fakeUserTokenIssuer,
+      registerUser: new RegisterUser(fakeUserRepository, fakePasswordHasher),
+      authenticateUser: new AuthenticateUser(
+        fakeUserRepository,
+        fakePasswordHasher,
+        fakeUserTokenIssuer
       ),
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),

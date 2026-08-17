@@ -1,10 +1,14 @@
 import { db, sql } from "./db/client";
 import { DrizzleCreatorRepository } from "./infrastructure/repositories/drizzle-creator.repository";
+import { DrizzleUserRepository } from "./infrastructure/repositories/drizzle-user.repository";
 import { DrizzleCommunityRepository } from "./infrastructure/repositories/drizzle-community.repository";
 import { BunPasswordHasher } from "./infrastructure/auth/bun-password.hasher";
 import { HonoJwtTokenIssuer } from "./infrastructure/auth/hono-jwt.token-issuer";
+import { HonoJwtUserTokenIssuer } from "./infrastructure/auth/hono-jwt.user-token-issuer";
 import { RegisterCreator } from "./application/use-cases/register-creator";
 import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
+import { RegisterUser } from "./application/use-cases/register-user";
+import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
@@ -62,7 +66,9 @@ import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lif
 import { ResolveWatchToken } from "./application/use-cases/resolve-watch-token";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
+import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
+import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 import type { AiProviderPort } from "./application/ports/ai-provider.port";
 import type { StreamingProviderPort } from "./application/ports/streaming-provider.port";
@@ -107,6 +113,24 @@ export interface Dependencies {
   payments: PaymentProviderPort | null;
   registerCreator: RegisterCreator;
   authenticateCreator: AuthenticateCreator;
+  /**
+   * Phase 9's personal-account identity, distinct from `creatorRepository`
+   * above. Exposed here for the same reason `creatorRepository` is: a test
+   * must be able to seed/read `app_user` rows through the port rather than
+   * poking Drizzle directly.
+   */
+  userRepository: UserRepositoryPort;
+  /**
+   * Signs and verifies user-session tokens. A SEPARATE class from
+   * `tokenIssuer` even though both share `JWT_SECRET` — see
+   * `HonoJwtUserTokenIssuer`'s own docstring for why the `typ` claim, not a
+   * different secret, is what keeps the two session kinds apart.
+   */
+  userTokenIssuer: UserTokenIssuerPort;
+  /** `POST /users/signup`. Returns `{ ok: true }` only — see the use case's own docstring. */
+  registerUser: RegisterUser;
+  /** `POST /users/login`. */
+  authenticateUser: AuthenticateUser;
   createCommunity: CreateCommunity;
   listCommunities: ListCommunities;
   updateCommunity: UpdateCommunity;
@@ -1367,6 +1391,15 @@ export function bootstrap(): Dependencies {
     tokenIssuer
   );
 
+  // Phase 9's personal accounts. `userTokenIssuer` deliberately reuses the
+  // SAME `jwtSecret` as the creator `tokenIssuer` above — see
+  // `HonoJwtUserTokenIssuer`'s own docstring for why the `typ` claim is what
+  // keeps the two session kinds apart, not a second secret.
+  const userRepository = new DrizzleUserRepository(db);
+  const userTokenIssuer = new HonoJwtUserTokenIssuer(jwtSecret);
+  const registerUser = new RegisterUser(userRepository, passwordHasher);
+  const authenticateUser = new AuthenticateUser(userRepository, passwordHasher, userTokenIssuer);
+
   const communityRepository = new DrizzleCommunityRepository(db);
   const listCommunities = new ListCommunities(communityRepository);
   const getCommunity = new GetCommunity(communityRepository);
@@ -1706,6 +1739,10 @@ export function bootstrap(): Dependencies {
     payments,
     registerCreator,
     authenticateCreator,
+    userRepository,
+    userTokenIssuer,
+    registerUser,
+    authenticateUser,
     createCommunity,
     listCommunities,
     updateCommunity,
