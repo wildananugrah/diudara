@@ -40,6 +40,8 @@ import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
+import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
+import { ExploreUsers } from "./application/use-cases/explore-users";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
 import type { PasswordResetRepositoryPort } from "./application/ports/password-reset-repository.port";
@@ -79,6 +81,7 @@ import type {
   CreatorRepositoryPort,
 } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
+import type { FollowRepositoryPort } from "./application/ports/follow-repository.port";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
@@ -164,6 +167,40 @@ const fakeUserRepository: UserRepositoryPort = {
   },
   async setPasswordAndBumpEpoch() {
     return false;
+  },
+  async searchPublic() {
+    return [];
+  },
+  async newestPublic() {
+    return [];
+  },
+  async mostFollowedPublic() {
+    return [];
+  },
+};
+
+/** Task 2 (profiles and following)'s repository, faked the same shallow way every other repository above is — these tests are about `Dependencies` wiring, not follow behaviour. */
+const fakeFollowRepository: FollowRepositoryPort = {
+  async follow() {
+    return true;
+  },
+  async unfollow() {
+    return true;
+  },
+  async isFollowing() {
+    return false;
+  },
+  async followedHandlesAmong() {
+    return [];
+  },
+  async countsFor() {
+    return { followers: 0, following: 0 };
+  },
+  async listFollowers() {
+    return [];
+  },
+  async listFollowing() {
+    return [];
   },
 };
 
@@ -599,8 +636,11 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeUserTokenIssuer
       ),
-      getUserProfile: new GetUserProfile(fakeUserRepository),
+      getUserProfile: new GetUserProfile(fakeUserRepository, fakeFollowRepository),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
+      followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
+      listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
+      exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,
@@ -790,8 +830,11 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeUserTokenIssuer
       ),
-      getUserProfile: new GetUserProfile(fakeUserRepository),
+      getUserProfile: new GetUserProfile(fakeUserRepository, fakeFollowRepository),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
+      followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
+      listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
+      exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,

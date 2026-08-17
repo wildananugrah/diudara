@@ -148,6 +148,13 @@
       "when": 1786954366402,
       "tag": "0020_spooky_quasimodo",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1786970699674,
+      "tag": "0021_sour_weapon_omega",
+      "breakpoints": true
     }
   ]
 }

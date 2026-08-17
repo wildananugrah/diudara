@@ -57,6 +57,35 @@ export function getUserToken(): string | null {
   }
 }
 
+/**
+ * **THE single answer to "is there a session?" — read from the TOKEN key and
+ * from nothing else.**
+ *
+ * Final-review I2: that question used to be answered from two different
+ * storage keys. `getProfileByHandle` asked `getUserToken()`
+ * (`diudara.user.token`); `FollowRow` in `JelajahPage.tsx` asked
+ * `getSessionUser() !== null` (`diudara.user.account`). Each was locally
+ * defensible and together they were wrong, because nothing ever put the two
+ * keys out of step in a test — every test either `localStorage.clear()`s or
+ * goes through `setUserSession`, which writes both. In the divergent state the
+ * review measured `"Masuk untuk mengikuti"` rendering on every row while a
+ * perfectly valid token sat in storage.
+ *
+ * The token is the right key because it is the only one the SERVER can act on:
+ * it is what `authorizedHeaders` attaches, and therefore what decides whether
+ * the API sees a viewer at all. The account cache answers a DIFFERENT question
+ * — "who am I?" — and `getSessionUser` stays the answer to that one. A missing
+ * account cache is not a missing session; it is a session whose display name
+ * and handle are unknown.
+ *
+ * Returns a boolean, not the token, so callers cannot accidentally start
+ * treating the two questions as one again — and so `useSyncExternalStore`
+ * compares a stable primitive.
+ */
+export function isUserSignedIn(): boolean {
+  return getUserToken() !== null;
+}
+
 export function getSessionUser(): SessionUser | null {
   let raw: string | null;
   try {
@@ -85,17 +114,65 @@ export function getSessionUser(): SessionUser | null {
   }
 }
 
-/** Stores the token and the account together, then notifies. */
+/** Bahasa Indonesia, because it is user-visible: `LoginPage` renders it. */
+export const SESSION_NOT_STORED_MESSAGE =
+  "Sesi tidak dapat disimpan di peramban ini. Coba lagi atau aktifkan penyimpanan situs.";
+
+/**
+ * Thrown by `setUserSession` when the account write fails AFTER the token
+ * write succeeded. Its own class rather than a bare `Error` so `LoginPage` can
+ * tell it from a network failure and show the right Bahasa sentence — a bare
+ * `Error` lands in that page's "Tidak dapat menghubungi server" branch, which
+ * would be a lie about what went wrong.
+ */
+export class SessionStorageError extends Error {
+  constructor() {
+    super(SESSION_NOT_STORED_MESSAGE);
+    this.name = "SessionStorageError";
+  }
+}
+
+/**
+ * Stores the token and the account together, then notifies. **ALL OR NOTHING.**
+ *
+ * Final-review I2: these two `setItem` calls used to share one `try`, token
+ * first. If the SECOND threw — quota, or Safari's storage behaviour, the same
+ * class of failure `getUserToken`'s own try/catch two functions up already
+ * anticipates — the token was already persisted, was never rolled back, and
+ * `notify()` was skipped. The app then held a token with no account cache, and
+ * the review measured the consequence: a live "Ikuti" button on your OWN
+ * profile, collecting the 409 that three separate docstrings exist to prevent.
+ *
+ * So the second failure now UNDOES the first and throws. A caller that cannot
+ * store a session must find out, rather than continuing with half of one.
+ *
+ * The FIRST write failing is different and still returns silently: nothing was
+ * written, so there is no half state to clean up, and a browser with storage
+ * disabled entirely should still be able to complete a login for the life of
+ * the page rather than being refused outright. `notify()` is skipped either way
+ * — announcing a session that `getUserToken()` cannot see would only make the
+ * UI flicker.
+ */
 export function setUserSession(token: string, user: SessionUser): void {
   try {
     localStorage.setItem(USER_TOKEN_STORAGE_KEY, token);
-    localStorage.setItem(USER_ACCOUNT_STORAGE_KEY, JSON.stringify(user));
   } catch {
-    // Storage is unavailable; the session simply will not persist. Notifying
-    // anyway is wrong — `getUserToken()` would still be null and the UI
-    // would flicker.
     return;
   }
+
+  try {
+    localStorage.setItem(USER_ACCOUNT_STORAGE_KEY, JSON.stringify(user));
+  } catch {
+    try {
+      localStorage.removeItem(USER_TOKEN_STORAGE_KEY);
+    } catch {
+      // Storage that accepted a write and refuses a remove is beyond anything
+      // this function can repair. Throwing below is still right: the caller
+      // must not proceed as though the session were sound.
+    }
+    throw new SessionStorageError();
+  }
+
   notify();
 }
 
@@ -226,6 +303,42 @@ async function publicPost<T>(path: string, body: unknown, fallback: string): Pro
   return (await res.json()) as T;
 }
 
+/**
+ * A **PUBLIC BUT NOT ANONYMOUS** GET whose JSON body is the result — the
+ * `publicPost` above, but for `GET`. Backs Jelajah's three lists and a
+ * profile's follower/following screens.
+ *
+ * **IT SENDS THE VIEWER'S TOKEN, and that is the whole point of this
+ * function.** Its docstring used to justify sending nothing with "attaching a
+ * stale Authorization header to a request nothing checks is pointless" — true
+ * when written, and false from the moment the final review's item 1 put
+ * `resolveViewerId` on all three of `/explore`, `/:handle/followers` and
+ * `/:handle/following`. That viewer id is the ONLY input to the per-row
+ * `viewerFollows`, so with no header every row of `/@you/mengikuti` comes back
+ * `viewerFollows: null` and renders "Masuk untuk mengikuti" to somebody who is
+ * signed in — the gate's Critical from `11b8848`, verbatim, one function over.
+ * The review named this seam explicitly: "it becomes the gate's Critical again
+ * the moment item 1 is done, and nothing guards it." Both directions are now
+ * pinned in `apiClient.test.ts`.
+ *
+ * Deliberately NOT routed through `apiRequest`, for the same reason
+ * `getProfileByHandle` is not: `apiRequest` clears the session and throws
+ * `SESSION_EXPIRED_MESSAGE` on a 401, which is right for a route that REQUIRES
+ * a session and wrong for one that merely NOTICES it. These three routes never
+ * answer 401 at all — `resolveViewerId` degrades a bad token to anonymous — so
+ * an expired token must show the anonymous view, never sign a visitor out
+ * mid-browse. `authorizedHeaders` attaches the token when there is one and
+ * nothing whatsoever when there is not, so the signed-out path is byte-identical
+ * on the wire to sending no init at all.
+ */
+async function publicGet<T>(path: string, fallback: string): Promise<T> {
+  const res = await fetch(path, { headers: authorizedHeaders(undefined, getUserToken()) });
+  if (!res.ok) {
+    throw await readError(res, fallback);
+  }
+  return (await res.json()) as T;
+}
+
 interface AuthSuccess {
   user: SessionUser;
   token: string;
@@ -258,12 +371,19 @@ export function signup(input: {
 }
 
 /**
- * `GET /users/by-handle/:handle`. Public — no auth, and deliberately not
- * routed through `apiRequest`: attaching a stale Authorization header to a
- * request nothing checks would be pointless, and a signed-out visitor must
- * be able to browse a profile at all.
+ * Fields common to every profile shape `/users/...` returns, public or own —
+ * mirrors the API's own `UserProfileCore`
+ * (`apps/api/src/application/use-cases/get-user-profile.ts`) deliberately,
+ * split out for the exact same reason that file's own docstring gives:
+ * `OwnUserProfile` below must extend THIS, never `PublicUserProfile`.
+ * `PublicUserProfile` widened by three fields (`followerCount`,
+ * `followingCount`, `viewerFollows`) once following existed (Task 5); if
+ * `OwnUserProfile` inherited from it instead of from this shared core, `GET
+ * /users/me`'s type would falsely claim those three fields even though that
+ * endpoint has never returned them — the exact structural mistake Task 2
+ * avoided server-side, carried over here for the same reason.
  */
-export interface PublicUserProfile {
+export interface UserProfileCore {
   handle: string;
   displayName: string;
   bio: string | null;
@@ -271,16 +391,60 @@ export interface PublicUserProfile {
   createdAt: string;
 }
 
-export async function getProfileByHandle(handle: string): Promise<PublicUserProfile> {
-  const res = await fetch(`/users/by-handle/${encodeURIComponent(handle)}`);
-  if (!res.ok) {
-    throw await readError(res, `gagal memuat profil (${res.status})`);
-  }
-  return (await res.json()) as PublicUserProfile;
+/**
+ * `GET /users/by-handle/:handle`'s response shape. Task 5 widens this by
+ * exactly three fields, mirroring the API's own `PublicUserProfile`
+ * (see that interface's own docstring for the full reasoning):
+ * `followerCount`, `followingCount`, and `viewerFollows`.
+ *
+ * `viewerFollows` is `null` for a signed-out visitor, `false` for a
+ * signed-in visitor who does not follow this profile, `true` for one who
+ * does. **It is `false`, not `null` or anything special, on YOUR OWN
+ * profile** — the API deliberately emits no self-signal (see the API's own
+ * docstring), so a follow button must decide "is this my own profile?" by
+ * comparing handles, never by reading this field alone. See
+ * `FollowButton.tsx`'s own docstring for where that comparison happens.
+ */
+export interface PublicUserProfile extends UserProfileCore {
+  followerCount: number;
+  followingCount: number;
+  viewerFollows: boolean | null;
 }
 
-/** `GET /users/me`'s shape — the public profile plus the caller's own email and WhatsApp number. */
-export interface OwnUserProfile extends PublicUserProfile {
+/**
+ * `GET /users/by-handle/:handle` — **PUBLIC BUT NOT ANONYMOUS**, exactly like
+ * the three list endpoints, so it goes through the exact same `publicGet`.
+ *
+ * IT USED TO BE A HAND-ROLLED COPY of `publicGet`: its own `fetch`, its own
+ * `authorizedHeaders`, its own `readError`. Its docstring even opened by
+ * claiming "the distinction is the whole reason this function does not simply
+ * call `publicGet`" — which was never the real reason. The real reason was that
+ * `publicGet` sent no token at the time, and the copy is what made it possible
+ * to forget the viewer header in ONE of them without the other noticing. It was
+ * then forgotten in each, separately: here until `11b8848` (the gate's
+ * Critical), and in `publicGet` until `926bb10` (the same Critical, one function
+ * over). Two places to forget it, forgotten twice. Now there is one place.
+ *
+ * See `publicGet` itself for the contract both callers share: the token is
+ * attached when there is one and nothing at all when there is not, and this is
+ * deliberately NOT routed through `apiRequest`, because `apiRequest` clears the
+ * session and throws on a 401 — right for a route that REQUIRES a session,
+ * wrong for one that merely NOTICES one. An expired token must degrade to the
+ * anonymous view, never sign a visitor out mid-browse.
+ */
+export function getProfileByHandle(handle: string): Promise<PublicUserProfile> {
+  return publicGet<PublicUserProfile>(
+    `/users/by-handle/${encodeURIComponent(handle)}`,
+    "gagal memuat profil"
+  );
+}
+
+/**
+ * `GET /users/me`'s shape — the CORE fields plus the caller's own email and
+ * WhatsApp number. Extends `UserProfileCore`, not `PublicUserProfile` — see
+ * that interface's own docstring above for why.
+ */
+export interface OwnUserProfile extends UserProfileCore {
   email: string;
   whatsappNumber: string | null;
 }
@@ -326,4 +490,78 @@ export function requestPasswordReset(email: string): Promise<{ ok: true }> {
  */
 export function completePasswordReset(token: string, newPassword: string): Promise<{ ok: true }> {
   return publicPost("/users/password-reset/complete", { token, newPassword }, "gagal mengganti sandi");
+}
+
+/**
+ * A single row in a follower/following list or a Jelajah result — mirrors the
+ * API's own `FollowListRowForViewer`
+ * (`apps/api/src/application/use-cases/viewer-follow-state.ts`) exactly: the
+ * same shape backs `GET /:handle/followers`, `/:handle/following` and
+ * `/explore`'s three lists.
+ *
+ * Still narrower than `PublicUserProfile` — no counts — but it DOES carry
+ * `viewerFollows` as of the final review's item 1, with the identical contract:
+ * `null` when the request carried no usable viewer, `boolean` when it did, and
+ * **`false` on your own row**, since the API emits no self-signal. Before this,
+ * `FollowRow` guessed the value from whether a session existed, so every row of
+ * `/@you/mengikuti` — the list of everyone you follow — read "Ikuti".
+ */
+export interface FollowListRow {
+  handle: string;
+  displayName: string;
+  bio: string | null;
+  viewerFollows: boolean | null;
+}
+
+/**
+ * `POST /:handle/follow`. Idempotent and always resolves `{ following: true
+ * }` — see `FollowUser`'s own docstring for why this is the RESULTING
+ * state, not whether a row changed, and why that is exactly the shape
+ * `FollowButton`'s optimistic update needs.
+ */
+export function followUser(handle: string): Promise<{ following: boolean }> {
+  return apiFetch<{ following: boolean }>(`/users/${encodeURIComponent(handle)}/follow`, { method: "POST" });
+}
+
+/** `DELETE /:handle/follow` — the other half of `followUser` above, same idempotency guarantee. */
+export function unfollowUser(handle: string): Promise<{ following: boolean }> {
+  return apiFetch<{ following: boolean }>(`/users/${encodeURIComponent(handle)}/follow`, { method: "DELETE" });
+}
+
+/** `GET /:handle/followers` — public, reachable by tapping a profile's follower count. */
+export function listFollowers(handle: string, limit?: number): Promise<FollowListRow[]> {
+  const search = limit !== undefined ? `?limit=${limit}` : "";
+  return publicGet<FollowListRow[]>(
+    `/users/${encodeURIComponent(handle)}/followers${search}`,
+    "gagal memuat daftar pengikut"
+  );
+}
+
+/** `GET /:handle/following` — the other half of `listFollowers` above. */
+export function listFollowing(handle: string, limit?: number): Promise<FollowListRow[]> {
+  const search = limit !== undefined ? `?limit=${limit}` : "";
+  return publicGet<FollowListRow[]>(
+    `/users/${encodeURIComponent(handle)}/following${search}`,
+    "gagal memuat daftar mengikuti"
+  );
+}
+
+/**
+ * `GET /explore`. `q` omitted or empty is Jelajah's DEFAULT state, not an
+ * error — see `ExploreUsers`'s own docstring: `results` comes back `[]` and
+ * `newest`/`mostFollowed` are still populated either way.
+ */
+export interface ExploreResult {
+  results: FollowListRow[];
+  newest: FollowListRow[];
+  mostFollowed: FollowListRow[];
+}
+
+export function exploreUsers(input: { q?: string; limit?: number } = {}): Promise<ExploreResult> {
+  const params = new URLSearchParams();
+  if (input.q !== undefined && input.q.length > 0) params.set("q", input.q);
+  if (input.limit !== undefined) params.set("limit", String(input.limit));
+  const query = params.toString();
+  const search = query.length > 0 ? `?${query}` : "";
+  return publicGet<ExploreResult>(`/users/explore${search}`, "gagal memuat Jelajah");
 }

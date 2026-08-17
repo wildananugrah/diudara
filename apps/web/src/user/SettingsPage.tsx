@@ -9,6 +9,7 @@ import {
   UserApiError,
   type OwnUserProfile,
 } from "./apiClient";
+import { describeRequestFailure } from "./errorCopy";
 
 type LoadState =
   | { status: "loading" }
@@ -63,10 +64,9 @@ function SettingsForm() {
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setLoad({
-          status: "error",
-          message: err instanceof Error ? err.message : "gagal memuat profil",
-        });
+        // N1 — same class as ProfilePage/FollowListPage, found by the guard
+        // rather than by anyone noticing it. See `errorCopy.ts`.
+        setLoad({ status: "error", message: describeRequestFailure(err) });
       });
     return () => {
       cancelled = true;
@@ -99,12 +99,17 @@ function SettingsForm() {
       setSaved(true);
     } catch (err) {
       if (err instanceof UserApiError && err.status === 400) {
-        setMessage(Object.keys(err.fieldErrors).length > 0 ? "Periksa data yang Anda isi." : err.message);
+        // The per-FIELD detail is still rendered, from `fieldErrors` — that is
+        // the one part of a 400 a user can act on. The summary line is Bahasa
+        // either way, never the raw message.
+        setMessage(
+          Object.keys(err.fieldErrors).length > 0
+            ? "Periksa data yang Anda isi."
+            : describeRequestFailure(err)
+        );
         setFieldErrors(err.fieldErrors);
-      } else if (err instanceof UserApiError) {
-        setMessage(err.message);
       } else {
-        setMessage("Tidak dapat menghubungi server. Coba lagi.");
+        setMessage(describeRequestFailure(err));
       }
     } finally {
       setSubmitting(false);

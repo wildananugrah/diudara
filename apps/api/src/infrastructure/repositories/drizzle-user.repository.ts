@@ -1,13 +1,29 @@
-import { eq, sql } from "drizzle-orm";
+import { asc, count, desc, eq, ilike, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { appUsers } from "../../db/schema";
+import { appUsers, follows } from "../../db/schema";
 import { UniqueRule } from "../../application/errors";
 import { rethrowUniqueViolation } from "./pg-errors";
+import { clampLimit } from "./drizzle-follow.repository";
 import type {
   UserCredentials,
   UserRecord,
   UserRepositoryPort,
 } from "../../application/ports/user-repository.port";
+import type { FollowListRow } from "../../application/ports/follow-repository.port";
+
+/**
+ * Public row shape for `searchPublic`/`newestPublic`/`mostFollowedPublic`:
+ * handle, display name and bio ONLY — the exact same three columns
+ * `DrizzleFollowRepository`'s `publicListColumns` projects, and the SAME
+ * `FollowListRow` type. Never `email`, never `id` — see
+ * `UserRepositoryPort.searchPublic`'s own docstring for why `email` in
+ * particular is non-negotiable here.
+ */
+const publicListColumns = {
+  handle: appUsers.handle,
+  displayName: appUsers.displayName,
+  bio: appUsers.bio,
+} as const;
 
 // Columns returned by the general-purpose methods below. Deliberately excludes
 // passwordHash: password hashes must never leave the repository layer except
@@ -150,4 +166,106 @@ export class DrizzleUserRepository implements UserRepositoryPort {
       .returning({ id: appUsers.id });
     return rows.length > 0;
   }
+
+  /**
+   * Case-insensitive PREFIX match over `handle` OR `display_name` ONLY — see
+   * the port docstring for why `email`/`whatsapp_number` are never touched
+   * here. `query` is passed to Postgres as a bound parameter (no string
+   * interpolation), so this is not a SQL-injection concern; it is a
+   * column-selection one, and the columns selected below are the whole of
+   * the guarantee.
+   *
+   * `query`'s own `%`/`_`/`\` are ESCAPED before the trailing `%` is
+   * appended (review round 1, Important 2) — `_` in particular is a LEGAL
+   * handle character (`domain/handle.ts`'s `/^[a-z0-9_]{3,30}$/`), so
+   * without escaping, searching an exact, valid handle like
+   * `budi_santoso` returned `budi_santoso` AND `budi1santoso` AND
+   * `budixsantoso` — three rows for what should be a single exact match,
+   * on the mainline path, not an edge case. `q=%` matched every user in
+   * the table for the same reason. Escaping the backslash too closes the
+   * related case where a trailing `\` in `query` would make the appended
+   * `%` combine into an escaped, literal percent instead of a wildcard.
+   * Metacharacters were never a SECURITY hole (the `or(...)` below is a
+   * fixed two-column list; nothing in `query` can reach `email` or
+   * `password_hash`, and a full unbounded dump is still capped by
+   * `clampLimit` — measured directly in Postgres for `'%aa'` repeated 30
+   * times, twenty `%`-segments over 2000 rows, and a 100,000-character
+   * query, all under 10ms with no backtracking blowup), only a
+   * correctness one, which is why this fix changes ONLY the pattern
+   * construction below and not the query shape.
+   */
+  async searchPublic(query: string, limit: number): Promise<FollowListRow[]> {
+    const pattern = `${escapeLikePattern(query)}%`;
+    return this.db
+      .select(publicListColumns)
+      .from(appUsers)
+      .where(or(ilike(appUsers.handle, pattern), ilike(appUsers.displayName, pattern)))
+      .orderBy(asc(appUsers.handle))
+      .limit(clampLimit(limit));
+  }
+
+  /** Newest accounts first. */
+  async newestPublic(limit: number): Promise<FollowListRow[]> {
+    return this.db
+      .select(publicListColumns)
+      .from(appUsers)
+      // id as a tiebreaker, same reasoning as `DrizzleFollowRepository.listFollowers`:
+      // `createdAt` alone is not a total order.
+      .orderBy(desc(appUsers.createdAt), desc(appUsers.id))
+      .limit(clampLimit(limit));
+  }
+
+  /**
+   * Most followers first; users with zero followers last. `LEFT JOIN` (not
+   * an inner join) is what keeps a zero-follower user in the result at all —
+   * an inner join would drop them entirely rather than sorting them last.
+   * `count(follows.id)`, not the bare `count()`: the left join still
+   * produces one row per zero-follower user with every `follows` column
+   * `NULL`, and `count()` (equivalent to `COUNT(*)`) would count that
+   * phantom row as one follower; `count(follows.id)` counts only non-null
+   * ids, giving the correct zero.
+   *
+   * DOES NOT go through `follow_followee_created_idx`, or any index — this
+   * docstring used to claim otherwise (so did the task brief that asked for
+   * this method; both were wrong, unmeasured). `EXPLAIN (ANALYZE, BUFFERS)`
+   * against 2,000 users / 2,000 follow rows, `ANALYZE`d, shows:
+   *
+   *   HashAggregate -> Hash Right Join -> Seq Scan on follow / Seq Scan on app_user
+   *   Execution Time: 1.787 ms
+   *
+   * Grouping by `app_user.id` selects EVERY row of `app_user` regardless of
+   * `follow`, which forces a full scan of that table no matter what index
+   * exists on `follow` — the index was never going to help THIS query
+   * shape, at any table size. The query is correct and fast (1.8ms at this
+   * scale); only the earlier claim that it was index-backed was false. See
+   * `schema.ts`'s own note on a prior instance of exactly this mistake
+   * (a comment claiming two queries were indexed when `pg_indexes` showed
+   * otherwise) — this is the same failure mode, corrected here rather than
+   * repeated.
+   */
+  async mostFollowedPublic(limit: number): Promise<FollowListRow[]> {
+    return this.db
+      .select(publicListColumns)
+      .from(appUsers)
+      .leftJoin(follows, eq(follows.followeeId, appUsers.id))
+      .groupBy(appUsers.id)
+      .orderBy(desc(count(follows.id)), asc(appUsers.handle))
+      .limit(clampLimit(limit));
+  }
+}
+
+/**
+ * Escapes Postgres `LIKE`/`ILIKE` metacharacters (`%`, `_`) and the escape
+ * character itself (`\`) in `query` before `searchPublic` appends its own
+ * trailing `%`. Postgres's DEFAULT escape character for `LIKE`/`ILIKE` is
+ * `\`, so prefixing each of the three with `\` is sufficient — no `ESCAPE`
+ * clause needed.
+ *
+ * See `searchPublic`'s own docstring for why this exists: `_` is a legal
+ * character in a real handle, so an unescaped search for an EXACT handle
+ * like `budi_santoso` matched two other users too (`budi1santoso`,
+ * `budixsantoso`) before this fix.
+ */
+function escapeLikePattern(raw: string): string {
+  return raw.replace(/[\\%_]/g, "\\$&");
 }

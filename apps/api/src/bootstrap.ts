@@ -11,6 +11,9 @@ import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
+import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
+import { ExploreUsers } from "./application/use-cases/explore-users";
+import { DrizzleFollowRepository } from "./infrastructure/repositories/drizzle-follow.repository";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
 import { DrizzlePasswordResetRepository } from "./infrastructure/repositories/drizzle-password-reset.repository";
@@ -162,6 +165,29 @@ export interface Dependencies {
   getUserProfile: GetUserProfile;
   /** Task 3's `PATCH /users/me`, behind `requireUserAuth`. Handle is not editable — see `updateProfileSchema`. */
   updateUserProfile: UpdateUserProfile;
+  /**
+   * Task 2 (profiles and following)'s `POST`/`DELETE /users/:handle/follow`.
+   * ONE use case for both directions — see its own docstring for why the
+   * handle lookup, the self-follow refusal and the 404 are identical either
+   * way, and for the precondition it exists to enforce: `FollowRepositoryPort
+   * .follow()` does not itself guard a self-follow or a nonexistent target.
+   */
+  followUser: FollowUser;
+  /**
+   * Task 2's `GET /users/:handle/followers` and `GET /users/:handle/following`.
+   * Public, unauthenticated, sharing `followUser`'s handle-lookup-then-404
+   * shape.
+   */
+  listFollows: ListFollows;
+  /**
+   * Task 3's `GET /users/explore` — Jelajah, the discovery screen a new user
+   * with an empty follow graph lands on. Public, unauthenticated, like
+   * `getUserProfile`/`listFollows` above. Reads `userRepository.searchPublic`
+   * / `.newestPublic` / `.mostFollowedPublic` — see those port methods' own
+   * docstrings for the enumeration-safety guarantee the search path in
+   * particular exists to hold (never `email`, never `whatsapp_number`).
+   */
+  exploreUsers: ExploreUsers;
   /**
    * Task 5's `POST /users/password-reset/request`. Always answers
    * `{ ok: true }` — see the use-case's own docstring for the enumeration-safety
@@ -1538,8 +1564,22 @@ export function bootstrap(): Dependencies {
   // `registerUser` is constructed further down, alongside Task 5's password
   // reset — see the comment there for why it needs to wait for `messaging`.
   const authenticateUser = new AuthenticateUser(userRepository, passwordHasher, userTokenIssuer);
-  const getUserProfile = new GetUserProfile(userRepository);
+  // Task 2 (profiles and following). Constructed here, before `getUserProfile`,
+  // because `GetUserProfile` now needs it too (`viewerFollows` and the two
+  // counts on the public profile) — one repository, three consumers.
+  const followRepository = new DrizzleFollowRepository(db);
+  const getUserProfile = new GetUserProfile(userRepository, followRepository);
   const updateUserProfile = new UpdateUserProfile(userRepository);
+  const followUser = new FollowUser(userRepository, followRepository);
+  const listFollows = new ListFollows(userRepository, followRepository);
+  // Task 3 (Jelajah). The three READ methods live on `userRepository` —
+  // `searchPublic`/`newestPublic`/`mostFollowedPublic` all query `app_user`
+  // directly (the follower count join lives inside
+  // `DrizzleUserRepository.mostFollowedPublic`). `followRepository` is here for
+  // ONE further thing, added by the final review's item 1: the per-row
+  // `viewerFollows` on all three lists, resolved in one query for the whole
+  // screen — see `resolveViewerFollowSet`.
+  const exploreUsers = new ExploreUsers(userRepository, followRepository);
 
   const communityRepository = new DrizzleCommunityRepository(db);
   const listCommunities = new ListCommunities(communityRepository);
@@ -1936,6 +1976,9 @@ export function bootstrap(): Dependencies {
     authenticateUser,
     getUserProfile,
     updateUserProfile,
+    followUser,
+    listFollows,
+    exploreUsers,
     requestPasswordReset,
     completePasswordReset,
     createCommunity,

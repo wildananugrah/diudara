@@ -10,6 +10,7 @@ import {
   text,
   index,
   uniqueIndex,
+  check,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -825,4 +826,37 @@ export const aiUsage = pgTable(
     messageCount: integer("message_count").notNull().default(0),
   },
   (table) => [uniqueIndex("ai_usage_creator_date_unique").on(table.creatorId, table.usageDate)]
+);
+
+/**
+ * Task 1 of the profiles-and-following phase: one row per (follower, followee)
+ * pair. Unidirectional — Alice following Bob is one row, and Bob following
+ * Alice back (if it ever happens) is a second, independent row.
+ */
+export const follows = pgTable(
+  "follow",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    followerId: uuid("follower_id")
+      .notNull()
+      .references(() => appUsers.id),
+    followeeId: uuid("followee_id")
+      .notNull()
+      .references(() => appUsers.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // Following twice is ONE row, arbitrated by the database rather than by a
+    // read-then-write — the same reason `join_request_community_member_pending_unique`
+    // is a unique index. Two taps in the same instant cannot both insert.
+    uniqueIndex("follow_follower_followee_unique").on(table.followerId, table.followeeId),
+    // BOTH directions are read on every profile view: "who follows this person"
+    // and "who they follow". Missing indexes on exactly this shape left the
+    // renewal passes seq-scanning for a whole phase before anyone noticed.
+    index("follow_followee_created_idx").on(table.followeeId, table.createdAt),
+    index("follow_follower_created_idx").on(table.followerId, table.createdAt),
+    // A CHECK, not only a use-case guard, so it holds however the row arrives —
+    // a future bulk import, a manual fix, a second call site.
+    check("follow_no_self", sql`${table.followerId} <> ${table.followeeId}`),
+  ],
 );

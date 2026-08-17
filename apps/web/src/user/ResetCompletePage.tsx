@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 import { completePasswordReset, UserApiError } from "./apiClient";
+import { describeRequestFailure } from "./errorCopy";
 
 /**
  * `CompletePasswordReset`'s ONE message for a missing, expired, or
@@ -36,10 +37,8 @@ export default function ResetCompletePage() {
       // those are not part of the enumeration-safety guarantee.
       if (err instanceof UserApiError && err.status === 401) {
         setError(INVALID_TOKEN_MESSAGE);
-      } else if (err instanceof UserApiError) {
-        setError(err.message);
       } else {
-        setError("Tidak dapat menghubungi server. Coba lagi.");
+        setError(describeRequestFailure(err));
       }
       setPhase("form");
     }

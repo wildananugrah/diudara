@@ -24,6 +24,7 @@ import {
   appUsers,
   passwordResetTokens,
   signupNotices,
+  follows,
 } from "./schema";
 
 /**
@@ -97,6 +98,9 @@ export async function resetDatabase() {
   // every other table above.
   await db.delete(passwordResetTokens);
   await db.delete(signupNotices);
+  // follow references app_user twice (follower and followee), so it must
+  // clear before app_user too — Task 1 of profiles-and-following.
+  await db.delete(follows);
   // app_user is a fully independent identity table (Phase 9's pivot) — no FK
   // relationship to anything above it, so its position here is free.
   await db.delete(appUsers);

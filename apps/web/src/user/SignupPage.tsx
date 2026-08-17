@@ -1,6 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { signup, UserApiError } from "./apiClient";
+import { describeRequestFailure } from "./errorCopy";
 
 /**
  * `POST /users/signup`'s 409 — a duplicate HANDLE, which is public by design
@@ -31,13 +32,16 @@ export default function SignupPage() {
       if (err.status === 409) return { message: HANDLE_TAKEN_FALLBACK, fieldErrors: {} };
       if (err.status === 400) {
         return {
-          message: Object.keys(err.fieldErrors).length > 0 ? "Periksa data yang Anda isi." : err.message,
+          message:
+            Object.keys(err.fieldErrors).length > 0
+              ? "Periksa data yang Anda isi."
+              : describeRequestFailure(err),
           fieldErrors: err.fieldErrors,
         };
       }
-      return { message: err.message, fieldErrors: {} };
+      return { message: describeRequestFailure(err), fieldErrors: {} };
     }
-    return { message: "Tidak dapat menghubungi server. Coba lagi.", fieldErrors: {} };
+    return { message: describeRequestFailure(err), fieldErrors: {} };
   }
 
   async function handleSubmit(event: FormEvent) {

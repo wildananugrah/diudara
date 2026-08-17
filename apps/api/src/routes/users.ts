@@ -1,7 +1,9 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { z } from "zod";
 import {
   completePasswordResetSchema,
+  MAX_EXPLORE_QUERY_LENGTH,
   requestPasswordResetSchema,
   updateProfileSchema,
   userLoginSchema,
@@ -13,8 +15,94 @@ import {
   type UserSignupInput,
 } from "@diudara/shared";
 import { validate } from "../http/validate";
-import { requireUserAuth, type UserAuthVariables } from "../http/user-auth.middleware";
+import {
+  requireUserAuth,
+  resolveViewerId,
+  type UserAuthVariables,
+} from "../http/user-auth.middleware";
+import { ValidationError } from "../application/errors";
+import { DEFAULT_FOLLOW_LIST_LIMIT } from "../application/use-cases/follow-user";
+import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import type { Dependencies } from "../bootstrap";
+
+/**
+ * Largest page a caller may ask for — same shape as `routes/analytics.ts`'s
+ * `MAX_PAGE_LIMIT`, and for the same reason: a REFUSAL rather than a silent
+ * clamp, so a client asking for more than this can tell "you get 100" from
+ * "that was a malformed request".
+ */
+const MAX_FOLLOW_LIST_LIMIT = 100;
+
+const followListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_FOLLOW_LIST_LIMIT).optional(),
+});
+
+/** `?limit=` for the follower/following lists, parsed and defaulted — mirrors `routes/analytics.ts`'s `parsePageQuery`. */
+function parseFollowListLimit(raw: string | undefined): number {
+  const parsed = followListQuerySchema.safeParse({
+    // Omitted rather than passed as `undefined`-from-empty-string: `?limit=`
+    // would otherwise coerce to 0 and fail the minimum with a confusing message.
+    ...(raw === undefined || raw === "" ? {} : { limit: raw }),
+  });
+  if (!parsed.success) {
+    throw new ValidationError(
+      `invalid limit: must be an integer between 1 and ${MAX_FOLLOW_LIST_LIMIT}`
+    );
+  }
+  return parsed.data.limit ?? DEFAULT_FOLLOW_LIST_LIMIT;
+}
+
+/**
+ * Largest page Jelajah's `?limit=` may ask for, applied to EACH of its three
+ * lists (results/newest/mostFollowed) independently — same value and same
+ * "refuse rather than silently clamp" reasoning as `MAX_FOLLOW_LIST_LIMIT`
+ * above, kept as its own constant rather than reused because the two caps
+ * are free to diverge later without either accidentally moving the other.
+ */
+const MAX_EXPLORE_LIMIT = 100;
+
+/*
+ * `MAX_EXPLORE_QUERY_LENGTH` — review round 1, Minor: every other
+ * user-supplied string on this router is bounded (`handle` 31, `displayName`
+ * 255, `bio` 300 — see `@diudara/shared`'s signup/profile schemas), but `q`
+ * had no bound at all on this public, unauthenticated, unrate-limited route.
+ * `searchPublic`'s own metacharacter escaping (see its docstring) already
+ * makes an arbitrarily long `q` cheap to execute — this is about consistency
+ * with the rest of the router, not a vulnerability being closed.
+ *
+ * IT USED TO BE DECLARED HERE, PRIVATELY, and that is what the final review's
+ * I3 turned on: only the server knew the number, so `JelajahPage` neither
+ * bounded its input nor bounded what it sent, and the 400 this schema produces
+ * reached the screen verbatim — in English — taking both discovery rails down
+ * with it. It now lives in `@diudara/shared` alongside the signup/login schemas,
+ * imported by BOTH sides. See that constant's own docstring for why a second
+ * literal on the client would have re-created a defect this project has already
+ * shipped once.
+ */
+const exploreQuerySchema = z.object({
+  q: z.string().max(MAX_EXPLORE_QUERY_LENGTH).optional(),
+  limit: z.coerce.number().int().min(1).max(MAX_EXPLORE_LIMIT).optional(),
+});
+
+/** `?q=`/`?limit=` for `GET /users/explore`, parsed and defaulted — mirrors `parseFollowListLimit` above. */
+function parseExploreQuery(raw: {
+  q: string | undefined;
+  limit: string | undefined;
+}): { q: string | undefined; limit: number } {
+  const parsed = exploreQuerySchema.safeParse({
+    ...(raw.q === undefined ? {} : { q: raw.q }),
+    // Omitted rather than passed as `undefined`-from-empty-string: `?limit=`
+    // would otherwise coerce to 0 and fail the minimum with a confusing message.
+    ...(raw.limit === undefined || raw.limit === "" ? {} : { limit: raw.limit }),
+  });
+  if (!parsed.success) {
+    throw new ValidationError(
+      `invalid query: q must be at most ${MAX_EXPLORE_QUERY_LENGTH} characters, ` +
+        `limit must be an integer between 1 and ${MAX_EXPLORE_LIMIT}`
+    );
+  }
+  return { q: parsed.data.q, limit: parsed.data.limit ?? DEFAULT_EXPLORE_LIMIT };
+}
 
 /**
  * The caller's IP, recorded (hashed) against every password-reset request
@@ -63,6 +151,12 @@ export function clientIp(c: Context): string | null {
  * per-route rather than via `app.use("*", ...)` so it never accidentally
  * guards signup/login/by-handle too (the same reason `routes/analytics.ts`
  * mounts `requireAuth` per-route instead of on `"*"`).
+ *
+ * Task 2 (profiles and following) adds four more: `POST`/`DELETE
+ * /:handle/follow` (behind `requireUserAuth` — following requires a session)
+ * and the public `GET /:handle/followers`/`/:handle/following` lists. All
+ * four share `by-handle/:handle`'s handle-normalisation forgiveness (a
+ * leading `@` still resolves) through `FollowUser`/`ListFollows` themselves.
  */
 export function userRoutes(
   deps: Pick<
@@ -75,6 +169,9 @@ export function userRoutes(
     | "updateUserProfile"
     | "requestPasswordReset"
     | "completePasswordReset"
+    | "followUser"
+    | "listFollows"
+    | "exploreUsers"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -123,7 +220,12 @@ export function userRoutes(
   // `@` if a client sends it anyway, so a mistake here is forgiving rather
   // than a 404.
   app.get<"/by-handle/:handle">("/by-handle/:handle", async (c) => {
-    const profile = await deps.getUserProfile.execute(c.req.param("handle"));
+    // Public route: `resolveViewerId` NEVER throws, unlike `requireAuth` —
+    // a missing/invalid token resolves to `null` (anonymous), not a 401,
+    // because this route never required a session. See its own docstring
+    // for why `null` here is load-bearing (`PublicUserProfile.viewerFollows`).
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    const profile = await deps.getUserProfile.execute(c.req.param("handle"), viewerId);
     return c.json(profile);
   });
 
@@ -136,6 +238,86 @@ export function userRoutes(
     const patch = c.get("validated") as UpdateProfileInput;
     const updated = await deps.updateUserProfile.execute({ userId: c.get("userId"), patch });
     return c.json(updated);
+  });
+
+  // Task 2. Behind `requireUserAuth`: following requires a session, unlike
+  // every other route on this router mounted above `/me`. `FollowUser`
+  // itself resolves the handle, 404s an unknown one, and 409s a self-follow
+  // in Bahasa Indonesia BEFORE ever touching `FollowRepositoryPort.follow`/
+  // `unfollow` — see that class's own docstring for why that ordering is
+  // the entire point of this use case existing. Both directions return the
+  // RESULTING state with 200, whether or not anything changed — idempotent
+  // by design (design spec §7): a double-tap must not error.
+  app.post<"/:handle/follow">("/:handle/follow", requireAuth, async (c) => {
+    const result = await deps.followUser.execute({
+      followerId: c.get("userId"),
+      handle: c.req.param("handle"),
+      action: "follow",
+    });
+    return c.json(result, 200);
+  });
+
+  app.delete<"/:handle/follow">("/:handle/follow", requireAuth, async (c) => {
+    const result = await deps.followUser.execute({
+      followerId: c.get("userId"),
+      handle: c.req.param("handle"),
+      action: "unfollow",
+    });
+    return c.json(result, 200);
+  });
+
+  // Task 2. Public, like `by-handle/:handle` — anyone can browse who follows
+  // whom. `ListFollows` 404s an unknown handle the same way `GetUserProfile`
+  // does; rows are the public projection (`handle`/`displayName`/`bio`) plus
+  // `viewerFollows`, never a wider shape.
+  //
+  // FINAL REVIEW, ITEM 1: these two and `/explore` below now run
+  // `resolveViewerId`, exactly as `by-handle/:handle` has since Task 2, and for
+  // the identical reason — they are PUBLIC BUT NOT ANONYMOUS. That viewer id is
+  // the only input to the per-row `viewerFollows`, without which `/@you/mengikuti`
+  // showed "Ikuti" against every single person you follow. `resolveViewerId`
+  // never throws: a missing, malformed or expired token resolves to `null`
+  // (anonymous) rather than a 401, so a stale token can never lock a visitor out
+  // of browsing a list.
+  app.get<"/:handle/followers">("/:handle/followers", async (c) => {
+    const limit = parseFollowListLimit(c.req.query("limit"));
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    const rows = await deps.listFollows.execute({
+      handle: c.req.param("handle"),
+      direction: "followers",
+      limit,
+      viewerId,
+    });
+    return c.json(rows);
+  });
+
+  app.get<"/:handle/following">("/:handle/following", async (c) => {
+    const limit = parseFollowListLimit(c.req.query("limit"));
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    const rows = await deps.listFollows.execute({
+      handle: c.req.param("handle"),
+      direction: "following",
+      limit,
+      viewerId,
+    });
+    return c.json(rows);
+  });
+
+  // Task 3. Public, like `by-handle`/`followers`/`following` above — Jelajah
+  // is the discovery screen a new user with an empty follow graph lands on,
+  // and there is nothing here a signed-out visitor should not see. A static
+  // path (`/explore`), not `/:handle`, so it cannot collide with any of the
+  // dynamic handle routes above regardless of registration order.
+  //
+  // `q` is optional and may be empty/whitespace-only — `ExploreUsers`
+  // treats that as the screen's default state (empty `results`, both other
+  // lists still populated), not an error. See that class's own docstring.
+  app.get<"/explore">("/explore", async (c) => {
+    const { q, limit } = parseExploreQuery({ q: c.req.query("q"), limit: c.req.query("limit") });
+    // See the two list routes above for why a PUBLIC route resolves a viewer.
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    const result = await deps.exploreUsers.execute({ q, limit, viewerId });
+    return c.json(result);
   });
 
   return app;

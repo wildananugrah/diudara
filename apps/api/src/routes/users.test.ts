@@ -2,11 +2,14 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { Hono } from "hono";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
+import { db } from "../db/client";
+import { appUsers } from "../db/schema";
 import { resetDatabase } from "../db/test-helpers";
 import { FakeEmailAdapter } from "../infrastructure/email/fake-email.adapter";
 import { FakeMessagingAdapter } from "../infrastructure/messaging/fake-messaging.adapter";
 import { BunPasswordHasher } from "../infrastructure/auth/bun-password.hasher";
 import { RegisterUser } from "../application/use-cases/register-user";
+import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import { clientIp } from "./users";
 
 beforeEach(resetDatabase);
@@ -38,17 +41,23 @@ const VALID = {
   displayName: "Wildan",
 };
 
-/** Signs up (if not already) and logs in `VALID`, returning the bearer token. */
-async function tokenForValidUser(a = app()) {
+/**
+ * Signs up (if not already) and logs in `VALID`, returning the bearer token.
+ * `overrides` merges over `VALID` before either call — Task 2's follow tests
+ * need a SECOND, distinct account on the same `app()` instance, e.g.
+ * `tokenForValidUser(a, { handle: "rina", email: "rina@example.com" })`.
+ */
+async function tokenForValidUser(a = app(), overrides: Partial<typeof VALID> = {}) {
+  const account = { ...VALID, ...overrides };
   await a.request("/users/signup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(VALID),
+    body: JSON.stringify(account),
   });
   const res = await a.request("/users/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: VALID.email, password: VALID.password }),
+    body: JSON.stringify({ email: account.email, password: account.password }),
   });
   const body = await res.json();
   return body.token as string;
@@ -263,7 +272,7 @@ describe("POST /users/login", () => {
 });
 
 describe("GET /users/by-handle/:handle", () => {
-  it("returns EXACTLY handle/displayName/bio/createdAt — no email, no anything else", async () => {
+  it("returns EXACTLY handle/displayName/bio/createdAt/followerCount/followingCount/viewerFollows — no email, no anything else", async () => {
     const a = app();
     await a.request("/users/signup", {
       method: "POST",
@@ -279,9 +288,21 @@ describe("GET /users/by-handle/:handle", () => {
     // properties (email, whatsappNumber, id, sessionEpoch) would pass a
     // structural-type check silently even though they must never appear
     // here. This is the form that catches that.
-    expect(Object.keys(body).sort()).toEqual(["bio", "createdAt", "displayName", "handle"]);
+    expect(Object.keys(body).sort()).toEqual([
+      "bio",
+      "createdAt",
+      "displayName",
+      "followerCount",
+      "followingCount",
+      "handle",
+      "viewerFollows",
+    ]);
     expect(body.handle).toBe("wildan");
     expect(body.displayName).toBe(VALID.displayName);
+    expect(body.followerCount).toBe(0);
+    expect(body.followingCount).toBe(0);
+    // No session sent — anonymous viewer. Must be `null`, not `false`.
+    expect(body.viewerFollows).toBeNull();
     expect(body.email).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain(VALID.email);
   });
@@ -302,6 +323,664 @@ describe("GET /users/by-handle/:handle", () => {
     const res = await a.request("/users/by-handle/%40wildan");
     expect(res.status).toBe(200);
     expect((await res.json()).handle).toBe("wildan");
+  });
+
+  it("viewerFollows is false for a signed-in viewer who does not follow the target", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+    const viewerToken = await tokenForValidUser(a, { handle: "viewer", email: "viewer@example.com" });
+
+    const res = await a.request("/users/by-handle/wildan", { headers: authed(viewerToken) });
+    expect(res.status).toBe(200);
+    expect((await res.json()).viewerFollows).toBe(false);
+  });
+
+  it("viewerFollows is true once the signed-in viewer follows the target", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+    const viewerToken = await tokenForValidUser(a, { handle: "viewer", email: "viewer@example.com" });
+
+    const follow = await a.request("/users/wildan/follow", {
+      method: "POST",
+      headers: authed(viewerToken),
+    });
+    expect(follow.status).toBe(200);
+
+    const res = await a.request("/users/by-handle/wildan", { headers: authed(viewerToken) });
+    expect(res.status).toBe(200);
+    expect((await res.json()).viewerFollows).toBe(true);
+  });
+
+  it("an invalid bearer token on a PUBLIC route degrades to anonymous, not a 401", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/by-handle/wildan", { headers: authed("garbage") });
+    expect(res.status).toBe(200);
+    expect((await res.json()).viewerFollows).toBeNull();
+  });
+});
+
+describe("POST /users/:handle/follow and DELETE /users/:handle/follow", () => {
+  it("requires auth — no Authorization header is a 401 for follow", async () => {
+    const res = await app().request("/users/wildan/follow", { method: "POST" });
+    expect(res.status).toBe(401);
+  });
+
+  it("requires auth — no Authorization header is a 401 for unfollow", async () => {
+    const res = await app().request("/users/wildan/follow", { method: "DELETE" });
+    expect(res.status).toBe(401);
+  });
+
+  it("follows and returns 200 { following: true } for a signed-in caller", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    const res = await a.request("/users/wildan/follow", {
+      method: "POST",
+      headers: authed(followerToken),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ following: true });
+  });
+
+  it("following again is idempotent — still 200 { following: true }, count does not double", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    await a.request("/users/wildan/follow", { method: "POST", headers: authed(followerToken) });
+    const second = await a.request("/users/wildan/follow", {
+      method: "POST",
+      headers: authed(followerToken),
+    });
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ following: true });
+
+    const profile = await a.request("/users/by-handle/wildan");
+    expect((await profile.json()).followerCount).toBe(1);
+  });
+
+  it("unfollows and returns 200 { following: false }", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    await a.request("/users/wildan/follow", { method: "POST", headers: authed(followerToken) });
+    const res = await a.request("/users/wildan/follow", {
+      method: "DELETE",
+      headers: authed(followerToken),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ following: false });
+  });
+
+  it("unfollowing someone never followed is idempotent — 200 { following: false }, no error", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    const res = await a.request("/users/wildan/follow", {
+      method: "DELETE",
+      headers: authed(followerToken),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ following: false });
+  });
+
+  it("404s for an unknown handle", async () => {
+    const a = app();
+    const followerToken = await tokenForValidUser(a, {});
+
+    const res = await a.request("/users/nobody-at-all/follow", {
+      method: "POST",
+      headers: authed(followerToken),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("REJECTS a self-follow with 409 and the exact Indonesian message — refused by the use case, not the database", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a, {});
+
+    const res = await a.request("/users/wildan/follow", {
+      method: "POST",
+      headers: authed(token),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "tidak bisa mengikuti akun sendiri" });
+  });
+
+  it("a handle sent with a leading @ still resolves for follow", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    const res = await a.request("/users/%40wildan/follow", {
+      method: "POST",
+      headers: authed(followerToken),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ following: true });
+  });
+});
+
+describe("GET /users/:handle/followers and GET /users/:handle/following", () => {
+  it("404s followers for an unknown handle", async () => {
+    const res = await app().request("/users/nobody-at-all/followers");
+    expect(res.status).toBe(404);
+  });
+
+  it("404s following for an unknown handle", async () => {
+    const res = await app().request("/users/nobody-at-all/following");
+    expect(res.status).toBe(404);
+  });
+
+  it("returns the three public fields for a follower — no id, no email", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    await a.request("/users/wildan/follow", { method: "POST", headers: authed(followerToken) });
+
+    const res = await a.request("/users/wildan/followers");
+    expect(res.status).toBe(200);
+    const rows = await res.json();
+    expect(rows).toHaveLength(1);
+    // `viewerFollows` joins the projection in the final review's item 1 — the
+    // three list endpoints each answer it per row now, exactly the shape
+    // `/by-handle/:handle` already returned. Still no `id`, still no `email`.
+    expect(Object.keys(rows[0]).sort()).toEqual(["bio", "displayName", "handle", "viewerFollows"]);
+    expect(rows[0].handle).toBe("rina");
+
+    const followingRes = await a.request("/users/rina/following");
+    expect(followingRes.status).toBe(200);
+    const followingRows = await followingRes.json();
+    expect(followingRows).toHaveLength(1);
+    // Mirrors the `/followers` key-set assertion just above — before this,
+    // `/following` had no route-level key-set coverage at all (coverage
+    // asymmetry review round 2 flagged as a Minor; `ListFollows` uses the
+    // SAME `FollowListRow` projection for both directions, but nothing said
+    // so for this one).
+    expect(Object.keys(followingRows[0]).sort()).toEqual([
+      "bio",
+      "displayName",
+      "handle",
+      "viewerFollows",
+    ]);
+    expect(followingRows[0].handle).toBe("wildan");
+  });
+
+  it("returns an empty array, not an error, when nobody follows the target", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/wildan/followers");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+  });
+
+  /**
+   * FINAL REVIEW, MUST-FIX ITEM 1. These three list endpoints returned only
+   * `["bio","displayName","handle"]` with or without a token, so every row on
+   * `/@you/mengikuti` — the list of everyone you follow, by definition —
+   * rendered "Ikuti". Task 6 measured the consequence in a real browser: tap 1
+   * was a silent no-op re-follow, tap 2 was the real DELETE, so unfollowing
+   * from a list took two taps and the first did nothing visible.
+   *
+   * `viewerFollows` here means exactly what it means on `/by-handle/:handle`:
+   * `null` for an anonymous request, `boolean` for a signed-in one. It is
+   * `false` on the viewer's OWN row, not some third value — the API emits no
+   * self-signal, and a client must decide "is this me?" by comparing handles
+   * (see `FollowButton`'s own docstring). That is a binding ledger ruling and
+   * these tests pin it rather than change it.
+   */
+  it("anonymous: every row's viewerFollows is null, never false", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const rinaToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    await a.request("/users/wildan/follow", { method: "POST", headers: authed(rinaToken) });
+
+    const followers = await (await a.request("/users/wildan/followers")).json();
+    const following = await (await a.request("/users/rina/following")).json();
+
+    expect(followers).toHaveLength(1);
+    expect(followers[0].viewerFollows).toBeNull();
+    expect(following).toHaveLength(1);
+    expect(following[0].viewerFollows).toBeNull();
+  });
+
+  it("signed in: viewerFollows is true for a row the viewer follows and false for one they do not", async () => {
+    const a = app();
+    // wildan follows rina, and nobody else.
+    const wildanToken = await tokenForValidUser(a, {});
+    await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    await tokenForValidUser(a, { handle: "budi", email: "budi@example.com" });
+    const rinaAndBudiFollowTarget = await tokenForValidUser(a, {
+      handle: "target",
+      email: "target@example.com",
+    });
+    void rinaAndBudiFollowTarget;
+    await a.request("/users/rina/follow", { method: "POST", headers: authed(wildanToken) });
+
+    // Both rina and budi follow `target`, so /target/followers has two rows —
+    // one wildan follows, one wildan does not. A single request, two answers.
+    const rinaToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    const budiToken = await tokenForValidUser(a, { handle: "budi", email: "budi@example.com" });
+    await a.request("/users/target/follow", { method: "POST", headers: authed(rinaToken) });
+    await a.request("/users/target/follow", { method: "POST", headers: authed(budiToken) });
+
+    const rows = await (
+      await a.request("/users/target/followers", { headers: authed(wildanToken) })
+    ).json();
+
+    expect(rows).toHaveLength(2);
+    const byHandle = Object.fromEntries(rows.map((r: { handle: string; viewerFollows: unknown }) => [r.handle, r.viewerFollows]));
+    expect(byHandle.rina).toBe(true);
+    expect(byHandle.budi).toBe(false);
+  });
+
+  it("signed in: the viewer's OWN row is false, not null and not true — no self-signal", async () => {
+    const a = app();
+    const wildanToken = await tokenForValidUser(a, {});
+    const rinaToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    // wildan and rina both follow `target`, so wildan sees its own row in the list.
+    await tokenForValidUser(a, { handle: "target", email: "target@example.com" });
+    await a.request("/users/target/follow", { method: "POST", headers: authed(wildanToken) });
+    await a.request("/users/target/follow", { method: "POST", headers: authed(rinaToken) });
+
+    const rows = await (
+      await a.request("/users/target/followers", { headers: authed(wildanToken) })
+    ).json();
+
+    const own = rows.find((r: { handle: string }) => r.handle === "wildan");
+    expect(own).toBeDefined();
+    expect(own.viewerFollows).toBe(false);
+  });
+
+  it("an invalid bearer token on these PUBLIC lists degrades to anonymous, not a 401", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const rinaToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    await a.request("/users/wildan/follow", { method: "POST", headers: authed(rinaToken) });
+
+    const res = await a.request("/users/wildan/followers", { headers: authed("not-a-jwt") });
+
+    // Same contract `/by-handle/:handle` already has: `resolveViewerId` never
+    // throws on these routes, so a stale token from a previous session must not
+    // lock a visitor out of browsing — it degrades to the anonymous view.
+    expect(res.status).toBe(200);
+    const rows = await res.json();
+    expect(rows[0].viewerFollows).toBeNull();
+  });
+
+  /**
+   * Review round 2, IMPORTANT 1: `DEFAULT_FOLLOW_LIST_LIMIT` used to be
+   * declared TWICE — once (tested) inside `ListFollows`, and once (untested)
+   * as a private duplicate in `routes/users.ts`. Since `parseFollowListLimit`
+   * always resolves a concrete number before calling `ListFollows.execute`,
+   * the ROUTE's own constant was the one actually reachable from an HTTP
+   * request with no `?limit=` — and it had zero coverage: changing it from
+   * 50 to 5 left every one of the 73 route tests green. `routes/users.ts`
+   * now imports the single, tested `DEFAULT_FOLLOW_LIST_LIMIT` rather than
+   * declaring its own; this seeds MORE than that default and pins the count
+   * on the real HTTP path, so a regression of either kind (a reintroduced
+   * duplicate, or a changed value) fails here.
+   */
+  it("defaults to 50 rows with no ?limit=, even when more than 50 people follow the target", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+
+    const followerTokens = await Promise.all(
+      Array.from({ length: 60 }, (_, i) =>
+        tokenForValidUser(a, { handle: `follower${i}`, email: `follower${i}@example.com` })
+      )
+    );
+    await Promise.all(
+      followerTokens.map((token) =>
+        a.request("/users/wildan/follow", { method: "POST", headers: authed(token) })
+      )
+    );
+
+    const res = await a.request("/users/wildan/followers");
+    expect(res.status).toBe(200);
+    const rows = await res.json();
+    expect(rows).toHaveLength(50);
+  });
+
+  it("rejects an out-of-range ?limit= with 400", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/wildan/followers?limit=101");
+    expect(res.status).toBe(400);
+  });
+
+  /**
+   * Review round 2, IMPORTANT 2: the ONLY existing limit test was
+   * `?limit=101 -> 400`, which passes even if `MAX_FOLLOW_LIST_LIMIT` were
+   * lowered to 25 — nothing pinned the boundary from the accepting side.
+   * `?limit=100 -> 200` closes that: lowering the cap below 100 now fails
+   * this test specifically, not just the rejection test.
+   */
+  it("accepts the maximum allowed ?limit=100", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/wildan/followers?limit=100");
+    expect(res.status).toBe(200);
+  });
+});
+
+/**
+ * Seeds `count` users directly through the database rather than via
+ * `POST /users/signup` — signup hashes a real password (argon2, through
+ * `BunPasswordHasher`), and seeding two dozen-plus users that way is both
+ * slow and, under root-level parallel-workspace load, exactly the shape of
+ * test that has hit the documented CPU-contention timeout before (see the
+ * followers/following `defaults to 50 rows` test above/`diudara-named-flakes`
+ * item 6). Nothing here exercises signup, so bypassing it is not a coverage
+ * loss — it only needs `count` real rows in `app_user` to exist.
+ */
+async function seedManyDirectly(count: number, prefix: string): Promise<void> {
+  await db.insert(appUsers).values(
+    Array.from({ length: count }, (_unused, i) => ({
+      handle: `${prefix}${i}`,
+      email: `${prefix}${i}@example.com`,
+      whatsappNumber: null,
+      passwordHash: "irrelevant-hash",
+      displayName: `${prefix} ${i}`,
+    }))
+  );
+}
+
+/**
+ * `GET /users/explore` — Jelajah, the discovery screen a new user with an
+ * empty follow graph lands on. Public, unauthenticated, like `by-handle`
+ * and the followers/following lists above.
+ */
+describe("GET /users/explore", () => {
+  it("with no ?q: returns both lists and an empty results — the screen's default state, not an error", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/explore");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.results).toEqual([]);
+    expect(body.newest.length).toBeGreaterThan(0);
+    expect(body.mostFollowed.length).toBeGreaterThan(0);
+  });
+
+  it("a whitespace-only ?q= behaves identically to no ?q at all", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request(`/users/explore?q=${encodeURIComponent("   ")}`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).results).toEqual([]);
+  });
+
+  it("with a ?q, returns matching users in results, alongside both other lists", async () => {
+    const a = app();
+    await tokenForValidUser(a, { handle: "wildan", email: "wildan@example.com" });
+    await tokenForValidUser(a, {
+      handle: "budi",
+      email: "budi@example.com",
+      displayName: "Budi Santoso",
+    });
+
+    const res = await a.request("/users/explore?q=wild");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.results).toHaveLength(1);
+    expect(body.results[0].handle).toBe("wildan");
+    expect(body.newest.length).toBeGreaterThan(0);
+    expect(body.mostFollowed.length).toBeGreaterThan(0);
+  });
+
+  it("returns only the three public fields in every list — no id, no email", async () => {
+    const a = app();
+    await tokenForValidUser(a, { handle: "wildan", email: "wildan@example.com" });
+
+    const res = await a.request("/users/explore?q=wild");
+    const body = await res.json();
+
+    for (const list of [body.results, body.newest, body.mostFollowed]) {
+      expect(list.length).toBeGreaterThan(0);
+      for (const row of list) {
+        expect(Object.keys(row).sort()).toEqual(["bio", "displayName", "handle", "viewerFollows"]);
+      }
+    }
+  });
+
+  it("requires no session — an anonymous request (no Authorization header) succeeds", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/explore");
+    expect(res.status).toBe(200);
+  });
+
+  /**
+   * Final review, item 1 — Jelajah's rows too, and across ALL THREE of its
+   * lists in one response. `FollowRow` renders the same component on `/jelajah`
+   * as on the two list pages, so a per-row answer here is what stops "Ikuti"
+   * appearing next to somebody the visitor already follows.
+   */
+  it("anonymous: viewerFollows is null in every one of the three lists", async () => {
+    const a = app();
+    await tokenForValidUser(a, { handle: "wildan", email: "wildan@example.com" });
+
+    const body = await (await a.request("/users/explore?q=wild")).json();
+
+    for (const list of [body.results, body.newest, body.mostFollowed]) {
+      expect(list.length).toBeGreaterThan(0);
+      for (const row of list) expect(row.viewerFollows).toBeNull();
+    }
+  });
+
+  it("signed in: viewerFollows is true for the followed account and false for the viewer's own row", async () => {
+    const a = app();
+    const wildanToken = await tokenForValidUser(a, {});
+    await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    await tokenForValidUser(a, { handle: "budi", email: "budi@example.com" });
+    await a.request("/users/rina/follow", { method: "POST", headers: authed(wildanToken) });
+
+    const body = await (
+      await a.request("/users/explore?limit=100", { headers: authed(wildanToken) })
+    ).json();
+
+    const byHandle = Object.fromEntries(
+      body.newest.map((r: { handle: string; viewerFollows: unknown }) => [r.handle, r.viewerFollows])
+    );
+    expect(byHandle.rina).toBe(true);
+    expect(byHandle.budi).toBe(false);
+    // Your own row appears in "Akun terbaru" and must not claim you follow
+    // yourself — `false`, the same no-self-signal `/by-handle/:handle` uses.
+    expect(byHandle.wildan).toBe(false);
+  });
+
+  /**
+   * THE GUARANTEE, proven end-to-end over real HTTP rather than only inside
+   * the repository test: Jelajah's search box must never become an oracle
+   * for whether an email address is registered. See
+   * `drizzle-user.repository.test.ts`'s identically-named-in-spirit
+   * guarantee test for the full rationale (Phase 1's 215ms->1.75ms timing
+   * closure this would otherwise undo in one line).
+   */
+  it("the guarantee: searching a registered user's email address returns zero results", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...VALID, email: "rahasia@example.com" }),
+    });
+
+    const res = await a.request(`/users/explore?q=${encodeURIComponent("rahasia@example.com")}`);
+    expect(res.status).toBe(200);
+    expect((await res.json()).results).toEqual([]);
+
+    const localPartRes = await a.request("/users/explore?q=rahasia");
+    expect((await localPartRes.json()).results).toEqual([]);
+  });
+
+  /**
+   * THE OTHER HALF OF THE SAME GUARANTEE, at the ROUTE layer — final review
+   * M3. Adding `ilike(appUsers.email, pattern)` to `searchPublic`'s `or(...)`
+   * failed TWO tests (the repository guarantee and the route one above);
+   * adding `ilike(appUsers.whatsappNumber, pattern)` failed only ONE, because
+   * there was no route-level WhatsApp counterpart. Low risk — it is one query
+   * and one `or(...)`, so the repository test does cover the real code path —
+   * but the asymmetry is the exact shape this project keeps getting caught by,
+   * and Task 6's browser gate searched two registered EMAIL addresses and
+   * never a WhatsApp number.
+   *
+   * The number must be seeded NON-NULL for this to be able to fail at all:
+   * every other search test on this router leaves `whatsapp_number` NULL, and
+   * `NULL ILIKE '...'` matches nothing, so the mutation would sail past them.
+   * That is review round 1's Important 1 on the repository side, restated
+   * here because the same trap applies to the same column.
+   *
+   * The prefix (`+62812`) is searched as well as the exact number: a prefix
+   * match is what `searchPublic` actually builds (`<query>%`), so an exact-only
+   * assertion would pass even against a pattern that matched every Indonesian
+   * mobile number in the table.
+   */
+  it("the guarantee: searching a registered user's WhatsApp number returns zero results", async () => {
+    const a = app();
+    const res = await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...VALID, whatsappNumber: "+6281234567890" }),
+    });
+    expect(res.status).toBe(201);
+    // The number really is stored — otherwise the two assertions below would
+    // be vacuous for the same reason a NULL column makes them vacuous.
+    const [stored] = await db.select({ whatsappNumber: appUsers.whatsappNumber }).from(appUsers);
+    expect(stored?.whatsappNumber).toBe("+6281234567890");
+
+    const exact = await a.request(`/users/explore?q=${encodeURIComponent("+6281234567890")}`);
+    expect(exact.status).toBe(200);
+    expect((await exact.json()).results).toEqual([]);
+
+    const prefix = await a.request(`/users/explore?q=${encodeURIComponent("+62812")}`);
+    expect(prefix.status).toBe(200);
+    expect((await prefix.json()).results).toEqual([]);
+  });
+
+  it("rejects an out-of-range ?limit= with 400", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/explore?limit=101");
+    expect(res.status).toBe(400);
+  });
+
+  // Same "test both sides of the boundary" discipline as the followers/
+  // following `?limit=100` test above — Task 2's review found the FOURTH
+  // instance of a cap that could be silently lowered with only the
+  // rejection side under test.
+  it("accepts the maximum allowed ?limit=100", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/explore?limit=100");
+    expect(res.status).toBe(200);
+  });
+
+  /**
+   * Review round 1, Important 3: `DEFAULT_EXPLORE_LIMIT` was imported from
+   * the single tested source (unlike Task 2's `DEFAULT_FOLLOW_LIST_LIMIT`
+   * duplicate), but nothing on the real HTTP path pinned its VALUE —
+   * changing `20` to `1` left the whole suite green. Mirrors
+   * `routes/users.test.ts`'s own `defaults to 50 rows with no ?limit=`
+   * test for the followers list: seed more than the default and pin the
+   * exact row count with no `?limit=` on the request.
+   *
+   * The expected count below is the LITERAL `20`, deliberately NOT
+   * `DEFAULT_EXPLORE_LIMIT` — asserting against the same constant the
+   * production code reads would make this test move in lockstep with any
+   * regression to that constant and pass vacuously, exactly the trap this
+   * test exists to catch. Only the SEED count below uses the import, so a
+   * future change to the default doesn't also require hand-editing how
+   * many rows get seeded.
+   */
+  it("defaults to 20 rows per list with no ?limit=, even when more exist", async () => {
+    const a = app();
+    await seedManyDirectly(DEFAULT_EXPLORE_LIMIT + 5, "explorer");
+
+    const res = await a.request("/users/explore");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.newest).toHaveLength(20);
+    expect(body.mostFollowed).toHaveLength(20);
+  });
+
+  /**
+   * Review round 1, Minor: `q` had no length bound at all — every other
+   * user-supplied string on this router does (`handle` 31, `displayName`
+   * 255, `bio` 300). Both sides of the boundary, same discipline as the
+   * `?limit=` pair above.
+   */
+  it("rejects a ?q= longer than 100 characters with 400", async () => {
+    const a = app();
+    const res = await a.request(`/users/explore?q=${"a".repeat(101)}`);
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts a ?q= of exactly 100 characters", async () => {
+    const a = app();
+    const res = await a.request(`/users/explore?q=${"a".repeat(100)}`);
+    expect(res.status).toBe(200);
   });
 });
 

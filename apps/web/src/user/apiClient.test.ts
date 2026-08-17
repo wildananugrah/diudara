@@ -1,22 +1,60 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   apiFetch,
   apiRequest,
   completePasswordReset,
+  exploreUsers,
+  followUser,
   getOwnProfile,
   getProfileByHandle,
   getSessionUser,
   getUserToken,
+  isUserSignedIn,
+  listFollowers,
+  listFollowing,
   login,
   requestPasswordReset,
   SESSION_EXPIRED_MESSAGE,
+  SessionStorageError,
   setUserSession,
+  subscribeToUserAuth,
   signup,
+  unfollowUser,
   updateOwnProfile,
   UserApiError,
   USER_TOKEN_STORAGE_KEY,
+  type OwnUserProfile,
 } from "./apiClient";
 import { SESSION_EXPIRED_MESSAGE as DASHBOARD_SESSION_EXPIRED_MESSAGE } from "../dashboard/apiClient";
+
+/**
+ * Type-level pin (review round 2, Important 2). `OwnUserProfile`'s own
+ * docstring in `apiClient.ts` explains why it extends `UserProfileCore`
+ * rather than `PublicUserProfile` — but `getOwnProfile()` returns its result
+ * via `(await res.json()) as T`, an assertion that compiles for ANY object
+ * shape, so nothing about that function itself would ever fail to compile
+ * if the `extends` clause regressed back to `PublicUserProfile`. This
+ * literal is the actual backstop: it is typed as `OwnUserProfile` WITHOUT
+ * `followerCount`/`followingCount`/`viewerFollows`, which only typechecks
+ * because those three are not part of `OwnUserProfile` today. If
+ * `OwnUserProfile` ever re-extends `PublicUserProfile`, those three become
+ * required properties of `OwnUserProfile` too, this literal starts missing
+ * required properties, and `bun run typecheck` fails right here — the same
+ * kind of two-sided proof `get-user-profile.ts`'s own `toOwnProfile` gets
+ * for free server-side (a spread that would fail to compile), reproduced
+ * here since a type-only `as` cast has no such guarantee.
+ */
+const OWN_PROFILE_SHAPE_PIN: OwnUserProfile = {
+  handle: "pin",
+  displayName: "Pin",
+  bio: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  email: "pin@example.com",
+  whatsappNumber: null,
+};
+void OWN_PROFILE_SHAPE_PIN;
 
 const USER = { id: "user-1", handle: "wildan", displayName: "Wildan", email: "wildan@example.com" };
 
@@ -38,6 +76,71 @@ afterEach(() => {
   global.fetch = originalFetch;
 });
 
+/**
+ * Re-review N6: `getProfileByHandle` was a hand-rolled COPY of `publicGet` —
+ * its own `fetch`, its own `authorizedHeaders`, its own `readError` — so there
+ * were two places to forget the viewer's Authorization header. It was then
+ * forgotten in each, separately: in `getProfileByHandle` until `11b8848` (the
+ * gate's Critical) and in `publicGet` until `926bb10` (the same Critical, one
+ * function over). Two places, two incidents.
+ *
+ * These two tests hold the collapse from both ends: the SHAPE (only the three
+ * sanctioned helpers may touch `fetch` at all) and the BEHAVIOUR (every public
+ * GET sends the token, and none invents one when signed out), driven through
+ * the real exported functions rather than through `publicGet` directly.
+ */
+describe("apiClient — one place to reach the network (N6)", () => {
+  it("only apiRequest, publicPost and publicGet call fetch at all", () => {
+    const source = readFileSync(join(import.meta.dir, "apiClient.ts"), "utf8");
+    // Every `fetch(` in the file, attributed to the nearest function
+    // declaration above it. A hand-rolled request inside any OTHER function is
+    // exactly the duplication this test exists to prevent coming back.
+    const owners = new Set<string>();
+    for (const match of source.matchAll(/\bfetch\s*\(/g)) {
+      const before = source.slice(0, match.index);
+      const declarations = [...before.matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)\s*[<(]/g)];
+      owners.add(declarations[declarations.length - 1]?.[1] ?? "<top level>");
+    }
+
+    expect([...owners].sort()).toEqual(["apiRequest", "publicGet", "publicPost"]);
+  });
+
+  it("every public GET sends the token when signed in, and none when signed out", async () => {
+    // Table-driven over the REAL exported functions, so this covers
+    // `getProfileByHandle` — the one that used to be its own copy — on exactly
+    // the same footing as the three that always went through `publicGet`.
+    const publicGets: Array<[string, () => Promise<unknown>]> = [
+      ["getProfileByHandle", () => getProfileByHandle("wildan")],
+      ["listFollowers", () => listFollowers("wildan")],
+      ["listFollowing", () => listFollowing("wildan")],
+      ["exploreUsers", () => exploreUsers({ q: "budi" })],
+    ];
+
+    // Collected into an array rather than a reassigned `let`: TypeScript
+    // narrows a `let` the mock writes to behind its back down to `never`.
+    const seen: Array<RequestInit | undefined> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      seen.push(init);
+      return jsonResponse([]);
+    }) as unknown as typeof fetch;
+
+    for (const [name, call] of publicGets) {
+      localStorage.clear();
+      setUserSession("jwt-abc", USER);
+      await call();
+      expect(`${name} signed in: ${new Headers(seen.at(-1)?.headers).get("Authorization")}`).toBe(
+        `${name} signed in: Bearer jwt-abc`
+      );
+
+      localStorage.clear();
+      await call();
+      expect(`${name} signed out: ${new Headers(seen.at(-1)?.headers).get("Authorization")}`).toBe(
+        `${name} signed out: null`
+      );
+    }
+  });
+});
+
 describe("session storage", () => {
   it("stores the token under its own key, distinct from the dashboard's", () => {
     expect(USER_TOKEN_STORAGE_KEY).toBe("diudara.user.token");
@@ -50,6 +153,148 @@ describe("session storage", () => {
     setUserSession("jwt-abc", USER);
     expect(getSessionUser()).toEqual(USER);
     expect(getUserToken()).toBe("jwt-abc");
+  });
+});
+
+/**
+ * Final-review I2, both halves.
+ *
+ * ATOMICITY: `setUserSession` wrote the token then the account inside ONE
+ * `try`. A failure on the SECOND `setItem` — quota, or Safari's storage
+ * behaviour, the same class of failure `getUserToken`'s own try/catch already
+ * anticipates — left the token persisted, un-rolled-back, with `notify()`
+ * skipped. The review measured what that state does: a live "Ikuti" button on
+ * your own profile, collecting the 409 three docstrings exist to prevent.
+ *
+ * SINGLE KEY: "is there a session?" was answered from `diudara.user.token` in
+ * one place and `diudara.user.account` in another. `isUserSignedIn` is now the
+ * one answer, and it reads the token.
+ */
+describe("session storage — atomicity and one source of truth (item 4)", () => {
+  /**
+   * Swaps `globalThis.localStorage` for a working in-memory stub that refuses
+   * writes to keys containing `refuseKeyFragment` — the quota shape the review
+   * described, where the short token fits and the longer account JSON does not.
+   *
+   * The whole object is replaced rather than `setItem` patched: happy-dom's
+   * `localStorage` routes method calls through an internal handler, so neither
+   * an own-property assignment nor a `Storage.prototype` patch intercepts
+   * anything (measured — both were silently ignored, with the real value still
+   * written). Restored by the returned function, which every test below calls
+   * in a `finally`: a leaked override would break every later test in this file.
+   */
+  function refuseWritesTo(refuseKeyFragment: string): () => void {
+    const real = Object.getOwnPropertyDescriptor(globalThis, "localStorage")!;
+    const store = new Map<string, string>();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+        setItem: (key: string, value: string) => {
+          if (key.includes(refuseKeyFragment)) throw new Error("QuotaExceededError");
+          store.set(key, value);
+        },
+        removeItem: (key: string) => void store.delete(key),
+        clear: () => store.clear(),
+      },
+    });
+    return () => {
+      Object.defineProperty(globalThis, "localStorage", real);
+    };
+  }
+
+  it("guards the guard: a refused write really does reach setUserSession", () => {
+    // Without this, a `refuseWritesTo` that silently stopped intercepting would
+    // make every assertion below pass vacuously — which is exactly what the
+    // first two attempts at this helper did.
+    const restore = refuseWritesTo("diudara.user.token");
+    let stored: string | null = "not read";
+    try {
+      setUserSession("jwt-abc", USER);
+      stored = getUserToken();
+    } finally {
+      restore();
+    }
+    // The FIRST write failing writes nothing at all, so there is no half state
+    // to clean up. Documented behaviour, not a bug: a browser with storage
+    // disabled entirely should still complete a login for the life of the page,
+    // which is why this case returns rather than throwing.
+    expect(stored).toBeNull();
+  });
+
+  it("rolls the token back and THROWS when the account write fails", () => {
+    const restore = refuseWritesTo("diudara.user.account");
+    let thrown: unknown = null;
+    let tokenAfter: string | null = "not read";
+    let accountAfter: unknown = "not read";
+    let signedInAfter: boolean | string = "not read";
+    try {
+      try {
+        setUserSession("jwt-abc", USER);
+      } catch (err) {
+        thrown = err;
+      }
+      tokenAfter = getUserToken();
+      accountAfter = getSessionUser();
+      signedInAfter = isUserSignedIn();
+    } finally {
+      restore();
+    }
+
+    expect(thrown).toBeInstanceOf(SessionStorageError);
+    // THE POINT: no half session survives. Before this fix the token was
+    // already persisted here and never rolled back.
+    expect(tokenAfter).toBeNull();
+    expect(accountAfter).toBeNull();
+    expect(signedInAfter).toBe(false);
+  });
+
+  it("the thrown message is Bahasa Indonesia, since LoginPage renders it", () => {
+    const restore = refuseWritesTo("diudara.user.account");
+    try {
+      expect(() => setUserSession("jwt-abc", USER)).toThrow(
+        "Sesi tidak dapat disimpan di peramban ini. Coba lagi atau aktifkan penyimpanan situs."
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not announce a session it failed to store", () => {
+    let notifications = 0;
+    const unsubscribe = subscribeToUserAuth(() => {
+      notifications += 1;
+    });
+    const restore = refuseWritesTo("diudara.user.account");
+    try {
+      expect(() => setUserSession("jwt-abc", USER)).toThrow();
+    } finally {
+      restore();
+      unsubscribe();
+    }
+
+    expect(notifications).toBe(0);
+  });
+
+  it("isUserSignedIn reads the TOKEN key — true with a token and no cached account", () => {
+    setUserSession("jwt-abc", USER);
+    localStorage.removeItem("diudara.user.account");
+
+    expect(isUserSignedIn()).toBe(true);
+    // The two questions are different, and this is what makes them different:
+    // the session exists, the identity behind it is unknown.
+    expect(getSessionUser()).toBeNull();
+  });
+
+  it("isUserSignedIn reads the TOKEN key — false with a cached account and no token", () => {
+    setUserSession("jwt-abc", USER);
+    localStorage.removeItem(USER_TOKEN_STORAGE_KEY);
+
+    expect(isUserSignedIn()).toBe(false);
+    // Deliberately asserted the other way round from the test above: a reader
+    // that had been switched to the account key would pass one of these two
+    // and fail the other, never both.
+    expect(getSessionUser()).toEqual(USER);
   });
 });
 
@@ -212,17 +457,109 @@ describe("signup", () => {
 });
 
 describe("profile", () => {
-  it("fetches a public profile by bare handle", async () => {
+  it("fetches a public profile by bare handle, including the follow fields", async () => {
     const calls: string[] = [];
     global.fetch = mock(async (url: string) => {
       calls.push(url);
-      return jsonResponse({ handle: "wildan", displayName: "Wildan", bio: null, createdAt: "2026-01-01T00:00:00.000Z" });
+      return jsonResponse({
+        handle: "wildan",
+        displayName: "Wildan",
+        bio: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        followerCount: 3,
+        followingCount: 1,
+        viewerFollows: null,
+      });
     }) as unknown as typeof fetch;
 
     const profile = await getProfileByHandle("wildan");
 
     expect(calls[0]).toBe("/users/by-handle/wildan");
     expect(profile.handle).toBe("wildan");
+    expect(profile.followerCount).toBe(3);
+    expect(profile.followingCount).toBe(1);
+    expect(profile.viewerFollows).toBeNull();
+  });
+
+  /**
+   * TASK 6, THE PHASE GATE, FOUND IN A REAL BROWSER: signed in and looking at
+   * somebody else's profile, the follow button read "Masuk untuk mengikuti"
+   * — the signed-OUT label — because this request carried no Authorization
+   * header, so `GET /users/by-handle/:handle` answered `viewerFollows: null`
+   * for a caller who very much had a session.
+   *
+   * `/by-handle/:handle` is PUBLIC but NOT anonymous. `routes/users.ts` runs
+   * `resolveViewerId` on it (never `requireAuth`, so a missing or expired
+   * token is `null`/anonymous rather than a 401), and that viewer id is the
+   * ONLY input to `viewerFollows`. Measured against the running API:
+   *
+   *   $ curl -s localhost:3000/users/by-handle/gate6_bagas
+   *   {... "viewerFollows":null}
+   *   $ curl -s localhost:3000/users/by-handle/gate6_bagas -H "Authorization: Bearer $TOKEN"
+   *   {... "viewerFollows":false}
+   *
+   * So the header is what decides whether the follow toggle exists at all:
+   * `FollowButton` renders a `<Link to="/masuk">` for `null` and the real
+   * button only for `true`/`false`. Without it the entire follow/unfollow
+   * feature was unreachable from `/@handle` in the running app for every
+   * signed-in user — the profile page being the primary place this phase
+   * exists to put it.
+   *
+   * The old code path was a bare `fetch()` whose own docstring asserted
+   * "attaching a stale Authorization header to a request nothing checks
+   * would be pointless". That was true when it was written (Task 6 of the
+   * accounts phase) and became false the moment Task 2 of THIS phase added
+   * `resolveViewerId` to the route — a written assumption that outlived the
+   * code it described, which is exactly what the ledger's standing lesson
+   * warns about.
+   *
+   * BOTH DIRECTIONS ARE PINNED, deliberately: sending the header always
+   * would break a signed-out visitor's "Masuk untuk mengikuti" if a stale
+   * token were ever present, and sending it never is the bug above.
+   */
+  it("sends the stored bearer token on a public profile fetch — viewerFollows depends on it", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit | undefined) => {
+      calls.push({ url, init });
+      return jsonResponse({
+        handle: "budi",
+        displayName: "Budi",
+        bio: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        followerCount: 1,
+        followingCount: 0,
+        viewerFollows: false,
+      });
+    }) as unknown as typeof fetch;
+
+    const profile = await getProfileByHandle("budi");
+
+    expect(calls[0]!.url).toBe("/users/by-handle/budi");
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+    expect(profile.viewerFollows).toBe(false);
+  });
+
+  it("sends NO Authorization header on a public profile fetch when signed out", async () => {
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit | undefined) => {
+      calls.push({ url, init });
+      return jsonResponse({
+        handle: "budi",
+        displayName: "Budi",
+        bio: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        followerCount: 1,
+        followingCount: 0,
+        viewerFollows: null,
+      });
+    }) as unknown as typeof fetch;
+
+    const profile = await getProfileByHandle("budi");
+
+    expect(getUserToken()).toBeNull();
+    expect(new Headers(calls[0]!.init?.headers).has("Authorization")).toBe(false);
+    expect(profile.viewerFollows).toBeNull();
   });
 
   it("throws a 404 for an unknown handle", async () => {
@@ -254,6 +591,12 @@ describe("profile", () => {
     expect(calls[0]!.url).toBe("/users/me");
     expect(new Headers(calls[0]!.init.headers).get("Authorization")).toBe("Bearer jwt-abc");
     expect(profile.email).toBe("wildan@example.com");
+    // Runtime half of the I2 pin above: the ACTUAL parsed response carries
+    // exactly the six own-profile fields — never the three follow fields a
+    // `PublicUserProfile`-based `OwnUserProfile` would (wrongly) claim.
+    expect(Object.keys(profile).sort()).toEqual(
+      ["bio", "createdAt", "displayName", "email", "handle", "whatsappNumber"].sort()
+    );
   });
 
   it("patches the display name via PATCH /users/me", async () => {
@@ -323,5 +666,185 @@ describe("password reset", () => {
     const err = (await completePasswordReset("bad-token", "newpassword1").catch((e: unknown) => e)) as UserApiError;
 
     expect(err.status).toBe(401);
+  });
+});
+
+describe("follow", () => {
+  it("POSTs to /users/:handle/follow with the bearer header and resolves the resulting state", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ following: true });
+    }) as unknown as typeof fetch;
+
+    const result = await followUser("budi");
+
+    expect(calls[0]!.url).toBe("/users/budi/follow");
+    expect(calls[0]!.init.method).toBe("POST");
+    expect(new Headers(calls[0]!.init.headers).get("Authorization")).toBe("Bearer jwt-abc");
+    expect(result).toEqual({ following: true });
+  });
+
+  it("DELETEs to /users/:handle/follow and resolves the resulting state", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ following: false });
+    }) as unknown as typeof fetch;
+
+    const result = await unfollowUser("budi");
+
+    expect(calls[0]!.url).toBe("/users/budi/follow");
+    expect(calls[0]!.init.method).toBe("DELETE");
+    expect(result).toEqual({ following: false });
+  });
+
+  it("throws a 409 for a self-follow", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "tidak bisa mengikuti akun sendiri" }, 409)
+    ) as unknown as typeof fetch;
+
+    const err = (await followUser("wildan").catch((e: unknown) => e)) as UserApiError;
+
+    expect(err.status).toBe(409);
+  });
+});
+
+describe("follow lists and Jelajah", () => {
+  /**
+   * REWRITTEN BY THE FINAL REVIEW'S ITEM 1, and the old version is worth
+   * recording: it asserted `Authorization` was ABSENT here even while signed in,
+   * which was correct when nothing on these routes read a viewer, and became the
+   * thing standing in front of the fix the moment they did. The review predicted
+   * exactly this — "it becomes the gate's Critical again the moment item 1 is
+   * done" — so the assertion is inverted rather than deleted, and the signed-OUT
+   * direction gets its own test below so the token cannot start being invented.
+   */
+  it("SENDS the stored bearer token on a followers fetch — per-row viewerFollows depends on it", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse([{ handle: "budi", displayName: "Budi", bio: null, viewerFollows: true }]);
+    }) as unknown as typeof fetch;
+
+    const rows = await listFollowers("wildan");
+
+    expect(calls[0]!.url).toBe("/users/wildan/followers");
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+    expect(rows).toEqual([{ handle: "budi", displayName: "Budi", bio: null, viewerFollows: true }]);
+  });
+
+  it("sends NO Authorization header on a followers fetch when signed out", async () => {
+    const calls: Array<{ init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse([]);
+    }) as unknown as typeof fetch;
+
+    await listFollowers("wildan");
+
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBeNull();
+  });
+
+  it("sends the token on a following fetch too — same publicGet, same seam", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse([]);
+    }) as unknown as typeof fetch;
+
+    await listFollowing("wildan");
+
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+  });
+
+  it("sends the token on the Jelajah explore fetch too", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
+    }) as unknown as typeof fetch;
+
+    await exploreUsers({ q: "budi" });
+
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+  });
+
+  it("sends NO Authorization header on the explore fetch when signed out", async () => {
+    const calls: Array<{ init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
+    }) as unknown as typeof fetch;
+
+    await exploreUsers({});
+
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBeNull();
+  });
+
+  it("appends ?limit= for followers when given a limit", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse([]);
+    }) as unknown as typeof fetch;
+
+    await listFollowers("wildan", 10);
+
+    expect(calls[0]).toBe("/users/wildan/followers?limit=10");
+  });
+
+  it("fetches following the same way", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse([{ handle: "budi", displayName: "Budi", bio: null, viewerFollows: false }]);
+    }) as unknown as typeof fetch;
+
+    const rows = await listFollowing("wildan");
+
+    expect(calls[0]).toBe("/users/wildan/following");
+    expect(rows).toEqual([{ handle: "budi", displayName: "Budi", bio: null, viewerFollows: false }]);
+  });
+
+  it("throws a 404 for an unknown handle's followers", async () => {
+    global.fetch = mock(async () => jsonResponse({ error: "user not found" }, 404)) as unknown as typeof fetch;
+
+    const err = (await listFollowers("nosuchuser").catch((e: unknown) => e)) as UserApiError;
+
+    expect(err.status).toBe(404);
+  });
+
+  it("calls /users/explore with no query string when q is omitted", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
+    }) as unknown as typeof fetch;
+
+    const result = await exploreUsers();
+
+    expect(calls[0]).toBe("/users/explore");
+    expect(result).toEqual({ results: [], newest: [], mostFollowed: [] });
+  });
+
+  it("calls /users/explore?q=... when a query is given, and never on an empty one", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
+    }) as unknown as typeof fetch;
+
+    await exploreUsers({ q: "budi" });
+    await exploreUsers({ q: "" });
+
+    expect(calls[0]).toBe("/users/explore?q=budi");
+    expect(calls[1]).toBe("/users/explore");
   });
 });
