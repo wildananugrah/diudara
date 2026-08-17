@@ -616,6 +616,55 @@ describe("EventsPage - browser publishing", () => {
     expect(screen.queryAllByRole("button", { name: "Hentikan siaran" }).length).toBe(0);
   });
 
+  // FIX ROUND 3 — THE DEFECT MEASURED IN PRODUCTION on diudara.mhamzah.id: a
+  // creator publishing from Firefox saw "Hentikan siaran" and the
+  // don't-close-this-tab warning — every earlier signal in this file's own
+  // FakePeerConnection (connectionState reaching "connected") said this
+  // publish was healthy — while MediaMTX logged `1 track (Opus)`: audio
+  // only, no video, and nothing on screen said so. `publishToWhip` now also
+  // verifies video is actually being sent (see whip-publisher.ts's own "FIX
+  // ROUND 3" docstring); this pins that the SCREEN reacts correctly — no
+  // live badge, the new Indonesian message instead — when it is not.
+  //
+  // This test uses the "no video sender negotiated at all" case specifically
+  // (not the "sends zero bytes" case) because that one fails IMMEDIATELY,
+  // with no polling wait — the "sends zero bytes" case is exhaustively
+  // covered at the whip-publisher.ts unit level instead, where
+  // `videoFlowTimeoutMs`/`videoFlowPollIntervalMs` can be overridden to keep
+  // tests fast; `goLive()` here calls `publishToWhip` with the real
+  // production defaults (~2s), which this file's own established convention
+  // (see the "does not resolve until..." comment above) is to test at the
+  // unit level, not by waiting it out here.
+  it("shows the video-not-sent message and no live badge when no video was negotiated at all", async () => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: grantingMediaDevices(),
+    });
+    stubFetchWithWhip([COMMUNITY, ENABLED, { path: EVENTS_PATH, body: [SCHEDULED_SESSION] }], {
+      url: SCHEDULED_SESSION.whipUrl,
+    });
+
+    class NoVideoSenderPeerConnection extends FakePeerConnection {
+      getSenders() {
+        return [{ track: { kind: "audio" }, getStats: async () => new Map() }];
+      }
+    }
+    (globalThis as Record<string, unknown>).RTCPeerConnection = NoVideoSenderPeerConnection;
+
+    render();
+    await screen.findByText("Sesi belajar saham");
+    fireEvent.click(screen.getByRole("button", { name: "Siarkan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktifkan kamera/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Mulai siaran dari browser/ }));
+
+    const message = await screen.findByText(/tayang tanpa gambar/);
+    expect(message.textContent).toContain("OBS");
+    // The creator must not be shown a live badge over a publish that never
+    // actually sent video.
+    expect(screen.queryAllByRole("button", { name: "Hentikan siaran" }).length).toBe(0);
+    expect(await screen.findByRole("button", { name: /Mulai siaran dari browser/ })).toBeTruthy();
+  });
+
   it("disables the go-live button and explains why when the session is already live via OBS", async () => {
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,

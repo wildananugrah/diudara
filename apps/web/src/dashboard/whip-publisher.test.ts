@@ -719,3 +719,216 @@ describe("publishToWhip video codec preference", () => {
     expect(handle).toBeDefined();
   });
 });
+
+/**
+ * TASK (Fix Round 3) — THE DEFECT MEASURED IN PRODUCTION, on
+ * `diudara.mhamzah.id`: a creator published from Firefox, the UI showed
+ * "Hentikan siaran" and the don't-close-this-tab warning (every signal Fix
+ * Rounds 1 and 2 above check said this was a healthy publish), while
+ * MediaMTX's own log read `stream is available and online, 1 track (Opus)`
+ * — audio only. Firefox's H264 encoder depends on Cisco's OpenH264 being
+ * present; without it (and without a server-side codec Firefox can actually
+ * encode either), a video transceiver can report "connected" while producing
+ * zero RTP packets, forever. Nothing before this fix ever checked that VIDEO
+ * specifically was moving.
+ *
+ * `verifyVideoIsFlowing` is feature-detected via `getSenders`/`getStats`
+ * exactly like `preferH264` is via `getCapabilities`/`setCodecPreferences` —
+ * every test above this block uses the plain `FakePeerConnection`, which has
+ * neither method, and every one of those tests still passes after this fix:
+ * that IS the regression coverage for "a browser without this API publishes
+ * exactly as it did before."
+ */
+describe("publishToWhip video-flow verification (Fix Round 3)", () => {
+  /**
+   * A minimal `RTCRtpSender` stand-in: a `track` (or `null`, modelling "no
+   * video sender exists") and a `getStats()` that hands back a real `Map`,
+   * matching `RTCStatsReport`'s own Map-like shape (see `outboundBytesSent`'s
+   * own docstring on why a plain object would not do). `bytesSentSequence`
+   * lets a test model bytes ramping up over successive polls — the LAST
+   * value repeats once the sequence is exhausted, so a test can express
+   * "starts at 0, then flows" without listing every poll it might take.
+   */
+  class FakeVideoSender {
+    calls = 0;
+    constructor(
+      public track: { kind: string } | null,
+      private bytesSentSequence: number[]
+    ) {}
+    async getStats() {
+      const index = Math.min(this.calls, this.bytesSentSequence.length - 1);
+      this.calls += 1;
+      return new Map([["outbound-rtp-video", { type: "outbound-rtp", bytesSent: this.bytesSentSequence[index] }]]);
+    }
+  }
+
+  /** A `FakePeerConnection` whose `getSenders()` is controlled per test, unlike the plain base class. */
+  function peerConnectionWithSenders(getSenders: () => { track: { kind: string } | null; getStats?: () => Promise<Map<string, unknown>> }[]) {
+    return class extends FakePeerConnection {
+      getSenders() {
+        return getSenders();
+      }
+    };
+  }
+
+  it("throws a message naming Firefox when the video sender's bytesSent stays at zero (the actual production defect)", async () => {
+    const sender = new FakeVideoSender({ kind: "video" }, [0]);
+    (globalThis as Record<string, unknown>).RTCPeerConnection = peerConnectionWithSenders(() => [sender]);
+
+    try {
+      await publishToWhip({
+        whipUrl: WHIP_URL,
+        stream: fakeStream(),
+        fetchFn: okAnswer(),
+        videoFlowTimeoutMs: 20,
+        videoFlowPollIntervalMs: 5,
+      });
+      throw new Error("expected publishToWhip to reject");
+    } catch (err) {
+      expect(err).toBeInstanceOf(WhipNegotiationError);
+      const message = (err as Error).message;
+      expect(message).toContain("Firefox");
+      expect(message).toContain("OBS");
+      expect(message).not.toContain("ReferenceError");
+    }
+  });
+
+  it("closes the peer connection when video never starts sending (not left open as a ghost audio-only publish)", async () => {
+    const sender = new FakeVideoSender({ kind: "video" }, [0]);
+    let capturedPc: FakePeerConnection | undefined;
+    (globalThis as Record<string, unknown>).RTCPeerConnection = class extends (
+      peerConnectionWithSenders(() => [sender])
+    ) {
+      constructor() {
+        super();
+        capturedPc = this;
+      }
+    };
+
+    try {
+      await publishToWhip({
+        whipUrl: WHIP_URL,
+        stream: fakeStream(),
+        fetchFn: okAnswer(),
+        videoFlowTimeoutMs: 20,
+        videoFlowPollIntervalMs: 5,
+      });
+    } catch {
+      // expected
+    }
+
+    expect(capturedPc?.closed).toBe(true);
+  });
+
+  it("throws a DIFFERENT message, not naming Firefox, when no video sender was negotiated at all", async () => {
+    // Only an audio sender — models a stream with no video track at all, so
+    // there was never anything for the server to accept in the first place.
+    (globalThis as Record<string, unknown>).RTCPeerConnection = peerConnectionWithSenders(() => [
+      { track: { kind: "audio" }, getStats: async () => new Map() },
+    ]);
+
+    try {
+      await publishToWhip({
+        whipUrl: WHIP_URL,
+        stream: fakeStream(),
+        fetchFn: okAnswer(),
+        videoFlowTimeoutMs: 20,
+        videoFlowPollIntervalMs: 5,
+      });
+      throw new Error("expected publishToWhip to reject");
+    } catch (err) {
+      expect(err).toBeInstanceOf(WhipNegotiationError);
+      const message = (err as Error).message;
+      // Distinct wording from the "sends nothing" case above: this browser
+      // never had video to send, so blaming Firefox's encoder specifically
+      // would be a wrong diagnosis.
+      expect(message).not.toContain("Firefox");
+      expect(message).toContain("OBS");
+    }
+  });
+
+  it("does NOT wait out the poll timeout when there is no video sender at all (fails fast)", async () => {
+    (globalThis as Record<string, unknown>).RTCPeerConnection = peerConnectionWithSenders(() => [
+      { track: { kind: "audio" }, getStats: async () => new Map() },
+    ]);
+    const startedAt = Date.now();
+
+    try {
+      await publishToWhip({
+        whipUrl: WHIP_URL,
+        stream: fakeStream(),
+        fetchFn: okAnswer(),
+        videoFlowTimeoutMs: 5_000, // would take 5s to fail if this waited the timeout out
+        videoFlowPollIntervalMs: 5,
+      });
+    } catch {
+      // expected
+    }
+
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it("resolves normally once the video sender's outbound bytesSent becomes nonzero on a later poll", async () => {
+    // Starts at 0 (mirroring a real encoder's brief startup) and ramps up —
+    // proves this is genuinely POLLING for the transition, not just reading
+    // one snapshot immediately after "connected".
+    const sender = new FakeVideoSender({ kind: "video" }, [0, 0, 48_000]);
+    (globalThis as Record<string, unknown>).RTCPeerConnection = peerConnectionWithSenders(() => [sender]);
+
+    const handle = await publishToWhip({
+      whipUrl: WHIP_URL,
+      stream: fakeStream(),
+      fetchFn: okAnswer(),
+      videoFlowTimeoutMs: 1_000,
+      videoFlowPollIntervalMs: 5,
+    });
+
+    expect(handle.close).toBeInstanceOf(Function);
+    expect(sender.calls).toBeGreaterThanOrEqual(3);
+  });
+
+  it("treats a getStats() that throws as unverifiable, not as evidence of failure", async () => {
+    const sender = {
+      track: { kind: "video" },
+      getStats: async () => {
+        throw new Error("getStats is not implemented in this environment");
+      },
+    };
+    (globalThis as Record<string, unknown>).RTCPeerConnection = peerConnectionWithSenders(() => [sender]);
+
+    const handle = await publishToWhip({
+      whipUrl: WHIP_URL,
+      stream: fakeStream(),
+      fetchFn: okAnswer(),
+      videoFlowTimeoutMs: 20,
+      videoFlowPollIntervalMs: 5,
+    });
+
+    expect(handle.close).toBeInstanceOf(Function);
+  });
+
+  it("treats a video sender with no getStats() at all as unverifiable, not as evidence of failure", async () => {
+    (globalThis as Record<string, unknown>).RTCPeerConnection = peerConnectionWithSenders(() => [
+      { track: { kind: "video" } },
+    ]);
+
+    const handle = await publishToWhip({
+      whipUrl: WHIP_URL,
+      stream: fakeStream(),
+      fetchFn: okAnswer(),
+      videoFlowTimeoutMs: 20,
+      videoFlowPollIntervalMs: 5,
+    });
+
+    expect(handle.close).toBeInstanceOf(Function);
+  });
+
+  it("skips the whole check when getSenders is unavailable — every earlier test in this file relies on exactly this", async () => {
+    // `FakePeerConnection` (installed in `beforeEach`) has no `getSenders`,
+    // matching a real browser without the newer WebRTC stats API. This test
+    // exists to say so explicitly; every OTHER test in this file is already
+    // proof this path keeps working.
+    const handle = await publishToWhip({ whipUrl: WHIP_URL, stream: fakeStream(), fetchFn: okAnswer() });
+    expect(handle.close).toBeInstanceOf(Function);
+  });
+});
