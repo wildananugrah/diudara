@@ -8,6 +8,24 @@ import type { SignupNoticeRepositoryPort } from "../ports/signup-notice-reposito
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
 import type { PasswordHasherPort } from "../ports/password-hasher.port";
 
+/**
+ * A manually-released gate for deterministically proving `execute()`
+ * resolves BEFORE a fire-and-forget notice send completes — review finding
+ * NF1. No sleeps: held open until the test calls `release()`.
+ */
+function makeGate(): { gate: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { gate, release };
+}
+
+/** Drains pending microtasks/one macrotask turn — see the identical helper in request-password-reset.test.ts. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function record(overrides: Partial<UserRecord> = {}): UserRecord {
   return {
     id: "user-1",
@@ -478,6 +496,46 @@ describe("RegisterUser", () => {
       expect(email.sent).toHaveLength(1);
       expect(email.sent[0].to).toBe("racer@example.com");
       expect(email.sent[0].body).toBe(EXISTING_EMAIL_SIGNUP_NOTICE);
+    });
+
+    /**
+     * Review finding NF1: F2's fix (not awaiting the notice send) was
+     * unpinned — re-adding `await` in front of
+     * `this.notifyExistingOwner(existing)` survived every other test, since
+     * none of them check that `execute()` returned before the message
+     * arrived, only that it eventually did.
+     *
+     * Deterministic, no sleeps: the email adapter's `send` blocks on a gate
+     * this test controls directly.
+     */
+    it("resolves BEFORE the notice send completes — the fire-and-forget guarantee (NF1)", async () => {
+      const { repository } = fakeRepository([
+        record({ handle: "existing", email: "wildan@example.com", whatsappNumber: null }),
+      ]);
+      const { gate, release } = makeGate();
+      const email = new FakeEmailAdapter();
+      const originalSend = email.send.bind(email);
+      email.send = async (input) => {
+        await gate;
+        await originalSend(input);
+      };
+      const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+      const useCase = buildUseCase(repository, fakeHasher, email, notifier);
+
+      const result = await useCase.execute({ ...VALID, handle: "newhandle" });
+
+      // execute() already resolved — the gated send has not, so nothing has
+      // arrived yet. If the send were awaited, this line would not be
+      // reached until AFTER release() below, and this would find one sent
+      // message instead of zero.
+      expect(result).toEqual({ ok: true });
+      expect(email.sent).toHaveLength(0);
+
+      release();
+      await flush();
+
+      expect(email.sent).toHaveLength(1);
+      expect(email.sent[0].to).toBe("wildan@example.com");
     });
   });
 });

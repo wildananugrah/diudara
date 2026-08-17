@@ -201,8 +201,19 @@ export class RegisterUser {
       return;
     }
     await this.signupNotices.record(existing.id);
-    // NOT awaited — see the class docstring's F2 note.
-    void this.notifyExistingOwner(existing);
+    // NOT awaited — see the class docstring's F2 note. `.catch(...)` here
+    // too, not just `notifyExistingOwner`'s own internal try/catch — review
+    // finding NF4, same reasoning as `RequestPasswordReset.send`'s own call
+    // site: this makes "cannot produce an unhandled rejection" true
+    // regardless of what `notifyExistingOwner`'s body does internally,
+    // rather than depending on it staying exactly as written.
+    void this.notifyExistingOwner(existing).catch((err) => {
+      console.warn(
+        `[register-user] notifyExistingOwner() itself rejected — this should be unreachable ` +
+          `given its own try/catch; treat this as that guard having been removed or narrowed. ` +
+          `user=${existing.id}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    });
   }
 
   /**
