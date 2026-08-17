@@ -8,6 +8,30 @@ import type { ClockPort } from "../ports/clock.port";
 import type { PasswordResetRepositoryPort, PasswordResetTokenRecord } from "../ports/password-reset-repository.port";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
 
+/**
+ * A manually-released gate for deterministically proving `execute()`
+ * resolves BEFORE a fire-and-forget send completes — review finding NF1.
+ * No sleeps: the send is held open until the test itself calls `release()`,
+ * so there is no timing window to race and nothing to make flaky.
+ */
+function makeGate(): { gate: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { gate, release };
+}
+
+/**
+ * Drains pending microtasks (and one macrotask turn) so that whatever ran
+ * as a continuation of a just-released gate has actually executed before
+ * the next assertion — `await gate` alone only waits for the GATE promise
+ * to settle, not for the `.then` continuations chained onto it elsewhere.
+ */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function record(overrides: Partial<UserRecord> = {}): UserRecord {
   return {
     id: "user-1",
@@ -345,5 +369,42 @@ describe("RequestPasswordReset", () => {
     expect(JSON.stringify(r1)).toBe(JSON.stringify(r2));
     expect(JSON.stringify(r2)).toBe(JSON.stringify(r3));
     expect(JSON.stringify(r3)).toBe(JSON.stringify(r4));
+  });
+
+  /**
+   * Review finding NF1: F1's fix (not awaiting `send`) was unpinned —
+   * re-adding `await` in front of `this.send(...)` survived the whole
+   * suite, because every other test only checks that the message
+   * EVENTUALLY arrives, never that `execute()` did not wait for it.
+   *
+   * Deterministic, no sleeps: the email adapter's `send` blocks on a gate
+   * this test controls directly. `execute()` must resolve while the gate is
+   * still held (proving it did not await the send); only after the test
+   * releases the gate does the message actually land.
+   */
+  it("resolves BEFORE the send completes — the fire-and-forget guarantee (NF1)", async () => {
+    const { gate, release } = makeGate();
+    const email = new FakeEmailAdapter();
+    const originalSend = email.send.bind(email);
+    email.send = async (input) => {
+      await gate;
+      await originalSend(input);
+    };
+    const { useCase } = harness({ email });
+
+    const result = await useCase.execute({ email: "wildan@example.com", ip: "1.2.3.4" });
+
+    // execute() already resolved — the gated send has not, so nothing has
+    // arrived yet. If `send` were awaited, this line would never be reached
+    // until AFTER release() below, and this assertion would find one sent
+    // message instead of zero.
+    expect(result).toEqual({ ok: true });
+    expect(email.sent).toHaveLength(0);
+
+    release();
+    await flush();
+
+    expect(email.sent).toHaveLength(1);
+    expect(email.sent[0].to).toBe("wildan@example.com");
   });
 });

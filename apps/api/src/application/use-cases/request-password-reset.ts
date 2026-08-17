@@ -147,7 +147,21 @@ export class RequestPasswordReset {
     // This process is a persistent Bun server (see `infra/docker-compose.yml`),
     // not a request-scoped serverless runtime, so a promise kept alive past
     // the point its handler returned keeps running normally.
-    void this.send(channel, user, link);
+    //
+    // `.catch(...)` HERE TOO, not just `send`'s own internal try/catch —
+    // review finding NF4. Without it, "this call can never produce an
+    // unhandled rejection" depends entirely on `send`'s body staying exactly
+    // as written; a future edit that narrows or removes its try/catch would
+    // silently reintroduce an unhandled rejection with nothing at this call
+    // site to catch it. This makes the guarantee hold regardless of what
+    // `send` does internally.
+    void this.send(channel, user, link).catch((err) => {
+      console.warn(
+        `[password-reset] send() itself rejected — this should be unreachable given send's ` +
+          `own try/catch; treat this as that guard having been removed or narrowed. user=` +
+          `${user.id}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    });
 
     // Case 2.
     return { ok: true };
