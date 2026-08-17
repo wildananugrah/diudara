@@ -251,6 +251,79 @@ describe("FollowListPage — per-row follow state and one-tap unfollow (item 1)"
    * followers list is not somewhere you can unfollow from. That stays true, and
    * for the right reason — the handle comparison, not the value.
    */
+  /**
+   * Final-review M1: `listFollowers`/`listFollowing` are called with no `?limit=`,
+   * so the route applies its default of 50. Measured against the real routes with
+   * 55 real followers: `profile followerCount=55; list with NO ?limit= returned 50
+   * rows`. The profile said 55, the page listed 50, and nothing said so.
+   *
+   * Ruled: NO pagination — out of scope, and the design spec (§5) says these
+   * lists are capped with no infinite scroll. Just be honest about the cap.
+   *
+   * The `50` below is the LITERAL, not `DEFAULT_FOLLOW_LIST_LIMIT`. The message
+   * interpolates the constant so the two can never disagree; asserting against
+   * that same constant here would move with it and pass vacuously.
+   */
+  it("says so, in Bahasa Indonesia, when the page comes back full", async () => {
+    const full = Array.from({ length: 50 }, (_, i) => ({
+      handle: `f${i}`,
+      displayName: `Follower ${i}`,
+      bio: null,
+      viewerFollows: null,
+    }));
+    global.fetch = mock(async () => jsonResponse(full)) as unknown as typeof fetch;
+
+    renderAt("/@wildan/pengikut");
+
+    await screen.findByText("Follower 0");
+    expect(
+      screen.getByText("Daftar dibatasi 50 akun, jadi mungkin ada yang tidak ditampilkan.")
+    ).toBeTruthy();
+  });
+
+  it("says nothing when the page is not full — no notice on a short list", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse([{ handle: "budi", displayName: "Budi", bio: null, viewerFollows: null }])
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/pengikut");
+
+    await screen.findByText("Budi");
+    expect(
+      screen.queryAllByText("Daftar dibatasi 50 akun, jadi mungkin ada yang tidak ditampilkan.")
+        .length
+    ).toBe(0);
+  });
+
+  it("says nothing on an empty list either", async () => {
+    global.fetch = mock(async () => jsonResponse([])) as unknown as typeof fetch;
+
+    renderAt("/@wildan/mengikuti");
+
+    await screen.findByText("Belum mengikuti siapa pun.");
+    expect(
+      screen.queryAllByText("Daftar dibatasi 50 akun, jadi mungkin ada yang tidak ditampilkan.")
+        .length
+    ).toBe(0);
+  });
+
+  it("shows the same notice on a full following list", async () => {
+    const full = Array.from({ length: 50 }, (_, i) => ({
+      handle: `g${i}`,
+      displayName: `Followee ${i}`,
+      bio: null,
+      viewerFollows: true,
+    }));
+    global.fetch = mock(async () => jsonResponse(full)) as unknown as typeof fetch;
+
+    renderAt("/@wildan/mengikuti");
+
+    await screen.findByText("Followee 0");
+    expect(
+      screen.getByText("Daftar dibatasi 50 akun, jadi mungkin ada yang tidak ditampilkan.")
+    ).toBeTruthy();
+  });
+
   it("your own row carries no control, even though the API reports false for it", async () => {
     setUserSession("jwt-abc", SESSION);
     global.fetch = mock(async () =>

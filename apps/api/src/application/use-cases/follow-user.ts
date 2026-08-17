@@ -1,3 +1,4 @@
+import { DEFAULT_FOLLOW_LIST_LIMIT } from "@diudara/shared";
 import { ConflictError, NotFoundError } from "../errors";
 import { normalizeHandle } from "../../domain/handle";
 import type { UserRepositoryPort } from "../ports/user-repository.port";
@@ -91,8 +92,15 @@ export class FollowUser {
  * round 2: changing it to 5 left all 73 route tests green). Importing this
  * one constant into the route closes that gap; the fallback below still
  * matters for any future caller of `ListFollows` that is not this route.
+ *
+ * THE VALUE NOW LIVES IN `@diudara/shared` and is re-exported here unchanged
+ * (final review M1). The web needs it too, to say so when a page comes back
+ * full — a profile reading "55 Pengikut" whose list shows 50 with no mention of
+ * the cap was the defect. Re-exported rather than moved outright so every
+ * existing importer and every test that pins this name is untouched: same
+ * symbol, same value, one definition.
  */
-export const DEFAULT_FOLLOW_LIST_LIMIT = 50;
+export { DEFAULT_FOLLOW_LIST_LIMIT };
 
 /**
  * `GET /users/:handle/followers` and `GET /users/:handle/following` —

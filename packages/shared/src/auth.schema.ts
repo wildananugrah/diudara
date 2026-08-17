@@ -62,6 +62,25 @@ export const userLoginSchema = z.object({
  */
 export const MAX_EXPLORE_QUERY_LENGTH = 100;
 
+/**
+ * Page size for a follower/following list when the request carries no `?limit=`
+ * — **the ONE definition**, imported by the server that applies it and by the
+ * client that has to tell the user when a page came back full.
+ *
+ * It used to live only in `apps/api/src/application/use-cases/follow-user.ts`
+ * (which now re-exports this, so every existing import and test is unchanged).
+ * The final review's M1 is what moved it: measured against the real routes with
+ * 55 followers, the profile read "55 Pengikut", tapping it listed 50, and
+ * nothing said so — because the client had no way to know what the cap even was.
+ * Pagination is explicitly out of scope (design spec §5: these lists are capped,
+ * with no infinite scroll), so honesty about the cap is the fix, and honesty
+ * requires both sides to mean the same number.
+ *
+ * Tests on both sides assert the LITERAL `50`; see `MAX_EXPLORE_QUERY_LENGTH`
+ * above for why never the constant.
+ */
+export const DEFAULT_FOLLOW_LIST_LIMIT = 50;
+
 export type UserSignupInput = z.infer<typeof userSignupSchema>;
 export type UserLoginInput = z.infer<typeof userLoginSchema>;
 

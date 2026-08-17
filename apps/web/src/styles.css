@@ -982,6 +982,13 @@ tbody tr:last-child td {
   text-decoration: underline;
 }
 
+/* Final review, item 6: the honest note under a full list — the profile's count
+   and this page disagreed silently above the server's page size of 50. */
+.follow-list-capped {
+  margin-top: 12px;
+  font-size: 0.8125rem;
+}
+
 .follow-list {
   list-style: none;
   padding: 0;

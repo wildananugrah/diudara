@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { DEFAULT_FOLLOW_LIST_LIMIT } from "@diudara/shared";
 import NotFoundPage from "../pages/NotFoundPage";
 import { listFollowers, listFollowing, UserApiError, type FollowListRow } from "./apiClient";
 import { FollowRow } from "./JelajahPage";
@@ -19,6 +20,21 @@ const EMPTY_MESSAGE: Record<"followers" | "following", string> = {
   followers: "Belum ada pengikut.",
   following: "Belum mengikuti siapa pun.",
 };
+
+/**
+ * Said when the page comes back FULL — final review M1, measured against the real
+ * routes: a profile reading "55 Pengikut", tapped, listed 50 rows with no
+ * pagination, no "and 5 more", and no error.
+ *
+ * Pagination is explicitly out of scope (design spec §5: these lists are capped,
+ * with no infinite scroll), so the ruling was to be honest instead. "mungkin"
+ * ("may") rather than a flat claim, because a full page is not proof of a
+ * remainder: somebody with exactly 50 followers sees this and nothing is hidden
+ * from them. The client asks for no `?limit=`, so the count it compares against
+ * is the server's own default — hence one shared constant rather than a 50
+ * written here.
+ */
+const CAPPED_MESSAGE = `Daftar dibatasi ${DEFAULT_FOLLOW_LIST_LIMIT} akun, jadi mungkin ada yang tidak ditampilkan.`;
 
 /**
  * The way off this page — see the component docstring for why it has to exist.
@@ -121,11 +137,16 @@ export default function FollowListPage({ direction }: { direction: "followers" |
       {load.rows.length === 0 ? (
         <p className="empty">{EMPTY_MESSAGE[direction]}</p>
       ) : (
-        <ul className="card-list follow-list">
-          {load.rows.map((row) => (
-            <FollowRow key={row.handle} row={row} />
-          ))}
-        </ul>
+        <>
+          <ul className="card-list follow-list">
+            {load.rows.map((row) => (
+              <FollowRow key={row.handle} row={row} />
+            ))}
+          </ul>
+          {load.rows.length >= DEFAULT_FOLLOW_LIST_LIMIT ? (
+            <p className="muted follow-list-capped">{CAPPED_MESSAGE}</p>
+          ) : null}
+        </>
       )}
     </main>
   );
