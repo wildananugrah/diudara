@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   apiFetch,
   apiRequest,
@@ -72,6 +74,71 @@ beforeEach(() => {
 
 afterEach(() => {
   global.fetch = originalFetch;
+});
+
+/**
+ * Re-review N6: `getProfileByHandle` was a hand-rolled COPY of `publicGet` —
+ * its own `fetch`, its own `authorizedHeaders`, its own `readError` — so there
+ * were two places to forget the viewer's Authorization header. It was then
+ * forgotten in each, separately: in `getProfileByHandle` until `11b8848` (the
+ * gate's Critical) and in `publicGet` until `926bb10` (the same Critical, one
+ * function over). Two places, two incidents.
+ *
+ * These two tests hold the collapse from both ends: the SHAPE (only the three
+ * sanctioned helpers may touch `fetch` at all) and the BEHAVIOUR (every public
+ * GET sends the token, and none invents one when signed out), driven through
+ * the real exported functions rather than through `publicGet` directly.
+ */
+describe("apiClient — one place to reach the network (N6)", () => {
+  it("only apiRequest, publicPost and publicGet call fetch at all", () => {
+    const source = readFileSync(join(import.meta.dir, "apiClient.ts"), "utf8");
+    // Every `fetch(` in the file, attributed to the nearest function
+    // declaration above it. A hand-rolled request inside any OTHER function is
+    // exactly the duplication this test exists to prevent coming back.
+    const owners = new Set<string>();
+    for (const match of source.matchAll(/\bfetch\s*\(/g)) {
+      const before = source.slice(0, match.index);
+      const declarations = [...before.matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)\s*[<(]/g)];
+      owners.add(declarations[declarations.length - 1]?.[1] ?? "<top level>");
+    }
+
+    expect([...owners].sort()).toEqual(["apiRequest", "publicGet", "publicPost"]);
+  });
+
+  it("every public GET sends the token when signed in, and none when signed out", async () => {
+    // Table-driven over the REAL exported functions, so this covers
+    // `getProfileByHandle` — the one that used to be its own copy — on exactly
+    // the same footing as the three that always went through `publicGet`.
+    const publicGets: Array<[string, () => Promise<unknown>]> = [
+      ["getProfileByHandle", () => getProfileByHandle("wildan")],
+      ["listFollowers", () => listFollowers("wildan")],
+      ["listFollowing", () => listFollowing("wildan")],
+      ["exploreUsers", () => exploreUsers({ q: "budi" })],
+    ];
+
+    // Collected into an array rather than a reassigned `let`: TypeScript
+    // narrows a `let` the mock writes to behind its back down to `never`.
+    const seen: Array<RequestInit | undefined> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      seen.push(init);
+      return jsonResponse([]);
+    }) as unknown as typeof fetch;
+
+    for (const [name, call] of publicGets) {
+      localStorage.clear();
+      setUserSession("jwt-abc", USER);
+      await call();
+      expect(`${name} signed in: ${new Headers(seen.at(-1)?.headers).get("Authorization")}`).toBe(
+        `${name} signed in: Bearer jwt-abc`
+      );
+
+      localStorage.clear();
+      await call();
+      expect(`${name} signed out: ${new Headers(seen.at(-1)?.headers).get("Authorization")}`).toBe(
+        `${name} signed out: null`
+      );
+    }
+  });
 });
 
 describe("session storage", () => {
