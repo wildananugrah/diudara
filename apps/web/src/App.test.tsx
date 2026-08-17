@@ -160,6 +160,28 @@ describe("routing — the app shell", () => {
     expect(screen.queryAllByRole("navigation").length).toBe(0);
   });
 
+  /**
+   * Review finding (IMPORTANT 1): the two password-reset pages had content
+   * assertions but no navigation-absence assertion, so moving either one
+   * inside the AppShell route block left the whole suite green. Mutation-
+   * confirmed fixed: both cases below fail if `/lupa-sandi` or
+   * `/reset/:token` is nested under `<Route element={<AppShell />}>` in
+   * App.tsx.
+   */
+  it("renders no navigation shell on /lupa-sandi", () => {
+    renderAt("/lupa-sandi");
+
+    expect(screen.getByRole("heading", { name: "Lupa sandi" })).toBeTruthy();
+    expect(screen.queryAllByRole("navigation").length).toBe(0);
+  });
+
+  it("renders no navigation shell on /reset/:token", () => {
+    renderAt("/reset/some-token");
+
+    expect(screen.getByRole("heading", { name: "Atur ulang sandi" })).toBeTruthy();
+    expect(screen.queryAllByRole("navigation").length).toBe(0);
+  });
+
   it("renders no navigation shell on a public profile page", async () => {
     global.fetch = mock(async () =>
       jsonResponse({ handle: "wildan", displayName: "Wildan", bio: null, createdAt: "2026-01-01T00:00:00.000Z" })
