@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { RegisterUser } from "./register-user";
+import { EXISTING_EMAIL_SIGNUP_NOTICE, RegisterUser } from "./register-user";
 import { ConflictError, UniqueRule, UniqueViolationError, ValidationError } from "../errors";
+import { FakeEmailAdapter } from "../../infrastructure/email/fake-email.adapter";
+import { FakeMessagingAdapter } from "../../infrastructure/messaging/fake-messaging.adapter";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
 import type { PasswordHasherPort } from "../ports/password-hasher.port";
 
@@ -97,6 +99,24 @@ function fakeHasherWithCallCount(): { hasher: PasswordHasherPort; callCount: () 
   return { hasher, callCount: () => hashCalls };
 }
 
+/**
+ * Builds a `RegisterUser` with Task 5's two new collaborators defaulted to
+ * "no channel available" (`email: null`, a throwaway `FakeMessagingAdapter`)
+ * — every test above this helper's introduction predates the existing-email
+ * notice and pairs `VALID` (no `whatsappNumber`) with a fresh handle, so
+ * none of them ever reaches a duplicate-email branch that would try to
+ * notify anyone. The notice itself is exercised by its own dedicated tests
+ * below, which pass `email`/`notifier` explicitly.
+ */
+function buildUseCase(
+  repository: UserRepositoryPort,
+  hasher: PasswordHasherPort = fakeHasher,
+  email: FakeEmailAdapter | null = null,
+  notifier: FakeMessagingAdapter = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false })
+): RegisterUser {
+  return new RegisterUser(repository, hasher, email, notifier);
+}
+
 const VALID = {
   handle: "wildan",
   email: "wildan@example.com",
@@ -107,7 +127,7 @@ const VALID = {
 describe("RegisterUser", () => {
   it("creates a user with a hashed password", async () => {
     const { repository, rows, hashes } = fakeRepository();
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     const result = await useCase.execute(VALID);
 
@@ -120,7 +140,7 @@ describe("RegisterUser", () => {
 
   it("passes displayName through to the repository unchanged", async () => {
     const { repository, rows } = fakeRepository();
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     await useCase.execute({ ...VALID, displayName: "Wildan Anugrah" });
 
@@ -129,7 +149,7 @@ describe("RegisterUser", () => {
 
   it("passes a provided whatsappNumber through to the repository unchanged", async () => {
     const { repository, rows } = fakeRepository();
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     await useCase.execute({ ...VALID, whatsappNumber: "+6281234567890" });
 
@@ -138,7 +158,7 @@ describe("RegisterUser", () => {
 
   it("stores whatsappNumber as null when none is provided", async () => {
     const { repository, rows } = fakeRepository();
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     await useCase.execute(VALID);
 
@@ -147,7 +167,7 @@ describe("RegisterUser", () => {
 
   it("normalises the handle before storing it, stripping a leading @ and lowercasing", async () => {
     const { repository, rows } = fakeRepository();
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     await useCase.execute({ ...VALID, handle: "  @Wildan  " });
 
@@ -156,7 +176,7 @@ describe("RegisterUser", () => {
 
   it("normalises the email before storing it", async () => {
     const { repository, rows } = fakeRepository();
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     await useCase.execute({ ...VALID, email: "  Wildan@Example.COM " });
 
@@ -165,7 +185,7 @@ describe("RegisterUser", () => {
 
   it("rejects a handle that fails domain validation after normalisation", async () => {
     const { repository } = fakeRepository();
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     await expect(useCase.execute({ ...VALID, handle: "ab" })).rejects.toBeInstanceOf(
       ValidationError
@@ -174,7 +194,7 @@ describe("RegisterUser", () => {
 
   it("THE CENTRAL GUARANTEE: '@Wildan' and 'wildan' collide as the same handle", async () => {
     const { repository, rows } = fakeRepository();
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     await useCase.execute({ ...VALID, handle: "@Wildan", email: "first@example.com" });
     await expect(
@@ -187,7 +207,7 @@ describe("RegisterUser", () => {
 
   it("rejects a duplicate handle with ConflictError (409) — handles are public, this is safe to reveal", async () => {
     const { repository } = fakeRepository([record({ handle: "wildan", email: "someone@example.com" })]);
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     await expect(
       useCase.execute({ ...VALID, handle: "wildan", email: "new@example.com" })
@@ -210,7 +230,7 @@ describe("RegisterUser", () => {
     const { repository, rows } = fakeRepository([
       record({ handle: "taken", email: "registered@example.com" }),
     ]);
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     await expect(
       useCase.execute({ ...VALID, handle: "taken", email: "registered@example.com" })
@@ -224,7 +244,7 @@ describe("RegisterUser", () => {
     const { repository, rows } = fakeRepository([
       record({ handle: "existing", email: "wildan@example.com" }),
     ]);
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     const result = await useCase.execute({ ...VALID, handle: "newhandle" });
 
@@ -237,7 +257,7 @@ describe("RegisterUser", () => {
     const { repository } = fakeRepository([
       record({ handle: "existing", email: "wildan@example.com" }),
     ]);
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     const fresh = await useCase.execute({ ...VALID, handle: "freshone", email: "fresh@example.com" });
     const duplicate = await useCase.execute({ ...VALID, handle: "anotherone" });
@@ -250,7 +270,7 @@ describe("RegisterUser", () => {
     const { repository } = fakeRepository([
       record({ handle: "existing", email: "wildan@example.com" }),
     ]);
-    const useCase = new RegisterUser(repository, hasher);
+    const useCase = buildUseCase(repository, hasher);
 
     await useCase.execute(VALID);
 
@@ -270,11 +290,104 @@ describe("RegisterUser", () => {
       }
       return originalCreate(input);
     };
-    const useCase = new RegisterUser(repository, fakeHasher);
+    const useCase = buildUseCase(repository);
 
     const result = await useCase.execute({ ...VALID, email: "racer@example.com" });
 
     expect(result).toEqual({ ok: true });
     expect(rows).toHaveLength(0);
+  });
+
+  describe("Task 5: the existing-email signup notice", () => {
+    it("sends exactly ONE message to the existing account's channel, and the HTTP-facing result stays byte-identical to a fresh signup's", async () => {
+      const { repository } = fakeRepository([
+        record({ handle: "existing", email: "wildan@example.com", whatsappNumber: null }),
+      ]);
+      const email = new FakeEmailAdapter();
+      const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+      const useCase = buildUseCase(repository, fakeHasher, email, notifier);
+
+      const duplicate = await useCase.execute({ ...VALID, handle: "newhandle" });
+
+      expect(email.sent).toHaveLength(1);
+      expect(email.sent[0].to).toBe("wildan@example.com");
+      expect(email.sent[0].body).toBe(EXISTING_EMAIL_SIGNUP_NOTICE);
+      expect(notifier.notifications).toHaveLength(0);
+
+      // Byte-identical to a fresh signup's result — same repository instance,
+      // fresh email, no channel fakes needed since nothing is sent on this path.
+      const fresh = await useCase.execute({ ...VALID, handle: "freshone", email: "fresh@example.com" });
+      expect(JSON.stringify(duplicate)).toBe(JSON.stringify(fresh));
+      expect(duplicate).toEqual({ ok: true });
+    });
+
+    it("falls back to WhatsApp when no email provider is configured and the existing owner has a number", async () => {
+      const { repository } = fakeRepository([
+        record({ handle: "existing", email: "wildan@example.com", whatsappNumber: "+6281234567890" }),
+      ]);
+      const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+      const useCase = buildUseCase(repository, fakeHasher, null, notifier);
+
+      await useCase.execute({ ...VALID, handle: "newhandle" });
+
+      expect(notifier.notifications).toHaveLength(1);
+      expect(notifier.notifications[0].toWhatsappNumber).toBe("+6281234567890");
+      expect(notifier.notifications[0].message).toBe(EXISTING_EMAIL_SIGNUP_NOTICE);
+    });
+
+    it("prefers email over WhatsApp when the existing owner has both available", async () => {
+      const { repository } = fakeRepository([
+        record({ handle: "existing", email: "wildan@example.com", whatsappNumber: "+6281234567890" }),
+      ]);
+      const email = new FakeEmailAdapter();
+      const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+      const useCase = buildUseCase(repository, fakeHasher, email, notifier);
+
+      await useCase.execute({ ...VALID, handle: "newhandle" });
+
+      expect(email.sent).toHaveLength(1);
+      expect(notifier.notifications).toHaveLength(0);
+    });
+
+    it("sends nothing, but still returns { ok: true }, when the existing owner has no channel at all", async () => {
+      const { repository } = fakeRepository([
+        record({ handle: "existing", email: "wildan@example.com", whatsappNumber: null }),
+      ]);
+      const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+      const useCase = buildUseCase(repository, fakeHasher, null, notifier);
+
+      const result = await useCase.execute({ ...VALID, handle: "newhandle" });
+
+      expect(result).toEqual({ ok: true });
+      expect(notifier.notifications).toHaveLength(0);
+    });
+
+    it("never notifies anyone on a FRESH signup — there is no existing owner to tell", async () => {
+      const { repository } = fakeRepository();
+      const email = new FakeEmailAdapter();
+      const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+      const useCase = buildUseCase(repository, fakeHasher, email, notifier);
+
+      await useCase.execute(VALID);
+
+      expect(email.sent).toHaveLength(0);
+      expect(notifier.notifications).toHaveLength(0);
+    });
+
+    it("swallows a send failure and still returns { ok: true } — a provider outage must not turn a duplicate-email signup into a 500", async () => {
+      const { repository } = fakeRepository([
+        record({ handle: "existing", email: "wildan@example.com", whatsappNumber: null }),
+      ]);
+      const email = new FakeEmailAdapter();
+      email.send = async () => {
+        throw new Error("fake provider outage");
+      };
+      const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+      const useCase = buildUseCase(repository, fakeHasher, email, notifier);
+
+      const result = await useCase.execute({ ...VALID, handle: "newhandle" });
+
+      expect(result).toEqual({ ok: true });
+    });
   });
 });

@@ -1,8 +1,22 @@
 import { normalizeEmail } from "../../domain/creator";
 import { isValidHandle, normalizeHandle } from "../../domain/handle";
 import { UniqueRule, UniqueViolationError, ValidationError } from "../errors";
+import type { EmailProviderPort } from "../ports/email-provider.port";
+import type { MessagingProviderPort } from "../ports/messaging-provider.port";
 import type { PasswordHasherPort } from "../ports/password-hasher.port";
-import type { UserRepositoryPort } from "../ports/user-repository.port";
+import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
+
+/**
+ * Told to the EXISTING account's owner, over whichever channel they have,
+ * when someone signs up against their email. Copy fixed by the spec —
+ * Task 5. Lives here, not in a route or a template file, for the same
+ * reason `STAGE_HEADLINE_ID` lives inside `send-renewal-reminder.ts`: it is
+ * the entire member-visible surface of this notice, so there is exactly one
+ * place to check what it does and does not say.
+ */
+export const EXISTING_EMAIL_SIGNUP_NOTICE =
+  "Seseorang mencoba mendaftar dengan alamat email ini. Jika itu Anda, silakan masuk atau " +
+  "pulihkan sandi Anda.";
 
 /**
  * `POST /users/signup`. Returns `{ ok: true }` and NOTHING else — no user,
@@ -49,7 +63,16 @@ import type { UserRepositoryPort } from "../ports/user-repository.port";
 export class RegisterUser {
   constructor(
     private readonly users: UserRepositoryPort,
-    private readonly hasher: PasswordHasherPort
+    private readonly hasher: PasswordHasherPort,
+    /**
+     * Task 5's addition: `null` means email is disabled on this box — see
+     * `selectEmailProvider`. Used ONLY on the duplicate-email path, to tell
+     * the EXISTING account's owner someone tried to sign up with their
+     * address — never on the fresh-signup path, which has nobody to tell.
+     */
+    private readonly email: EmailProviderPort | null,
+    /** How the existing owner is reached over WhatsApp when email is unavailable. Never `null` — see `Dependencies.messaging`. */
+    private readonly notifier: MessagingProviderPort
   ) {}
 
   async execute(input: {
@@ -77,7 +100,13 @@ export class RegisterUser {
     // `{ ok: true }` without ever inserting a row — see the class docstring.
     const passwordHash = await this.hasher.hash(input.password);
 
-    if (await this.users.findByEmail(email)) {
+    const existing = await this.users.findByEmail(email);
+    if (existing) {
+      // Task 5: the silent duplicate becomes HONEST rather than merely
+      // quiet — the account's owner learns someone tried, while the caller
+      // who typed the email learns nothing (the HTTP response below is
+      // unaffected either way — see the class docstring).
+      await this.notifyExistingOwner(existing);
       return { ok: true };
     }
 
@@ -93,7 +122,14 @@ export class RegisterUser {
       if (err instanceof UniqueViolationError && err.rule === UniqueRule.userEmail) {
         // Lost a race with a concurrent signup for the same email: the
         // pre-check above passed, another request's INSERT landed first.
-        // Same enumeration-safety rule applies — answer identically.
+        // Same enumeration-safety rule applies — answer identically, and
+        // notify the owner exactly as the pre-check branch above does. The
+        // record has to be re-read: the row `create()` collided with is not
+        // the one this call's own (failed) attempt produced.
+        const owner = await this.users.findByEmail(email);
+        if (owner) {
+          await this.notifyExistingOwner(owner);
+        }
         return { ok: true };
       }
       // A userHandle violation here means a concurrent signup claimed the
@@ -106,5 +142,44 @@ export class RegisterUser {
     }
 
     return { ok: true };
+  }
+
+  /**
+   * Email first, then WhatsApp, then nothing — same order and reasoning as
+   * `RequestPasswordReset`'s own `chooseChannel` (duplicated rather than
+   * shared — see that function's docstring for why this codebase accepts
+   * that for two call sites with different contracts).
+   *
+   * Never allowed to throw: a provider outage on this notice must not turn
+   * a duplicate-email signup into a 500 while a fresh signup stays a 201 —
+   * the exact timing/status oracle enumeration safety exists to close.
+   * Logged, not silently dropped, so an operator can still see a real
+   * delivery failure.
+   */
+  private async notifyExistingOwner(existing: UserRecord): Promise<void> {
+    try {
+      if (this.email !== null) {
+        await this.email.send({
+          to: existing.email,
+          subject: "Percobaan pendaftaran dengan email Anda",
+          body: EXISTING_EMAIL_SIGNUP_NOTICE,
+        });
+        return;
+      }
+      if (existing.whatsappNumber !== null) {
+        await this.notifier.notify({
+          toWhatsappNumber: existing.whatsappNumber,
+          message: EXISTING_EMAIL_SIGNUP_NOTICE,
+        });
+        return;
+      }
+      // No channel at all — silent, exactly like `RequestPasswordReset`'s
+      // own case 4. Nothing to notify with, and nothing to leak either way.
+    } catch (err) {
+      console.warn(
+        `[register-user] failed to deliver the existing-email signup notice for user=` +
+          `${existing.id}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   }
 }

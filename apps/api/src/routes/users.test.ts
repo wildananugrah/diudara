@@ -2,6 +2,10 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { resetDatabase } from "../db/test-helpers";
+import { FakeEmailAdapter } from "../infrastructure/email/fake-email.adapter";
+import { FakeMessagingAdapter } from "../infrastructure/messaging/fake-messaging.adapter";
+import { BunPasswordHasher } from "../infrastructure/auth/bun-password.hasher";
+import { RegisterUser } from "../application/use-cases/register-user";
 
 beforeEach(resetDatabase);
 
@@ -50,6 +54,29 @@ async function tokenForValidUser(a = app()) {
 
 function authed(token: string) {
   return { Authorization: `Bearer ${token}` };
+}
+
+async function requestReset(body: unknown, a = app()) {
+  return a.request("/users/password-reset/request", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+async function completeReset(body: unknown, a = app()) {
+  return a.request("/users/password-reset/complete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Pulls the 64-char hex reset token out of the link in a sent email/WhatsApp body. */
+function extractToken(body: string): string {
+  const match = /\/reset\/([0-9a-f]{64})/.exec(body);
+  if (!match) throw new Error(`no reset token found in message body: ${body}`);
+  return match[1];
 }
 
 describe("POST /users/signup", () => {
@@ -487,5 +514,262 @@ describe("PATCH /users/me", () => {
     const body = await res.json();
     expect(body.displayName).toBe("Still Wildan");
     expect(body.handle).toBe("wildan");
+  });
+});
+
+describe("POST /users/password-reset/request", () => {
+  it("returns 200 { ok: true } for an unknown email", async () => {
+    const res = await requestReset({ email: "nobody@example.com" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it("returns 200 { ok: true } for a KNOWN email, and sends a real reset link over email", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await requestReset({ email: VALID.email }, a);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    const email = deps.email as FakeEmailAdapter;
+    expect(email.sent).toHaveLength(1);
+    expect(email.sent[0].to).toBe(VALID.email);
+  });
+
+  it("the known-email and unknown-email responses are byte-identical — enumeration safety", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const known = await requestReset({ email: VALID.email }, a);
+    const unknown = await requestReset({ email: "nobody-at-all@example.com" }, a);
+
+    expect(known.status).toBe(unknown.status);
+    expect(await known.text()).toBe(await unknown.text());
+  });
+
+  it("rejects a malformed body with 400", async () => {
+    const res = await app().request("/users/password-reset/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not json",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a missing email with 400", async () => {
+    const res = await requestReset({});
+    expect(res.status).toBe(400);
+  });
+
+  it("still returns 200 { ok: true } once the per-account rate limit (3/hour) is exceeded, and stops sending", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    for (let i = 0; i < 3; i++) {
+      const res = await requestReset({ email: VALID.email }, a);
+      expect(res.status).toBe(200);
+    }
+    const email = deps.email as FakeEmailAdapter;
+    expect(email.sent).toHaveLength(3);
+
+    const fourth = await requestReset({ email: VALID.email }, a);
+    expect(fourth.status).toBe(200);
+    expect(await fourth.json()).toEqual({ ok: true });
+    expect(email.sent).toHaveLength(3);
+  });
+});
+
+describe("POST /users/password-reset/complete", () => {
+  it("rejects an unknown token with 401", async () => {
+    const res = await completeReset({ token: "a".repeat(64), newPassword: "brand-new-password" });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a malformed body with 400", async () => {
+    const res = await app().request("/users/password-reset/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not json",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a short new password with 400", async () => {
+    const res = await completeReset({ token: "a".repeat(64), newPassword: "short" });
+    expect(res.status).toBe(400);
+  });
+
+  /**
+   * Step 3 / Step 6 of the task brief, together: a full round trip through the
+   * REAL routes — signup, log in, request a reset, extract the real token from
+   * the real (fake-adapter) email, complete the reset, and confirm three
+   * things a fake repository could not: the OLD password stops working, the
+   * NEW one works, and — the assertion the epoch mechanism exists for — the
+   * OLD session token is rejected by the real `requireUserAuth` middleware
+   * once the reset lands. Mirrors the equivalent test in the `GET /users/me`
+   * block above (Task 3's `setPasswordAndBumpEpoch` proof), but driven
+   * through `CompletePasswordReset` rather than the repository directly.
+   */
+  it("sets a new password and ends every existing session — the OLD bearer token 401s afterwards", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+    const loginRes = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: VALID.email, password: VALID.password }),
+    });
+    const { token: oldToken } = (await loginRes.json()) as { token: string };
+
+    const stillGood = await a.request("/users/me", { headers: authed(oldToken) });
+    expect(stillGood.status).toBe(200);
+
+    await requestReset({ email: VALID.email }, a);
+    const email = deps.email as FakeEmailAdapter;
+    expect(email.sent).toHaveLength(1);
+    const resetToken = extractToken(email.sent[0].body);
+
+    const completeRes = await completeReset({ token: resetToken, newPassword: "brand-new-password" }, a);
+    expect(completeRes.status).toBe(200);
+    expect(await completeRes.json()).toEqual({ ok: true });
+
+    // THE session-epoch proof: the token minted before the reset is dead.
+    const afterReset = await a.request("/users/me", { headers: authed(oldToken) });
+    expect(afterReset.status).toBe(401);
+
+    // The OLD password no longer works.
+    const oldPasswordLogin = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: VALID.email, password: VALID.password }),
+    });
+    expect(oldPasswordLogin.status).toBe(401);
+
+    // The NEW password does.
+    const newPasswordLogin = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: VALID.email, password: "brand-new-password" }),
+    });
+    expect(newPasswordLogin.status).toBe(200);
+  });
+
+  it("rejects the SAME token a second time — completing a reset consumes it", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+    await requestReset({ email: VALID.email }, a);
+    const email = deps.email as FakeEmailAdapter;
+    const resetToken = extractToken(email.sent[0].body);
+
+    const first = await completeReset({ token: resetToken, newPassword: "brand-new-password" }, a);
+    expect(first.status).toBe(200);
+
+    const second = await completeReset({ token: resetToken, newPassword: "yet-another-password" }, a);
+    expect(second.status).toBe(401);
+  });
+
+  it("invalidates every OTHER outstanding token for the user, not just the one that was used", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+    const email = deps.email as FakeEmailAdapter;
+
+    await requestReset({ email: VALID.email }, a);
+    await requestReset({ email: VALID.email }, a);
+    expect(email.sent).toHaveLength(2);
+    const firstToken = extractToken(email.sent[0].body);
+    const secondToken = extractToken(email.sent[1].body);
+
+    const completed = await completeReset({ token: firstToken, newPassword: "brand-new-password" }, a);
+    expect(completed.status).toBe(200);
+
+    // The SECOND, never-used link is now dead too.
+    const secondAttempt = await completeReset({ token: secondToken, newPassword: "another-password" }, a);
+    expect(secondAttempt.status).toBe(401);
+  });
+});
+
+describe("POST /users/signup — Task 5's existing-email notice", () => {
+  it("sends exactly one message to the existing account's channel, and the response is byte-identical to a fresh signup's", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+
+    const fresh = await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+    const freshStatus = fresh.status;
+    const freshBody = await fresh.json();
+
+    const email = deps.email as FakeEmailAdapter;
+    expect(email.sent).toHaveLength(0);
+
+    const duplicate = await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...VALID, handle: "someoneelse" }),
+    });
+
+    expect(duplicate.status).toBe(freshStatus);
+    expect(await duplicate.json()).toEqual(freshBody);
+
+    expect(email.sent).toHaveLength(1);
+    expect(email.sent[0].to).toBe(VALID.email);
+  });
+
+  it("falls back to WhatsApp for the notice when the existing owner has a number and email is disabled", async () => {
+    // `email` is only `null` when RESEND_API_KEY/EMAIL_FROM are unset AND
+    // NODE_ENV is outside RELAXED_NODE_ENVS — not reachable from `bootstrap()`
+    // under `NODE_ENV=test`. This drives `RegisterUser` directly instead,
+    // proving the SAME wiring `bootstrap()` would produce on a box with no
+    // email provider: `deps.messaging.notifier` is what `RegisterUser` is
+    // constructed with either way.
+    const deps = bootstrap();
+    const notifier = deps.messaging.notifier as FakeMessagingAdapter;
+    const useCase = new RegisterUser(deps.userRepository, new BunPasswordHasher(), null, notifier);
+
+    await deps.userRepository.create({
+      handle: "existing",
+      email: "existing@example.com",
+      whatsappNumber: "+6281234567890",
+      passwordHash: "irrelevant",
+      displayName: "Existing",
+    });
+
+    const result = await useCase.execute({ ...VALID, handle: "newhandle", email: "existing@example.com" });
+
+    expect(result).toEqual({ ok: true });
+    expect(notifier.notifications).toHaveLength(1);
+    expect(notifier.notifications[0].toWhatsappNumber).toBe("+6281234567890");
   });
 });

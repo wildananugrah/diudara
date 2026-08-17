@@ -82,3 +82,34 @@ export const updateProfileSchema = z
   });
 
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;
+
+/**
+ * `POST /users/password-reset/request`. `email` only — no `handle`, no
+ * anything else this endpoint could use to confirm an account exists.
+ * Deliberately NOT lowercased/trimmed by the schema the way `signupSchema`'s
+ * top-level `email` is: `RequestPasswordReset` normalises internally via
+ * `normalizeEmail`, the same split `userSignupSchema` already uses for the
+ * same field.
+ */
+export const requestPasswordResetSchema = z.object({
+  email: z.string().trim().email().max(255),
+});
+
+export type RequestPasswordResetInput = z.infer<typeof requestPasswordResetSchema>;
+
+/**
+ * `POST /users/password-reset/complete`. `token` is the 64-character hex
+ * secret from the `/reset/:token` link — bounded generously above the exact
+ * 64 chars `mintResetToken` produces (`domain/reset-token.ts`) rather than
+ * pinned to it, so a malformed token is a clean 401 from `CompletePasswordReset`
+ * (missing/expired/used all answer identically) instead of a 400 that would
+ * distinguish "badly formed" from "well formed but wrong" — one MORE shape
+ * a caller could use to tell tokens apart. `newPassword` mirrors
+ * `userSignupSchema`'s own password rule exactly.
+ */
+export const completePasswordResetSchema = z.object({
+  token: z.string().trim().min(1).max(200),
+  newPassword: z.string().min(8).max(200),
+});
+
+export type CompletePasswordResetInput = z.infer<typeof completePasswordResetSchema>;

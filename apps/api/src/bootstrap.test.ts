@@ -40,6 +40,13 @@ import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
+import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
+import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
+import type { PasswordResetRepositoryPort } from "./application/ports/password-reset-repository.port";
+import type {
+  PasswordResetRepositories,
+  PasswordResetUnitOfWorkPort,
+} from "./application/ports/password-reset-unit-of-work.port";
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
@@ -245,6 +252,40 @@ const fakeMemberRepository: MemberRepositoryPort = {
 const fakeClock: ClockPort = {
   now: () => new Date("2026-08-09T11:00:00.000Z"),
 };
+
+/**
+ * Task 5's password-reset fakes. Nothing in the two "fully faked
+ * Dependencies" tests below exercises password reset — they only need a
+ * `Dependencies` object that TYPE-CHECKS — so these refuse every method
+ * rather than backing a real in-memory store, the same "not used" shape
+ * every other never-exercised fake in this file follows.
+ */
+const fakePasswordResetRepository: PasswordResetRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async findByHash() {
+    return null;
+  },
+  async countForUserSince() {
+    return 0;
+  },
+  async countForIpSince() {
+    return 0;
+  },
+  async markUsed() {
+    return false;
+  },
+  async markAllOtherOutstandingUsed() {
+    return 0;
+  },
+};
+
+class FakePasswordResetUnitOfWork implements PasswordResetUnitOfWorkPort {
+  async run<T>(work: (repositories: PasswordResetRepositories) => Promise<T>): Promise<T> {
+    return work({ passwordResets: fakePasswordResetRepository, users: fakeUserRepository });
+  }
+}
 
 const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   async createPending() {
@@ -529,7 +570,7 @@ describe("Dependencies (composition root contract)", () => {
       ),
       userRepository: fakeUserRepository,
       userTokenIssuer: fakeUserTokenIssuer,
-      registerUser: new RegisterUser(fakeUserRepository, fakePasswordHasher),
+      registerUser: new RegisterUser(fakeUserRepository, fakePasswordHasher, null, fakeMessagingProvider),
       authenticateUser: new AuthenticateUser(
         fakeUserRepository,
         fakePasswordHasher,
@@ -537,6 +578,20 @@ describe("Dependencies (composition root contract)", () => {
       ),
       getUserProfile: new GetUserProfile(fakeUserRepository),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
+      requestPasswordReset: new RequestPasswordReset(
+        fakeUserRepository,
+        fakePasswordResetRepository,
+        null,
+        fakeMessagingProvider,
+        fakeClock,
+        { appBaseUrl: "https://app.diudara.test" }
+      ),
+      completePasswordReset: new CompletePasswordReset(
+        fakePasswordResetRepository,
+        fakePasswordHasher,
+        new FakePasswordResetUnitOfWork(),
+        fakeClock
+      ),
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),
       updateCommunity: new UpdateCommunity(fakeCommunityRepository),
@@ -699,7 +754,7 @@ describe("Dependencies (composition root contract)", () => {
       ),
       userRepository: fakeUserRepository,
       userTokenIssuer: fakeUserTokenIssuer,
-      registerUser: new RegisterUser(fakeUserRepository, fakePasswordHasher),
+      registerUser: new RegisterUser(fakeUserRepository, fakePasswordHasher, null, fakeMessagingProvider),
       authenticateUser: new AuthenticateUser(
         fakeUserRepository,
         fakePasswordHasher,
@@ -707,6 +762,20 @@ describe("Dependencies (composition root contract)", () => {
       ),
       getUserProfile: new GetUserProfile(fakeUserRepository),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
+      requestPasswordReset: new RequestPasswordReset(
+        fakeUserRepository,
+        fakePasswordResetRepository,
+        null,
+        fakeMessagingProvider,
+        fakeClock,
+        { appBaseUrl: "https://app.diudara.test" }
+      ),
+      completePasswordReset: new CompletePasswordReset(
+        fakePasswordResetRepository,
+        fakePasswordHasher,
+        new FakePasswordResetUnitOfWork(),
+        fakeClock
+      ),
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),
       updateCommunity: new UpdateCommunity(fakeCommunityRepository),

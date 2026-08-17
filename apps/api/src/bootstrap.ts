@@ -11,6 +11,10 @@ import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
+import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
+import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
+import { DrizzlePasswordResetRepository } from "./infrastructure/repositories/drizzle-password-reset.repository";
+import { DrizzlePasswordResetUnitOfWork } from "./infrastructure/repositories/drizzle-password-reset-unit-of-work";
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
@@ -157,6 +161,18 @@ export interface Dependencies {
   getUserProfile: GetUserProfile;
   /** Task 3's `PATCH /users/me`, behind `requireUserAuth`. Handle is not editable — see `updateProfileSchema`. */
   updateUserProfile: UpdateUserProfile;
+  /**
+   * Task 5's `POST /users/password-reset/request`. Always answers
+   * `{ ok: true }` — see the use-case's own docstring for the enumeration-safety
+   * reasoning behind that shape being non-negotiable.
+   */
+  requestPasswordReset: RequestPasswordReset;
+  /**
+   * Task 5's `POST /users/password-reset/complete`. A missing, expired or
+   * already-used token is a 401 via `UnauthorizedError`, one identical message
+   * for all three — see the use-case's own docstring.
+   */
+  completePasswordReset: CompletePasswordReset;
   createCommunity: CreateCommunity;
   listCommunities: ListCommunities;
   updateCommunity: UpdateCommunity;
@@ -1508,7 +1524,8 @@ export function bootstrap(): Dependencies {
   // keeps the two session kinds apart, not a second secret.
   const userRepository = new DrizzleUserRepository(db);
   const userTokenIssuer = new HonoJwtUserTokenIssuer(jwtSecret);
-  const registerUser = new RegisterUser(userRepository, passwordHasher);
+  // `registerUser` is constructed further down, alongside Task 5's password
+  // reset — see the comment there for why it needs to wait for `messaging`.
   const authenticateUser = new AuthenticateUser(userRepository, passwordHasher, userTokenIssuer);
   const getUserProfile = new GetUserProfile(userRepository);
   const updateUserProfile = new UpdateUserProfile(userRepository);
@@ -1699,15 +1716,41 @@ export function bootstrap(): Dependencies {
     analyticsRepository
   );
 
-  // Revocation is the ONE messaging call the API process makes; granting happens
-  // in apps/worker. Same allowlist as the payment adapter: on a box with no
-  // tokens and a NODE_ENV outside the allowlist this throws rather than booting a
-  // fake that would report a removal it never performed.
+  // Revocation used to be the ONE messaging call the API process made outside
+  // signup/login (granting happens in apps/worker) — Task 5's password reset and
+  // its existing-email signup notice are the second and third. Same allowlist as
+  // the payment adapter either way: on a box with no tokens and a NODE_ENV
+  // outside the allowlist this throws rather than booting a fake that would
+  // report a send it never performed.
   const messaging = selectMessagingProviders({
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
     fonnteApiToken: process.env.FONNTE_API_TOKEN,
     nodeEnv: process.env.NODE_ENV,
   });
+
+  // Task 5's password reset, and `registerUser`'s existing-email notice.
+  // Constructed HERE, not up with `userRepository`/`authenticateUser` above,
+  // because both need `messaging.notifier` (just resolved) and `email`/
+  // `appBaseUrl`/`clock` (resolved earlier, but this is the first point all
+  // four are available together).
+  const passwordResetRepository = new DrizzlePasswordResetRepository(db);
+  const passwordResetUnitOfWork = new DrizzlePasswordResetUnitOfWork(db);
+  const registerUser = new RegisterUser(userRepository, passwordHasher, email, messaging.notifier);
+  const requestPasswordReset = new RequestPasswordReset(
+    userRepository,
+    passwordResetRepository,
+    email,
+    messaging.notifier,
+    clock,
+    { appBaseUrl }
+  );
+  const completePasswordReset = new CompletePasswordReset(
+    passwordResetRepository,
+    passwordHasher,
+    passwordResetUnitOfWork,
+    clock
+  );
+
   const channelMembershipRepository = new DrizzleChannelMembershipRepository(db);
   const revokeChannelAccess = new RevokeChannelAccess(
     communityRepository,
@@ -1870,6 +1913,8 @@ export function bootstrap(): Dependencies {
     authenticateUser,
     getUserProfile,
     updateUserProfile,
+    requestPasswordReset,
+    completePasswordReset,
     createCommunity,
     listCommunities,
     updateCommunity,
