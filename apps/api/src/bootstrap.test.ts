@@ -47,6 +47,7 @@ import type {
   PasswordResetRepositories,
   PasswordResetUnitOfWorkPort,
 } from "./application/ports/password-reset-unit-of-work.port";
+import type { SignupNoticeRepositoryPort } from "./application/ports/signup-notice-repository.port";
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
@@ -286,6 +287,21 @@ class FakePasswordResetUnitOfWork implements PasswordResetUnitOfWorkPort {
     return work({ passwordResets: fakePasswordResetRepository, users: fakeUserRepository });
   }
 }
+
+/**
+ * Review finding F3's rate-limit ledger — same "not used" shape as
+ * `fakePasswordResetRepository` above: nothing in the two "fully faked
+ * Dependencies" tests below signs up against an existing email, so this
+ * only needs to type-check.
+ */
+const fakeSignupNoticeRepository: SignupNoticeRepositoryPort = {
+  async countForUserSince() {
+    return 0;
+  },
+  async record() {
+    // no-op
+  },
+};
 
 const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
   async createPending() {
@@ -570,7 +586,14 @@ describe("Dependencies (composition root contract)", () => {
       ),
       userRepository: fakeUserRepository,
       userTokenIssuer: fakeUserTokenIssuer,
-      registerUser: new RegisterUser(fakeUserRepository, fakePasswordHasher, null, fakeMessagingProvider),
+      registerUser: new RegisterUser(
+        fakeUserRepository,
+        fakePasswordHasher,
+        null,
+        fakeMessagingProvider,
+        fakeSignupNoticeRepository,
+        fakeClock
+      ),
       authenticateUser: new AuthenticateUser(
         fakeUserRepository,
         fakePasswordHasher,
@@ -754,7 +777,14 @@ describe("Dependencies (composition root contract)", () => {
       ),
       userRepository: fakeUserRepository,
       userTokenIssuer: fakeUserTokenIssuer,
-      registerUser: new RegisterUser(fakeUserRepository, fakePasswordHasher, null, fakeMessagingProvider),
+      registerUser: new RegisterUser(
+        fakeUserRepository,
+        fakePasswordHasher,
+        null,
+        fakeMessagingProvider,
+        fakeSignupNoticeRepository,
+        fakeClock
+      ),
       authenticateUser: new AuthenticateUser(
         fakeUserRepository,
         fakePasswordHasher,

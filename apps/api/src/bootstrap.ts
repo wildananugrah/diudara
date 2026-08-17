@@ -15,6 +15,7 @@ import { RequestPasswordReset } from "./application/use-cases/request-password-r
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
 import { DrizzlePasswordResetRepository } from "./infrastructure/repositories/drizzle-password-reset.repository";
 import { DrizzlePasswordResetUnitOfWork } from "./infrastructure/repositories/drizzle-password-reset-unit-of-work";
+import { DrizzleSignupNoticeRepository } from "./infrastructure/repositories/drizzle-signup-notice.repository";
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
@@ -1735,7 +1736,19 @@ export function bootstrap(): Dependencies {
   // four are available together).
   const passwordResetRepository = new DrizzlePasswordResetRepository(db);
   const passwordResetUnitOfWork = new DrizzlePasswordResetUnitOfWork(db);
-  const registerUser = new RegisterUser(userRepository, passwordHasher, email, messaging.notifier);
+  // Review finding F3's rate-limit ledger for `registerUser`'s
+  // existing-email notice — a separate table/repository from
+  // `passwordResetRepository` on purpose, so exhausting one cannot starve
+  // the other. See `signupNotices` in db/schema.ts.
+  const signupNoticeRepository = new DrizzleSignupNoticeRepository(db);
+  const registerUser = new RegisterUser(
+    userRepository,
+    passwordHasher,
+    email,
+    messaging.notifier,
+    signupNoticeRepository,
+    clock
+  );
   const requestPasswordReset = new RequestPasswordReset(
     userRepository,
     passwordResetRepository,

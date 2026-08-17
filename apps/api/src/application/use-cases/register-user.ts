@@ -1,10 +1,24 @@
 import { normalizeEmail } from "../../domain/creator";
 import { isValidHandle, normalizeHandle } from "../../domain/handle";
 import { UniqueRule, UniqueViolationError, ValidationError } from "../errors";
+import type { ClockPort } from "../ports/clock.port";
 import type { EmailProviderPort } from "../ports/email-provider.port";
 import type { MessagingProviderPort } from "../ports/messaging-provider.port";
 import type { PasswordHasherPort } from "../ports/password-hasher.port";
+import type { SignupNoticeRepositoryPort } from "../ports/signup-notice-repository.port";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
+
+/** The rate-limit window for the existing-email notice: "the last hour", mirroring the reset endpoint's own window. */
+const SIGNUP_NOTICE_WINDOW_MS = 60 * 60 * 1000;
+/**
+ * Review finding F3: 25 signup attempts against one address used to deliver
+ * 25 messages, all 201 — an unrate-limited amplifier. Capped at the SAME
+ * number `RequestPasswordReset` uses for its own per-account limit, in a
+ * SEPARATE ledger (`signup_notice`, not `password_reset_token`) so
+ * exhausting this cap cannot also block the real owner's own resets — see
+ * `signupNotices` in `db/schema.ts`.
+ */
+const MAX_SIGNUP_NOTICES_PER_HOUR = 3;
 
 /**
  * Told to the EXISTING account's owner, over whichever channel they have,
@@ -59,6 +73,23 @@ export const EXISTING_EMAIL_SIGNUP_NOTICE =
  * duplicate-email branch would make it measurably faster than a fresh
  * signup, and that timing gap is itself an oracle even though the response
  * body is identical.
+ *
+ * THE EXISTING-EMAIL NOTICE'S SEND IS NOT AWAITED — Task 5 review finding
+ * F2. Step 6 originally `await`ed `notifyExistingOwner`, which reintroduced
+ * exactly the timing gap the paragraph above exists to prevent, in the
+ * OTHER direction: measured with a 200ms provider, a fresh signup answered
+ * in ~65ms and a duplicate-email signup in ~296ms — worse than the reset
+ * endpoint's own version of this bug (F1), because signup has no rate limit
+ * at all to blunt it. The actual network call inside `notifyExistingOwner`
+ * is now fired without an `await`, for the identical reasoning
+ * `RequestPasswordReset.execute` documents for its own `send` call: it
+ * never throws, so a fire-and-forget call cannot produce an unhandled
+ * rejection, and this process is a persistent Bun server where a promise
+ * kept alive past its caller's return completes normally. The RATE-LIMIT
+ * check and ledger write (see `MAX_SIGNUP_NOTICES_PER_HOUR`) stay AWAITED —
+ * they are fast local reads/writes, not the network call, and awaiting them
+ * is what keeps a burst of concurrent signups from all seeing the same
+ * stale count and all sailing past the cap together.
  */
 export class RegisterUser {
   constructor(
@@ -72,7 +103,10 @@ export class RegisterUser {
      */
     private readonly email: EmailProviderPort | null,
     /** How the existing owner is reached over WhatsApp when email is unavailable. Never `null` — see `Dependencies.messaging`. */
-    private readonly notifier: MessagingProviderPort
+    private readonly notifier: MessagingProviderPort,
+    /** Review finding F3's rate-limit ledger for this notice — see `MAX_SIGNUP_NOTICES_PER_HOUR`. */
+    private readonly signupNotices: SignupNoticeRepositoryPort,
+    private readonly clock: ClockPort
   ) {}
 
   async execute(input: {
@@ -106,7 +140,7 @@ export class RegisterUser {
       // quiet — the account's owner learns someone tried, while the caller
       // who typed the email learns nothing (the HTTP response below is
       // unaffected either way — see the class docstring).
-      await this.notifyExistingOwner(existing);
+      await this.maybeNotifyExistingOwner(existing);
       return { ok: true };
     }
 
@@ -128,7 +162,7 @@ export class RegisterUser {
         // the one this call's own (failed) attempt produced.
         const owner = await this.users.findByEmail(email);
         if (owner) {
-          await this.notifyExistingOwner(owner);
+          await this.maybeNotifyExistingOwner(owner);
         }
         return { ok: true };
       }
@@ -145,16 +179,44 @@ export class RegisterUser {
   }
 
   /**
+   * The rate-limit gate in front of `notifyExistingOwner` — review finding
+   * F3. AWAITED by `execute` (unlike the send itself): both the count read
+   * and the ledger write are fast, local, and are what makes the cap
+   * accurate under a burst of concurrent signups against the same address,
+   * the same reason `RequestPasswordReset`'s own rate-limit check is
+   * awaited rather than deferred.
+   *
+   * The ledger entry is written BEFORE the send is even attempted,
+   * regardless of whether it will succeed — it caps ATTEMPTS, not
+   * successful deliveries, the same accounting `RequestPasswordReset` uses
+   * for its own token rows.
+   */
+  private async maybeNotifyExistingOwner(existing: UserRecord): Promise<void> {
+    const since = new Date(this.clock.now().getTime() - SIGNUP_NOTICE_WINDOW_MS);
+    const count = await this.signupNotices.countForUserSince(existing.id, since);
+    if (count >= MAX_SIGNUP_NOTICES_PER_HOUR) {
+      // Capped. Silent, like every other refusal in this class and in
+      // `RequestPasswordReset` — the caller's response is unaffected either
+      // way, so there is nothing to leak by staying quiet here too.
+      return;
+    }
+    await this.signupNotices.record(existing.id);
+    // NOT awaited — see the class docstring's F2 note.
+    void this.notifyExistingOwner(existing);
+  }
+
+  /**
    * Email first, then WhatsApp, then nothing — same order and reasoning as
    * `RequestPasswordReset`'s own `chooseChannel` (duplicated rather than
    * shared — see that function's docstring for why this codebase accepts
    * that for two call sites with different contracts).
    *
-   * Never allowed to throw: a provider outage on this notice must not turn
-   * a duplicate-email signup into a 500 while a fresh signup stays a 201 —
-   * the exact timing/status oracle enumeration safety exists to close.
-   * Logged, not silently dropped, so an operator can still see a real
-   * delivery failure.
+   * Never allowed to throw — not just because a provider outage on this
+   * notice must not turn a duplicate-email signup into a 500 while a fresh
+   * signup stays a 201, but because `maybeNotifyExistingOwner` does not
+   * await this call at all: an unhandled rejection here would crash
+   * nothing, but would still be the wrong way to learn about a real
+   * delivery failure. Logged instead, so an operator can still see one.
    */
   private async notifyExistingOwner(existing: UserRecord): Promise<void> {
     try {

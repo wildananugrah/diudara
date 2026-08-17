@@ -3,6 +3,8 @@ import { EXISTING_EMAIL_SIGNUP_NOTICE, RegisterUser } from "./register-user";
 import { ConflictError, UniqueRule, UniqueViolationError, ValidationError } from "../errors";
 import { FakeEmailAdapter } from "../../infrastructure/email/fake-email.adapter";
 import { FakeMessagingAdapter } from "../../infrastructure/messaging/fake-messaging.adapter";
+import type { ClockPort } from "../ports/clock.port";
+import type { SignupNoticeRepositoryPort } from "../ports/signup-notice-repository.port";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
 import type { PasswordHasherPort } from "../ports/password-hasher.port";
 
@@ -99,22 +101,49 @@ function fakeHasherWithCallCount(): { hasher: PasswordHasherPort; callCount: () 
   return { hasher, callCount: () => hashCalls };
 }
 
+const FIXED_NOW = new Date("2026-08-17T10:00:00.000Z");
+const fixedClock: ClockPort = { now: () => new Date(FIXED_NOW.getTime()) };
+
 /**
- * Builds a `RegisterUser` with Task 5's two new collaborators defaulted to
- * "no channel available" (`email: null`, a throwaway `FakeMessagingAdapter`)
- * — every test above this helper's introduction predates the existing-email
- * notice and pairs `VALID` (no `whatsappNumber`) with a fresh handle, so
- * none of them ever reaches a duplicate-email branch that would try to
- * notify anyone. The notice itself is exercised by its own dedicated tests
- * below, which pass `email`/`notifier` explicitly.
+ * In-memory `SignupNoticeRepositoryPort` — review finding F3's rate-limit
+ * ledger. `createdAt` is stamped from an injectable `now()` rather than the
+ * real wall clock, the same fix `request-password-reset.test.ts`'s own
+ * fake needed: the window is measured against `ClockPort`, and a fake using
+ * real time would drift from whatever fixed instant a test's clock reports.
+ */
+function fakeSignupNoticeRepository(now: () => Date = () => new Date()) {
+  const rows: { userId: string; createdAt: Date }[] = [];
+  const repo: SignupNoticeRepositoryPort = {
+    async countForUserSince(userId, since) {
+      return rows.filter((r) => r.userId === userId && r.createdAt >= since).length;
+    },
+    async record(userId) {
+      rows.push({ userId, createdAt: now() });
+    },
+  };
+  return { repo, rows };
+}
+
+/**
+ * Builds a `RegisterUser` with Task 5's new collaborators defaulted to "no
+ * channel available, never rate-limited" (`email: null`, a throwaway
+ * `FakeMessagingAdapter`, a fresh `SignupNoticeRepositoryPort`, a fixed
+ * clock) — every test above this helper's introduction predates the
+ * existing-email notice and pairs `VALID` (no `whatsappNumber`) with a
+ * fresh handle, so none of them ever reaches a duplicate-email branch that
+ * would try to notify anyone. The notice itself is exercised by its own
+ * dedicated tests below, which pass `email`/`notifier`/`signupNotices`
+ * explicitly.
  */
 function buildUseCase(
   repository: UserRepositoryPort,
   hasher: PasswordHasherPort = fakeHasher,
   email: FakeEmailAdapter | null = null,
-  notifier: FakeMessagingAdapter = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false })
+  notifier: FakeMessagingAdapter = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false }),
+  signupNotices: SignupNoticeRepositoryPort = fakeSignupNoticeRepository().repo,
+  clock: ClockPort = fixedClock
 ): RegisterUser {
-  return new RegisterUser(repository, hasher, email, notifier);
+  return new RegisterUser(repository, hasher, email, notifier, signupNotices, clock);
 }
 
 const VALID = {
@@ -388,6 +417,67 @@ describe("RegisterUser", () => {
       const result = await useCase.execute({ ...VALID, handle: "newhandle" });
 
       expect(result).toEqual({ ok: true });
+    });
+
+    /**
+     * Review finding F3: an unrate-limited notice let 25 signup attempts
+     * against one address deliver 25 messages. Capped at 3/hour/account, in
+     * its own ledger — the 4th attempt against the SAME existing account
+     * within the window must record no further notice and send nothing
+     * more, while still answering { ok: true }.
+     */
+    it("caps the notice at 3 per hour per account, and stays silent (but still { ok: true }) past the cap", async () => {
+      const { repository } = fakeRepository([
+        record({ handle: "existing", email: "wildan@example.com", whatsappNumber: null }),
+      ]);
+      const email = new FakeEmailAdapter();
+      const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+      const { repo: signupNotices, rows: noticeRows } = fakeSignupNoticeRepository(() => fixedClock.now());
+      const useCase = buildUseCase(repository, fakeHasher, email, notifier, signupNotices, fixedClock);
+
+      for (let i = 0; i < 3; i++) {
+        const res = await useCase.execute({ ...VALID, handle: `attempt${i}` });
+        expect(res).toEqual({ ok: true });
+      }
+      expect(email.sent).toHaveLength(3);
+      expect(noticeRows).toHaveLength(3);
+
+      const fourth = await useCase.execute({ ...VALID, handle: "attempt4" });
+
+      expect(fourth).toEqual({ ok: true });
+      expect(email.sent).toHaveLength(3);
+      expect(noticeRows).toHaveLength(3);
+    });
+
+    /**
+     * Review finding (minor): the concurrent-race branch's own notification
+     * path was untested — only the `{ ok: true }` / no-second-row outcome
+     * was. This drives `create()` into the SAME `UniqueViolationError`
+     * (userEmail) branch the pre-existing race test above does, but this
+     * time against a repository that HAS a matching existing row, so
+     * `maybeNotifyExistingOwner` actually has an owner to notify.
+     */
+    it("notifies the owner on the CONCURRENT-RACE branch too, not just the pre-check branch", async () => {
+      const { repository } = fakeRepository([
+        record({ handle: "existing", email: "racer@example.com", whatsappNumber: null }),
+      ]);
+      const originalCreate = repository.create.bind(repository);
+      repository.create = async (input) => {
+        if (input.email === "racer@example.com") {
+          throw new UniqueViolationError(UniqueRule.userEmail, "email is already registered");
+        }
+        return originalCreate(input);
+      };
+      const email = new FakeEmailAdapter();
+      const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+      const useCase = buildUseCase(repository, fakeHasher, email, notifier);
+
+      const result = await useCase.execute({ ...VALID, handle: "newhandle", email: "racer@example.com" });
+
+      expect(result).toEqual({ ok: true });
+      expect(email.sent).toHaveLength(1);
+      expect(email.sent[0].to).toBe("racer@example.com");
+      expect(email.sent[0].body).toBe(EXISTING_EMAIL_SIGNUP_NOTICE);
     });
   });
 });
