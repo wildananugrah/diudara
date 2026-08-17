@@ -42,6 +42,41 @@ export const appUsers = pgTable(
   },
 );
 
+/**
+ * Task 5's password reset. One row per issued link.
+ *
+ * `tokenHash` is a sha256 hex digest of the token that was sent, NEVER the
+ * token itself — a database read (a backup, a replica, an operator's SELECT)
+ * must not yield a working reset link. See `domain/reset-token.ts`.
+ *
+ * `requestIpHash` is hashed too, for the same reason: this table exists to
+ * rate-limit and audit reset activity, not to become a second place raw IP
+ * addresses accumulate against an account.
+ *
+ * The two indexes below back the rate-limit counts `RequestPasswordReset`
+ * runs on every request (per-account by `userId`, per-IP by
+ * `requestIpHash`) — without them each request seq-scans this table, the
+ * same defect a previous phase found in the renewal passes.
+ */
+export const passwordResetTokens = pgTable(
+  "password_reset_token",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => appUsers.id),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull().unique(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    requestIpHash: varchar("request_ip_hash", { length: 64 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("password_reset_user_created_idx").on(table.userId, table.createdAt),
+    index("password_reset_ip_created_idx").on(table.requestIpHash, table.createdAt),
+  ]
+);
+
 export const creators = pgTable(
   "creator",
   {

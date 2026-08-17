@@ -134,6 +134,13 @@
       "when": 1786943336440,
       "tag": "0018_secret_dark_phoenix",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1786951327269,
+      "tag": "0019_hard_junta",
+      "breakpoints": true
     }
   ]
 }
