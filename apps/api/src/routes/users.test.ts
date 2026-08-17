@@ -723,6 +723,50 @@ describe("GET /users/explore", () => {
     expect((await localPartRes.json()).results).toEqual([]);
   });
 
+  /**
+   * THE OTHER HALF OF THE SAME GUARANTEE, at the ROUTE layer — final review
+   * M3. Adding `ilike(appUsers.email, pattern)` to `searchPublic`'s `or(...)`
+   * failed TWO tests (the repository guarantee and the route one above);
+   * adding `ilike(appUsers.whatsappNumber, pattern)` failed only ONE, because
+   * there was no route-level WhatsApp counterpart. Low risk — it is one query
+   * and one `or(...)`, so the repository test does cover the real code path —
+   * but the asymmetry is the exact shape this project keeps getting caught by,
+   * and Task 6's browser gate searched two registered EMAIL addresses and
+   * never a WhatsApp number.
+   *
+   * The number must be seeded NON-NULL for this to be able to fail at all:
+   * every other search test on this router leaves `whatsapp_number` NULL, and
+   * `NULL ILIKE '...'` matches nothing, so the mutation would sail past them.
+   * That is review round 1's Important 1 on the repository side, restated
+   * here because the same trap applies to the same column.
+   *
+   * The prefix (`+62812`) is searched as well as the exact number: a prefix
+   * match is what `searchPublic` actually builds (`<query>%`), so an exact-only
+   * assertion would pass even against a pattern that matched every Indonesian
+   * mobile number in the table.
+   */
+  it("the guarantee: searching a registered user's WhatsApp number returns zero results", async () => {
+    const a = app();
+    const res = await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...VALID, whatsappNumber: "+6281234567890" }),
+    });
+    expect(res.status).toBe(201);
+    // The number really is stored — otherwise the two assertions below would
+    // be vacuous for the same reason a NULL column makes them vacuous.
+    const [stored] = await db.select({ whatsappNumber: appUsers.whatsappNumber }).from(appUsers);
+    expect(stored?.whatsappNumber).toBe("+6281234567890");
+
+    const exact = await a.request(`/users/explore?q=${encodeURIComponent("+6281234567890")}`);
+    expect(exact.status).toBe(200);
+    expect((await exact.json()).results).toEqual([]);
+
+    const prefix = await a.request(`/users/explore?q=${encodeURIComponent("+62812")}`);
+    expect(prefix.status).toBe(200);
+    expect((await prefix.json()).results).toEqual([]);
+  });
+
   it("rejects an out-of-range ?limit= with 400", async () => {
     const a = app();
     await a.request("/users/signup", {
