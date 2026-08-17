@@ -847,13 +847,23 @@ export function selectEmailProvider(env: {
     return null;
   }
 
+  // `echo` ONLY under development, never under test — see `FakeEmailAdapter`'s
+  // own docstring for why the fake has to print at all (its `sent` array is
+  // unreachable from outside this process, so local development could not
+  // complete a password reset), and `logProviderChoice` just above for why
+  // `test` is the one environment that must stay silent.
+  const echo = env.nodeEnv === "development";
   logProviderChoice(
     env.nodeEnv,
     "[bootstrap] email provider: FakeEmailAdapter " +
       "(RESEND_API_KEY/EMAIL_FROM not set — no real email will be sent; set both to switch " +
-      "to the real Resend adapter)"
+      "to the real Resend adapter)" +
+      (echo
+        ? " — every message is printed to this log instead, reset links included, so the " +
+          "password-reset flow can actually be completed locally"
+        : "")
   );
-  return new FakeEmailAdapter();
+  return new FakeEmailAdapter({ echo });
 }
 
 /**

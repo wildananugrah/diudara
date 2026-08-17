@@ -2067,6 +2067,48 @@ describe("selectEmailProvider", () => {
     });
   });
 
+  /**
+   * The Task 7 gate finding, pinned at the WIRING rather than only inside the
+   * adapter: `FakeEmailAdapter`'s own test proves `echo: true` prints, but that
+   * proves nothing about the adapter this function actually hands to
+   * `RequestPasswordReset` — and it was precisely a correct-in-isolation,
+   * unwired component that made the reset link unobtainable in local
+   * development in the first place. Both rows matter: `development` must echo
+   * (or dev is broken again) and `test` must NOT (or 100+ suites start printing
+   * message bodies over genuine failure output, the same hazard
+   * `logProviderChoice` avoids).
+   */
+  it("echoes messages in development and stays silent under test", async () => {
+    for (const [nodeEnv, shouldEcho] of [
+      ["development", true],
+      ["test", false],
+    ] as const) {
+      const provider = captureConsoleLogValue(() =>
+        selectEmailProvider({ apiKey: undefined, from: undefined, nodeEnv })
+      );
+      expect(provider).toBeInstanceOf(FakeEmailAdapter);
+
+      const lines: string[] = [];
+      const original = console.log;
+      console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+      try {
+        await (provider as FakeEmailAdapter).send({
+          to: "budi@example.com",
+          subject: "Atur ulang kata sandi DIUDARA",
+          body: "http://localhost:5173/reset/tok-abc",
+        });
+      } finally {
+        console.log = original;
+      }
+
+      expect(lines.length > 0).toBe(shouldEcho);
+      // The link, not merely "something was printed" — that is the whole point.
+      expect(lines.join("\n").includes("http://localhost:5173/reset/tok-abc")).toBe(shouldEcho);
+      // The send is recorded either way, so no existing test depends on the flag.
+      expect((provider as FakeEmailAdapter).sent.length).toBe(1);
+    }
+  });
+
   it("treats empty-string configuration as unset in production", () => {
     captureConsoleLog(() => {
       const provider = selectEmailProvider({ apiKey: "", from: "", nodeEnv: "production" });
