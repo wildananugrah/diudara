@@ -1,10 +1,22 @@
 import type { PasswordResetRepositoryPort } from "./password-reset-repository.port";
 import type { UserRepositoryPort } from "./user-repository.port";
 
-/** The repositories a completed reset must write through together. */
+/**
+ * The repositories a completed reset must write through together.
+ *
+ * `users` is `Pick<UserRepositoryPort, "setPasswordAndBumpEpoch">`, not the
+ * full port — review finding (minor). This class's docstring below claims
+ * "nothing INSERTed inside `work` can raise a unique violation", and that
+ * claim used to be true only because of what `CompletePasswordReset`
+ * happens to call today. Narrowing the type makes it true BY CONSTRUCTION:
+ * there is no `create()` to call inside `work` in the first place, so a
+ * future edit cannot silently reintroduce an INSERT (and the
+ * `createPending`-style 23505 hazard that comes with one) into this unit of
+ * work without TypeScript refusing to compile it.
+ */
 export interface PasswordResetRepositories {
   passwordResets: PasswordResetRepositoryPort;
-  users: UserRepositoryPort;
+  users: Pick<UserRepositoryPort, "setPasswordAndBumpEpoch">;
 }
 
 /**

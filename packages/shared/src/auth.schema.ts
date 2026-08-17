@@ -86,8 +86,9 @@ export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;
 /**
  * `POST /users/password-reset/request`. `email` only — no `handle`, no
  * anything else this endpoint could use to confirm an account exists.
- * Deliberately NOT lowercased/trimmed by the schema the way `signupSchema`'s
- * top-level `email` is: `RequestPasswordReset` normalises internally via
+ * `.trim()` runs here (whitespace is never meaningful in an email), but
+ * deliberately NOT `.toLowerCase()` the way `signupSchema`'s top-level
+ * `email` gets — case-folding happens inside `RequestPasswordReset` via
  * `normalizeEmail`, the same split `userSignupSchema` already uses for the
  * same field.
  */

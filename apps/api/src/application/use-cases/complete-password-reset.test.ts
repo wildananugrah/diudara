@@ -122,6 +122,21 @@ const fakeHasher: PasswordHasherPort = {
   },
 };
 
+/** Tracks calls to `hash()` — used to prove the invalid-token paths never pay the argon2id cost. */
+function fakeHasherWithCallCount(): { hasher: PasswordHasherPort; callCount: () => number } {
+  let hashCalls = 0;
+  const hasher: PasswordHasherPort = {
+    async hash(plain) {
+      hashCalls++;
+      return `hashed:${plain}`;
+    },
+    async verify(plain, hash) {
+      return hash === `hashed:${plain}`;
+    },
+  };
+  return { hasher, callCount: () => hashCalls };
+}
+
 const NOW = new Date("2026-08-17T10:00:00.000Z");
 const fixedClock: ClockPort = { now: () => new Date(NOW.getTime()) };
 
@@ -142,11 +157,17 @@ function harness(options: {
   users?: UserRecord[];
   tokens?: PasswordResetTokenRecord[];
   clock?: ClockPort;
+  hasher?: PasswordHasherPort;
 } = {}) {
   const { repo: users, rows: userRows, hashes } = fakeUserRepository(options.users ?? [userRecord()]);
   const { repo: passwordResets, rows: tokenRows } = fakePasswordResetRepository(options.tokens ?? []);
   const unitOfWork = new FakePasswordResetUnitOfWork({ passwordResets, users });
-  const useCase = new CompletePasswordReset(passwordResets, fakeHasher, unitOfWork, options.clock ?? fixedClock);
+  const useCase = new CompletePasswordReset(
+    passwordResets,
+    options.hasher ?? fakeHasher,
+    unitOfWork,
+    options.clock ?? fixedClock
+  );
   return { useCase, userRows, tokenRows, hashes, unitOfWork };
 }
 
@@ -294,5 +315,37 @@ describe("CompletePasswordReset", () => {
   it("hashResetToken sanity: the fixture's tokenHash really is hashResetToken(token)", () => {
     const { token, tokenHash } = mintResetToken();
     expect(tokenHash).toBe(hashResetToken(token));
+  });
+
+  /**
+   * Review finding (minor): deleting the `usedAt` pre-check (leaving only
+   * `record === null` and the expiry check) survives every OTHER test green
+   * — `markUsed`'s own conditional UPDATE still refuses a used token and
+   * still throws the identical 401. What that mutation would reopen is a
+   * TIMING oracle: a used token would then pay the ~argon2id hash cost
+   * before failing, while an unknown or expired token still fails
+   * instantly. This pins the real property — no invalid path, of any of
+   * the three kinds, ever reaches the hasher — rather than only the
+   * observable status/message, which the mutation leaves untouched.
+   */
+  it("never hashes the new password for a missing, expired, or already-used token", async () => {
+    const { token: expiredToken, tokenHash: expiredHash } = mintResetToken();
+    const { token: usedToken, tokenHash: usedHash } = mintResetToken();
+    const { hasher, callCount } = fakeHasherWithCallCount();
+    const { useCase } = harness({
+      tokens: [
+        tokenRecord({ id: "t1", userId: "user-1", tokenHash: expiredHash, expiresAt: new Date(NOW.getTime() - 1) }),
+        tokenRecord({ id: "t2", userId: "user-1", tokenHash: usedHash, usedAt: new Date(NOW.getTime() - 1) }),
+      ],
+      hasher,
+    });
+
+    for (const t of ["unknown-token", expiredToken, usedToken]) {
+      await expect(useCase.execute({ token: t, newPassword: "x".repeat(10) })).rejects.toBeInstanceOf(
+        UnauthorizedError
+      );
+    }
+
+    expect(callCount()).toBe(0);
   });
 });
