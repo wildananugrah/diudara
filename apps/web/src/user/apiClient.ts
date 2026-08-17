@@ -57,6 +57,35 @@ export function getUserToken(): string | null {
   }
 }
 
+/**
+ * **THE single answer to "is there a session?" — read from the TOKEN key and
+ * from nothing else.**
+ *
+ * Final-review I2: that question used to be answered from two different
+ * storage keys. `getProfileByHandle` asked `getUserToken()`
+ * (`diudara.user.token`); `FollowRow` in `JelajahPage.tsx` asked
+ * `getSessionUser() !== null` (`diudara.user.account`). Each was locally
+ * defensible and together they were wrong, because nothing ever put the two
+ * keys out of step in a test — every test either `localStorage.clear()`s or
+ * goes through `setUserSession`, which writes both. In the divergent state the
+ * review measured `"Masuk untuk mengikuti"` rendering on every row while a
+ * perfectly valid token sat in storage.
+ *
+ * The token is the right key because it is the only one the SERVER can act on:
+ * it is what `authorizedHeaders` attaches, and therefore what decides whether
+ * the API sees a viewer at all. The account cache answers a DIFFERENT question
+ * — "who am I?" — and `getSessionUser` stays the answer to that one. A missing
+ * account cache is not a missing session; it is a session whose display name
+ * and handle are unknown.
+ *
+ * Returns a boolean, not the token, so callers cannot accidentally start
+ * treating the two questions as one again — and so `useSyncExternalStore`
+ * compares a stable primitive.
+ */
+export function isUserSignedIn(): boolean {
+  return getUserToken() !== null;
+}
+
 export function getSessionUser(): SessionUser | null {
   let raw: string | null;
   try {
@@ -85,17 +114,65 @@ export function getSessionUser(): SessionUser | null {
   }
 }
 
-/** Stores the token and the account together, then notifies. */
+/** Bahasa Indonesia, because it is user-visible: `LoginPage` renders it. */
+export const SESSION_NOT_STORED_MESSAGE =
+  "Sesi tidak dapat disimpan di peramban ini. Coba lagi atau aktifkan penyimpanan situs.";
+
+/**
+ * Thrown by `setUserSession` when the account write fails AFTER the token
+ * write succeeded. Its own class rather than a bare `Error` so `LoginPage` can
+ * tell it from a network failure and show the right Bahasa sentence — a bare
+ * `Error` lands in that page's "Tidak dapat menghubungi server" branch, which
+ * would be a lie about what went wrong.
+ */
+export class SessionStorageError extends Error {
+  constructor() {
+    super(SESSION_NOT_STORED_MESSAGE);
+    this.name = "SessionStorageError";
+  }
+}
+
+/**
+ * Stores the token and the account together, then notifies. **ALL OR NOTHING.**
+ *
+ * Final-review I2: these two `setItem` calls used to share one `try`, token
+ * first. If the SECOND threw — quota, or Safari's storage behaviour, the same
+ * class of failure `getUserToken`'s own try/catch two functions up already
+ * anticipates — the token was already persisted, was never rolled back, and
+ * `notify()` was skipped. The app then held a token with no account cache, and
+ * the review measured the consequence: a live "Ikuti" button on your OWN
+ * profile, collecting the 409 that three separate docstrings exist to prevent.
+ *
+ * So the second failure now UNDOES the first and throws. A caller that cannot
+ * store a session must find out, rather than continuing with half of one.
+ *
+ * The FIRST write failing is different and still returns silently: nothing was
+ * written, so there is no half state to clean up, and a browser with storage
+ * disabled entirely should still be able to complete a login for the life of
+ * the page rather than being refused outright. `notify()` is skipped either way
+ * — announcing a session that `getUserToken()` cannot see would only make the
+ * UI flicker.
+ */
 export function setUserSession(token: string, user: SessionUser): void {
   try {
     localStorage.setItem(USER_TOKEN_STORAGE_KEY, token);
-    localStorage.setItem(USER_ACCOUNT_STORAGE_KEY, JSON.stringify(user));
   } catch {
-    // Storage is unavailable; the session simply will not persist. Notifying
-    // anyway is wrong — `getUserToken()` would still be null and the UI
-    // would flicker.
     return;
   }
+
+  try {
+    localStorage.setItem(USER_ACCOUNT_STORAGE_KEY, JSON.stringify(user));
+  } catch {
+    try {
+      localStorage.removeItem(USER_TOKEN_STORAGE_KEY);
+    } catch {
+      // Storage that accepted a write and refuses a remove is beyond anything
+      // this function can repair. Throwing below is still right: the caller
+      // must not proceed as though the session were sound.
+    }
+    throw new SessionStorageError();
+  }
+
   notify();
 }
 

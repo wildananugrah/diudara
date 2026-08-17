@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { getUserToken, subscribeToUserAuth } from "./apiClient";
+import { isUserSignedIn, subscribeToUserAuth } from "./apiClient";
 
 /**
  * The three destinations that never change — see
@@ -30,17 +30,21 @@ const STATIC_DESTINATIONS = [
  * fetch — the shell still cannot know a signed-out visitor's handle, and
  * that reasoning for not linking straight to `/@handle` stands — but knowing
  * whether a session exists AT ALL needs no network call, only the same
- * synchronous token check `SettingsPage.tsx` already makes:
- * `useSyncExternalStore(subscribeToUserAuth, getUserToken, () => null)`.
+ * synchronous token check `SettingsPage.tsx` already makes.
  * Signed in, this reads "Profil" -> `/pengaturan`, same as before. Signed
  * out, it reads "Masuk" -> `/masuk`, so the nav does not lie about what
  * tapping it will do. Beranda/Jelajah/Siaran stay public routes either way
  * — discovery-first means a signed-out visitor can still browse them — only
  * this one label and target change.
+ *
+ * Asks `isUserSignedIn` rather than comparing the raw token itself (final
+ * review I2): that function is the ONE place "is there a session?" is answered,
+ * and it answers from the token key alone. It also returns a boolean, which is
+ * a stable `useSyncExternalStore` snapshot for free.
  */
 function useDestinations(): ReadonlyArray<{ to: string; label: string }> {
-  const token = useSyncExternalStore(subscribeToUserAuth, getUserToken, () => null);
-  const profile = token !== null ? { to: "/pengaturan", label: "Profil" } : { to: "/masuk", label: "Masuk" };
+  const signedIn = useSyncExternalStore(subscribeToUserAuth, isUserSignedIn, () => false);
+  const profile = signedIn ? { to: "/pengaturan", label: "Profil" } : { to: "/masuk", label: "Masuk" };
   return [...STATIC_DESTINATIONS, profile];
 }
 

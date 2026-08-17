@@ -98,4 +98,39 @@ describe("AppShell", () => {
       cleanup();
     }
   });
+
+  /**
+   * Final-review I2, the single-key half, pinned where a user can see it.
+   *
+   * "Is there a session?" used to be answered from two different storage keys —
+   * the token in `getProfileByHandle`/`SettingsPage`/here, the ACCOUNT cache in
+   * `FollowRow`. Every existing test either clears storage or goes through
+   * `setUserSession`, which writes both keys, so nothing ever put them out of
+   * step and nothing noticed the disagreement. This test does put them out of
+   * step: a valid token, no cached account. The nav must read "Profil", because
+   * the session is real — the account cache answers "who am I?", not "am I
+   * signed in?".
+   */
+  it("token held but no cached account: still shows Profil, because the session is real", () => {
+    setUserSession("jwt-abc", USER);
+    localStorage.removeItem("diudara.user.account");
+
+    renderShellAt("/beranda");
+
+    expect(screen.getAllByRole("link", { name: "Profil" }).length).toBe(2);
+    expect(screen.queryAllByRole("link", { name: "Masuk" }).length).toBe(0);
+  });
+
+  it("cached account but no token: shows Masuk, because the session is gone", () => {
+    setUserSession("jwt-abc", USER);
+    localStorage.removeItem("diudara.user.token");
+
+    renderShellAt("/beranda");
+
+    // Asserted the opposite way round from the test above on purpose: a reader
+    // switched to the account key would pass one of the pair and fail the
+    // other, never both.
+    expect(screen.getAllByRole("link", { name: "Masuk" }).length).toBe(2);
+    expect(screen.queryAllByRole("link", { name: "Profil" }).length).toBe(0);
+  });
 });

@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { getUserToken, login, UserApiError } from "./apiClient";
+import { getUserToken, login, SessionStorageError, UserApiError } from "./apiClient";
 
 /**
  * THE GENERIC 401, and the reason it is a constant rather than the API's
@@ -43,6 +43,13 @@ export default function LoginPage() {
           fieldErrors: err.fieldErrors,
         };
       }
+      return { message: err.message, fieldErrors: {} };
+    }
+    // The credentials were accepted and the SESSION could not be persisted —
+    // `setUserSession` rolled the token back and threw rather than leaving half
+    // a session behind (final review I2). Its own message, because "cannot
+    // reach the server" below would be a lie about what failed.
+    if (err instanceof SessionStorageError) {
       return { message: err.message, fieldErrors: {} };
     }
     return { message: "Tidak dapat menghubungi server. Coba lagi.", fieldErrors: {} };

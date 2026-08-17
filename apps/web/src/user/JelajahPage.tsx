@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { MAX_EXPLORE_QUERY_LENGTH } from "@diudara/shared";
-import { exploreUsers, getSessionUser, type FollowListRow } from "./apiClient";
+import { exploreUsers, isUserSignedIn, type FollowListRow } from "./apiClient";
 import FollowButton from "./FollowButton";
 
 /**
@@ -51,7 +51,7 @@ const LOAD_FAILED_MESSAGE = "Gagal memuat Jelajah. Coba lagi.";
  * since that check compares handles, not this guessed value.
  */
 export function FollowRow({ row }: { row: FollowListRow }) {
-  const signedIn = getSessionUser() !== null;
+  const signedIn = isUserSignedIn();
   return (
     <li className="follow-row card">
       <Link to={`/@${row.handle}`} className="follow-row-identity">

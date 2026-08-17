@@ -9,12 +9,15 @@ import {
   getProfileByHandle,
   getSessionUser,
   getUserToken,
+  isUserSignedIn,
   listFollowers,
   listFollowing,
   login,
   requestPasswordReset,
   SESSION_EXPIRED_MESSAGE,
+  SessionStorageError,
   setUserSession,
+  subscribeToUserAuth,
   signup,
   unfollowUser,
   updateOwnProfile,
@@ -83,6 +86,148 @@ describe("session storage", () => {
     setUserSession("jwt-abc", USER);
     expect(getSessionUser()).toEqual(USER);
     expect(getUserToken()).toBe("jwt-abc");
+  });
+});
+
+/**
+ * Final-review I2, both halves.
+ *
+ * ATOMICITY: `setUserSession` wrote the token then the account inside ONE
+ * `try`. A failure on the SECOND `setItem` — quota, or Safari's storage
+ * behaviour, the same class of failure `getUserToken`'s own try/catch already
+ * anticipates — left the token persisted, un-rolled-back, with `notify()`
+ * skipped. The review measured what that state does: a live "Ikuti" button on
+ * your own profile, collecting the 409 three docstrings exist to prevent.
+ *
+ * SINGLE KEY: "is there a session?" was answered from `diudara.user.token` in
+ * one place and `diudara.user.account` in another. `isUserSignedIn` is now the
+ * one answer, and it reads the token.
+ */
+describe("session storage — atomicity and one source of truth (item 4)", () => {
+  /**
+   * Swaps `globalThis.localStorage` for a working in-memory stub that refuses
+   * writes to keys containing `refuseKeyFragment` — the quota shape the review
+   * described, where the short token fits and the longer account JSON does not.
+   *
+   * The whole object is replaced rather than `setItem` patched: happy-dom's
+   * `localStorage` routes method calls through an internal handler, so neither
+   * an own-property assignment nor a `Storage.prototype` patch intercepts
+   * anything (measured — both were silently ignored, with the real value still
+   * written). Restored by the returned function, which every test below calls
+   * in a `finally`: a leaked override would break every later test in this file.
+   */
+  function refuseWritesTo(refuseKeyFragment: string): () => void {
+    const real = Object.getOwnPropertyDescriptor(globalThis, "localStorage")!;
+    const store = new Map<string, string>();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+        setItem: (key: string, value: string) => {
+          if (key.includes(refuseKeyFragment)) throw new Error("QuotaExceededError");
+          store.set(key, value);
+        },
+        removeItem: (key: string) => void store.delete(key),
+        clear: () => store.clear(),
+      },
+    });
+    return () => {
+      Object.defineProperty(globalThis, "localStorage", real);
+    };
+  }
+
+  it("guards the guard: a refused write really does reach setUserSession", () => {
+    // Without this, a `refuseWritesTo` that silently stopped intercepting would
+    // make every assertion below pass vacuously — which is exactly what the
+    // first two attempts at this helper did.
+    const restore = refuseWritesTo("diudara.user.token");
+    let stored: string | null = "not read";
+    try {
+      setUserSession("jwt-abc", USER);
+      stored = getUserToken();
+    } finally {
+      restore();
+    }
+    // The FIRST write failing writes nothing at all, so there is no half state
+    // to clean up. Documented behaviour, not a bug: a browser with storage
+    // disabled entirely should still complete a login for the life of the page,
+    // which is why this case returns rather than throwing.
+    expect(stored).toBeNull();
+  });
+
+  it("rolls the token back and THROWS when the account write fails", () => {
+    const restore = refuseWritesTo("diudara.user.account");
+    let thrown: unknown = null;
+    let tokenAfter: string | null = "not read";
+    let accountAfter: unknown = "not read";
+    let signedInAfter: boolean | string = "not read";
+    try {
+      try {
+        setUserSession("jwt-abc", USER);
+      } catch (err) {
+        thrown = err;
+      }
+      tokenAfter = getUserToken();
+      accountAfter = getSessionUser();
+      signedInAfter = isUserSignedIn();
+    } finally {
+      restore();
+    }
+
+    expect(thrown).toBeInstanceOf(SessionStorageError);
+    // THE POINT: no half session survives. Before this fix the token was
+    // already persisted here and never rolled back.
+    expect(tokenAfter).toBeNull();
+    expect(accountAfter).toBeNull();
+    expect(signedInAfter).toBe(false);
+  });
+
+  it("the thrown message is Bahasa Indonesia, since LoginPage renders it", () => {
+    const restore = refuseWritesTo("diudara.user.account");
+    try {
+      expect(() => setUserSession("jwt-abc", USER)).toThrow(
+        "Sesi tidak dapat disimpan di peramban ini. Coba lagi atau aktifkan penyimpanan situs."
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not announce a session it failed to store", () => {
+    let notifications = 0;
+    const unsubscribe = subscribeToUserAuth(() => {
+      notifications += 1;
+    });
+    const restore = refuseWritesTo("diudara.user.account");
+    try {
+      expect(() => setUserSession("jwt-abc", USER)).toThrow();
+    } finally {
+      restore();
+      unsubscribe();
+    }
+
+    expect(notifications).toBe(0);
+  });
+
+  it("isUserSignedIn reads the TOKEN key — true with a token and no cached account", () => {
+    setUserSession("jwt-abc", USER);
+    localStorage.removeItem("diudara.user.account");
+
+    expect(isUserSignedIn()).toBe(true);
+    // The two questions are different, and this is what makes them different:
+    // the session exists, the identity behind it is unknown.
+    expect(getSessionUser()).toBeNull();
+  });
+
+  it("isUserSignedIn reads the TOKEN key — false with a cached account and no token", () => {
+    setUserSession("jwt-abc", USER);
+    localStorage.removeItem(USER_TOKEN_STORAGE_KEY);
+
+    expect(isUserSignedIn()).toBe(false);
+    // Deliberately asserted the other way round from the test above: a reader
+    // that had been switched to the account key would pass one of these two
+    // and fail the other, never both.
+    expect(getSessionUser()).toEqual(USER);
   });
 });
 
