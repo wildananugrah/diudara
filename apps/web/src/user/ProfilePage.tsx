@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import NotFoundPage from "../pages/NotFoundPage";
 import { getProfileByHandle, UserApiError, type PublicUserProfile } from "./apiClient";
+import { describeRequestFailure } from "./errorCopy";
 import FollowButton from "./FollowButton";
 
 type LoadState =
@@ -52,7 +53,12 @@ export default function ProfilePage() {
         if (err instanceof UserApiError && err.status === 404) {
           setLoad({ status: "not-found" });
         } else {
-          setLoad({ status: "error", message: err instanceof Error ? err.message : "gagal memuat profil" });
+          // N1: NEVER `err.message`. That is the server's own string — English
+          // for a 404 ("user not found"), and the browser's own "Failed to
+          // fetch" for a network drop, both measured on this component. The
+          // heading below supplies the Bahasa context; this supplies the
+          // Bahasa reason. See `errorCopy.ts`.
+          setLoad({ status: "error", message: describeRequestFailure(err) });
         }
       });
     return () => {

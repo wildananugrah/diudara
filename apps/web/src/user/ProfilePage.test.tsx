@@ -172,3 +172,37 @@ describe("ProfilePage", () => {
     expect(await screen.findByText("4")).toBeTruthy();
   });
 });
+
+/**
+ * Re-review N1, measured on this exact component: `"Gagal memuat profil"`
+ * followed by the server's own `"internal server error"` on a 500, and by the
+ * browser's own `"Failed to fetch"` on a network drop. Both English, on a screen
+ * whose every other word is Bahasa.
+ */
+describe("ProfilePage — a failed load speaks Bahasa Indonesia (N1)", () => {
+  it("shows Bahasa copy for a 500, never the server's own string", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "internal server error" }, 500)
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan");
+
+    await screen.findByRole("heading", { name: "Gagal memuat profil" });
+    expect(screen.getByText("Server sedang bermasalah. Coba lagi sebentar lagi.")).toBeTruthy();
+    expect(screen.queryAllByText("internal server error").length).toBe(0);
+  });
+
+  it("shows Bahasa copy when the connection drops, never 'Failed to fetch'", async () => {
+    // What a real network failure looks like: `fetch` REJECTS, it does not
+    // resolve with a status. Nothing about it is a UserApiError.
+    global.fetch = mock(async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+
+    renderAt("/@wildan");
+
+    await screen.findByRole("heading", { name: "Gagal memuat profil" });
+    expect(screen.getByText("Tidak dapat menghubungi server. Coba lagi.")).toBeTruthy();
+    expect(screen.queryAllByText("Failed to fetch").length).toBe(0);
+  });
+});

@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { DEFAULT_FOLLOW_LIST_LIMIT } from "@diudara/shared";
 import NotFoundPage from "../pages/NotFoundPage";
 import { listFollowers, listFollowing, UserApiError, type FollowListRow } from "./apiClient";
+import { describeRequestFailure } from "./errorCopy";
 import { FollowRow } from "./JelajahPage";
 
 type LoadState =
@@ -100,7 +101,10 @@ export default function FollowListPage({ direction }: { direction: "followers" |
         if (err instanceof UserApiError && err.status === 404) {
           setLoad({ status: "not-found" });
         } else {
-          setLoad({ status: "error", message: err instanceof Error ? err.message : "gagal memuat daftar" });
+          // N1: see `ProfilePage`'s identical note and `errorCopy.ts`. This
+          // component printed `"internal server error"` under its own
+          // "Gagal memuat daftar" heading, measured on a real 500.
+          setLoad({ status: "error", message: describeRequestFailure(err) });
         }
       });
     return () => {

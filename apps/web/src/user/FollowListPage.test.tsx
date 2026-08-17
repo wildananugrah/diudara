@@ -337,3 +337,50 @@ describe("FollowListPage — per-row follow state and one-tap unfollow (item 1)"
     expect(screen.queryAllByRole("button", { name: "Mengikuti" }).length).toBe(0);
   });
 });
+
+/**
+ * Re-review N1, measured on this exact component: the reviewer drove a real 500
+ * and got `"Gagal memuat daftar"` immediately followed by the server's own
+ * `"internal server error"`. Items 5 and 7 had already fixed this same pattern
+ * in two other files, and this round had edited THIS file twice without
+ * noticing it here — which is why the fix is a shared path plus a guard
+ * (`src/test/no-raw-server-errors.test.ts`) rather than a third careful edit.
+ */
+describe("FollowListPage — a failed load speaks Bahasa Indonesia (N1)", () => {
+  it("shows Bahasa copy for a 500, never the server's own string", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "internal server error" }, 500)
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/pengikut");
+
+    await screen.findByRole("heading", { name: "Gagal memuat daftar" });
+    expect(screen.getByText("Server sedang bermasalah. Coba lagi sebentar lagi.")).toBeTruthy();
+    expect(screen.queryAllByText("internal server error").length).toBe(0);
+  });
+
+  it("shows Bahasa copy when the connection drops, never 'Failed to fetch'", async () => {
+    global.fetch = mock(async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+
+    renderAt("/@wildan/mengikuti");
+
+    await screen.findByRole("heading", { name: "Gagal memuat daftar" });
+    expect(screen.getByText("Tidak dapat menghubungi server. Coba lagi.")).toBeTruthy();
+    expect(screen.queryAllByText("Failed to fetch").length).toBe(0);
+  });
+
+  it("still offers the way out from the Bahasa error state", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "internal server error" }, 500)
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/pengikut");
+
+    await screen.findByRole("heading", { name: "Gagal memuat daftar" });
+    expect(screen.getByRole("link", { name: "Kembali ke @wildan" }).getAttribute("href")).toBe(
+      "/@wildan"
+    );
+  });
+});

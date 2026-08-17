@@ -1,6 +1,13 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { getUserToken, login, SessionStorageError, UserApiError } from "./apiClient";
+import {
+  getUserToken,
+  login,
+  SESSION_NOT_STORED_MESSAGE,
+  SessionStorageError,
+  UserApiError,
+} from "./apiClient";
+import { describeRequestFailure } from "./errorCopy";
 
 /**
  * THE GENERIC 401, and the reason it is a constant rather than the API's
@@ -39,20 +46,26 @@ export default function LoginPage() {
       if (err.status === 401) return { message: GENERIC_CREDENTIALS_MESSAGE, fieldErrors: {} };
       if (err.status === 400) {
         return {
-          message: Object.keys(err.fieldErrors).length > 0 ? "Periksa data yang Anda isi." : err.message,
+          message:
+            Object.keys(err.fieldErrors).length > 0
+              ? "Periksa data yang Anda isi."
+              : describeRequestFailure(err),
           fieldErrors: err.fieldErrors,
         };
       }
-      return { message: err.message, fieldErrors: {} };
+      return { message: describeRequestFailure(err), fieldErrors: {} };
     }
     // The credentials were accepted and the SESSION could not be persisted —
     // `setUserSession` rolled the token back and threw rather than leaving half
     // a session behind (final review I2). Its own message, because "cannot
     // reach the server" below would be a lie about what failed.
     if (err instanceof SessionStorageError) {
-      return { message: err.message, fieldErrors: {} };
+      // Its own constant rather than `err.message`: identical string, but the
+      // guard cannot tell a client-authored message from a server one, and
+      // neither can a reader.
+      return { message: SESSION_NOT_STORED_MESSAGE, fieldErrors: {} };
     }
-    return { message: "Tidak dapat menghubungi server. Coba lagi.", fieldErrors: {} };
+    return { message: describeRequestFailure(err), fieldErrors: {} };
   }
 
   async function handleSubmit(event: FormEvent) {
