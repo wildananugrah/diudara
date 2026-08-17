@@ -17,6 +17,12 @@ import MembersPage from "./dashboard/pages/MembersPage";
 import ActivityPage from "./dashboard/pages/ActivityPage";
 import CoBuilderPage from "./dashboard/pages/CoBuilderPage";
 import EventsPage from "./dashboard/pages/EventsPage";
+import UserSignupPage from "./user/SignupPage";
+import UserLoginPage from "./user/LoginPage";
+import SettingsPage from "./user/SettingsPage";
+import ResetRequestPage from "./user/ResetRequestPage";
+import ResetCompletePage from "./user/ResetCompletePage";
+import ProfilePage from "./user/ProfilePage";
 
 export function AppRoutes() {
   return (
@@ -74,6 +80,35 @@ export function AppRoutes() {
             to the public checkout 404 the catch-all below serves. */}
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>
+
+      {/*
+        Task 6: personal accounts — a separate session from the creator
+        dashboard above (see user/apiClient.ts's own docstring). All public
+        except /pengaturan, which guards itself (see SettingsPage.tsx).
+      */}
+      <Route path="/signup" element={<UserSignupPage />} />
+      <Route path="/masuk" element={<UserLoginPage />} />
+      <Route path="/pengaturan" element={<SettingsPage />} />
+      <Route path="/lupa-sandi" element={<ResetRequestPage />} />
+      <Route path="/reset/:token" element={<ResetCompletePage />} />
+
+      {/*
+        THE PROFILE ROUTE — path="/:handleParam", NOT path="/@:handle".
+        React Router cannot match a literal glued to a parameter inside one
+        path segment, so "/@:handle" would never match "/@wildan" at all.
+        ProfilePage itself renders the 404 page unless the param starts
+        with "@", and strips it before calling the API.
+
+        Registered LAST, immediately before the catch-all: a single-segment
+        dynamic route would otherwise be free to shadow /signup, /masuk, and
+        every other one-segment path above. React Router actually ranks
+        static segments above dynamic ones regardless of declaration order
+        (same note the /c/:slug block above makes), so this ordering is
+        defensive rather than load-bearing — but it is exactly the ordering
+        whose absence would silently break /masuk, so it is kept here
+        anyway and covered by its own routing test.
+      */}
+      <Route path="/:handleParam" element={<ProfilePage />} />
 
       {/* Rendered IN PLACE, never redirected: the URL the visitor typed has to stay
           in the address bar or the message cannot be acted on. This used to send
