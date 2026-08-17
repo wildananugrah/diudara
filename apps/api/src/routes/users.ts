@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { z } from "zod";
 import {
   completePasswordResetSchema,
   requestPasswordResetSchema,
@@ -13,8 +14,43 @@ import {
   type UserSignupInput,
 } from "@diudara/shared";
 import { validate } from "../http/validate";
-import { requireUserAuth, type UserAuthVariables } from "../http/user-auth.middleware";
+import {
+  requireUserAuth,
+  resolveViewerId,
+  type UserAuthVariables,
+} from "../http/user-auth.middleware";
+import { ValidationError } from "../application/errors";
 import type { Dependencies } from "../bootstrap";
+
+/** Page size for `GET /users/:handle/followers|following` when `?limit=` is absent. */
+const DEFAULT_FOLLOW_LIST_LIMIT = 50;
+
+/**
+ * Largest page a caller may ask for — same shape as `routes/analytics.ts`'s
+ * `MAX_PAGE_LIMIT`, and for the same reason: a REFUSAL rather than a silent
+ * clamp, so a client asking for more than this can tell "you get 100" from
+ * "that was a malformed request".
+ */
+const MAX_FOLLOW_LIST_LIMIT = 100;
+
+const followListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_FOLLOW_LIST_LIMIT).optional(),
+});
+
+/** `?limit=` for the follower/following lists, parsed and defaulted — mirrors `routes/analytics.ts`'s `parsePageQuery`. */
+function parseFollowListLimit(raw: string | undefined): number {
+  const parsed = followListQuerySchema.safeParse({
+    // Omitted rather than passed as `undefined`-from-empty-string: `?limit=`
+    // would otherwise coerce to 0 and fail the minimum with a confusing message.
+    ...(raw === undefined || raw === "" ? {} : { limit: raw }),
+  });
+  if (!parsed.success) {
+    throw new ValidationError(
+      `invalid limit: must be an integer between 1 and ${MAX_FOLLOW_LIST_LIMIT}`
+    );
+  }
+  return parsed.data.limit ?? DEFAULT_FOLLOW_LIST_LIMIT;
+}
 
 /**
  * The caller's IP, recorded (hashed) against every password-reset request
@@ -63,6 +99,12 @@ export function clientIp(c: Context): string | null {
  * per-route rather than via `app.use("*", ...)` so it never accidentally
  * guards signup/login/by-handle too (the same reason `routes/analytics.ts`
  * mounts `requireAuth` per-route instead of on `"*"`).
+ *
+ * Task 2 (profiles and following) adds four more: `POST`/`DELETE
+ * /:handle/follow` (behind `requireUserAuth` — following requires a session)
+ * and the public `GET /:handle/followers`/`/:handle/following` lists. All
+ * four share `by-handle/:handle`'s handle-normalisation forgiveness (a
+ * leading `@` still resolves) through `FollowUser`/`ListFollows` themselves.
  */
 export function userRoutes(
   deps: Pick<
@@ -75,6 +117,8 @@ export function userRoutes(
     | "updateUserProfile"
     | "requestPasswordReset"
     | "completePasswordReset"
+    | "followUser"
+    | "listFollows"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -123,7 +167,12 @@ export function userRoutes(
   // `@` if a client sends it anyway, so a mistake here is forgiving rather
   // than a 404.
   app.get<"/by-handle/:handle">("/by-handle/:handle", async (c) => {
-    const profile = await deps.getUserProfile.execute(c.req.param("handle"));
+    // Public route: `resolveViewerId` NEVER throws, unlike `requireAuth` —
+    // a missing/invalid token resolves to `null` (anonymous), not a 401,
+    // because this route never required a session. See its own docstring
+    // for why `null` here is load-bearing (`PublicUserProfile.viewerFollows`).
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    const profile = await deps.getUserProfile.execute(c.req.param("handle"), viewerId);
     return c.json(profile);
   });
 
@@ -136,6 +185,56 @@ export function userRoutes(
     const patch = c.get("validated") as UpdateProfileInput;
     const updated = await deps.updateUserProfile.execute({ userId: c.get("userId"), patch });
     return c.json(updated);
+  });
+
+  // Task 2. Behind `requireUserAuth`: following requires a session, unlike
+  // every other route on this router mounted above `/me`. `FollowUser`
+  // itself resolves the handle, 404s an unknown one, and 409s a self-follow
+  // in Bahasa Indonesia BEFORE ever touching `FollowRepositoryPort.follow`/
+  // `unfollow` — see that class's own docstring for why that ordering is
+  // the entire point of this use case existing. Both directions return the
+  // RESULTING state with 200, whether or not anything changed — idempotent
+  // by design (design spec §7): a double-tap must not error.
+  app.post<"/:handle/follow">("/:handle/follow", requireAuth, async (c) => {
+    const result = await deps.followUser.execute({
+      followerId: c.get("userId"),
+      handle: c.req.param("handle"),
+      action: "follow",
+    });
+    return c.json(result, 200);
+  });
+
+  app.delete<"/:handle/follow">("/:handle/follow", requireAuth, async (c) => {
+    const result = await deps.followUser.execute({
+      followerId: c.get("userId"),
+      handle: c.req.param("handle"),
+      action: "unfollow",
+    });
+    return c.json(result, 200);
+  });
+
+  // Task 2. Public, like `by-handle/:handle` — anyone can browse who follows
+  // whom. `ListFollows` 404s an unknown handle the same way `GetUserProfile`
+  // does; rows are already the public `FollowListRow` projection
+  // (`handle`/`displayName`/`bio`), never a wider shape.
+  app.get<"/:handle/followers">("/:handle/followers", async (c) => {
+    const limit = parseFollowListLimit(c.req.query("limit"));
+    const rows = await deps.listFollows.execute({
+      handle: c.req.param("handle"),
+      direction: "followers",
+      limit,
+    });
+    return c.json(rows);
+  });
+
+  app.get<"/:handle/following">("/:handle/following", async (c) => {
+    const limit = parseFollowListLimit(c.req.query("limit"));
+    const rows = await deps.listFollows.execute({
+      handle: c.req.param("handle"),
+      direction: "following",
+      limit,
+    });
+    return c.json(rows);
   });
 
   return app;

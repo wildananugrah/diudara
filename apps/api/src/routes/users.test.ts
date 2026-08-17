@@ -38,17 +38,23 @@ const VALID = {
   displayName: "Wildan",
 };
 
-/** Signs up (if not already) and logs in `VALID`, returning the bearer token. */
-async function tokenForValidUser(a = app()) {
+/**
+ * Signs up (if not already) and logs in `VALID`, returning the bearer token.
+ * `overrides` merges over `VALID` before either call — Task 2's follow tests
+ * need a SECOND, distinct account on the same `app()` instance, e.g.
+ * `tokenForValidUser(a, { handle: "rina", email: "rina@example.com" })`.
+ */
+async function tokenForValidUser(a = app(), overrides: Partial<typeof VALID> = {}) {
+  const account = { ...VALID, ...overrides };
   await a.request("/users/signup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(VALID),
+    body: JSON.stringify(account),
   });
   const res = await a.request("/users/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: VALID.email, password: VALID.password }),
+    body: JSON.stringify({ email: account.email, password: account.password }),
   });
   const body = await res.json();
   return body.token as string;
@@ -263,7 +269,7 @@ describe("POST /users/login", () => {
 });
 
 describe("GET /users/by-handle/:handle", () => {
-  it("returns EXACTLY handle/displayName/bio/createdAt — no email, no anything else", async () => {
+  it("returns EXACTLY handle/displayName/bio/createdAt/followerCount/followingCount/viewerFollows — no email, no anything else", async () => {
     const a = app();
     await a.request("/users/signup", {
       method: "POST",
@@ -279,9 +285,21 @@ describe("GET /users/by-handle/:handle", () => {
     // properties (email, whatsappNumber, id, sessionEpoch) would pass a
     // structural-type check silently even though they must never appear
     // here. This is the form that catches that.
-    expect(Object.keys(body).sort()).toEqual(["bio", "createdAt", "displayName", "handle"]);
+    expect(Object.keys(body).sort()).toEqual([
+      "bio",
+      "createdAt",
+      "displayName",
+      "followerCount",
+      "followingCount",
+      "handle",
+      "viewerFollows",
+    ]);
     expect(body.handle).toBe("wildan");
     expect(body.displayName).toBe(VALID.displayName);
+    expect(body.followerCount).toBe(0);
+    expect(body.followingCount).toBe(0);
+    // No session sent — anonymous viewer. Must be `null`, not `false`.
+    expect(body.viewerFollows).toBeNull();
     expect(body.email).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain(VALID.email);
   });
@@ -302,6 +320,216 @@ describe("GET /users/by-handle/:handle", () => {
     const res = await a.request("/users/by-handle/%40wildan");
     expect(res.status).toBe(200);
     expect((await res.json()).handle).toBe("wildan");
+  });
+
+  it("viewerFollows is false for a signed-in viewer who does not follow the target", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+    const viewerToken = await tokenForValidUser(a, { handle: "viewer", email: "viewer@example.com" });
+
+    const res = await a.request("/users/by-handle/wildan", { headers: authed(viewerToken) });
+    expect(res.status).toBe(200);
+    expect((await res.json()).viewerFollows).toBe(false);
+  });
+
+  it("viewerFollows is true once the signed-in viewer follows the target", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+    const viewerToken = await tokenForValidUser(a, { handle: "viewer", email: "viewer@example.com" });
+
+    const follow = await a.request("/users/wildan/follow", {
+      method: "POST",
+      headers: authed(viewerToken),
+    });
+    expect(follow.status).toBe(200);
+
+    const res = await a.request("/users/by-handle/wildan", { headers: authed(viewerToken) });
+    expect(res.status).toBe(200);
+    expect((await res.json()).viewerFollows).toBe(true);
+  });
+
+  it("an invalid bearer token on a PUBLIC route degrades to anonymous, not a 401", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/by-handle/wildan", { headers: authed("garbage") });
+    expect(res.status).toBe(200);
+    expect((await res.json()).viewerFollows).toBeNull();
+  });
+});
+
+describe("POST /users/:handle/follow and DELETE /users/:handle/follow", () => {
+  it("requires auth — no Authorization header is a 401 for follow", async () => {
+    const res = await app().request("/users/wildan/follow", { method: "POST" });
+    expect(res.status).toBe(401);
+  });
+
+  it("requires auth — no Authorization header is a 401 for unfollow", async () => {
+    const res = await app().request("/users/wildan/follow", { method: "DELETE" });
+    expect(res.status).toBe(401);
+  });
+
+  it("follows and returns 200 { following: true } for a signed-in caller", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    const res = await a.request("/users/wildan/follow", {
+      method: "POST",
+      headers: authed(followerToken),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ following: true });
+  });
+
+  it("following again is idempotent — still 200 { following: true }, count does not double", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    await a.request("/users/wildan/follow", { method: "POST", headers: authed(followerToken) });
+    const second = await a.request("/users/wildan/follow", {
+      method: "POST",
+      headers: authed(followerToken),
+    });
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ following: true });
+
+    const profile = await a.request("/users/by-handle/wildan");
+    expect((await profile.json()).followerCount).toBe(1);
+  });
+
+  it("unfollows and returns 200 { following: false }", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    await a.request("/users/wildan/follow", { method: "POST", headers: authed(followerToken) });
+    const res = await a.request("/users/wildan/follow", {
+      method: "DELETE",
+      headers: authed(followerToken),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ following: false });
+  });
+
+  it("unfollowing someone never followed is idempotent — 200 { following: false }, no error", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    const res = await a.request("/users/wildan/follow", {
+      method: "DELETE",
+      headers: authed(followerToken),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ following: false });
+  });
+
+  it("404s for an unknown handle", async () => {
+    const a = app();
+    const followerToken = await tokenForValidUser(a, {});
+
+    const res = await a.request("/users/nobody-at-all/follow", {
+      method: "POST",
+      headers: authed(followerToken),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("REJECTS a self-follow with 409 and the exact Indonesian message — refused by the use case, not the database", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a, {});
+
+    const res = await a.request("/users/wildan/follow", {
+      method: "POST",
+      headers: authed(token),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "tidak bisa mengikuti akun sendiri" });
+  });
+
+  it("a handle sent with a leading @ still resolves for follow", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    const res = await a.request("/users/%40wildan/follow", {
+      method: "POST",
+      headers: authed(followerToken),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ following: true });
+  });
+});
+
+describe("GET /users/:handle/followers and GET /users/:handle/following", () => {
+  it("404s followers for an unknown handle", async () => {
+    const res = await app().request("/users/nobody-at-all/followers");
+    expect(res.status).toBe(404);
+  });
+
+  it("404s following for an unknown handle", async () => {
+    const res = await app().request("/users/nobody-at-all/following");
+    expect(res.status).toBe(404);
+  });
+
+  it("returns the three public fields for a follower — no id, no email", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const followerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+
+    await a.request("/users/wildan/follow", { method: "POST", headers: authed(followerToken) });
+
+    const res = await a.request("/users/wildan/followers");
+    expect(res.status).toBe(200);
+    const rows = await res.json();
+    expect(rows).toHaveLength(1);
+    expect(Object.keys(rows[0]).sort()).toEqual(["bio", "displayName", "handle"]);
+    expect(rows[0].handle).toBe("rina");
+
+    const followingRes = await a.request("/users/rina/following");
+    expect(followingRes.status).toBe(200);
+    const followingRows = await followingRes.json();
+    expect(followingRows).toHaveLength(1);
+    expect(followingRows[0].handle).toBe("wildan");
+  });
+
+  it("returns an empty array, not an error, when nobody follows the target", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/wildan/followers");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+  });
+
+  it("rejects an out-of-range ?limit= with 400", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/wildan/followers?limit=101");
+    expect(res.status).toBe(400);
   });
 });
 
