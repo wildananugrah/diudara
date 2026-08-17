@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach } from "bun:test";
-import { db } from "../../db/client";
+import { sql } from "drizzle-orm";
+import { db, sql as pgClient } from "../../db/client";
 import { appUsers, follows, posts } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { DrizzlePostRepository } from "./drizzle-post.repository";
@@ -33,6 +34,34 @@ async function seedPost(authorId: string, body: string, createdAt: Date, id?: st
     .values({ authorId, body, createdAt, ...(id === undefined ? {} : { id }) })
     .returning();
   return row!;
+}
+
+/**
+ * Builds `count` UUIDs for a same-timestamp tie test: `idAtRank(count, 0)` is
+ * the LARGEST of the set (sorts first under `desc(id)`), `idAtRank(count,
+ * count - 1)` is the smallest. Every varying digit stays 0-9, so hex/lexical
+ * ordering of the UUID matches decimal rank ordering exactly.
+ */
+function idAtRank(count: number, rank: number): string {
+  const suffix = (count - 1 - rank).toString().padStart(12, "0");
+  return `ffffffff-0000-4000-8000-${suffix}`;
+}
+
+/**
+ * A fixed permutation of `[0, count)` that is neither ascending nor
+ * descending — Task 1 review finding I2: the shipped "orders by id when two
+ * posts share a created_at" test above inserted exactly 3 rows in ASCENDING
+ * id order and asserted DESCENDING output, which a 3-row top-N heapsort can
+ * satisfy BY COINCIDENCE even with the `id` tiebreaker deleted from the
+ * query entirely (verified: removing `desc(posts.id)` from `page()` left
+ * that test green). Insertion order here matches neither "keep physical
+ * order" nor "reverse physical order" — the two ways a small heapsort's tie
+ * handling can accidentally look sorted — so only a REAL `ORDER BY id` can
+ * produce the exact sequence these tests assert. `step` must be coprime
+ * with `count` for this to visit every rank exactly once.
+ */
+function shuffledRanks(count: number, step = 7): number[] {
+  return Array.from({ length: count }, (_, i) => (i * step) % count);
 }
 
 describe("DrizzlePostRepository.create", () => {
@@ -137,6 +166,22 @@ describe("DrizzlePostRepository keyset pagination", () => {
     expect(secondPage.map((row) => row.body)).toEqual(["lama"]);
     expect(older.body).toBe("lama");
   });
+
+  it("breaks a WIDE same-timestamp tie strictly by id — page()'s own tiebreaker, not luck", async () => {
+    const author = await seedUser();
+    const shared = new Date("2026-08-18T06:00:00.000Z");
+    const count = 24;
+
+    for (const rank of shuffledRanks(count)) {
+      await seedPost(author.id, `rank-${rank}`, shared, idAtRank(count, rank));
+    }
+
+    const rows = await repo.listGlobal(count, null);
+
+    expect(rows.map((row) => row.body)).toEqual(
+      Array.from({ length: count }, (_, rank) => `rank-${rank}`)
+    );
+  });
 });
 
 describe("DrizzlePostRepository.listFollowing", () => {
@@ -153,6 +198,36 @@ describe("DrizzlePostRepository.listFollowing", () => {
 
     expect(rows.map((row) => row.body)).toEqual(["diikuti"]);
   });
+
+  it("breaks a WIDE same-timestamp tie strictly by id — listFollowing's own tiebreaker, not luck", async () => {
+    const viewer = await seedUser();
+    const followed = await seedUser();
+    await db.insert(follows).values({ followerId: viewer.id, followeeId: followed.id });
+    const shared = new Date("2026-08-18T07:00:00.000Z");
+    const count = 24;
+
+    for (const rank of shuffledRanks(count)) {
+      await seedPost(followed.id, `rank-${rank}`, shared, idAtRank(count, rank));
+    }
+
+    const rows = await repo.listFollowing(viewer.id, count, null);
+
+    expect(rows.map((row) => row.body)).toEqual(
+      Array.from({ length: count }, (_, rank) => `rank-${rank}`)
+    );
+  });
+
+  it("also clamps a nonsensical limit rather than returning the whole table", async () => {
+    const viewer = await seedUser();
+    const followed = await seedUser();
+    await db.insert(follows).values({ followerId: viewer.id, followeeId: followed.id });
+    await repo.create(followed.id, "satu juga");
+
+    // I4: `listFollowing` calls `clampLimit` at its OWN call site rather than
+    // through `page()` — this fails independently if that call is ever
+    // replaced with a bare `limit`.
+    expect(await repo.listFollowing(viewer.id, -1, null)).toEqual([]);
+  });
 });
 
 describe("DrizzlePostRepository limits", () => {
@@ -161,5 +236,167 @@ describe("DrizzlePostRepository limits", () => {
     await repo.create(author.id, "satu");
 
     expect(await repo.listGlobal(-1, null)).toEqual([]);
+  });
+});
+
+/**
+ * Task 1 review finding I3: the exact-key-set assertion in
+ * `DrizzlePostRepository.create` above only exercises `readOne` — the
+ * `.map((row) => row.body)` idiom every list test uses, and `toEqual([])` on
+ * the soft-delete test, cannot see an extra key at all. Verified by mutation:
+ * adding `authorId`, `deletedAt` and `appUsers.email` to the select in
+ * `page()` or in `listFollowing()` left the whole suite at 9 pass / 0 fail
+ * before these existed. `postColumns` is shared by all three list paths, so
+ * one row from each is enough to catch a leak introduced at either call site.
+ */
+describe("DrizzlePostRepository projection on every list path", () => {
+  const POST_ROW_KEYS = [
+    "authorDisplayName",
+    "authorHandle",
+    "body",
+    "createdAt",
+    "editedAt",
+    "id",
+  ].sort();
+
+  it("listGlobal rows carry only the public post fields", async () => {
+    const author = await seedUser();
+    await repo.create(author.id, "cek proyeksi global");
+
+    const [row] = await repo.listGlobal(1, null);
+
+    expect(Object.keys(row!).sort()).toEqual(POST_ROW_KEYS);
+  });
+
+  it("listByAuthor rows carry only the public post fields", async () => {
+    const author = await seedUser();
+    await repo.create(author.id, "cek proyeksi penulis");
+
+    const [row] = await repo.listByAuthor(author.id, 1, null);
+
+    expect(Object.keys(row!).sort()).toEqual(POST_ROW_KEYS);
+  });
+
+  it("listFollowing rows carry only the public post fields", async () => {
+    const viewer = await seedUser();
+    const followed = await seedUser();
+    await db.insert(follows).values({ followerId: viewer.id, followeeId: followed.id });
+    await repo.create(followed.id, "cek proyeksi mengikuti");
+
+    const [row] = await repo.listFollowing(viewer.id, 1, null);
+
+    expect(Object.keys(row!).sort()).toEqual(POST_ROW_KEYS);
+  });
+});
+
+/**
+ * Task 1 review finding C1. An index that EXISTS is not an index the planner
+ * USES: both indexes below were present in every migration since Task 1 but
+ * read by NEITHER `listGlobal` nor `listByAuthor`/`listFollowing` —
+ * `pg_stat_user_indexes` showed `post_live_created_idx` at `idx_scan: 0`
+ * after four real queries, because drizzle's query-builder `desc()` (bare
+ * `DESC`, which Postgres reads as `NULLS FIRST`) didn't match either index's
+ * own `DESC NULLS LAST`. See `newestFirstOrder()`'s docstring in
+ * `drizzle-post.repository.ts` for the fix.
+ *
+ * TWO layers, same discipline `drizzle-follow.repository.test.ts`'s "the
+ * indexes profile reads go through" and `schema-phase5.test.ts`'s "the
+ * indexes Phase 5's hourly passes read through" each established
+ * separately: `pg_indexes` proves the index EXISTS with the right columns —
+ * a declaration in `schema.ts` that never made it into a generated migration
+ * is exactly that gap — and a REAL `EXPLAIN` on a REALISTICALLY sized table
+ * proves the planner actually chooses it. `enable_seqscan = off` is
+ * deliberately NOT used for the second part — that would make any index
+ * look used, which is the exact failure this guards against — so the table
+ * is instead given a size (100 authors, 10k posts, 5% soft-deleted,
+ * `analyze`d) where seq-scanning is measurably worse. A tiny table is
+ * correctly seq-scanned however many indexes it has.
+ */
+describe("the indexes post reads go through", () => {
+  async function indexDefinition(name: string): Promise<string | null> {
+    const rows = await db.execute<{ indexdef: string }>(
+      sql`select indexdef from pg_indexes where tablename = 'post' and indexname = ${name}`
+    );
+    return rows.length === 0 ? null : rows[0].indexdef;
+  }
+
+  it("indexes listGlobal's (created_at desc, id desc), live rows only", async () => {
+    const definition = await indexDefinition("post_live_created_idx");
+    expect(definition).not.toBeNull();
+    expect(definition).toMatch(/\(\s*created_at\s+DESC[^,]*,\s*id\s+DESC/i);
+    expect(definition).toContain("WHERE (deleted_at IS NULL)");
+  });
+
+  it("indexes listByAuthor's/listFollowing's (author_id, created_at desc)", async () => {
+    const definition = await indexDefinition("post_author_created_idx");
+    expect(definition).not.toBeNull();
+    expect(definition).toMatch(/\(\s*author_id\s*,\s*created_at\s+DESC/i);
+  });
+
+  it("plans listGlobal and listByAuthor WITHOUT a sequential scan of post", async () => {
+    await db.execute(sql`
+      insert into app_user (handle, email, whatsapp_number, password_hash, display_name, bio)
+      select 'bulkpost' || g, 'bulkpost' || g || '@example.com', null, 'x', 'Bulk Post Author ' || g, null
+      from generate_series(1, 100) g
+    `);
+    await db.execute(sql`
+      insert into post (author_id, body, created_at, deleted_at)
+      select a.id,
+             'bulk post ' || gs,
+             timestamptz '2026-01-01 00:00:00+00' + (gs || ' seconds')::interval,
+             case when gs % 20 = 0
+               then timestamptz '2026-01-01 00:00:00+00' + (gs || ' seconds')::interval
+               else null
+             end
+      from generate_series(1, 10000) gs
+      join (
+        select id, (row_number() over (order by id) - 1) as idx
+        from app_user where handle like 'bulkpost%'
+      ) a on a.idx = gs % 100
+    `);
+    // Statistics, or the planner is guessing — and a planner that is
+    // guessing picks a seq scan.
+    await db.execute(sql`analyze post`);
+    await db.execute(sql`analyze app_user`);
+
+    const oneAuthorId = (
+      await db.execute<{ id: string }>(sql`select id from app_user where handle = 'bulkpost1'`)
+    )[0]!.id;
+
+    // Captures the EXACT SQL the SHIPPED `listGlobal`/`listByAuthor` issue —
+    // NOT a hand-written copy of what they are supposed to produce, which
+    // would drift silently from the real query and pass regardless of what
+    // the repository actually does. This is the gap a first draft of this
+    // test had: it hand-wrote `order by ... desc nulls last` directly in the
+    // EXPLAIN text, so mutating `newestFirstOrder()` back to the shipped bug
+    // left it green — proving nothing. `.toSQL()` is drizzle's synchronous,
+    // non-executing introspection of its own lazy query builder: calling it
+    // on the un-awaited return of `listGlobal`/`listByAuthor` (both are NOT
+    // `async` methods — they return the builder chain itself) never sends
+    // anything over the wire on its own.
+    type ToSql = { toSQL(): { sql: string; params: unknown[] } };
+    const { sql: globalText, params: globalParams } = (
+      repo.listGlobal(20, null) as unknown as ToSql
+    ).toSQL();
+    const { sql: byAuthorText, params: byAuthorParams } = (
+      repo.listByAuthor(oneAuthorId, 20, null) as unknown as ToSql
+    ).toSQL();
+
+    const globalPlan = await pgClient.unsafe<{ "QUERY PLAN": string }[]>(
+      `explain ${globalText}`,
+      globalParams as never[]
+    );
+    const byAuthorPlan = await pgClient.unsafe<{ "QUERY PLAN": string }[]>(
+      `explain ${byAuthorText}`,
+      byAuthorParams as never[]
+    );
+
+    const globalPlanText = globalPlan.map((row) => row["QUERY PLAN"]).join("\n");
+    expect(globalPlanText).not.toContain("Seq Scan on post");
+    expect(globalPlanText).toContain("post_live_created_idx");
+
+    const byAuthorPlanText = byAuthorPlan.map((row) => row["QUERY PLAN"]).join("\n");
+    expect(byAuthorPlanText).not.toContain("Seq Scan on post");
+    expect(byAuthorPlanText).toContain("post_author_created_idx");
   });
 });

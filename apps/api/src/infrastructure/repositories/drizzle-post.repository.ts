@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { appUsers, follows, posts } from "../../db/schema";
 import type { KeysetCursor } from "../../domain/keyset-cursor";
@@ -38,6 +38,29 @@ function beforeCursor(cursor: KeysetCursor | null) {
   );
 }
 
+/**
+ * `ORDER BY created_at DESC NULLS LAST, id DESC NULLS LAST` — deliberately
+ * NOT drizzle's `desc()` query-builder helper. That helper emits a bare
+ * `DESC`, which Postgres reads as `DESC NULLS FIRST`, while
+ * `post_live_created_idx` and `post_author_created_idx` are both declared
+ * `DESC NULLS LAST` (drizzle's `.desc()` on an INDEX column — `schema.ts` —
+ * adds `NULLS LAST` automatically; the query-builder's `desc()` does not).
+ * The mismatched pathkeys meant Postgres could not use either index to
+ * satisfy this order at all: on 40k posts, `listGlobal` sequentially
+ * scanned every live row and top-N heapsorted the result, with
+ * `post_live_created_idx` at `idx_scan: 0` in `pg_stat_user_indexes` after
+ * real queries — reproduced and pinned by "the indexes post reads go
+ * through", below.
+ *
+ * `created_at` and `id` are both `NOT NULL`, so which NULLS placement wins
+ * is semantically free either way; matching the index's own choice (rather
+ * than changing the index to match a bare `desc()`) is what lets the
+ * planner use it without a migration change.
+ */
+function newestFirstOrder() {
+  return [sql`${posts.createdAt} desc nulls last`, sql`${posts.id} desc nulls last`] as const;
+}
+
 export class DrizzlePostRepository implements PostRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
 
@@ -73,9 +96,12 @@ export class DrizzlePostRepository implements PostRepositoryPort {
   }
 
   async softDelete(id: string): Promise<void> {
-    // No `isNull` guard: re-deleting is a no-op that must not error, and
-    // re-stamping deleted_at on an already-deleted row changes nothing anyone
-    // can observe. The guard would only make the second call a silent failure.
+    // The `isNull(posts.deletedAt)` guard IS present, and idempotency comes
+    // from it, not despite it: a repeat call matches zero rows (the row's
+    // deleted_at is already non-null), so it is a no-op UPDATE that neither
+    // errors nor touches the row — the ORIGINAL deleted_at is left exactly as
+    // it was, which is strictly better than a guardless UPDATE that would
+    // slide the timestamp forward on every repeat call.
     await this.db
       .update(posts)
       .set({ deletedAt: sql`now()` })
@@ -99,7 +125,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       .innerJoin(appUsers, eq(posts.authorId, appUsers.id))
       .innerJoin(follows, eq(follows.followeeId, posts.authorId))
       .where(and(eq(follows.followerId, viewerId), isNull(posts.deletedAt), beforeCursor(before)))
-      .orderBy(desc(posts.createdAt), desc(posts.id))
+      .orderBy(...newestFirstOrder())
       .limit(clampLimit(limit));
   }
 
@@ -113,7 +139,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       .from(posts)
       .innerJoin(appUsers, eq(posts.authorId, appUsers.id))
       .where(and(filter, beforeCursor(before)))
-      .orderBy(desc(posts.createdAt), desc(posts.id))
+      .orderBy(...newestFirstOrder())
       .limit(clampLimit(limit));
   }
 
