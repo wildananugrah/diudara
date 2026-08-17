@@ -172,6 +172,25 @@ describe("SignupPage", () => {
     expect(screen.getByTestId("error-email").textContent).toContain("Invalid email");
   });
 
+  /**
+   * The Task 7 gate found this by counting anchors on the running page:
+   * `/masuk` offers "Belum punya akun? Buat akun baru", but `/signup` had NO
+   * links at all — a visitor who already has an account and arrives on the
+   * signup page (a shared link, a bookmark, a back button) has no way out of
+   * it except guessing a URL. The same "unusable past the first screen" class
+   * as Task 6's missing sign-out, and equally invisible to a test that only
+   * ever drives the form.
+   *
+   * Asserted as the LINK TARGET, not just the words: copy that reads right
+   * while pointing nowhere useful is exactly the failure this closes.
+   */
+  it("offers a way to the login page for a visitor who already has an account", () => {
+    renderSignup();
+
+    const link = screen.getByRole("link", { name: "Sudah punya akun? Masuk" });
+    expect(link.getAttribute("href")).toBe("/masuk");
+  });
+
   it("keeps what was typed when signup fails", async () => {
     global.fetch = mock(async () => jsonResponse({ error: "handle is already taken" }, 409)) as unknown as typeof fetch;
 

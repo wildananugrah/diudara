@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { signup, UserApiError } from "./apiClient";
 
 /**
@@ -142,6 +142,18 @@ export default function SignupPage() {
             {submitting ? "Memproses..." : "Daftar"}
           </button>
         </form>
+
+        {/*
+          The mirror of `LoginPage`'s own "Belum punya akun? Buat akun baru",
+          and deliberately the same `button-link` class so the two pages look
+          like one pair. Without it this page had NO links whatsoever — see
+          this page's test for what the Task 7 gate found.
+        */}
+        <p>
+          <Link className="button-link" to="/masuk">
+            Sudah punya akun? Masuk
+          </Link>
+        </p>
       </div>
     </main>
   );
