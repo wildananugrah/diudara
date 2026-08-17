@@ -74,7 +74,19 @@ export class FollowUser {
   }
 }
 
-/** Page size when a follower/following list request carries no `limit`. */
+/**
+ * Page size when a follower/following list request carries no `limit`. THE
+ * single source of truth for that default — `routes/users.ts`'s
+ * `followListQuerySchema` imports this rather than declaring its own copy.
+ * A second, untested `const DEFAULT_FOLLOW_LIST_LIMIT = 50` used to live in
+ * the route file; since `parseFollowListLimit` always resolves a concrete
+ * number before calling `ListFollows.execute`, the fallback below is dead on
+ * the real HTTP path and can only be proven correct by the ROUTE's own
+ * default — which is exactly the constant that had zero coverage (review
+ * round 2: changing it to 5 left all 73 route tests green). Importing this
+ * one constant into the route closes that gap; the fallback below still
+ * matters for any future caller of `ListFollows` that is not this route.
+ */
 export const DEFAULT_FOLLOW_LIST_LIMIT = 50;
 
 /**

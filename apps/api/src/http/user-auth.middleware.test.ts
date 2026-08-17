@@ -84,6 +84,13 @@ describe("requireUserAuth", () => {
     const app = protectedUserApp(fakeUserRepository([record()]));
     const res = await app.request("/me");
     expect(res.status).toBe(401);
+    // Task 2's refactor collapsed the "no header at all" and "token present
+    // but invalid" cases onto ONE message via the shared `verifyBearerToken`
+    // helper — this used to say "missing bearer token" specifically. Nothing
+    // asserted the exact string before, so the refactor could not have been
+    // caught by the suite; pinning it now so a future change to either value
+    // is a deliberate edit, not an unnoticed side effect.
+    expect(await res.json()).toEqual({ error: "invalid or expired token" });
   });
 
   it("rejects a malformed Authorization header", async () => {
@@ -92,6 +99,7 @@ describe("requireUserAuth", () => {
       headers: { Authorization: "Basic token-for-user-9-epoch-0" },
     });
     expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "invalid or expired token" });
   });
 
   it("rejects a token that does not verify", async () => {

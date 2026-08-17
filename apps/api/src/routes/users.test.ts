@@ -504,6 +504,12 @@ describe("GET /users/:handle/followers and GET /users/:handle/following", () => 
     expect(followingRes.status).toBe(200);
     const followingRows = await followingRes.json();
     expect(followingRows).toHaveLength(1);
+    // Mirrors the `/followers` key-set assertion just above — before this,
+    // `/following` had no route-level key-set coverage at all (coverage
+    // asymmetry review round 2 flagged as a Minor; `ListFollows` uses the
+    // SAME `FollowListRow` projection for both directions, but nothing said
+    // so for this one).
+    expect(Object.keys(followingRows[0]).sort()).toEqual(["bio", "displayName", "handle"]);
     expect(followingRows[0].handle).toBe("wildan");
   });
 
@@ -520,6 +526,40 @@ describe("GET /users/:handle/followers and GET /users/:handle/following", () => 
     expect(await res.json()).toEqual([]);
   });
 
+  /**
+   * Review round 2, IMPORTANT 1: `DEFAULT_FOLLOW_LIST_LIMIT` used to be
+   * declared TWICE — once (tested) inside `ListFollows`, and once (untested)
+   * as a private duplicate in `routes/users.ts`. Since `parseFollowListLimit`
+   * always resolves a concrete number before calling `ListFollows.execute`,
+   * the ROUTE's own constant was the one actually reachable from an HTTP
+   * request with no `?limit=` — and it had zero coverage: changing it from
+   * 50 to 5 left every one of the 73 route tests green. `routes/users.ts`
+   * now imports the single, tested `DEFAULT_FOLLOW_LIST_LIMIT` rather than
+   * declaring its own; this seeds MORE than that default and pins the count
+   * on the real HTTP path, so a regression of either kind (a reintroduced
+   * duplicate, or a changed value) fails here.
+   */
+  it("defaults to 50 rows with no ?limit=, even when more than 50 people follow the target", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+
+    const followerTokens = await Promise.all(
+      Array.from({ length: 60 }, (_, i) =>
+        tokenForValidUser(a, { handle: `follower${i}`, email: `follower${i}@example.com` })
+      )
+    );
+    await Promise.all(
+      followerTokens.map((token) =>
+        a.request("/users/wildan/follow", { method: "POST", headers: authed(token) })
+      )
+    );
+
+    const res = await a.request("/users/wildan/followers");
+    expect(res.status).toBe(200);
+    const rows = await res.json();
+    expect(rows).toHaveLength(50);
+  });
+
   it("rejects an out-of-range ?limit= with 400", async () => {
     const a = app();
     await a.request("/users/signup", {
@@ -530,6 +570,25 @@ describe("GET /users/:handle/followers and GET /users/:handle/following", () => 
 
     const res = await a.request("/users/wildan/followers?limit=101");
     expect(res.status).toBe(400);
+  });
+
+  /**
+   * Review round 2, IMPORTANT 2: the ONLY existing limit test was
+   * `?limit=101 -> 400`, which passes even if `MAX_FOLLOW_LIST_LIMIT` were
+   * lowered to 25 — nothing pinned the boundary from the accepting side.
+   * `?limit=100 -> 200` closes that: lowering the cap below 100 now fails
+   * this test specifically, not just the rejection test.
+   */
+  it("accepts the maximum allowed ?limit=100", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/wildan/followers?limit=100");
+    expect(res.status).toBe(200);
   });
 });
 

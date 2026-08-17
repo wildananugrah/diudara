@@ -20,10 +20,8 @@ import {
   type UserAuthVariables,
 } from "../http/user-auth.middleware";
 import { ValidationError } from "../application/errors";
+import { DEFAULT_FOLLOW_LIST_LIMIT } from "../application/use-cases/follow-user";
 import type { Dependencies } from "../bootstrap";
-
-/** Page size for `GET /users/:handle/followers|following` when `?limit=` is absent. */
-const DEFAULT_FOLLOW_LIST_LIMIT = 50;
 
 /**
  * Largest page a caller may ask for — same shape as `routes/analytics.ts`'s
