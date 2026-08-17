@@ -2,11 +2,14 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { Hono } from "hono";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
+import { db } from "../db/client";
+import { appUsers } from "../db/schema";
 import { resetDatabase } from "../db/test-helpers";
 import { FakeEmailAdapter } from "../infrastructure/email/fake-email.adapter";
 import { FakeMessagingAdapter } from "../infrastructure/messaging/fake-messaging.adapter";
 import { BunPasswordHasher } from "../infrastructure/auth/bun-password.hasher";
 import { RegisterUser } from "../application/use-cases/register-user";
+import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import { clientIp } from "./users";
 
 beforeEach(resetDatabase);
@@ -593,6 +596,28 @@ describe("GET /users/:handle/followers and GET /users/:handle/following", () => 
 });
 
 /**
+ * Seeds `count` users directly through the database rather than via
+ * `POST /users/signup` — signup hashes a real password (argon2, through
+ * `BunPasswordHasher`), and seeding two dozen-plus users that way is both
+ * slow and, under root-level parallel-workspace load, exactly the shape of
+ * test that has hit the documented CPU-contention timeout before (see the
+ * followers/following `defaults to 50 rows` test above/`diudara-named-flakes`
+ * item 6). Nothing here exercises signup, so bypassing it is not a coverage
+ * loss — it only needs `count` real rows in `app_user` to exist.
+ */
+async function seedManyDirectly(count: number, prefix: string): Promise<void> {
+  await db.insert(appUsers).values(
+    Array.from({ length: count }, (_unused, i) => ({
+      handle: `${prefix}${i}`,
+      email: `${prefix}${i}@example.com`,
+      whatsappNumber: null,
+      passwordHash: "irrelevant-hash",
+      displayName: `${prefix} ${i}`,
+    }))
+  );
+}
+
+/**
  * `GET /users/explore` — Jelajah, the discovery screen a new user with an
  * empty follow graph lands on. Public, unauthenticated, like `by-handle`
  * and the followers/following lists above.
@@ -723,6 +748,53 @@ describe("GET /users/explore", () => {
     });
 
     const res = await a.request("/users/explore?limit=100");
+    expect(res.status).toBe(200);
+  });
+
+  /**
+   * Review round 1, Important 3: `DEFAULT_EXPLORE_LIMIT` was imported from
+   * the single tested source (unlike Task 2's `DEFAULT_FOLLOW_LIST_LIMIT`
+   * duplicate), but nothing on the real HTTP path pinned its VALUE —
+   * changing `20` to `1` left the whole suite green. Mirrors
+   * `routes/users.test.ts`'s own `defaults to 50 rows with no ?limit=`
+   * test for the followers list: seed more than the default and pin the
+   * exact row count with no `?limit=` on the request.
+   *
+   * The expected count below is the LITERAL `20`, deliberately NOT
+   * `DEFAULT_EXPLORE_LIMIT` — asserting against the same constant the
+   * production code reads would make this test move in lockstep with any
+   * regression to that constant and pass vacuously, exactly the trap this
+   * test exists to catch. Only the SEED count below uses the import, so a
+   * future change to the default doesn't also require hand-editing how
+   * many rows get seeded.
+   */
+  it("defaults to 20 rows per list with no ?limit=, even when more exist", async () => {
+    const a = app();
+    await seedManyDirectly(DEFAULT_EXPLORE_LIMIT + 5, "explorer");
+
+    const res = await a.request("/users/explore");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.newest).toHaveLength(20);
+    expect(body.mostFollowed).toHaveLength(20);
+  });
+
+  /**
+   * Review round 1, Minor: `q` had no length bound at all — every other
+   * user-supplied string on this router does (`handle` 31, `displayName`
+   * 255, `bio` 300). Both sides of the boundary, same discipline as the
+   * `?limit=` pair above.
+   */
+  it("rejects a ?q= longer than 100 characters with 400", async () => {
+    const a = app();
+    const res = await a.request(`/users/explore?q=${"a".repeat(101)}`);
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts a ?q= of exactly 100 characters", async () => {
+    const a = app();
+    const res = await a.request(`/users/explore?q=${"a".repeat(100)}`);
     expect(res.status).toBe(200);
   });
 });

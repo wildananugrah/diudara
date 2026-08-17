@@ -356,6 +356,37 @@ describe("DrizzleUserRepository.searchPublic", () => {
     expect(await repo.searchPublic("clamplimit", -1)).toEqual([]);
     expect(await repo.searchPublic("clamplimit", 0)).toEqual([]);
   });
+
+  /**
+   * Review round 1, Important 2: `_` is a LEGAL handle character
+   * (`domain/handle.ts`'s `/^[a-z0-9_]{3,30}$/`), so an unescaped `_` in a
+   * search term is a Postgres `LIKE` wildcard meaning "any one character" —
+   * searching the EXACT, valid handle `budi_santoso` (unescaped) also
+   * matched `budi1santoso` and `budixsantoso`. This is the mainline path,
+   * not an edge case: any handle containing an underscore was affected.
+   */
+  it("treats a literal underscore in the query as a literal character, not a wildcard", async () => {
+    const target = await repo.create(seedInput({ handle: "budi_santoso", displayName: "Budi Santoso" }));
+    await repo.create(seedInput({ handle: "budi1santoso", displayName: "Budi Satu Santoso" }));
+    await repo.create(seedInput({ handle: "budixsantoso", displayName: "Budi X Santoso" }));
+
+    const rows = await repo.searchPublic("budi_santoso", 10);
+
+    expect(rows.map((r) => r.handle)).toEqual([target.handle]);
+  });
+
+  /**
+   * A query of a bare `%` used to prefix-match literally everyone (`%`
+   * unescaped means "zero or more of anything", so the appended trailing
+   * `%` made the whole pattern `%%`). After escaping, `%` is a literal
+   * character no seeded handle/display name starts with, so this returns
+   * nothing rather than the entire table.
+   */
+  it("treats a literal percent sign in the query as a literal character, not a wildcard", async () => {
+    await repo.create(seedInput({ handle: "anyoneatall", displayName: "Anyone At All" }));
+
+    expect(await repo.searchPublic("%", 10)).toEqual([]);
+  });
 });
 
 /**
@@ -376,6 +407,32 @@ describe("the guarantee: search can never confirm whether an email address is re
 
     expect(await repo.searchPublic("rahasia@example.com", 10)).toEqual([]);
     expect(await repo.searchPublic("rahasia", 10)).toEqual([]);
+  });
+});
+
+/**
+ * THE OTHER HALF OF THE SAME GUARANTEE: search can never confirm whether a
+ * WhatsApp number is registered either — `UserRepositoryPort.searchPublic`'s
+ * own docstring names `whatsapp_number` alongside `email` as never touched.
+ * Review round 1, Important 1: every OTHER search test in this file leaves
+ * `whatsappNumber` as its default `null`, so `ilike(appUsers.whatsappNumber,
+ * pattern)` evaluates to SQL `NULL`, which never matches anything —
+ * accidentally ADDING that column to `searchPublic`'s `or(...)` would leave
+ * every other test in this file green. Only a real, non-null number
+ * seeded here can catch that regression.
+ */
+describe("the guarantee: search can never confirm whether a WhatsApp number is registered", () => {
+  it("returns zero rows for a registered user's exact WhatsApp number, and for its prefix", async () => {
+    await repo.create(
+      seedInput({
+        handle: "hasphonenumber",
+        displayName: "Has Phone Number",
+        whatsappNumber: "+6281234567890",
+      })
+    );
+
+    expect(await repo.searchPublic("+6281234567890", 10)).toEqual([]);
+    expect(await repo.searchPublic("+62812", 10)).toEqual([]);
   });
 });
 

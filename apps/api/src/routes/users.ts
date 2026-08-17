@@ -60,19 +60,41 @@ function parseFollowListLimit(raw: string | undefined): number {
  */
 const MAX_EXPLORE_LIMIT = 100;
 
+/**
+ * Largest `?q=` Jelajah will accept — review round 1, Minor: every other
+ * user-supplied string on this router is bounded (`handle` 31,
+ * `displayName` 255, `bio` 300 — see `@diudara/shared`'s signup/profile
+ * schemas), but `q` had no bound at all on this public, unauthenticated,
+ * unrate-limited route. `searchPublic`'s own metacharacter escaping (see
+ * its docstring) already makes an arbitrarily long `q` cheap to execute —
+ * this is about consistency with the rest of the router, not a
+ * vulnerability being closed.
+ */
+const MAX_EXPLORE_QUERY_LENGTH = 100;
+
 const exploreQuerySchema = z.object({
+  q: z.string().max(MAX_EXPLORE_QUERY_LENGTH).optional(),
   limit: z.coerce.number().int().min(1).max(MAX_EXPLORE_LIMIT).optional(),
 });
 
-/** `?limit=` for `GET /users/explore`, parsed and defaulted — mirrors `parseFollowListLimit` above. */
-function parseExploreLimit(raw: string | undefined): number {
+/** `?q=`/`?limit=` for `GET /users/explore`, parsed and defaulted — mirrors `parseFollowListLimit` above. */
+function parseExploreQuery(raw: {
+  q: string | undefined;
+  limit: string | undefined;
+}): { q: string | undefined; limit: number } {
   const parsed = exploreQuerySchema.safeParse({
-    ...(raw === undefined || raw === "" ? {} : { limit: raw }),
+    ...(raw.q === undefined ? {} : { q: raw.q }),
+    // Omitted rather than passed as `undefined`-from-empty-string: `?limit=`
+    // would otherwise coerce to 0 and fail the minimum with a confusing message.
+    ...(raw.limit === undefined || raw.limit === "" ? {} : { limit: raw.limit }),
   });
   if (!parsed.success) {
-    throw new ValidationError(`invalid limit: must be an integer between 1 and ${MAX_EXPLORE_LIMIT}`);
+    throw new ValidationError(
+      `invalid query: q must be at most ${MAX_EXPLORE_QUERY_LENGTH} characters, ` +
+        `limit must be an integer between 1 and ${MAX_EXPLORE_LIMIT}`
+    );
   }
-  return parsed.data.limit ?? DEFAULT_EXPLORE_LIMIT;
+  return { q: parsed.data.q, limit: parsed.data.limit ?? DEFAULT_EXPLORE_LIMIT };
 }
 
 /**
@@ -271,8 +293,8 @@ export function userRoutes(
   // treats that as the screen's default state (empty `results`, both other
   // lists still populated), not an error. See that class's own docstring.
   app.get<"/explore">("/explore", async (c) => {
-    const limit = parseExploreLimit(c.req.query("limit"));
-    const result = await deps.exploreUsers.execute({ q: c.req.query("q"), limit });
+    const { q, limit } = parseExploreQuery({ q: c.req.query("q"), limit: c.req.query("limit") });
+    const result = await deps.exploreUsers.execute({ q, limit });
     return c.json(result);
   });
 
