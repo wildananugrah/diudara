@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import SignupPage from "./SignupPage";
+
+/**
+ * The literal copy the brief requires, hardcoded here rather than imported
+ * from `SignupPage.ts`'s own `SIGNUP_SUCCESS_MESSAGE` export — importing it
+ * would make this file compare the constant to itself, so a mutation that
+ * silently changed the constant's VALUE (e.g. to English) would still pass.
+ * Hardcoding it is what actually pins the required Indonesian sentence.
+ */
+const SIGNUP_SUCCESS_MESSAGE = "Akun dibuat. Silakan masuk.";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -24,9 +33,23 @@ function renderSignup() {
   );
 }
 
-/** Stands in for LoginPage, echoing the `state.message` it would receive — proves the hand-off shape without importing the real page. */
+/**
+ * Stands in for LoginPage, ACTUALLY reading and rendering `location.state.message`
+ * — not just claiming to. Proves the hand-off shape (SignupPage's `navigate()` call
+ * really does carry the required copy) without importing the real LoginPage. The
+ * "login page reached" text alone would pass even if SignupPage navigated with no
+ * state at all or the wrong message; the second line is what the fresh-signup and
+ * duplicate-email tests below actually assert against.
+ */
 function LoginLanding() {
-  return <div>login page reached</div>;
+  const location = useLocation();
+  const state = location.state as { message?: unknown } | null;
+  return (
+    <div>
+      <p>login page reached</p>
+      <p>{typeof state?.message === "string" ? state.message : "(no message received)"}</p>
+    </div>
+  );
 }
 
 function fillForm(overrides: Partial<Record<"handle" | "displayName" | "email" | "password", string>> = {}) {
@@ -69,7 +92,9 @@ describe("SignupPage", () => {
     fillForm();
     fireEvent.click(screen.getByRole("button", { name: "Daftar" }));
 
-    expect(await screen.findByText("login page reached")).toBeTruthy();
+    // The literal required copy, actually received by the landing route's
+    // own location.state — not just "some page was reached".
+    expect(await screen.findByText(SIGNUP_SUCCESS_MESSAGE)).toBeTruthy();
     expect(calls[0]!.url).toBe("/users/signup");
     expect(JSON.parse(calls[0]!.init.body as string)).toEqual({
       handle: "wildan",
@@ -106,7 +131,10 @@ describe("SignupPage", () => {
     fillForm({ email: "already-registered@example.com" });
     fireEvent.click(screen.getByRole("button", { name: "Daftar" }));
 
-    expect(await screen.findByText("login page reached")).toBeTruthy();
+    // Same literal, same join — the duplicate-email path must hand off the
+    // identical state.message a fresh signup does, not merely land on the
+    // same route.
+    expect(await screen.findByText(SIGNUP_SUCCESS_MESSAGE)).toBeTruthy();
   });
 
   it("includes a trimmed WhatsApp number when provided, and omits it when blank", async () => {
