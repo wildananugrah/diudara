@@ -8,6 +8,21 @@ import type { ClockPort } from "../ports/clock.port";
 import type { PasswordResetRepositoryPort, PasswordResetTokenRecord } from "../ports/password-reset-repository.port";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
 
+/** Captures `console.warn` for the duration of `fn`, restoring it afterwards. */
+async function captureWarnings(fn: () => Promise<unknown>): Promise<string[]> {
+  const lines: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    await fn();
+  } finally {
+    console.warn = original;
+  }
+  return lines;
+}
+
 /**
  * A manually-released gate for deterministically proving `execute()`
  * resolves BEFORE a fire-and-forget send completes — review finding NF1.
@@ -225,6 +240,55 @@ describe("RequestPasswordReset", () => {
     expect(notifier.notifications).toHaveLength(0);
     // No channel available means nothing is recorded either.
     expect(rows).toHaveLength(0);
+  });
+
+  /**
+   * Whole-branch review item 2: total delivery failure (case 4 — no channel
+   * at all) and correct operation look identical from every observable HTTP
+   * surface, which is CORRECT for enumeration safety. But before this, it
+   * was ALSO invisible to an operator: `send`'s own console.warn only fires
+   * on a delivery FAILURE, and case 4 never calls `send` at all, so nothing
+   * ever logged "nobody could be reached". This pins that the log now fires,
+   * names the user id, names which channels were considered, and — the
+   * point of the whole exercise — NEVER logs the email address itself.
+   */
+  it("logs a clearly-tagged warning when a request resolves to no available channel, naming the user and the channels considered, never the email", async () => {
+    const { useCase, rows } = harness({
+      users: [record({ id: "user-no-channel", email: "wildan@example.com", whatsappNumber: null })],
+      email: null,
+    });
+
+    const warnings = await captureWarnings(() =>
+      useCase.execute({ email: "wildan@example.com", ip: "1.2.3.4" })
+    );
+
+    expect(rows).toHaveLength(0);
+    const line = warnings.find((w) => w.includes("NO CHANNEL AVAILABLE"));
+    expect(line).toBeDefined();
+    expect(line as string).toContain("user-no-channel");
+    expect(line as string).toContain("email");
+    expect(line as string).toContain("whatsapp");
+    expect(line as string).not.toContain("wildan@example.com");
+  });
+
+  /**
+   * The companion half of the fix: the log above must not have come at the
+   * cost of the response. Case 4's `{ ok: true }` stays byte-identical to
+   * every other path — proven directly here rather than only inferred from
+   * the enumeration-safety test above, since that test does not exercise
+   * the no-channel path at all.
+   */
+  it("the HTTP-observable response is unchanged by the new no-channel log", async () => {
+    const withoutChannel = harness({
+      users: [record({ whatsappNumber: null })],
+      email: null,
+    });
+    const found = harness();
+
+    const r1 = await withoutChannel.useCase.execute({ email: "wildan@example.com", ip: "1.2.3.4" });
+    const r2 = await found.useCase.execute({ email: "wildan@example.com", ip: "1.2.3.4" });
+
+    expect(JSON.stringify(r1)).toBe(JSON.stringify(r2));
   });
 
   it("refuses after 3 requests for the same user within the hour, returning the SAME { ok: true } and sending nothing more", async () => {

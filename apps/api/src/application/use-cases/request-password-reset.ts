@@ -38,12 +38,29 @@ const MAX_REQUESTS_PER_USER = 3;
  * Case 4 is the subtle one. A "you have no reset channel" error would ITSELF
  * be an oracle, because only a REAL account can lack a channel — a made-up
  * email can never reach this branch at all, so any response that looks
- * different here immediately confirms the email exists. The refusal a human
- * should see for that case ("we couldn't reach you — add a WhatsApp number
- * or contact support") belongs to the WEB layer, driven by what channels an
- * AUTHENTICATED account's own profile shows it has — never to this
- * endpoint's response, which has no way to prove the caller who typed the
- * email is the account's owner.
+ * different here immediately confirms the email exists. THE RESPONSE CANNOT
+ * SAY SO, and — corrected by the whole-branch review's item 3, which found
+ * an earlier version of this paragraph claiming the refusal "belongs to the
+ * WEB layer, driven by what channels an AUTHENTICATED account's own profile
+ * shows it has": that cannot be built. The person who needs the message is
+ * the one who is LOCKED OUT — no session exists to read a profile through,
+ * and this endpoint has no way to prove the caller who typed the email is
+ * the account's owner even if it wanted to answer differently. There is no
+ * layer, web or otherwise, that can surface a request-time refusal here
+ * without reopening the exact oracle this paragraph exists to close. Spec
+ * §6's row for this condition is accordingly unimplemented BY DESIGN, not by
+ * oversight — see spec §6's own note. What this codebase has instead:
+ *   - An OPERATOR-facing substitute: the case-4 branch below logs a clearly
+ *     tagged warning (user id and which channels were considered, never the
+ *     email address) so "nobody could be reached" is distinguishable from
+ *     "everything is fine" in the logs, even though the HTTP response can't
+ *     move (whole-branch review item 2).
+ *   - A USER-facing answer that is prevention rather than a refusal message:
+ *     email verification (still unbuilt — see spec §8) plus a `whatsappNumber`
+ *     the signed-in owner can add or fix after signup (item 1's `PATCH
+ *     /users/me` addition) closes the gap from the other direction, by
+ *     making "no channel at all" avoidable rather than by explaining it
+ *     after the fact.
  *
  * NO PER-IP LIMIT ANYMORE — Task 5 review finding F4. The original design
  * capped requests per hashed IP too, read from `X-Forwarded-For`. Measured:
@@ -108,8 +125,21 @@ export class RequestPasswordReset {
 
     const channel = chooseChannel(this.email, user);
     if (channel === null) {
-      // Case 4 — see the class docstring for why this is silent rather than
-      // an error.
+      // Case 4 — the HTTP response stays the identical { ok: true } (see the
+      // class docstring for why it must), but that silence must not also be
+      // invisible to an OPERATOR: this is the one case that never reaches
+      // `send`'s own console.warn, because `send` is never called at all.
+      // Without a log here, "nobody could be reached" and "everything is
+      // fine" produce literally the same observable trace. Item 2 of the
+      // whole-branch review. Tagged distinctly from `send`'s failure log so
+      // an operator can grep the two apart, and names which channels were
+      // considered — NEVER the email address, which must not appear in this
+      // log line even though `user.email` is right there on the record.
+      console.warn(
+        `[password-reset] NO CHANNEL AVAILABLE for user=${user.id} — email ` +
+          `${this.email !== null ? "configured" : "not configured on this box"}, whatsapp ` +
+          `${user.whatsappNumber !== null ? "on file" : "not on file"}. Nothing was sent.`
+      );
       return { ok: true };
     }
 
