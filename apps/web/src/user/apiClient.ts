@@ -275,10 +275,37 @@ export function signup(input: {
 }
 
 /**
- * `GET /users/by-handle/:handle`. Public — no auth, and deliberately not
- * routed through `apiRequest`: attaching a stale Authorization header to a
- * request nothing checks would be pointless, and a signed-out visitor must
- * be able to browse a profile at all.
+ * `GET /users/by-handle/:handle`. **PUBLIC BUT NOT ANONYMOUS**, and the
+ * distinction is the whole reason this function does not simply call
+ * `publicGet`.
+ *
+ * `routes/users.ts` runs `resolveViewerId` on this route — never
+ * `requireAuth`, so a missing, malformed or expired token resolves to `null`
+ * (anonymous) instead of a 401, and a signed-out visitor can still read any
+ * profile. But that viewer id is the ONLY input to
+ * `PublicUserProfile.viewerFollows`, so the bearer header is what decides
+ * whether the follow toggle exists at all: `FollowButton` renders a
+ * `<Link to="/masuk">Masuk untuk mengikuti</Link>` for `null` and the real
+ * button only for `true`/`false`.
+ *
+ * THIS USED TO SEND NO HEADER, and its docstring used to justify that with
+ * "attaching a stale Authorization header to a request nothing checks would
+ * be pointless". That was true when written (the accounts phase, before
+ * following existed) and became false the moment Task 2 added
+ * `resolveViewerId` to the route — so every signed-in visitor to `/@handle`
+ * got `viewerFollows: null` and was told to sign in on a page they were
+ * already signed in on. Found by Task 6's gate in a real browser, not by
+ * any test: `ProfilePage`'s own tests mock this module, and this module's
+ * tests asserted only the URL. Both directions are now pinned in
+ * `apiClient.test.ts`.
+ *
+ * Still NOT routed through `apiRequest`, and that part of the original
+ * reasoning stands: `apiRequest` clears the session and throws
+ * `SESSION_EXPIRED_MESSAGE` on a 401, which is right for a route that
+ * REQUIRES a session and wrong for one that merely notices it — an expired
+ * token here must degrade to the anonymous view, not log the visitor out
+ * mid-browse. `authorizedHeaders` (shared with `apiRequest`) attaches the
+ * token when there is one and nothing at all when there is not.
  */
 /**
  * Fields common to every profile shape `/users/...` returns, public or own —
@@ -322,7 +349,12 @@ export interface PublicUserProfile extends UserProfileCore {
 }
 
 export async function getProfileByHandle(handle: string): Promise<PublicUserProfile> {
-  const res = await fetch(`/users/by-handle/${encodeURIComponent(handle)}`);
+  const token = getUserToken();
+  const res = await fetch(`/users/by-handle/${encodeURIComponent(handle)}`, {
+    // Signed out this is an empty `Headers`, which is byte-identical on the
+    // wire to sending no init at all — the signed-out path is unchanged.
+    headers: authorizedHeaders(undefined, token),
+  });
   if (!res.ok) {
     throw await readError(res, `gagal memuat profil (${res.status})`);
   }

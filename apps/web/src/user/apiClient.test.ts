@@ -269,6 +269,87 @@ describe("profile", () => {
     expect(profile.viewerFollows).toBeNull();
   });
 
+  /**
+   * TASK 6, THE PHASE GATE, FOUND IN A REAL BROWSER: signed in and looking at
+   * somebody else's profile, the follow button read "Masuk untuk mengikuti"
+   * — the signed-OUT label — because this request carried no Authorization
+   * header, so `GET /users/by-handle/:handle` answered `viewerFollows: null`
+   * for a caller who very much had a session.
+   *
+   * `/by-handle/:handle` is PUBLIC but NOT anonymous. `routes/users.ts` runs
+   * `resolveViewerId` on it (never `requireAuth`, so a missing or expired
+   * token is `null`/anonymous rather than a 401), and that viewer id is the
+   * ONLY input to `viewerFollows`. Measured against the running API:
+   *
+   *   $ curl -s localhost:3000/users/by-handle/gate6_bagas
+   *   {... "viewerFollows":null}
+   *   $ curl -s localhost:3000/users/by-handle/gate6_bagas -H "Authorization: Bearer $TOKEN"
+   *   {... "viewerFollows":false}
+   *
+   * So the header is what decides whether the follow toggle exists at all:
+   * `FollowButton` renders a `<Link to="/masuk">` for `null` and the real
+   * button only for `true`/`false`. Without it the entire follow/unfollow
+   * feature was unreachable from `/@handle` in the running app for every
+   * signed-in user — the profile page being the primary place this phase
+   * exists to put it.
+   *
+   * The old code path was a bare `fetch()` whose own docstring asserted
+   * "attaching a stale Authorization header to a request nothing checks
+   * would be pointless". That was true when it was written (Task 6 of the
+   * accounts phase) and became false the moment Task 2 of THIS phase added
+   * `resolveViewerId` to the route — a written assumption that outlived the
+   * code it described, which is exactly what the ledger's standing lesson
+   * warns about.
+   *
+   * BOTH DIRECTIONS ARE PINNED, deliberately: sending the header always
+   * would break a signed-out visitor's "Masuk untuk mengikuti" if a stale
+   * token were ever present, and sending it never is the bug above.
+   */
+  it("sends the stored bearer token on a public profile fetch — viewerFollows depends on it", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit | undefined) => {
+      calls.push({ url, init });
+      return jsonResponse({
+        handle: "budi",
+        displayName: "Budi",
+        bio: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        followerCount: 1,
+        followingCount: 0,
+        viewerFollows: false,
+      });
+    }) as unknown as typeof fetch;
+
+    const profile = await getProfileByHandle("budi");
+
+    expect(calls[0]!.url).toBe("/users/by-handle/budi");
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+    expect(profile.viewerFollows).toBe(false);
+  });
+
+  it("sends NO Authorization header on a public profile fetch when signed out", async () => {
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit | undefined) => {
+      calls.push({ url, init });
+      return jsonResponse({
+        handle: "budi",
+        displayName: "Budi",
+        bio: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        followerCount: 1,
+        followingCount: 0,
+        viewerFollows: null,
+      });
+    }) as unknown as typeof fetch;
+
+    const profile = await getProfileByHandle("budi");
+
+    expect(getUserToken()).toBeNull();
+    expect(new Headers(calls[0]!.init?.headers).has("Authorization")).toBe(false);
+    expect(profile.viewerFollows).toBeNull();
+  });
+
   it("throws a 404 for an unknown handle", async () => {
     global.fetch = mock(async () => jsonResponse({ error: "user not found" }, 404)) as unknown as typeof fetch;
 
