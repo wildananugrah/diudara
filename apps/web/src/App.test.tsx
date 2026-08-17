@@ -82,6 +82,40 @@ describe("routing — the personal-account routes", () => {
     expect(await screen.findByText("Wildan")).toBeTruthy();
   });
 
+  /**
+   * Review round 2, Important 1: `FollowListPage.test.tsx` renders the
+   * component against its OWN local `<Routes>`, which never touches
+   * `App.tsx`'s real table — so a typo in either literal path segment below
+   * (or the routes simply missing from `AppRoutes`) would pass every
+   * existing test and typecheck, and only be discovered by clicking a
+   * profile's follower/following count in a real browser. Registered as
+   * TWO-segment paths ahead of the bare `/:handleParam` profile route (see
+   * that route's own comment on why more segments always wins regardless of
+   * declaration order) — these two confirm that wiring against the actual
+   * route table, not a stand-in one.
+   */
+  it("resolves /@wildan/pengikut to the follower list, against the real route table", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null }])
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/pengikut");
+
+    expect(await screen.findByText("Budi Santoso")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Pengikut" })).toBeTruthy();
+  });
+
+  it("resolves /@wildan/mengikuti to the following list, against the real route table", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null }])
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/mengikuti");
+
+    expect(await screen.findByText("Budi Santoso")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Mengikuti" })).toBeTruthy();
+  });
+
   it("still resolves the creator dashboard's own /dashboard/login, unaffected by the new routes", () => {
     renderAt("/dashboard/login");
 

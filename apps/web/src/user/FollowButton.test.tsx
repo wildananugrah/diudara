@@ -145,6 +145,24 @@ describe("FollowButton", () => {
     expect(screen.queryAllByRole("button").length).toBe(0);
   });
 
+  // Review round 2, Minor: the case fix above only varies the TARGET
+  // handle's case, so a comparison that normalised only that side (leaving
+  // the session's own cached handle un-lowercased) would still pass it. This
+  // varies the SESSION side instead.
+  it("is absent on your own profile even when the session's cached handle has different case than the prop", () => {
+    setUserSession("jwt-abc", { ...USER, handle: "WILDAN" });
+    renderButton({ handle: "wildan", viewerFollows: false });
+
+    expect(screen.queryAllByRole("button").length).toBe(0);
+  });
+
+  it("is absent on your own profile even if the handle prop carries a leading @", () => {
+    setUserSession("jwt-abc", USER);
+    renderButton({ handle: "@wildan", viewerFollows: false });
+
+    expect(screen.queryAllByRole("button").length).toBe(0);
+  });
+
   it("renders the toggle normally when signed out is false but the handle differs from the viewer's own", () => {
     setUserSession("jwt-abc", USER);
     renderButton({ handle: "budi", viewerFollows: false });

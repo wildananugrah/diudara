@@ -18,6 +18,20 @@ export interface FollowButtonProps {
 }
 
 /**
+ * Both sides of the own-profile comparison below go through this — not just
+ * the `handle` prop — so the check stays correct if either one ever carries
+ * a leading `@` (defensive; today neither call site does: both
+ * `PublicUserProfile.handle`/`FollowListRow.handle` and
+ * `getSessionUser().handle` are already server-normalised) and so the two
+ * sides cannot silently drift into an asymmetric comparison (review round
+ * 2, Minor: applying `.toLowerCase()` to only one side survived every test
+ * whose session and target handles already matched in case).
+ */
+function normalizeForComparison(raw: string): string {
+  return raw.replace(/^@/, "").toLowerCase();
+}
+
+/**
  * The follow/unfollow toggle — Task 5. **Renders nothing at all on your own
  * profile.**
  *
@@ -51,7 +65,7 @@ export default function FollowButton({ handle, viewerFollows, onChange }: Follow
   }, [viewerFollows, handle]);
 
   const session = getSessionUser();
-  if (session !== null && session.handle.toLowerCase() === handle.toLowerCase()) {
+  if (session !== null && normalizeForComparison(session.handle) === normalizeForComparison(handle)) {
     return null;
   }
 

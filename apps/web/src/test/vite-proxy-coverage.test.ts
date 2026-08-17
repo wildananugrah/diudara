@@ -45,18 +45,24 @@ function sourceFiles(dir: string): string[] {
 }
 
 /**
- * `fetch(`, `apiFetch(`/`apiFetch<T>(`, `apiRequest(`, `publicPost(` — the
- * four call sites this app ever reaches the network through (see
- * `user/apiClient.ts` and `dashboard/apiClient.ts`, which both define
- * `apiFetch`/`apiRequest` in terms of a bare `fetch`, and `api.ts`'s own
- * direct `fetch` calls for the public checkout surface). Captures the
- * literal path argument — a plain string or a template literal — and
- * deliberately does NOT match a bare identifier (`fetch(url, init)` in
- * `dashboard/whip-publisher.ts` is exactly that: an absolute URL handed in
- * from elsewhere, not a same-origin app path, and has nothing here to
- * proxy).
+ * `fetch(`, `apiFetch(`/`apiFetch<T>(`, `apiRequest(`, `publicPost(`,
+ * `publicGet(` — the FIVE call sites this app ever reaches the network
+ * through (see `user/apiClient.ts` and `dashboard/apiClient.ts`, which both
+ * define `apiFetch`/`apiRequest` in terms of a bare `fetch`, and `api.ts`'s
+ * own direct `fetch` calls for the public checkout surface).
+ * `publicGet` (Task 5, review round 2 — Important 4) backs every public GET
+ * `apiClient.ts` makes for following/Jelajah (`listFollowers`,
+ * `listFollowing`, `exploreUsers`) — omitting it here left this guard blind
+ * to that entire family: pointing one of those three at an unproxied prefix
+ * still reported every check green, exactly the failure mode this file
+ * exists to catch. Captures the literal path argument — a plain string or a
+ * template literal — and deliberately does NOT match a bare identifier
+ * (`fetch(url, init)` in `dashboard/whip-publisher.ts` is exactly that: an
+ * absolute URL handed in from elsewhere, not a same-origin app path, and
+ * has nothing here to proxy).
  */
-const CALL_SITE = /\b(?:fetch|apiFetch|apiRequest|publicPost)(?:<[^>()]*>)?\s*\(\s*(`[^`]*`|"[^"]*"|'[^']*')/g;
+const CALL_SITE =
+  /\b(?:fetch|apiFetch|apiRequest|publicPost|publicGet)(?:<[^>()]*>)?\s*\(\s*(`[^`]*`|"[^"]*"|'[^']*')/g;
 
 /** Strips the call site's quotes/backticks and truncates a template literal at its first `${`. */
 function literalPath(raw: string): string | null {

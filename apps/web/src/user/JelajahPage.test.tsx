@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import JelajahPage from "./JelajahPage";
+import { setUserSession } from "./apiClient";
+
+const USER = { id: "user-1", handle: "wildan", displayName: "Wildan", email: "wildan@example.com" };
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -140,5 +143,39 @@ describe("JelajahPage", () => {
     await waitFor(() => {
       expect(screen.getAllByRole("alert").length).toBeGreaterThan(0);
     });
+  });
+
+  // Review round 2, Important 3: FollowRow guesses `viewerFollows` from
+  // whether a session exists (none of /explore, /followers, /following
+  // return a per-row value) — every other test in this file runs
+  // signed-out, so neither direction of that guess had ever been asserted.
+  // Collapsing it to always-`{null}` would silently kill the follow feature
+  // for signed-in visitors (every row reads "Masuk untuk mengikuti"
+  // instead); collapsing it to always-`{false}` would show a signed-out
+  // visitor a live "Ikuti" that 401s the moment it's tapped — the exact
+  // inversion `apiClient.ts`'s `viewerFollows` docstring warns against.
+  it("shows the sign-in link on every row for a signed-out visitor, never a live toggle", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ results: [], newest: NEWEST, mostFollowed: [] })
+    ) as unknown as typeof fetch;
+
+    renderPage();
+
+    await screen.findByText("Akun Baru");
+    expect(screen.getByRole("link", { name: "Masuk untuk mengikuti" })).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: "Ikuti" }).length).toBe(0);
+  });
+
+  it("shows a live Ikuti toggle on every row for a signed-in visitor, never the sign-in link", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ results: [], newest: NEWEST, mostFollowed: [] })
+    ) as unknown as typeof fetch;
+
+    renderPage();
+
+    await screen.findByText("Akun Baru");
+    expect(screen.getByRole("button", { name: "Ikuti" })).toBeTruthy();
+    expect(screen.queryAllByRole("link", { name: "Masuk untuk mengikuti" }).length).toBe(0);
   });
 });

@@ -20,8 +20,36 @@ import {
   updateOwnProfile,
   UserApiError,
   USER_TOKEN_STORAGE_KEY,
+  type OwnUserProfile,
 } from "./apiClient";
 import { SESSION_EXPIRED_MESSAGE as DASHBOARD_SESSION_EXPIRED_MESSAGE } from "../dashboard/apiClient";
+
+/**
+ * Type-level pin (review round 2, Important 2). `OwnUserProfile`'s own
+ * docstring in `apiClient.ts` explains why it extends `UserProfileCore`
+ * rather than `PublicUserProfile` — but `getOwnProfile()` returns its result
+ * via `(await res.json()) as T`, an assertion that compiles for ANY object
+ * shape, so nothing about that function itself would ever fail to compile
+ * if the `extends` clause regressed back to `PublicUserProfile`. This
+ * literal is the actual backstop: it is typed as `OwnUserProfile` WITHOUT
+ * `followerCount`/`followingCount`/`viewerFollows`, which only typechecks
+ * because those three are not part of `OwnUserProfile` today. If
+ * `OwnUserProfile` ever re-extends `PublicUserProfile`, those three become
+ * required properties of `OwnUserProfile` too, this literal starts missing
+ * required properties, and `bun run typecheck` fails right here — the same
+ * kind of two-sided proof `get-user-profile.ts`'s own `toOwnProfile` gets
+ * for free server-side (a spread that would fail to compile), reproduced
+ * here since a type-only `as` cast has no such guarantee.
+ */
+const OWN_PROFILE_SHAPE_PIN: OwnUserProfile = {
+  handle: "pin",
+  displayName: "Pin",
+  bio: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  email: "pin@example.com",
+  whatsappNumber: null,
+};
+void OWN_PROFILE_SHAPE_PIN;
 
 const USER = { id: "user-1", handle: "wildan", displayName: "Wildan", email: "wildan@example.com" };
 
@@ -270,6 +298,12 @@ describe("profile", () => {
     expect(calls[0]!.url).toBe("/users/me");
     expect(new Headers(calls[0]!.init.headers).get("Authorization")).toBe("Bearer jwt-abc");
     expect(profile.email).toBe("wildan@example.com");
+    // Runtime half of the I2 pin above: the ACTUAL parsed response carries
+    // exactly the six own-profile fields — never the three follow fields a
+    // `PublicUserProfile`-based `OwnUserProfile` would (wrongly) claim.
+    expect(Object.keys(profile).sort()).toEqual(
+      ["bio", "createdAt", "displayName", "email", "handle", "whatsappNumber"].sort()
+    );
   });
 
   it("patches the display name via PATCH /users/me", async () => {

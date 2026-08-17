@@ -148,4 +148,27 @@ describe("ProfilePage", () => {
 
     expect(await screen.findByText("6")).toBeTruthy();
   });
+
+  // Review round 2, Minor: the bump test above only exercises the FOLLOW
+  // direction — `handleFollowChange`'s subtraction branch
+  // (`- (viewerFollowing === true ? 1 : 0)`) had no test of its own, so
+  // deleting it stayed green.
+  it("drops the visible follower count when the follow button is tapped to unfollow", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        return jsonResponse({ following: false });
+      }
+      return jsonResponse(profileBody({ followerCount: 5, viewerFollows: true }));
+    }) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+
+    const button = await screen.findByRole("button", { name: "Mengikuti" });
+    expect(screen.getByText("5")).toBeTruthy();
+
+    fireEvent.click(button);
+
+    expect(await screen.findByText("4")).toBeTruthy();
+  });
 });
