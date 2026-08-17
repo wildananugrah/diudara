@@ -155,9 +155,9 @@ done
 if [ -z "$api_healthy" ]; then
   echo "api never became healthy — check 'pm2 logs diudara-api --lines 50 --nostream'." >&2
   echo "A common cause: apps/api/.env is half-configured for one of the guarded" >&2
-  echo "provider groups (Xendit, Telegram/Fonnte, or the five MEDIAMTX_*/" >&2
-  echo "STREAM_TOKEN_SECRET streaming variables) — bootstrap() refuses to start" >&2
-  echo "rather than boot half-wired, and pm2 silently restart-loops the crash." >&2
+  echo "provider groups (Xendit, Telegram/Fonnte, email/Resend, or the five" >&2
+  echo "MEDIAMTX_*/STREAM_TOKEN_SECRET streaming variables) — bootstrap() refuses" >&2
+  echo "to start rather than boot half-wired, and pm2 silently restart-loops the crash." >&2
   echo "See apps/api/.env.example and CONTRIBUTING.md's 'Live streaming (MediaMTX)'" >&2
   echo "section." >&2
   exit 1
