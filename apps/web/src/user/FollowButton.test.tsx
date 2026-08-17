@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import FollowButton from "./FollowButton";
-import { setUserSession } from "./apiClient";
+import { getUserToken, setUserSession } from "./apiClient";
 
 const USER = { id: "user-1", handle: "wildan", displayName: "Wildan", email: "wildan@example.com" };
 
@@ -17,6 +17,23 @@ function renderButton(props: Parameters<typeof FollowButton>[0]) {
   return render(
     <MemoryRouter>
       <FollowButton {...props} />
+    </MemoryRouter>
+  );
+}
+
+/**
+ * Same button, but inside a real (if tiny) route table, so a navigation the
+ * component performs itself can be OBSERVED by what renders afterwards rather
+ * than by mocking `useNavigate` — the 401 path in item 7 has to actually land
+ * somewhere.
+ */
+function renderButtonRouted(props: Parameters<typeof FollowButton>[0]) {
+  return render(
+    <MemoryRouter initialEntries={["/@budi"]}>
+      <Routes>
+        <Route path="/@budi" element={<FollowButton {...props} />} />
+        <Route path="/masuk" element={<h1>Masuk</h1>} />
+      </Routes>
     </MemoryRouter>
   );
 }
@@ -168,5 +185,104 @@ describe("FollowButton", () => {
     renderButton({ handle: "budi", viewerFollows: false });
 
     expect(screen.getByRole("button", { name: "Ikuti" })).toBeTruthy();
+  });
+});
+
+/**
+ * Final-review M2: `catch { setFollowing(!next); }` swallowed EVERY failure and
+ * only reverted the visible state. Nothing told the user anything — the button
+ * snapped back to "Ikuti" and stayed a live toggle they could tap forever. The
+ * old "reverts to Ikuti when the follow call fails" test above pinned the
+ * revert; nothing pinned any feedback, because there was none to pin.
+ */
+describe("FollowButton — a failed toggle is not silent (item 7)", () => {
+  it("shows an Indonesian error when the follow call fails", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () => jsonResponse({ error: "server error" }, 500)) as unknown as typeof fetch;
+
+    renderButton({ handle: "budi", viewerFollows: false });
+    fireEvent.click(screen.getByRole("button", { name: "Ikuti" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toBe("Gagal memperbarui status mengikuti. Coba lagi.");
+    });
+  });
+
+  /**
+   * The API's own error strings on this endpoint are NOT all Bahasa —
+   * `routes/users.ts`'s unknown-handle case answers `{"error":"user not
+   * found"}`, and `apiFetch`'s own fallback embeds a bare status code. Copy
+   * rule is project-wide, so this screen renders its OWN sentence rather than
+   * lifting whatever arrived, and this test pins that it does not leak the
+   * server's text through.
+   */
+  it("never surfaces the server's own error text", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "user not found" }, 404)
+    ) as unknown as typeof fetch;
+
+    renderButton({ handle: "budi", viewerFollows: false });
+    fireEvent.click(screen.getByRole("button", { name: "Ikuti" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeTruthy();
+    });
+    expect(screen.queryAllByText("user not found").length).toBe(0);
+  });
+
+  it("shows the error for a failed UNFOLLOW too, not only a failed follow", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () => jsonResponse({ error: "server error" }, 500)) as unknown as typeof fetch;
+
+    renderButton({ handle: "budi", viewerFollows: true });
+    fireEvent.click(screen.getByRole("button", { name: "Mengikuti" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toBe("Gagal memperbarui status mengikuti. Coba lagi.");
+    });
+  });
+
+  /**
+   * The 401 is the failure that MATTERS: `apiRequest` has already cleared the
+   * session by the time this `catch` runs, so the button is a live toggle
+   * attached to a session that no longer exists. Reverting silently left the
+   * user tapping it indefinitely with no hint they had been signed out.
+   */
+  it("sends the visitor to /masuk when the session turns out to be gone (401)", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "invalid or expired token" }, 401)
+    ) as unknown as typeof fetch;
+
+    renderButtonRouted({ handle: "budi", viewerFollows: false });
+    fireEvent.click(screen.getByRole("button", { name: "Ikuti" }));
+
+    expect(await screen.findByRole("heading", { name: "Masuk" })).toBeTruthy();
+    // `apiRequest` cleared it on the way past; asserted here so the redirect
+    // cannot be mistaken for the only thing that happened.
+    expect(getUserToken()).toBeNull();
+  });
+
+  it("clears the error once a later tap succeeds", async () => {
+    setUserSession("jwt-abc", USER);
+    let fail = true;
+    global.fetch = mock(async () =>
+      fail ? jsonResponse({ error: "server error" }, 500) : jsonResponse({ following: true })
+    ) as unknown as typeof fetch;
+
+    renderButton({ handle: "budi", viewerFollows: false });
+    fireEvent.click(screen.getByRole("button", { name: "Ikuti" }));
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeTruthy();
+    });
+
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Ikuti" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Mengikuti" })).toBeTruthy();
+    });
+    expect(screen.queryAllByRole("alert").length).toBe(0);
   });
 });

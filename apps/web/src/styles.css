@@ -1007,6 +1007,25 @@ tbody tr:last-child td {
   font-weight: 600;
 }
 
+/* Final review, item 7: the toggle plus its own error line. A column that
+   right-aligns works in BOTH of FollowButton's layouts — the profile header's
+   .spread and a .follow-row's space-between — without either needing to know
+   the button can now grow a second line. */
+.follow-control {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.follow-error {
+  color: var(--red);
+  font-size: 0.8125rem;
+  text-align: right;
+  max-width: 15rem;
+}
+
 /* Task 5: the two entry points added to the landing page, alongside its
    existing dashboard CTAs — see LandingPage.tsx's own comment. */
 .landing-entry-points {
