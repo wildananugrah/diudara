@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import {
+  clearUserToken,
   getOwnProfile,
   getUserToken,
   subscribeToUserAuth,
@@ -117,11 +118,38 @@ function SettingsForm() {
 
   return (
     <main className="user-page">
-      <h1>Pengaturan akun</h1>
+      <div className="spread">
+        <h1>Pengaturan akun</h1>
+        {/*
+          F3 (review): this was the ONLY way in — there was no way out. A
+          signed-in visitor is bounced away from /masuk (LoginPage.tsx), so
+          without this button /pengaturan was the one place a signed-in user
+          could reach and the one place they could never leave their session
+          from. Mirrors dashboard/DashboardLayout.tsx's own "Keluar" exactly:
+          clearUserToken() only clears and notifies — it does not navigate.
+          SettingsPage's own guard above is already SUBSCRIBED to the token,
+          so the resulting re-render (token now null) is what sends this
+          page to /masuk, the same single code path an expired session takes.
+        */}
+        <button type="button" className="button-quiet" onClick={() => clearUserToken()}>
+          Keluar
+        </button>
+      </div>
 
       <div className="card stack">
         <p className="muted">@{profile.handle}</p>
         <p className="muted">{profile.email}</p>
+        {/*
+          Minor (review): GET /users/me returns whatsappNumber, and the
+          signup form's own hint tells the caller this number is what
+          password recovery and live-stream notices use — so someone who
+          mistyped it needs a way to at least SEE it, even with no PATCH
+          field to fix it yet (updateProfileSchema has no whatsappNumber
+          field at all — Task 3's actual schema, not an oversight here).
+        */}
+        <p className="muted">
+          {profile.whatsappNumber !== null ? profile.whatsappNumber : "Nomor WhatsApp belum diatur"}
+        </p>
 
         <form onSubmit={handleSubmit} className="stack" noValidate>
           <Field label="Nama tampilan" name="displayName" error={fieldErrors.displayName}>
