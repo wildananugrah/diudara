@@ -141,6 +141,13 @@
       "when": 1786951327269,
       "tag": "0019_hard_junta",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1786954366402,
+      "tag": "0020_spooky_quasimodo",
+      "breakpoints": true
     }
   ]
 }
