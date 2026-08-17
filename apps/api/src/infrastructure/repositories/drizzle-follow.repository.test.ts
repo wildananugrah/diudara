@@ -151,10 +151,32 @@ describe("follow_no_self CHECK constraint", () => {
 
     // Bypasses the repository entirely — proves the CHECK is IN THE DATABASE,
     // not merely enforced by a use-case guard that a bulk import or a manual
-    // fix could route around.
-    await expect(
-      db.insert(follows).values({ followerId: alice.id, followeeId: alice.id })
-    ).rejects.toThrow();
+    // fix could route around. Wrapped in an IIFE so `expect().rejects` sees a
+    // genuine Promise rather than drizzle's thenable query builder.
+    let caught: unknown;
+    try {
+      await db.insert(follows).values({ followerId: alice.id, followeeId: alice.id });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeDefined();
+    // SQLSTATE 23514 is check_violation; drizzle wraps the driver error, so
+    // walk `.cause` the same way `uniqueViolationConstraint` does.
+    let current: unknown = caught;
+    let code: unknown;
+    let constraintName: unknown;
+    for (let depth = 0; current && depth < 5; depth++) {
+      const candidate = current as { code?: unknown; constraint_name?: unknown; cause?: unknown };
+      if (candidate.code !== undefined) {
+        code = candidate.code;
+        constraintName = candidate.constraint_name;
+        break;
+      }
+      current = candidate.cause;
+    }
+    expect(code).toBe("23514");
+    expect(constraintName).toBe("follow_no_self");
 
     const rows = await db
       .select()
