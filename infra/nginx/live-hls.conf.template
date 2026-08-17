@@ -225,6 +225,16 @@ location ^~ /whip/ {
 
     access_log off;
 
+    # MediaMTX answers a REFUSED publish with `401` plus `WWW-Authenticate: Basic`,
+    # because it also supports username/password auth as an alternative to the webhook
+    # this project uses. Left alone, the browser sees that header come back from our
+    # OWN origin and pops its native sign-in dialog — a credential prompt on
+    # diudara.mhamzah.id that no username or password can satisfy, that looks exactly
+    # like a phishing attempt, and that replaces the Indonesian explanation
+    # `whip-publisher.ts` would otherwise show. Observed in production. Hiding the
+    # header leaves a plain 401, so our own copy does the talking.
+    proxy_hide_header WWW-Authenticate;
+
     proxy_pass http://127.0.0.1:8889/live/$whip_key/whip$whip_session$is_args$args;
     proxy_redirect /live/$whip_key/whip/ /whip/$whip_key/;
     proxy_set_header Host $host;
