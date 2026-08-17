@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import NotFoundPage from "../pages/NotFoundPage";
 import { listFollowers, listFollowing, UserApiError, type FollowListRow } from "./apiClient";
 import { FollowRow } from "./JelajahPage";
@@ -21,6 +21,22 @@ const EMPTY_MESSAGE: Record<"followers" | "following", string> = {
 };
 
 /**
+ * The way off this page — see the component docstring for why it has to exist.
+ * Names the handle rather than saying only "Kembali", so it still reads
+ * correctly after a visitor has scrolled a long list, and so it replaces the
+ * bare `<p className="muted">@handle</p>` that used to sit under the heading
+ * rather than repeating it. The `@` matches how every other surface in this
+ * app writes a handle.
+ */
+function BackToProfile({ handle }: { handle: string }) {
+  return (
+    <p className="follow-list-back">
+      <Link to={`/@${handle}`}>Kembali ke @{handle}</Link>
+    </p>
+  );
+}
+
+/**
  * `/@:handle/pengikut` and `/@:handle/mengikuti` (Task 5) — reachable by
  * tapping either count on `ProfilePage`. `direction` picks which of the two
  * this instance serves; `App.tsx` mounts the same component twice, once per
@@ -37,6 +53,16 @@ const EMPTY_MESSAGE: Record<"followers" | "following", string> = {
  * React Router ranks static segments (and more of them) above a shorter
  * dynamic match regardless of registration order, so these can never be
  * shadowed by it.
+ *
+ * **Renders OUTSIDE the app shell, and carries its own back link** (final
+ * review I1's design question, ruled). Outside the shell is consistent with
+ * `/@handle`, which is also outside — but unlike `/@handle`, which people
+ * arrive at from a shared URL, these two pages are reachable ONLY by tapping a
+ * count on a profile, so with no shell AND no back link they were a dead end
+ * on a phone: browser-back or a row's own `/@handle` link were the only ways
+ * out. `BackToProfile` below is rendered in every state a visitor can be
+ * stranded in. The shell exclusion itself is pinned in `App.test.tsx` — both
+ * per-route and as a whole-table partition.
  */
 export default function FollowListPage({ direction }: { direction: "followers" | "following" }) {
   const { handleParam } = useParams<{ handleParam: string }>();
@@ -81,6 +107,7 @@ export default function FollowListPage({ direction }: { direction: "followers" |
   if (load.status === "error") {
     return (
       <main className="user-page">
+        <BackToProfile handle={handle} />
         <h1>Gagal memuat daftar</h1>
         <p>{load.message}</p>
       </main>
@@ -89,8 +116,8 @@ export default function FollowListPage({ direction }: { direction: "followers" |
 
   return (
     <main className="user-page">
+      <BackToProfile handle={handle} />
       <h1>{TITLE[direction]}</h1>
-      <p className="muted">@{handle}</p>
       {load.rows.length === 0 ? (
         <p className="empty">{EMPTY_MESSAGE[direction]}</p>
       ) : (

@@ -106,4 +106,54 @@ describe("FollowListPage", () => {
     const link = await screen.findByRole("link", { name: /Budi Santoso/ });
     expect(link.getAttribute("href")).toBe("/@budi");
   });
+
+  /**
+   * Final-review I1's design question, ruled: this page stays OUTSIDE the app
+   * shell (consistent with `/@handle`, also outside) and gains a back link to
+   * the profile it came from. Before this, the only navigation off
+   * `/@x/pengikut` was browser-back or a row's own `/@handle` link — a genuine
+   * dead end on a phone, since these two pages are reachable ONLY by tapping a
+   * count on a profile.
+   *
+   * Asserted on the `href` rather than on the presence of any link, because
+   * every ROW is also a link to some `/@handle`; the one that matters is the
+   * one pointing back at the LIST'S OWN subject.
+   */
+  it("offers a back link to the profile the list belongs to", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null }])
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/pengikut");
+
+    await screen.findByText("Budi Santoso");
+    const back = screen.getByRole("link", { name: "Kembali ke @wildan" });
+    expect(back.getAttribute("href")).toBe("/@wildan");
+  });
+
+  it("offers the same back link on the following list", async () => {
+    global.fetch = mock(async () => jsonResponse([])) as unknown as typeof fetch;
+
+    renderAt("/@wildan/mengikuti");
+
+    await screen.findByText("Belum mengikuti siapa pun.");
+    const back = screen.getByRole("link", { name: "Kembali ke @wildan" });
+    expect(back.getAttribute("href")).toBe("/@wildan");
+  });
+
+  /**
+   * The error state is a dead end too — arguably more of one, since there are
+   * no rows to tap through to. A failed list must still be escapable.
+   */
+  it("offers the back link even when the list failed to load", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "kesalahan server" }, 500)
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/pengikut");
+
+    await screen.findByRole("heading", { name: "Gagal memuat daftar" });
+    const back = screen.getByRole("link", { name: "Kembali ke @wildan" });
+    expect(back.getAttribute("href")).toBe("/@wildan");
+  });
 });

@@ -963,6 +963,25 @@ tbody tr:last-child td {
   border-color: var(--green);
 }
 
+/* Final review, item 3: the way off /@handle/pengikut and /@handle/mengikuti.
+   Those two pages render OUTSIDE the app shell (like /@handle itself) and are
+   reachable only by tapping a count on a profile, so without this link the
+   only exits were browser-back and a row's own /@handle link. */
+.follow-list-back {
+  margin: 0 0 12px;
+  font-size: 0.925rem;
+}
+
+.follow-list-back a {
+  color: var(--ink-faint);
+  text-decoration: none;
+}
+
+.follow-list-back a:hover {
+  color: inherit;
+  text-decoration: underline;
+}
+
 .follow-list {
   list-style: none;
   padding: 0;
