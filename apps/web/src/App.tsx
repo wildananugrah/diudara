@@ -23,18 +23,11 @@ import SettingsPage from "./user/SettingsPage";
 import ResetRequestPage from "./user/ResetRequestPage";
 import ResetCompletePage from "./user/ResetCompletePage";
 import ProfilePage from "./user/ProfilePage";
+import FollowListPage from "./user/FollowListPage";
 import AppShell from "./user/AppShell";
 import BerandaPage from "./user/BerandaPage";
 import SiaranPage from "./user/SiaranPage";
-
-/** A bare stand-in for Task 5's real Jelajah screen — enough for the route and the shell to exist. */
-function JelajahPlaceholder() {
-  return (
-    <main className="user-page">
-      <h1>Jelajah</h1>
-    </main>
-  );
-}
+import JelajahPage from "./user/JelajahPage";
 
 export function AppRoutes() {
   return (
@@ -118,11 +111,24 @@ export function AppRoutes() {
       */}
       <Route element={<AppShell />}>
         <Route path="/beranda" element={<BerandaPage />} />
-        {/* Task 5 fills this in for real; Task 4 only wires the route and the shell. */}
-        <Route path="/jelajah" element={<JelajahPlaceholder />} />
+        <Route path="/jelajah" element={<JelajahPage />} />
         <Route path="/siaran" element={<SiaranPage />} />
         <Route path="/pengaturan" element={<SettingsPage />} />
       </Route>
+
+      {/*
+        Task 5: reachable by tapping either count on ProfilePage. Both are
+        TWO-segment paths ("/:handleParam/pengikut",
+        "/:handleParam/mengikuti"), strictly more specific than the bare
+        one-segment "/:handleParam" below — React Router ranks a route with
+        more matched segments above a shorter one regardless of declaration
+        order (same reasoning as /c/:slug/status/:subscriptionId above), so
+        neither can ever be shadowed by the profile route. Registered before
+        it anyway, for the same "defensive, not load-bearing" reason
+        /:handleParam's own comment gives.
+      */}
+      <Route path="/:handleParam/pengikut" element={<FollowListPage direction="followers" />} />
+      <Route path="/:handleParam/mengikuti" element={<FollowListPage direction="following" />} />
 
       {/*
         THE PROFILE ROUTE — path="/:handleParam", NOT path="/@:handle".

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import NotFoundPage from "../pages/NotFoundPage";
 import { getProfileByHandle, UserApiError, type PublicUserProfile } from "./apiClient";
+import FollowButton from "./FollowButton";
 
 type LoadState =
   | { status: "loading" }
@@ -26,6 +27,14 @@ export default function ProfilePage() {
   const isProfileUrl = typeof handleParam === "string" && handleParam.startsWith("@");
   const handle = isProfileUrl ? handleParam.slice(1) : "";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
+  // Mirrors `profile.followerCount`/`profile.viewerFollows` once loaded, kept
+  // as separate state (not read straight off `load`) so `FollowButton`'s
+  // `onChange` can update the visible count without a refetch — see
+  // `handleFollowChange` below. Declared unconditionally, alongside `load`
+  // itself, since hooks cannot follow the early `status !== "ready"` returns
+  // further down.
+  const [followerCount, setFollowerCount] = useState(0);
+  const [viewerFollowing, setViewerFollowing] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (!isProfileUrl) return;
@@ -33,7 +42,10 @@ export default function ProfilePage() {
     setLoad({ status: "loading" });
     getProfileByHandle(handle)
       .then((profile) => {
-        if (!cancelled) setLoad({ status: "ready", profile });
+        if (cancelled) return;
+        setLoad({ status: "ready", profile });
+        setFollowerCount(profile.followerCount);
+        setViewerFollowing(profile.viewerFollows);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -47,6 +59,19 @@ export default function ProfilePage() {
       cancelled = true;
     };
   }, [isProfileUrl, handle]);
+
+  /**
+   * `FollowButton`'s `onChange` — told the RESULTING state after a
+   * successful toggle. The follower count belongs to the PROFILE being
+   * viewed, not the viewer, so a follow increments it and an unfollow
+   * decrements it; the delta is computed against the previously known
+   * `viewerFollowing` rather than assumed, so a toggle that (somehow)
+   * resolves to the same state it started at is a no-op on the count too.
+   */
+  function handleFollowChange(following: boolean) {
+    setFollowerCount((count) => count + (following ? 1 : 0) - (viewerFollowing === true ? 1 : 0));
+    setViewerFollowing(following);
+  }
 
   // Not a `/@...` URL at all — the same 404 as any other unmatched path,
   // never a hint that a bare-word path is free to register as a handle.
@@ -78,10 +103,31 @@ export default function ProfilePage() {
   const { profile } = load;
   return (
     <main className="user-page profile-page">
-      <h1 className="profile-name">{profile.displayName}</h1>
-      <p className="profile-handle muted">@{profile.handle}</p>
+      <div className="spread">
+        <div>
+          <h1 className="profile-name">{profile.displayName}</h1>
+          <p className="profile-handle muted">@{profile.handle}</p>
+        </div>
+        {/*
+          Absent entirely on your own profile — FollowButton itself decides
+          that by comparing `profile.handle` to the signed-in caller's own
+          handle (see its own docstring), never by trusting
+          `viewerFollowing`/`viewerFollows` alone: the API deliberately
+          reports `false`, not some self-specific value, when the viewer IS
+          the profile.
+        */}
+        <FollowButton handle={profile.handle} viewerFollows={viewerFollowing} onChange={handleFollowChange} />
+      </div>
       {/* No element at all for a bio-less profile — never an empty <p>. */}
       {profile.bio !== null && profile.bio !== "" ? <p className="profile-bio">{profile.bio}</p> : null}
+      <div className="profile-counts">
+        <Link to={`/@${profile.handle}/pengikut`} className="profile-count">
+          <strong>{followerCount}</strong> Pengikut
+        </Link>
+        <Link to={`/@${profile.handle}/mengikuti`} className="profile-count">
+          <strong>{profile.followingCount}</strong> Mengikuti
+        </Link>
+      </div>
     </main>
   );
 }

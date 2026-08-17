@@ -14,6 +14,17 @@ export default function LandingPage() {
         <Link className="button-primary landing-cta" to="/dashboard/login">
           Mulai sekarang
         </Link>
+        {/*
+          Task 5: the personal-account entry points (Task 2's own spec §10 —
+          "nothing links to the six account pages today, and phase 2 is
+          where that gets fixed"). Added ALONGSIDE the existing dashboard
+          CTAs above/below, not in place of them — the creator pitch stays
+          untouched; Phase 8 resolves which of the two audiences this page
+          is actually for.
+        */}
+        <p className="landing-entry-points">
+          <Link to="/signup">Daftar</Link> · <Link to="/masuk">Masuk</Link>
+        </p>
       </section>
 
       <section className="landing-section">

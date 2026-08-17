@@ -130,10 +130,18 @@ describe("routing — the app shell", () => {
     expect(screen.getAllByRole("navigation").length).toBeGreaterThan(0);
   });
 
-  it("resolves /jelajah inside the shell", () => {
+  it("resolves /jelajah inside the shell", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ results: [], newest: [], mostFollowed: [] })
+    ) as unknown as typeof fetch;
+
     renderAt("/jelajah");
 
     expect(screen.getAllByRole("navigation").length).toBeGreaterThan(0);
+    // Lets JelajahPage's own explore fetch resolve inside this test's `act`
+    // scope, rather than after it — an unmocked `fetch` here previously hit
+    // the real network and updated state outside any `act(...)`.
+    await screen.findAllByText("Belum ada akun.");
   });
 
   it("resolves /siaran inside the shell, with Siaran's empty-state copy", () => {

@@ -3,15 +3,20 @@ import {
   apiFetch,
   apiRequest,
   completePasswordReset,
+  exploreUsers,
+  followUser,
   getOwnProfile,
   getProfileByHandle,
   getSessionUser,
   getUserToken,
+  listFollowers,
+  listFollowing,
   login,
   requestPasswordReset,
   SESSION_EXPIRED_MESSAGE,
   setUserSession,
   signup,
+  unfollowUser,
   updateOwnProfile,
   UserApiError,
   USER_TOKEN_STORAGE_KEY,
@@ -212,17 +217,28 @@ describe("signup", () => {
 });
 
 describe("profile", () => {
-  it("fetches a public profile by bare handle", async () => {
+  it("fetches a public profile by bare handle, including the follow fields", async () => {
     const calls: string[] = [];
     global.fetch = mock(async (url: string) => {
       calls.push(url);
-      return jsonResponse({ handle: "wildan", displayName: "Wildan", bio: null, createdAt: "2026-01-01T00:00:00.000Z" });
+      return jsonResponse({
+        handle: "wildan",
+        displayName: "Wildan",
+        bio: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        followerCount: 3,
+        followingCount: 1,
+        viewerFollows: null,
+      });
     }) as unknown as typeof fetch;
 
     const profile = await getProfileByHandle("wildan");
 
     expect(calls[0]).toBe("/users/by-handle/wildan");
     expect(profile.handle).toBe("wildan");
+    expect(profile.followerCount).toBe(3);
+    expect(profile.followingCount).toBe(1);
+    expect(profile.viewerFollows).toBeNull();
   });
 
   it("throws a 404 for an unknown handle", async () => {
@@ -323,5 +339,126 @@ describe("password reset", () => {
     const err = (await completePasswordReset("bad-token", "newpassword1").catch((e: unknown) => e)) as UserApiError;
 
     expect(err.status).toBe(401);
+  });
+});
+
+describe("follow", () => {
+  it("POSTs to /users/:handle/follow with the bearer header and resolves the resulting state", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ following: true });
+    }) as unknown as typeof fetch;
+
+    const result = await followUser("budi");
+
+    expect(calls[0]!.url).toBe("/users/budi/follow");
+    expect(calls[0]!.init.method).toBe("POST");
+    expect(new Headers(calls[0]!.init.headers).get("Authorization")).toBe("Bearer jwt-abc");
+    expect(result).toEqual({ following: true });
+  });
+
+  it("DELETEs to /users/:handle/follow and resolves the resulting state", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ following: false });
+    }) as unknown as typeof fetch;
+
+    const result = await unfollowUser("budi");
+
+    expect(calls[0]!.url).toBe("/users/budi/follow");
+    expect(calls[0]!.init.method).toBe("DELETE");
+    expect(result).toEqual({ following: false });
+  });
+
+  it("throws a 409 for a self-follow", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "tidak bisa mengikuti akun sendiri" }, 409)
+    ) as unknown as typeof fetch;
+
+    const err = (await followUser("wildan").catch((e: unknown) => e)) as UserApiError;
+
+    expect(err.status).toBe(409);
+  });
+});
+
+describe("follow lists and Jelajah", () => {
+  it("fetches followers without an Authorization header, unauthenticated", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse([{ handle: "budi", displayName: "Budi", bio: null }]);
+    }) as unknown as typeof fetch;
+
+    const rows = await listFollowers("wildan");
+
+    expect(calls[0]!.url).toBe("/users/wildan/followers");
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBeNull();
+    expect(rows).toEqual([{ handle: "budi", displayName: "Budi", bio: null }]);
+  });
+
+  it("appends ?limit= for followers when given a limit", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse([]);
+    }) as unknown as typeof fetch;
+
+    await listFollowers("wildan", 10);
+
+    expect(calls[0]).toBe("/users/wildan/followers?limit=10");
+  });
+
+  it("fetches following the same way", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse([{ handle: "budi", displayName: "Budi", bio: null }]);
+    }) as unknown as typeof fetch;
+
+    const rows = await listFollowing("wildan");
+
+    expect(calls[0]).toBe("/users/wildan/following");
+    expect(rows).toEqual([{ handle: "budi", displayName: "Budi", bio: null }]);
+  });
+
+  it("throws a 404 for an unknown handle's followers", async () => {
+    global.fetch = mock(async () => jsonResponse({ error: "user not found" }, 404)) as unknown as typeof fetch;
+
+    const err = (await listFollowers("nosuchuser").catch((e: unknown) => e)) as UserApiError;
+
+    expect(err.status).toBe(404);
+  });
+
+  it("calls /users/explore with no query string when q is omitted", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
+    }) as unknown as typeof fetch;
+
+    const result = await exploreUsers();
+
+    expect(calls[0]).toBe("/users/explore");
+    expect(result).toEqual({ results: [], newest: [], mostFollowed: [] });
+  });
+
+  it("calls /users/explore?q=... when a query is given, and never on an empty one", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
+    }) as unknown as typeof fetch;
+
+    await exploreUsers({ q: "budi" });
+    await exploreUsers({ q: "" });
+
+    expect(calls[0]).toBe("/users/explore?q=budi");
+    expect(calls[1]).toBe("/users/explore");
   });
 });

@@ -37,6 +37,22 @@ describe("LandingPage", () => {
     }
   });
 
+  // Task 5: the personal-account entry points, added alongside the existing
+  // dashboard CTAs above — nothing about the creator pitch changes.
+  it("also links to /signup and /masuk, alongside the dashboard CTAs", () => {
+    render(
+      <MemoryRouter>
+        <LandingPage />
+      </MemoryRouter>
+    );
+    const signup = screen.getByRole("link", { name: "Daftar" });
+    expect(signup.getAttribute("href")).toBe("/signup");
+    const login = screen.getByRole("link", { name: "Masuk" });
+    expect(login.getAttribute("href")).toBe("/masuk");
+    // Still there, untouched.
+    expect(screen.getAllByRole("link", { name: /mulai/i }).length).toBeGreaterThan(0);
+  });
+
   // THE REGRESSION THIS CHANGE EXISTS TO PREVENT. Before it, "/" matched no
   // route, fell through the catch-all, and redirected to /c/tidak-ada — the
   // bare domain told every visitor a specific community was missing when none

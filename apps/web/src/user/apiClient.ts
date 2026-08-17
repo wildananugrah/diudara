@@ -226,6 +226,23 @@ async function publicPost<T>(path: string, body: unknown, fallback: string): Pro
   return (await res.json()) as T;
 }
 
+/**
+ * A public (unauthenticated) GET whose JSON body is the result — the
+ * `publicPost` above, but for `GET`. Backs Jelajah's three lists and a
+ * profile's follower/following screens (Task 5): anyone can browse who
+ * follows whom or search for an account, same as `getProfileByHandle`
+ * below, which does not go through `apiRequest` for the same reason —
+ * attaching a stale Authorization header to a request nothing checks is
+ * pointless, and a signed-out visitor must be able to browse at all.
+ */
+async function publicGet<T>(path: string, fallback: string): Promise<T> {
+  const res = await fetch(path);
+  if (!res.ok) {
+    throw await readError(res, fallback);
+  }
+  return (await res.json()) as T;
+}
+
 interface AuthSuccess {
   user: SessionUser;
   token: string;
@@ -263,12 +280,45 @@ export function signup(input: {
  * request nothing checks would be pointless, and a signed-out visitor must
  * be able to browse a profile at all.
  */
-export interface PublicUserProfile {
+/**
+ * Fields common to every profile shape `/users/...` returns, public or own —
+ * mirrors the API's own `UserProfileCore`
+ * (`apps/api/src/application/use-cases/get-user-profile.ts`) deliberately,
+ * split out for the exact same reason that file's own docstring gives:
+ * `OwnUserProfile` below must extend THIS, never `PublicUserProfile`.
+ * `PublicUserProfile` widened by three fields (`followerCount`,
+ * `followingCount`, `viewerFollows`) once following existed (Task 5); if
+ * `OwnUserProfile` inherited from it instead of from this shared core, `GET
+ * /users/me`'s type would falsely claim those three fields even though that
+ * endpoint has never returned them — the exact structural mistake Task 2
+ * avoided server-side, carried over here for the same reason.
+ */
+export interface UserProfileCore {
   handle: string;
   displayName: string;
   bio: string | null;
   /** ISO-8601, as it comes off the wire — never parsed to a `Date` here, since nothing on this page does arithmetic on it. */
   createdAt: string;
+}
+
+/**
+ * `GET /users/by-handle/:handle`'s response shape. Task 5 widens this by
+ * exactly three fields, mirroring the API's own `PublicUserProfile`
+ * (see that interface's own docstring for the full reasoning):
+ * `followerCount`, `followingCount`, and `viewerFollows`.
+ *
+ * `viewerFollows` is `null` for a signed-out visitor, `false` for a
+ * signed-in visitor who does not follow this profile, `true` for one who
+ * does. **It is `false`, not `null` or anything special, on YOUR OWN
+ * profile** — the API deliberately emits no self-signal (see the API's own
+ * docstring), so a follow button must decide "is this my own profile?" by
+ * comparing handles, never by reading this field alone. See
+ * `FollowButton.tsx`'s own docstring for where that comparison happens.
+ */
+export interface PublicUserProfile extends UserProfileCore {
+  followerCount: number;
+  followingCount: number;
+  viewerFollows: boolean | null;
 }
 
 export async function getProfileByHandle(handle: string): Promise<PublicUserProfile> {
@@ -279,8 +329,12 @@ export async function getProfileByHandle(handle: string): Promise<PublicUserProf
   return (await res.json()) as PublicUserProfile;
 }
 
-/** `GET /users/me`'s shape — the public profile plus the caller's own email and WhatsApp number. */
-export interface OwnUserProfile extends PublicUserProfile {
+/**
+ * `GET /users/me`'s shape — the CORE fields plus the caller's own email and
+ * WhatsApp number. Extends `UserProfileCore`, not `PublicUserProfile` — see
+ * that interface's own docstring above for why.
+ */
+export interface OwnUserProfile extends UserProfileCore {
   email: string;
   whatsappNumber: string | null;
 }
@@ -326,4 +380,73 @@ export function requestPasswordReset(email: string): Promise<{ ok: true }> {
  */
 export function completePasswordReset(token: string, newPassword: string): Promise<{ ok: true }> {
   return publicPost("/users/password-reset/complete", { token, newPassword }, "gagal mengganti sandi");
+}
+
+/**
+ * A single row in a follower/following list or a Jelajah result — mirrors
+ * the API's own `FollowListRow` (`apps/api/src/application/ports/
+ * follow-repository.port.ts`) exactly: the same public projection backs
+ * `GET /:handle/followers`, `/:handle/following` and `/explore`'s three
+ * lists. Deliberately narrower than `PublicUserProfile` — no counts, no
+ * `viewerFollows`: none of these three endpoints compute a per-row follow
+ * state (see `FollowRow` in `JelajahPage.tsx` for how the UI copes with
+ * that gap).
+ */
+export interface FollowListRow {
+  handle: string;
+  displayName: string;
+  bio: string | null;
+}
+
+/**
+ * `POST /:handle/follow`. Idempotent and always resolves `{ following: true
+ * }` — see `FollowUser`'s own docstring for why this is the RESULTING
+ * state, not whether a row changed, and why that is exactly the shape
+ * `FollowButton`'s optimistic update needs.
+ */
+export function followUser(handle: string): Promise<{ following: boolean }> {
+  return apiFetch<{ following: boolean }>(`/users/${encodeURIComponent(handle)}/follow`, { method: "POST" });
+}
+
+/** `DELETE /:handle/follow` — the other half of `followUser` above, same idempotency guarantee. */
+export function unfollowUser(handle: string): Promise<{ following: boolean }> {
+  return apiFetch<{ following: boolean }>(`/users/${encodeURIComponent(handle)}/follow`, { method: "DELETE" });
+}
+
+/** `GET /:handle/followers` — public, reachable by tapping a profile's follower count. */
+export function listFollowers(handle: string, limit?: number): Promise<FollowListRow[]> {
+  const search = limit !== undefined ? `?limit=${limit}` : "";
+  return publicGet<FollowListRow[]>(
+    `/users/${encodeURIComponent(handle)}/followers${search}`,
+    "gagal memuat daftar pengikut"
+  );
+}
+
+/** `GET /:handle/following` — the other half of `listFollowers` above. */
+export function listFollowing(handle: string, limit?: number): Promise<FollowListRow[]> {
+  const search = limit !== undefined ? `?limit=${limit}` : "";
+  return publicGet<FollowListRow[]>(
+    `/users/${encodeURIComponent(handle)}/following${search}`,
+    "gagal memuat daftar mengikuti"
+  );
+}
+
+/**
+ * `GET /explore`. `q` omitted or empty is Jelajah's DEFAULT state, not an
+ * error — see `ExploreUsers`'s own docstring: `results` comes back `[]` and
+ * `newest`/`mostFollowed` are still populated either way.
+ */
+export interface ExploreResult {
+  results: FollowListRow[];
+  newest: FollowListRow[];
+  mostFollowed: FollowListRow[];
+}
+
+export function exploreUsers(input: { q?: string; limit?: number } = {}): Promise<ExploreResult> {
+  const params = new URLSearchParams();
+  if (input.q !== undefined && input.q.length > 0) params.set("q", input.q);
+  if (input.limit !== undefined) params.set("limit", String(input.limit));
+  const query = params.toString();
+  const search = query.length > 0 ? `?${query}` : "";
+  return publicGet<ExploreResult>(`/users/explore${search}`, "gagal memuat Jelajah");
 }
