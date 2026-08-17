@@ -45,6 +45,7 @@ function SettingsForm() {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [displayName, setDisplayName] = useState("");
   const [bio, setBio] = useState("");
+  const [whatsappNumber, setWhatsappNumber] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -58,6 +59,7 @@ function SettingsForm() {
         setLoad({ status: "ready", profile });
         setDisplayName(profile.displayName);
         setBio(profile.bio ?? "");
+        setWhatsappNumber(profile.whatsappNumber ?? "");
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -78,10 +80,22 @@ function SettingsForm() {
     setSaved(false);
     setSubmitting(true);
     try {
-      const updated = await updateOwnProfile({ displayName, bio });
+      // Whole-branch review item 1: `whatsappNumber` is the ONLY field here
+      // where an empty input means "clear it" rather than "leave it as
+      // typed" — `updateProfileSchema` does NOT collapse `""` to `null` for
+      // this field the way it does for `bio` (an empty number would fail
+      // the regex with a 400 instead), so the client does that conversion
+      // itself, exactly the way `SignupPage` already converts an empty
+      // WhatsApp field to `undefined` before sending.
+      const updated = await updateOwnProfile({
+        displayName,
+        bio,
+        whatsappNumber: whatsappNumber.trim() === "" ? null : whatsappNumber.trim(),
+      });
       setLoad({ status: "ready", profile: updated });
       setDisplayName(updated.displayName);
       setBio(updated.bio ?? "");
+      setWhatsappNumber(updated.whatsappNumber ?? "");
       setSaved(true);
     } catch (err) {
       if (err instanceof UserApiError && err.status === 400) {
@@ -139,17 +153,6 @@ function SettingsForm() {
       <div className="card stack">
         <p className="muted">@{profile.handle}</p>
         <p className="muted">{profile.email}</p>
-        {/*
-          Minor (review): GET /users/me returns whatsappNumber, and the
-          signup form's own hint tells the caller this number is what
-          password recovery and live-stream notices use — so someone who
-          mistyped it needs a way to at least SEE it, even with no PATCH
-          field to fix it yet (updateProfileSchema has no whatsappNumber
-          field at all — Task 3's actual schema, not an oversight here).
-        */}
-        <p className="muted">
-          {profile.whatsappNumber !== null ? profile.whatsappNumber : "Nomor WhatsApp belum diatur"}
-        </p>
 
         <form onSubmit={handleSubmit} className="stack" noValidate>
           <Field label="Nama tampilan" name="displayName" error={fieldErrors.displayName}>
@@ -168,6 +171,30 @@ function SettingsForm() {
               value={bio}
               onChange={(e) => setBio(e.target.value)}
               aria-invalid={fieldErrors.bio !== undefined}
+            />
+          </Field>
+
+          {/*
+            Whole-branch review item 1: before this, GET /users/me returned
+            whatsappNumber but PATCH /users/me had no field to change it —
+            a number set (or skipped) at signup was permanent. This is the
+            second reset channel spec §5 promises, so a wrong or missing
+            value here was a real, unrecoverable cost, not a cosmetic one —
+            see the spec's own corrected §8. Editable exactly like bio now,
+            not read-only.
+          */}
+          <Field
+            label="Nomor WhatsApp"
+            name="whatsappNumber"
+            error={fieldErrors.whatsappNumber}
+            hint="Untuk memulihkan sandi jika Anda kehilangan akses ke email, dan untuk memberi tahu Anda saat ada siaran langsung."
+          >
+            <input
+              id="field-whatsappNumber"
+              type="tel"
+              value={whatsappNumber}
+              onChange={(e) => setWhatsappNumber(e.target.value)}
+              aria-invalid={fieldErrors.whatsappNumber !== undefined}
             />
           </Field>
 
@@ -192,17 +219,20 @@ function Field({
   label,
   name,
   error,
+  hint,
   children,
 }: {
   label: string;
   name: string;
   error: string | undefined;
+  hint?: string;
   children: ReactNode;
 }) {
   return (
     <div className="field">
       <label htmlFor={`field-${name}`}>{label}</label>
       {children}
+      {hint !== undefined ? <p className="hint">{hint}</p> : null}
       {error !== undefined ? (
         <p className="field-error" data-testid={`error-${name}`}>
           {error}

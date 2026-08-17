@@ -65,6 +65,18 @@ export type UserLoginInput = z.infer<typeof userLoginSchema>;
  * fallback for a bio of `"   "`. This only collapses an empty STRING to
  * null; an explicit `null` and an absent `bio` are untouched by it and stay
  * distinguishable exactly as before.
+ *
+ * `whatsappNumber` follows the SAME `null`-clears/absent-leaves-alone rule as
+ * `bio` — added by the whole-branch review (item 1): the field was writable
+ * only once, at signup (`userSignupSchema`), with no way to add it later or
+ * fix a typo, which made spec §8's "a wrong address costs them one reset
+ * channel and nothing else" false whenever the caller also skipped the
+ * number. The regex is copied FIELD FOR FIELD from `userSignupSchema` and
+ * `startCheckoutSchema` (tolerant of a leading 0 or +62), so the three forms
+ * never disagree about what counts as a valid number. Unlike `bio`, an empty
+ * string is NOT collapsed to `null` here — the regex's own `min(8)` already
+ * rejects `""` with a normal 400, and a caller that wants to clear the
+ * number sends an explicit `null` exactly like clearing a bio.
  */
 export const updateProfileSchema = z
   .object({
@@ -76,6 +88,14 @@ export const updateProfileSchema = z
       .nullable()
       .optional()
       .transform((value) => (value === "" ? null : value)),
+    whatsappNumber: z
+      .string()
+      .trim()
+      .min(8)
+      .max(20)
+      .regex(/^[+0-9][0-9]{7,19}$/)
+      .nullable()
+      .optional(),
   })
   .refine((patch) => Object.keys(patch).length > 0, {
     message: "at least one field is required",

@@ -143,7 +143,7 @@ These are not optional details; a reset flow is the most attacked endpoint in mo
 | Login wrong | One message for wrong email and wrong password alike, never "no such account" |
 | Reset requested for unknown account | Same response as a known one (§5.1) |
 | Reset token expired, used, or forged | One message: the link is no longer valid, request a new one |
-| No reset channel available for this account | Reset is refused with an explanation, whether because the account has no number and email is unconfigured, or because both providers are absent. Never accept a request nothing can deliver |
+| No reset channel available for this account | **Corrected by the whole-branch review (item 3).** Originally specified as "reset is refused with an explanation" — that cannot be built. §5.1 requires the request endpoint to answer identically whether or not the account exists, and only a real account can lack a channel, so an explicit refusal at request time would itself be an enumeration oracle: a made-up email can never reach this case at all, so any response that looks different immediately confirms the email exists. There is also no session to gate a "your account, tell me its channels" answer behind — the person who needs the message is the one who is locked out. As built: the request answers the identical `200 { ok: true }` as every other case, and the API logs a clearly-tagged operator-facing warning (user id and which channels were considered, never the email address) so "nobody could be reached" is distinguishable from "everything is fine" in the logs even though the HTTP response cannot move. The user-facing answer is prevention, not an after-the-fact refusal: email verification (still unbuilt, see §8) plus an editable `whatsappNumber` (§8) are what keep an account from reaching this state at all. |
 | Profile of an unknown handle | 404 page, no hint whether the handle is free |
 
 ## 7. Testing
@@ -176,9 +176,40 @@ once.
 recipients, and the first real test is production. Fonnte in particular has never sent a message
 outside this codebase's own fakes, across several phases.
 
-**No email verification.** A user may sign up with an address they do not control. It costs them
-one reset channel and nothing else at this stage, and verification is worth building once there is
-something in an account worth protecting.
+**No email verification, and — corrected by the whole-branch review (item 1) — that is no longer a
+small cost.** This section originally claimed a wrong address "costs them one reset channel and
+nothing else at this stage." As built, that was false: `whatsappNumber` had a write path (signup)
+and a read path (`GET /users/me` and both password-reset channel-choosers) but no *update* path —
+`updateProfileSchema` accepted only `displayName` and `bio`, and `SettingsPage` showed the number
+read-only. Combined with `chooseChannel` picking email whenever the provider is configured,
+regardless of whether the user has a number (a design consequence of §5's ordering, not a
+deviation), the real consequence was: **a user who mistypes their email at signup has zero
+recovery channels the moment `RESEND_API_KEY` is set, even having supplied a valid WhatsApp
+number** — and a user who skipped the number at signup could never add one afterwards, making the
+second channel this spec promises permanently unobtainable for them. Plainly: a mistyped email
+plus no WhatsApp number on file means no recovery path at all, full stop, and the only real fix is
+email verification, which remains unbuilt.
+
+Item 1's fix narrows this without closing it: `PATCH /users/me` now accepts `whatsappNumber`
+(same tolerant regex `userSignupSchema` and `startCheckoutSchema` already use; an explicit `null`
+clears it, an absent value leaves it alone — matching how `bio` already works), and `SettingsPage`
+makes it editable rather than read-only. A signed-in user can now add a number they skipped at
+signup, or correct one they mistyped. What this does NOT fix: the one scenario where the mistake
+is in the *email* itself — a user who mistypes their email has no session under that address to
+sign in with and fix anything, since the account they meant to create does not exist under the
+address they can actually log in with. That gap is exactly what email verification would close,
+and verification is worth building once there is something in an account worth protecting.
 
 **No rate limit on login**, only on reset. Credential-stuffing protection is real work and belongs
 with the account-security phase that also brings verification.
+
+**A duplicate-signup race can write a real email address into the Postgres server log.**
+`app_user.email` is a new UNIQUE column, and this project already documents (see the payment and
+messaging phases) that Postgres logs the *conflicting value* on a unique-constraint violation. Two
+simultaneous signups for the same email race the same way the handle-collision concurrency test
+(§7) already covers — one wins, the other's `INSERT` fails the `app_user_email_unique` constraint,
+and Postgres's own error-logging writes that email address to the server log as part of reporting
+the conflict. This is a pre-existing mechanism (the same thing already happens for every other
+unique column this codebase has), applied to a new class of data: a real email address rather than
+a handle or an internal id. Not a new vulnerability this phase introduces, but worth naming
+because it is the first UNIQUE email column in this codebase.

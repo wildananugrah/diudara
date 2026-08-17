@@ -118,11 +118,12 @@ export class DrizzleUserRepository implements UserRepositoryPort {
 
   async updateProfile(
     id: string,
-    patch: { displayName?: string; bio?: string | null }
+    patch: { displayName?: string; bio?: string | null; whatsappNumber?: string | null }
   ): Promise<UserRecord | null> {
-    const set: { displayName?: string; bio?: string | null } = {};
+    const set: { displayName?: string; bio?: string | null; whatsappNumber?: string | null } = {};
     if (patch.displayName !== undefined) set.displayName = patch.displayName;
     if (patch.bio !== undefined) set.bio = patch.bio;
+    if (patch.whatsappNumber !== undefined) set.whatsappNumber = patch.whatsappNumber;
 
     if (Object.keys(set).length === 0) {
       return this.findById(id);

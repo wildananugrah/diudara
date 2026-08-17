@@ -228,6 +228,40 @@ describe("DrizzleUserRepository.updateProfile", () => {
     const updated = await repo.updateProfile(created.id, { bio: "Halo" });
     expect("passwordHash" in (updated as object)).toBe(false);
   });
+
+  /**
+   * Whole-branch review item 1: `whatsappNumber` had no update path at all —
+   * signup could set it once, and nothing could ever change or add it after.
+   * The same round-trip/clear/independence trio the bio tests above already
+   * cover, against the real database.
+   */
+  it("sets a previously-null whatsappNumber", async () => {
+    const created = await repo.create(seedInput());
+    expect(created.whatsappNumber).toBeNull();
+
+    const updated = await repo.updateProfile(created.id, { whatsappNumber: "+6281234567890" });
+
+    expect(updated?.whatsappNumber).toBe("+6281234567890");
+  });
+
+  it("clears a whatsappNumber to null", async () => {
+    const created = await repo.create(seedInput());
+    await repo.updateProfile(created.id, { whatsappNumber: "+6281234567890" });
+
+    const cleared = await repo.updateProfile(created.id, { whatsappNumber: null });
+
+    expect(cleared?.whatsappNumber).toBeNull();
+  });
+
+  it("updates whatsappNumber independently of bio and displayName", async () => {
+    const created = await repo.create(seedInput());
+
+    const updated = await repo.updateProfile(created.id, { whatsappNumber: "+6281234567890" });
+
+    expect(updated?.whatsappNumber).toBe("+6281234567890");
+    expect(updated?.bio).toBeNull();
+    expect(updated?.displayName).toBe(created.displayName);
+  });
 });
 
 describe("DrizzleUserRepository.setPasswordAndBumpEpoch", () => {

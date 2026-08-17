@@ -104,7 +104,11 @@ describe("SettingsPage", () => {
     expect(await screen.findByText("Perubahan disimpan.")).toBeTruthy();
     const patch = calls.find((c) => c.init.method === "PATCH")!;
     expect(patch.url).toBe("/users/me");
-    expect(JSON.parse(patch.init.body as string)).toEqual({ displayName: "Wildan Anugrah", bio: "Bio lama" });
+    expect(JSON.parse(patch.init.body as string)).toEqual({
+      displayName: "Wildan Anugrah",
+      bio: "Bio lama",
+      whatsappNumber: null,
+    });
   });
 
   it("shows an error message when saving fails, without losing what was typed", async () => {
@@ -156,19 +160,78 @@ describe("SettingsPage", () => {
     expect(getUserToken()).toBeNull();
   });
 
-  it("shows the caller's own WhatsApp number read-only, and a fallback when none is set", async () => {
+  it("prefills the caller's own WhatsApp number, blank when none is set", async () => {
     setUserSession("jwt-abc", USER);
     global.fetch = mock(async () => jsonResponse({ ...OWN_PROFILE, whatsappNumber: "+6281234567890" })) as unknown as typeof fetch;
 
     renderSettings();
 
-    expect(await screen.findByText("+6281234567890")).toBeTruthy();
+    expect(await screen.findByDisplayValue("+6281234567890")).toBeTruthy();
 
     cleanup();
     setUserSession("jwt-abc", USER);
     global.fetch = mock(async () => jsonResponse(OWN_PROFILE)) as unknown as typeof fetch; // whatsappNumber: null
     renderSettings();
+    await screen.findByDisplayValue("Wildan");
 
-    expect(await screen.findByText("Nomor WhatsApp belum diatur")).toBeTruthy();
+    expect((screen.getByLabelText("Nomor WhatsApp") as HTMLInputElement).value).toBe("");
+  });
+
+  /**
+   * Whole-branch review item 1: before this, `whatsappNumber` was shown
+   * read-only and `updateProfileSchema` had no field for it at all — a
+   * number set (or skipped) at signup was permanent. This is the field's
+   * whole reason for existing: a signed-in user must be able to ADD a
+   * number they skipped, or FIX one they mistyped, since it is the second
+   * password-reset channel the spec promises (§5) and the only way to fix
+   * the gap the corrected §8 now names.
+   */
+  it("edits the WhatsApp number and sends it on PATCH — the round-trip this field exists for", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      if ((init?.method ?? "GET") === "PATCH") {
+        return jsonResponse({ ...OWN_PROFILE, whatsappNumber: "+6281234567890" });
+      }
+      return jsonResponse(OWN_PROFILE); // whatsappNumber: null
+    }) as unknown as typeof fetch;
+
+    renderSettings();
+    await screen.findByDisplayValue("Wildan");
+
+    fireEvent.change(screen.getByLabelText("Nomor WhatsApp"), { target: { value: "+6281234567890" } });
+    fireEvent.click(screen.getByRole("button", { name: "Simpan perubahan" }));
+
+    expect(await screen.findByText("Perubahan disimpan.")).toBeTruthy();
+    const patch = calls.find((c) => c.init.method === "PATCH")!;
+    expect(JSON.parse(patch.init.body as string)).toEqual({
+      displayName: "Wildan",
+      bio: "Bio lama",
+      whatsappNumber: "+6281234567890",
+    });
+    expect(await screen.findByDisplayValue("+6281234567890")).toBeTruthy();
+  });
+
+  it("clearing the WhatsApp field sends an explicit null, not an empty string", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      if ((init?.method ?? "GET") === "PATCH") {
+        return jsonResponse(OWN_PROFILE);
+      }
+      return jsonResponse({ ...OWN_PROFILE, whatsappNumber: "+6281234567890" });
+    }) as unknown as typeof fetch;
+
+    renderSettings();
+    await screen.findByDisplayValue("+6281234567890");
+
+    fireEvent.change(screen.getByLabelText("Nomor WhatsApp"), { target: { value: "  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Simpan perubahan" }));
+
+    expect(await screen.findByText("Perubahan disimpan.")).toBeTruthy();
+    const patch = calls.find((c) => c.init.method === "PATCH")!;
+    expect(JSON.parse(patch.init.body as string).whatsappNumber).toBeNull();
   });
 });

@@ -221,6 +221,15 @@ describe("POST /users/login", () => {
     expect(body.user.handle).toBe("wildan");
     expect(body.user.email).toBe(VALID.email);
     expect(body.user.displayName).toBe(VALID.displayName);
+    // Whole-branch review item 4: this was the only one of the four
+    // response shapes with no key assertion — by-handle, /users/me and
+    // PATCH /users/me all pin `Object.keys(body).sort()`, login did not.
+    // Replacing `AuthenticateUser`'s explicit `user: { id, handle, email,
+    // displayName }` projection with `user: { ...profile }` (a spread of the
+    // full `UserRecord`) left 60 pass / 0 fail and typecheck green, leaking
+    // `bio`, `whatsappNumber`, `createdAt` and `sessionEpoch`. This is what
+    // catches that.
+    expect(Object.keys(body.user).sort()).toEqual(["displayName", "email", "handle", "id"]);
   });
 
   it("never includes the password hash in the response", async () => {
@@ -467,6 +476,78 @@ describe("PATCH /users/me", () => {
     });
     expect(res.status).toBe(200);
     expect((await res.json()).bio).toBe("keep me");
+  });
+
+  /**
+   * Whole-branch review item 1: `whatsappNumber` was written only at signup
+   * (`userSignupSchema`) and never had an update path — a typo or a skipped
+   * number at signup was permanent. Round-trip/clear/absent, driven through
+   * the real HTTP route, mirroring the bio trio immediately above.
+   */
+  it("sets a whatsappNumber that was previously absent — the round-trip", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ whatsappNumber: "+6281234567890" }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).whatsappNumber).toBe("+6281234567890");
+
+    const confirm = await a.request("/users/me", { headers: authed(token) });
+    expect((await confirm.json()).whatsappNumber).toBe("+6281234567890");
+  });
+
+  it("clears the whatsappNumber with an EXPLICIT null", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ whatsappNumber: "+6281234567890" }),
+    });
+
+    const cleared = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ whatsappNumber: null }),
+    });
+    expect(cleared.status).toBe(200);
+    expect((await cleared.json()).whatsappNumber).toBeNull();
+  });
+
+  it("an ABSENT whatsappNumber leaves the existing value alone", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ whatsappNumber: "+6281234567890" }),
+    });
+
+    const res = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ displayName: "Only Name Changed Again" }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).whatsappNumber).toBe("+6281234567890");
+  });
+
+  it("rejects a malformed whatsappNumber with 400", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ whatsappNumber: "not-a-number" }),
+    });
+    expect(res.status).toBe(400);
   });
 
   it("rejects an empty patch with 400", async () => {

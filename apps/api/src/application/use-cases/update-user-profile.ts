@@ -16,7 +16,7 @@ export class UpdateUserProfile {
 
   async execute(input: {
     userId: string;
-    patch: { displayName?: string; bio?: string | null };
+    patch: { displayName?: string; bio?: string | null; whatsappNumber?: string | null };
   }): Promise<OwnUserProfile> {
     const updated = await this.users.updateProfile(input.userId, input.patch);
     if (!updated) {

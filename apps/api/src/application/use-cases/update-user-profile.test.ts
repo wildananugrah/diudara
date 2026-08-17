@@ -44,6 +44,7 @@ function fakeRepository(rows: UserRecord[]): UserRepositoryPort {
       if (!row) return null;
       if (patch.displayName !== undefined) row.displayName = patch.displayName;
       if (patch.bio !== undefined) row.bio = patch.bio;
+      if (patch.whatsappNumber !== undefined) row.whatsappNumber = patch.whatsappNumber;
       return row;
     },
     async setPasswordAndBumpEpoch() {
@@ -87,5 +88,36 @@ describe("UpdateUserProfile", () => {
     await expect(
       useCase.execute({ userId: "ghost", patch: { displayName: "X" } })
     ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  /**
+   * Item 1 of the whole-branch review: `whatsappNumber` had a write (signup)
+   * and a read (`GET /users/me`) but no update path at all, which made spec
+   * §8's "a wrong address costs them one reset channel and nothing else"
+   * false — a mistyped number could never be fixed. Same round-trip/clear/
+   * absent trio `bio` already has, immediately above.
+   */
+  it("sets a whatsappNumber that was previously null — the round-trip", async () => {
+    const rows = [record({ whatsappNumber: null })];
+    const useCase = new UpdateUserProfile(fakeRepository(rows));
+    const result = await useCase.execute({
+      userId: "user-1",
+      patch: { whatsappNumber: "+6281234567890" },
+    });
+    expect(result.whatsappNumber).toBe("+6281234567890");
+  });
+
+  it("an explicit null whatsappNumber clears it", async () => {
+    const rows = [record({ whatsappNumber: "+6281234567890" })];
+    const useCase = new UpdateUserProfile(fakeRepository(rows));
+    const result = await useCase.execute({ userId: "user-1", patch: { whatsappNumber: null } });
+    expect(result.whatsappNumber).toBeNull();
+  });
+
+  it("an absent whatsappNumber leaves the existing value alone", async () => {
+    const rows = [record({ whatsappNumber: "+6281234567890" })];
+    const useCase = new UpdateUserProfile(fakeRepository(rows));
+    const result = await useCase.execute({ userId: "user-1", patch: { displayName: "New Name" } });
+    expect(result.whatsappNumber).toBe("+6281234567890");
   });
 });

@@ -38,7 +38,7 @@ export interface UserRepositoryPort {
   findCredentialsByEmail(email: string): Promise<UserCredentials | null>;
   updateProfile(
     id: string,
-    patch: { displayName?: string; bio?: string | null }
+    patch: { displayName?: string; bio?: string | null; whatsappNumber?: string | null }
   ): Promise<UserRecord | null>;
   setPasswordAndBumpEpoch(id: string, passwordHash: string): Promise<boolean>;
 }

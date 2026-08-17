@@ -293,8 +293,16 @@ export function getOwnProfile(): Promise<OwnUserProfile> {
  * `PATCH /users/me`. `handle` is deliberately not an accepted input here —
  * see `updateProfileSchema`'s own docstring for why a handle in the body
  * would be silently stripped rather than honoured, and never send one.
+ *
+ * `whatsappNumber` follows `updateProfileSchema`'s own `null`-clears/absent-
+ * leaves-alone rule, same as `bio` — added by the whole-branch review (item
+ * 1): before this, the number was writable only once, at signup, and
+ * `SettingsPage` showed it read-only. See that page's own docstring for the
+ * enumeration-safety consequence this closes.
  */
-export function updateOwnProfile(patch: { displayName?: string; bio?: string | null }): Promise<OwnUserProfile> {
+export function updateOwnProfile(
+  patch: { displayName?: string; bio?: string | null; whatsappNumber?: string | null }
+): Promise<OwnUserProfile> {
   return apiFetch<OwnUserProfile>("/users/me", { method: "PATCH", body: JSON.stringify(patch) });
 }
 
