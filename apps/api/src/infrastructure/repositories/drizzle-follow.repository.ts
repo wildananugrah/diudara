@@ -1,4 +1,4 @@
-import { and, count, desc, eq } from "drizzle-orm";
+import { and, count, desc, eq, inArray } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { appUsers, follows } from "../../db/schema";
 import type {
@@ -109,6 +109,30 @@ export class DrizzleFollowRepository implements FollowRepositoryPort {
       .where(eq(follows.followerId, userId))
       .orderBy(desc(follows.createdAt), desc(follows.id))
       .limit(clampLimit(limit));
+  }
+
+  /**
+   * See the port docstring for the contract. **ONE statement**, and the shape
+   * the existing indexes already serve: `follower_id` is the leading column of
+   * both `follow_follower_followee_unique` and `follow_follower_created_idx`, so
+   * the equality on it is index-backed and the `IN` list then filters a set
+   * bounded by how many people the viewer follows.
+   *
+   * NO `orderBy` and NO `limit`: the caller is asking a set-membership question
+   * about a page it has already bounded (at most `MAX_FOLLOW_LIST_LIMIT` = 100
+   * handles), so ordering is meaningless and a limit could only truncate the
+   * answer into a wrong `false`.
+   *
+   * Selects `app_user.handle` only — no id crosses this boundary, same
+   * discipline as `publicListColumns` above.
+   */
+  async followedHandlesAmong(viewerId: string, handles: readonly string[]): Promise<string[]> {
+    const rows = await this.db
+      .select({ handle: appUsers.handle })
+      .from(follows)
+      .innerJoin(appUsers, eq(follows.followeeId, appUsers.id))
+      .where(and(eq(follows.followerId, viewerId), inArray(appUsers.handle, [...handles])));
+    return rows.map((row) => row.handle);
   }
 }
 

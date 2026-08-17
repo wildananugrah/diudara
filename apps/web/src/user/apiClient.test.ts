@@ -647,19 +647,78 @@ describe("follow", () => {
 });
 
 describe("follow lists and Jelajah", () => {
-  it("fetches followers without an Authorization header, unauthenticated", async () => {
+  /**
+   * REWRITTEN BY THE FINAL REVIEW'S ITEM 1, and the old version is worth
+   * recording: it asserted `Authorization` was ABSENT here even while signed in,
+   * which was correct when nothing on these routes read a viewer, and became the
+   * thing standing in front of the fix the moment they did. The review predicted
+   * exactly this — "it becomes the gate's Critical again the moment item 1 is
+   * done" — so the assertion is inverted rather than deleted, and the signed-OUT
+   * direction gets its own test below so the token cannot start being invented.
+   */
+  it("SENDS the stored bearer token on a followers fetch — per-row viewerFollows depends on it", async () => {
     setUserSession("jwt-abc", USER);
     const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
     global.fetch = mock(async (url: string, init?: RequestInit) => {
       calls.push({ url, init });
-      return jsonResponse([{ handle: "budi", displayName: "Budi", bio: null }]);
+      return jsonResponse([{ handle: "budi", displayName: "Budi", bio: null, viewerFollows: true }]);
     }) as unknown as typeof fetch;
 
     const rows = await listFollowers("wildan");
 
     expect(calls[0]!.url).toBe("/users/wildan/followers");
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+    expect(rows).toEqual([{ handle: "budi", displayName: "Budi", bio: null, viewerFollows: true }]);
+  });
+
+  it("sends NO Authorization header on a followers fetch when signed out", async () => {
+    const calls: Array<{ init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse([]);
+    }) as unknown as typeof fetch;
+
+    await listFollowers("wildan");
+
     expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBeNull();
-    expect(rows).toEqual([{ handle: "budi", displayName: "Budi", bio: null }]);
+  });
+
+  it("sends the token on a following fetch too — same publicGet, same seam", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse([]);
+    }) as unknown as typeof fetch;
+
+    await listFollowing("wildan");
+
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+  });
+
+  it("sends the token on the Jelajah explore fetch too", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
+    }) as unknown as typeof fetch;
+
+    await exploreUsers({ q: "budi" });
+
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+  });
+
+  it("sends NO Authorization header on the explore fetch when signed out", async () => {
+    const calls: Array<{ init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
+    }) as unknown as typeof fetch;
+
+    await exploreUsers({});
+
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBeNull();
   });
 
   it("appends ?limit= for followers when given a limit", async () => {
@@ -678,13 +737,13 @@ describe("follow lists and Jelajah", () => {
     const calls: string[] = [];
     global.fetch = mock(async (url: string) => {
       calls.push(url);
-      return jsonResponse([{ handle: "budi", displayName: "Budi", bio: null }]);
+      return jsonResponse([{ handle: "budi", displayName: "Budi", bio: null, viewerFollows: false }]);
     }) as unknown as typeof fetch;
 
     const rows = await listFollowing("wildan");
 
     expect(calls[0]).toBe("/users/wildan/following");
-    expect(rows).toEqual([{ handle: "budi", displayName: "Budi", bio: null }]);
+    expect(rows).toEqual([{ handle: "budi", displayName: "Budi", bio: null, viewerFollows: false }]);
   });
 
   it("throws a 404 for an unknown handle's followers", async () => {

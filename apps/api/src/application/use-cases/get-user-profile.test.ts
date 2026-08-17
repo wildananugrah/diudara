@@ -71,6 +71,14 @@ function fakeFollowRepository(options: {
     async unfollow() {
       throw new Error("not used in these tests");
     },
+    async followedHandlesAmong() {
+      // `GetUserProfile` reads a SINGLE profile and asks `isFollowing`; the
+      // batch lookup belongs to the three LIST endpoints (`ListFollows`,
+      // `ExploreUsers`). Throwing rather than returning `[]` so a future change
+      // that starts routing a profile read through the batch path shows up here
+      // instead of silently answering "follows nobody".
+      throw new Error("not used in these tests");
+    },
     async isFollowing(followerId, followeeId) {
       return followingPairs.some(([f, t]) => f === followerId && t === followeeId);
     },

@@ -268,24 +268,37 @@ export function userRoutes(
 
   // Task 2. Public, like `by-handle/:handle` — anyone can browse who follows
   // whom. `ListFollows` 404s an unknown handle the same way `GetUserProfile`
-  // does; rows are already the public `FollowListRow` projection
-  // (`handle`/`displayName`/`bio`), never a wider shape.
+  // does; rows are the public projection (`handle`/`displayName`/`bio`) plus
+  // `viewerFollows`, never a wider shape.
+  //
+  // FINAL REVIEW, ITEM 1: these two and `/explore` below now run
+  // `resolveViewerId`, exactly as `by-handle/:handle` has since Task 2, and for
+  // the identical reason — they are PUBLIC BUT NOT ANONYMOUS. That viewer id is
+  // the only input to the per-row `viewerFollows`, without which `/@you/mengikuti`
+  // showed "Ikuti" against every single person you follow. `resolveViewerId`
+  // never throws: a missing, malformed or expired token resolves to `null`
+  // (anonymous) rather than a 401, so a stale token can never lock a visitor out
+  // of browsing a list.
   app.get<"/:handle/followers">("/:handle/followers", async (c) => {
     const limit = parseFollowListLimit(c.req.query("limit"));
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
     const rows = await deps.listFollows.execute({
       handle: c.req.param("handle"),
       direction: "followers",
       limit,
+      viewerId,
     });
     return c.json(rows);
   });
 
   app.get<"/:handle/following">("/:handle/following", async (c) => {
     const limit = parseFollowListLimit(c.req.query("limit"));
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
     const rows = await deps.listFollows.execute({
       handle: c.req.param("handle"),
       direction: "following",
       limit,
+      viewerId,
     });
     return c.json(rows);
   });
@@ -301,7 +314,9 @@ export function userRoutes(
   // lists still populated), not an error. See that class's own docstring.
   app.get<"/explore">("/explore", async (c) => {
     const { q, limit } = parseExploreQuery({ q: c.req.query("q"), limit: c.req.query("limit") });
-    const result = await deps.exploreUsers.execute({ q, limit });
+    // See the two list routes above for why a PUBLIC route resolves a viewer.
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    const result = await deps.exploreUsers.execute({ q, limit, viewerId });
     return c.json(result);
   });
 

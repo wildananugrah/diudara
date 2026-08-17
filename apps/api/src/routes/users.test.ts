@@ -500,7 +500,10 @@ describe("GET /users/:handle/followers and GET /users/:handle/following", () => 
     expect(res.status).toBe(200);
     const rows = await res.json();
     expect(rows).toHaveLength(1);
-    expect(Object.keys(rows[0]).sort()).toEqual(["bio", "displayName", "handle"]);
+    // `viewerFollows` joins the projection in the final review's item 1 — the
+    // three list endpoints each answer it per row now, exactly the shape
+    // `/by-handle/:handle` already returned. Still no `id`, still no `email`.
+    expect(Object.keys(rows[0]).sort()).toEqual(["bio", "displayName", "handle", "viewerFollows"]);
     expect(rows[0].handle).toBe("rina");
 
     const followingRes = await a.request("/users/rina/following");
@@ -512,7 +515,12 @@ describe("GET /users/:handle/followers and GET /users/:handle/following", () => 
     // asymmetry review round 2 flagged as a Minor; `ListFollows` uses the
     // SAME `FollowListRow` projection for both directions, but nothing said
     // so for this one).
-    expect(Object.keys(followingRows[0]).sort()).toEqual(["bio", "displayName", "handle"]);
+    expect(Object.keys(followingRows[0]).sort()).toEqual([
+      "bio",
+      "displayName",
+      "handle",
+      "viewerFollows",
+    ]);
     expect(followingRows[0].handle).toBe("wildan");
   });
 
@@ -527,6 +535,100 @@ describe("GET /users/:handle/followers and GET /users/:handle/following", () => 
     const res = await a.request("/users/wildan/followers");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
+  });
+
+  /**
+   * FINAL REVIEW, MUST-FIX ITEM 1. These three list endpoints returned only
+   * `["bio","displayName","handle"]` with or without a token, so every row on
+   * `/@you/mengikuti` — the list of everyone you follow, by definition —
+   * rendered "Ikuti". Task 6 measured the consequence in a real browser: tap 1
+   * was a silent no-op re-follow, tap 2 was the real DELETE, so unfollowing
+   * from a list took two taps and the first did nothing visible.
+   *
+   * `viewerFollows` here means exactly what it means on `/by-handle/:handle`:
+   * `null` for an anonymous request, `boolean` for a signed-in one. It is
+   * `false` on the viewer's OWN row, not some third value — the API emits no
+   * self-signal, and a client must decide "is this me?" by comparing handles
+   * (see `FollowButton`'s own docstring). That is a binding ledger ruling and
+   * these tests pin it rather than change it.
+   */
+  it("anonymous: every row's viewerFollows is null, never false", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const rinaToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    await a.request("/users/wildan/follow", { method: "POST", headers: authed(rinaToken) });
+
+    const followers = await (await a.request("/users/wildan/followers")).json();
+    const following = await (await a.request("/users/rina/following")).json();
+
+    expect(followers).toHaveLength(1);
+    expect(followers[0].viewerFollows).toBeNull();
+    expect(following).toHaveLength(1);
+    expect(following[0].viewerFollows).toBeNull();
+  });
+
+  it("signed in: viewerFollows is true for a row the viewer follows and false for one they do not", async () => {
+    const a = app();
+    // wildan follows rina, and nobody else.
+    const wildanToken = await tokenForValidUser(a, {});
+    await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    await tokenForValidUser(a, { handle: "budi", email: "budi@example.com" });
+    const rinaAndBudiFollowTarget = await tokenForValidUser(a, {
+      handle: "target",
+      email: "target@example.com",
+    });
+    void rinaAndBudiFollowTarget;
+    await a.request("/users/rina/follow", { method: "POST", headers: authed(wildanToken) });
+
+    // Both rina and budi follow `target`, so /target/followers has two rows —
+    // one wildan follows, one wildan does not. A single request, two answers.
+    const rinaToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    const budiToken = await tokenForValidUser(a, { handle: "budi", email: "budi@example.com" });
+    await a.request("/users/target/follow", { method: "POST", headers: authed(rinaToken) });
+    await a.request("/users/target/follow", { method: "POST", headers: authed(budiToken) });
+
+    const rows = await (
+      await a.request("/users/target/followers", { headers: authed(wildanToken) })
+    ).json();
+
+    expect(rows).toHaveLength(2);
+    const byHandle = Object.fromEntries(rows.map((r: { handle: string; viewerFollows: unknown }) => [r.handle, r.viewerFollows]));
+    expect(byHandle.rina).toBe(true);
+    expect(byHandle.budi).toBe(false);
+  });
+
+  it("signed in: the viewer's OWN row is false, not null and not true — no self-signal", async () => {
+    const a = app();
+    const wildanToken = await tokenForValidUser(a, {});
+    const rinaToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    // wildan and rina both follow `target`, so wildan sees its own row in the list.
+    await tokenForValidUser(a, { handle: "target", email: "target@example.com" });
+    await a.request("/users/target/follow", { method: "POST", headers: authed(wildanToken) });
+    await a.request("/users/target/follow", { method: "POST", headers: authed(rinaToken) });
+
+    const rows = await (
+      await a.request("/users/target/followers", { headers: authed(wildanToken) })
+    ).json();
+
+    const own = rows.find((r: { handle: string }) => r.handle === "wildan");
+    expect(own).toBeDefined();
+    expect(own.viewerFollows).toBe(false);
+  });
+
+  it("an invalid bearer token on these PUBLIC lists degrades to anonymous, not a 401", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+    const rinaToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    await a.request("/users/wildan/follow", { method: "POST", headers: authed(rinaToken) });
+
+    const res = await a.request("/users/wildan/followers", { headers: authed("not-a-jwt") });
+
+    // Same contract `/by-handle/:handle` already has: `resolveViewerId` never
+    // throws on these routes, so a stale token from a previous session must not
+    // lock a visitor out of browsing — it degrades to the anonymous view.
+    expect(res.status).toBe(200);
+    const rows = await res.json();
+    expect(rows[0].viewerFollows).toBeNull();
   });
 
   /**
@@ -682,7 +784,7 @@ describe("GET /users/explore", () => {
     for (const list of [body.results, body.newest, body.mostFollowed]) {
       expect(list.length).toBeGreaterThan(0);
       for (const row of list) {
-        expect(Object.keys(row).sort()).toEqual(["bio", "displayName", "handle"]);
+        expect(Object.keys(row).sort()).toEqual(["bio", "displayName", "handle", "viewerFollows"]);
       }
     }
   });
@@ -697,6 +799,45 @@ describe("GET /users/explore", () => {
 
     const res = await a.request("/users/explore");
     expect(res.status).toBe(200);
+  });
+
+  /**
+   * Final review, item 1 — Jelajah's rows too, and across ALL THREE of its
+   * lists in one response. `FollowRow` renders the same component on `/jelajah`
+   * as on the two list pages, so a per-row answer here is what stops "Ikuti"
+   * appearing next to somebody the visitor already follows.
+   */
+  it("anonymous: viewerFollows is null in every one of the three lists", async () => {
+    const a = app();
+    await tokenForValidUser(a, { handle: "wildan", email: "wildan@example.com" });
+
+    const body = await (await a.request("/users/explore?q=wild")).json();
+
+    for (const list of [body.results, body.newest, body.mostFollowed]) {
+      expect(list.length).toBeGreaterThan(0);
+      for (const row of list) expect(row.viewerFollows).toBeNull();
+    }
+  });
+
+  it("signed in: viewerFollows is true for the followed account and false for the viewer's own row", async () => {
+    const a = app();
+    const wildanToken = await tokenForValidUser(a, {});
+    await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    await tokenForValidUser(a, { handle: "budi", email: "budi@example.com" });
+    await a.request("/users/rina/follow", { method: "POST", headers: authed(wildanToken) });
+
+    const body = await (
+      await a.request("/users/explore?limit=100", { headers: authed(wildanToken) })
+    ).json();
+
+    const byHandle = Object.fromEntries(
+      body.newest.map((r: { handle: string; viewerFollows: unknown }) => [r.handle, r.viewerFollows])
+    );
+    expect(byHandle.rina).toBe(true);
+    expect(byHandle.budi).toBe(false);
+    // Your own row appears in "Akun terbaru" and must not claim you follow
+    // yourself — `false`, the same no-self-signal `/by-handle/:handle` uses.
+    expect(byHandle.wildan).toBe(false);
   });
 
   /**

@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { MAX_EXPLORE_QUERY_LENGTH } from "@diudara/shared";
-import { exploreUsers, isUserSignedIn, type FollowListRow } from "./apiClient";
+import { exploreUsers, type FollowListRow } from "./apiClient";
 import FollowButton from "./FollowButton";
 
 /**
@@ -34,31 +34,31 @@ const LOAD_FAILED_MESSAGE = "Gagal memuat Jelajah. Coba lagi.";
 
 /**
  * A single follower/following/search row — shared between this page and
- * `FollowListPage.tsx` (imported from there rather than duplicated, since
- * both screens render the exact same `FollowListRow` projection).
+ * `FollowListPage.tsx` (imported from there rather than duplicated, since both
+ * screens render the exact same projection).
  *
- * **The per-row `FollowButton` cannot know the real per-row follow state.**
- * None of the three endpoints these rows come from (`/explore`,
- * `/:handle/followers`, `/:handle/following`) return a per-row
- * `viewerFollows` — only the single profile fetch does (Task 2's
- * `PublicUserProfile`). A signed-out visitor still gets the correct `null`
- * ("Masuk untuk mengikuti"); a signed-in visitor's rows start assuming
- * "not following" even for someone already followed, self-correcting the
- * moment they tap it — the resulting state always comes back from the real
- * `POST`/`DELETE` response, never guessed again after that. Fixing the
- * initial-state gap would need a wider list endpoint; out of scope here.
- * `FollowButton` itself still hides correctly on the viewer's own row,
- * since that check compares handles, not this guessed value.
+ * **`viewerFollows` now comes from the SERVER, per row.** This component used to
+ * guess it — `signedIn ? false : null` — because none of `/explore`,
+ * `/:handle/followers` or `/:handle/following` returned a per-row value. The
+ * final review's item 1 widened all three, so the guess is gone: the row is
+ * handed straight to `FollowButton`, which is the only way `/@you/mengikuti` can
+ * read "Mengikuti" on people you follow instead of offering to follow them
+ * again. See `FollowListRow`'s own docstring in `apiClient.ts` for the contract.
+ *
+ * The viewer's OWN row (reachable on `/jelajah`, where your account appears in
+ * "Akun terbaru") arrives as `false`, since nobody follows themselves —
+ * `FollowButton` renders nothing at all for it by comparing handles, never by
+ * reading this value. That is the ledger's binding ruling and the reason a
+ * self-row shows no control rather than a button that 409s.
  */
 export function FollowRow({ row }: { row: FollowListRow }) {
-  const signedIn = isUserSignedIn();
   return (
     <li className="follow-row card">
       <Link to={`/@${row.handle}`} className="follow-row-identity">
         <span className="follow-row-name">{row.displayName}</span>
         <span className="follow-row-handle muted">@{row.handle}</span>
       </Link>
-      <FollowButton handle={row.handle} viewerFollows={signedIn ? false : null} />
+      <FollowButton handle={row.handle} viewerFollows={row.viewerFollows} />
     </li>
   );
 }

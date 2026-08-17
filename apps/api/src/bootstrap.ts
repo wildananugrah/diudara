@@ -1572,11 +1572,14 @@ export function bootstrap(): Dependencies {
   const updateUserProfile = new UpdateUserProfile(userRepository);
   const followUser = new FollowUser(userRepository, followRepository);
   const listFollows = new ListFollows(userRepository, followRepository);
-  // Task 3 (Jelajah). Reads only `userRepository` — `searchPublic`/
-  // `newestPublic`/`mostFollowedPublic` all live there, not on
-  // `followRepository`, since they query `app_user` directly (the follower
-  // count join lives inside `DrizzleUserRepository.mostFollowedPublic`).
-  const exploreUsers = new ExploreUsers(userRepository);
+  // Task 3 (Jelajah). The three READ methods live on `userRepository` —
+  // `searchPublic`/`newestPublic`/`mostFollowedPublic` all query `app_user`
+  // directly (the follower count join lives inside
+  // `DrizzleUserRepository.mostFollowedPublic`). `followRepository` is here for
+  // ONE further thing, added by the final review's item 1: the per-row
+  // `viewerFollows` on all three lists, resolved in one query for the whole
+  // screen — see `resolveViewerFollowSet`.
+  const exploreUsers = new ExploreUsers(userRepository, followRepository);
 
   const communityRepository = new DrizzleCommunityRepository(db);
   const listCommunities = new ListCommunities(communityRepository);

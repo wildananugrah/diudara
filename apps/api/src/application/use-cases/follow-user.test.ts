@@ -121,6 +121,28 @@ class FakeFollowRepository implements FollowRepositoryPort {
     return (this.listing.get(userId) ?? []).slice(0, limit);
   }
 
+  /**
+   * The batch lookup behind the per-row `viewerFollows` (final review, item 1).
+   * `followedHandlesAmongCalls` is recorded because the ruling is about HOW —
+   * one query for the page, never one per row — and no assertion on the returned
+   * rows could tell those two apart.
+   *
+   * Answers from `rows`, the same set `follow()`/`isFollowing()` use, so a test
+   * that follows somebody through this fake sees it here too rather than needing
+   * a second seeding step. Keyed by handle, so it resolves ids through
+   * `handlesById`.
+   */
+  followedHandlesAmongCalls: Array<{ viewerId: string; handles: readonly string[] }> = [];
+  handlesById = new Map<string, string>();
+
+  async followedHandlesAmong(viewerId: string, handles: readonly string[]): Promise<string[]> {
+    this.followedHandlesAmongCalls.push({ viewerId, handles });
+    return handles.filter((handle) => {
+      const id = this.handlesById.get(handle);
+      return id !== undefined && this.rows.has(FakeFollowRepository.key(viewerId, id));
+    });
+  }
+
   get rowCount(): number {
     return this.rows.size;
   }
@@ -276,5 +298,89 @@ describe("ListFollows.execute", () => {
 
     const rows = await useCase.execute({ handle: "@wildan", direction: "followers" });
     expect(rows).toHaveLength(1);
+  });
+
+  /**
+   * Final review, must-fix item 1. `/@you/mengikuti` is DEFINED as "everyone you
+   * follow", and every row of it read "Ikuti" because no list endpoint answered
+   * the question per row. Task 6 measured the result in a browser: tap 1 a silent
+   * no-op re-follow, tap 2 the real DELETE.
+   */
+  describe("per-row viewerFollows (item 1)", () => {
+    it("anonymous: null on every row, and the batch lookup is never called", async () => {
+      const users = fakeUserRepository([record()]);
+      const follows = new FakeFollowRepository();
+      follows.seedListing("user-1", [followRow({ handle: "rina" }), followRow({ handle: "budi" })]);
+      const useCase = new ListFollows(users, follows);
+
+      const rows = await useCase.execute({ handle: "wildan", direction: "following", viewerId: null });
+
+      expect(rows.map((r) => r.viewerFollows)).toEqual([null, null]);
+      expect(follows.followedHandlesAmongCalls).toHaveLength(0);
+    });
+
+    it("signed in: true for the row the viewer follows, false for the row they do not", async () => {
+      const users = fakeUserRepository([record(), record({ id: "user-2", handle: "rina" })]);
+      const follows = new FakeFollowRepository();
+      follows.handlesById.set("rina", "user-2");
+      follows.handlesById.set("budi", "user-3");
+      follows.seedListing("user-1", [followRow({ handle: "rina" }), followRow({ handle: "budi" })]);
+      // The viewer really does follow rina, through the same port a real follow
+      // would go through.
+      await follows.follow("viewer-1", "user-2");
+      const useCase = new ListFollows(users, follows);
+
+      const rows = await useCase.execute({
+        handle: "wildan",
+        direction: "following",
+        viewerId: "viewer-1",
+      });
+
+      expect(rows.find((r) => r.handle === "rina")!.viewerFollows).toBe(true);
+      expect(rows.find((r) => r.handle === "budi")!.viewerFollows).toBe(false);
+    });
+
+    it("THE RULING: one lookup for the whole page, whatever its length", async () => {
+      const users = fakeUserRepository([record()]);
+      const follows = new FakeFollowRepository();
+      follows.seedListing(
+        "user-1",
+        Array.from({ length: 25 }, (_, i) => followRow({ handle: `f${i}` }))
+      );
+      const useCase = new ListFollows(users, follows);
+
+      await useCase.execute({ handle: "wildan", direction: "followers", viewerId: "viewer-1" });
+
+      // 25 rows -> exactly 1 lookup, carrying all 25 handles. A loop would give
+      // 25 and pass every output assertion above.
+      expect(follows.followedHandlesAmongCalls).toHaveLength(1);
+      expect(follows.followedHandlesAmongCalls[0]!.handles).toHaveLength(25);
+    });
+
+    it("an empty list costs no lookup at all", async () => {
+      const users = fakeUserRepository([record()]);
+      const follows = new FakeFollowRepository();
+      const useCase = new ListFollows(users, follows);
+
+      const rows = await useCase.execute({
+        handle: "wildan",
+        direction: "followers",
+        viewerId: "viewer-1",
+      });
+
+      expect(rows).toEqual([]);
+      expect(follows.followedHandlesAmongCalls).toHaveLength(0);
+    });
+
+    it("an absent viewerId is anonymous, not an error", async () => {
+      const users = fakeUserRepository([record()]);
+      const follows = new FakeFollowRepository();
+      follows.seedListing("user-1", [followRow({ handle: "rina" })]);
+      const useCase = new ListFollows(users, follows);
+
+      const rows = await useCase.execute({ handle: "wildan", direction: "followers" });
+
+      expect(rows[0]!.viewerFollows).toBeNull();
+    });
   });
 });

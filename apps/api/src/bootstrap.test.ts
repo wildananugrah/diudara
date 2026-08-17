@@ -190,6 +190,9 @@ const fakeFollowRepository: FollowRepositoryPort = {
   async isFollowing() {
     return false;
   },
+  async followedHandlesAmong() {
+    return [];
+  },
   async countsFor() {
     return { followers: 0, following: 0 };
   },
@@ -637,7 +640,7 @@ describe("Dependencies (composition root contract)", () => {
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
-      exploreUsers: new ExploreUsers(fakeUserRepository),
+      exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,
@@ -831,7 +834,7 @@ describe("Dependencies (composition root contract)", () => {
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
-      exploreUsers: new ExploreUsers(fakeUserRepository),
+      exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,

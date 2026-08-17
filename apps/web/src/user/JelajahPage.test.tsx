@@ -33,8 +33,15 @@ afterEach(() => {
   cleanup();
 });
 
-const NEWEST = [{ handle: "baru", displayName: "Akun Baru", bio: null }];
-const MOST_FOLLOWED = [{ handle: "populer", displayName: "Akun Populer", bio: null }];
+/**
+ * Rows as the API now sends them — with `viewerFollows` (final review, item 1).
+ * `null` is the ANONYMOUS answer, which is what these two constants carry, since
+ * most tests in this file run signed out.
+ */
+const NEWEST = [{ handle: "baru", displayName: "Akun Baru", bio: null, viewerFollows: null }];
+const MOST_FOLLOWED = [
+  { handle: "populer", displayName: "Akun Populer", bio: null, viewerFollows: null },
+];
 
 describe("JelajahPage", () => {
   it("loads both rails with an empty query on mount, and asks for no ?q=", async () => {
@@ -103,7 +110,9 @@ describe("JelajahPage", () => {
       calls.push(url);
       if (url.includes("q=budi")) {
         return jsonResponse({
-          results: [{ handle: "budisantoso", displayName: "Budi Santoso", bio: null }],
+          results: [
+            { handle: "budisantoso", displayName: "Budi Santoso", bio: null, viewerFollows: null },
+          ],
           newest: [],
           mostFollowed: [],
         });
@@ -145,16 +154,15 @@ describe("JelajahPage", () => {
     });
   });
 
-  // Review round 2, Important 3: FollowRow guesses `viewerFollows` from
-  // whether a session exists (none of /explore, /followers, /following
-  // return a per-row value) — every other test in this file runs
-  // signed-out, so neither direction of that guess had ever been asserted.
-  // Collapsing it to always-`{null}` would silently kill the follow feature
-  // for signed-in visitors (every row reads "Masuk untuk mengikuti"
-  // instead); collapsing it to always-`{false}` would show a signed-out
-  // visitor a live "Ikuti" that 401s the moment it's tapped — the exact
-  // inversion `apiClient.ts`'s `viewerFollows` docstring warns against.
-  it("shows the sign-in link on every row for a signed-out visitor, never a live toggle", async () => {
+  /**
+   * Review round 2's Important 3 pinned both directions of a GUESS
+   * (`signedIn ? false : null`), because no list endpoint returned a per-row
+   * value. The final review's item 1 replaced the guess with the server's own
+   * answer, so these two now pin that the ROW drives the control — which is a
+   * strictly stronger statement, since a row can now say "true" and the old
+   * guess could not.
+   */
+  it("a row the API reports as null renders the sign-in link, never a live toggle", async () => {
     global.fetch = mock(async () =>
       jsonResponse({ results: [], newest: NEWEST, mostFollowed: [] })
     ) as unknown as typeof fetch;
@@ -166,16 +174,87 @@ describe("JelajahPage", () => {
     expect(screen.queryAllByRole("button", { name: "Ikuti" }).length).toBe(0);
   });
 
-  it("shows a live Ikuti toggle on every row for a signed-in visitor, never the sign-in link", async () => {
+  it("a row the API reports as false renders a live Ikuti toggle, never the sign-in link", async () => {
     setUserSession("jwt-abc", USER);
     global.fetch = mock(async () =>
-      jsonResponse({ results: [], newest: NEWEST, mostFollowed: [] })
+      jsonResponse({
+        results: [],
+        newest: [{ handle: "baru", displayName: "Akun Baru", bio: null, viewerFollows: false }],
+        mostFollowed: [],
+      })
     ) as unknown as typeof fetch;
 
     renderPage();
 
     await screen.findByText("Akun Baru");
     expect(screen.getByRole("button", { name: "Ikuti" })).toBeTruthy();
+    expect(screen.queryAllByRole("link", { name: "Masuk untuk mengikuti" }).length).toBe(0);
+  });
+
+  /**
+   * THE DEFECT ITSELF, on the screen that shares this row component. Before item
+   * 1 no row could ever read "Mengikuti", whatever the truth — which on
+   * `/@you/mengikuti` was wrong for 100% of rows.
+   */
+  it("a row the API reports as true reads Mengikuti, not Ikuti", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({
+        results: [],
+        newest: [{ handle: "diikuti", displayName: "Sudah Diikuti", bio: null, viewerFollows: true }],
+        mostFollowed: [],
+      })
+    ) as unknown as typeof fetch;
+
+    renderPage();
+
+    await screen.findByText("Sudah Diikuti");
+    expect(screen.getByRole("button", { name: "Mengikuti" })).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: "Ikuti" }).length).toBe(0);
+  });
+
+  it("mixes states within one list — one Mengikuti and one Ikuti side by side", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({
+        results: [],
+        newest: [
+          { handle: "diikuti", displayName: "Sudah Diikuti", bio: null, viewerFollows: true },
+          { handle: "belum", displayName: "Belum Diikuti", bio: null, viewerFollows: false },
+        ],
+        mostFollowed: [],
+      })
+    ) as unknown as typeof fetch;
+
+    renderPage();
+
+    await screen.findByText("Sudah Diikuti");
+    expect(screen.getAllByRole("button", { name: "Mengikuti" }).length).toBe(1);
+    expect(screen.getAllByRole("button", { name: "Ikuti" }).length).toBe(1);
+  });
+
+  /**
+   * Your own account appears in "Akun terbaru", and the API answers `false` for
+   * it (nobody follows themselves) — so a control driven off that value alone
+   * would offer to follow you, and collect the 409. `FollowButton` compares
+   * handles instead. Item 1's brief calls this out specifically: "your own row
+   * must show no button, not a self-follow that 409s."
+   */
+  it("shows NO control at all on the viewer's own row, even though the API says false", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({
+        results: [],
+        newest: [{ handle: "wildan", displayName: "Wildan", bio: null, viewerFollows: false }],
+        mostFollowed: [],
+      })
+    ) as unknown as typeof fetch;
+
+    renderPage();
+
+    await screen.findByText("Wildan");
+    expect(screen.queryAllByRole("button", { name: "Ikuti" }).length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: "Mengikuti" }).length).toBe(0);
     expect(screen.queryAllByRole("link", { name: "Masuk untuk mengikuti" }).length).toBe(0);
   });
 });
@@ -319,7 +398,9 @@ describe("JelajahPage — the ?q= bound and a survivable failed search (item 5)"
       if (url.includes("q=")) {
         if (failNext) return jsonResponse({ error: "server error" }, 500);
         return jsonResponse({
-          results: [{ handle: "budisantoso", displayName: "Budi Santoso", bio: null }],
+          results: [
+            { handle: "budisantoso", displayName: "Budi Santoso", bio: null, viewerFollows: null },
+          ],
           newest: NEWEST,
           mostFollowed: MOST_FOLLOWED,
         });

@@ -304,16 +304,35 @@ async function publicPost<T>(path: string, body: unknown, fallback: string): Pro
 }
 
 /**
- * A public (unauthenticated) GET whose JSON body is the result — the
+ * A **PUBLIC BUT NOT ANONYMOUS** GET whose JSON body is the result — the
  * `publicPost` above, but for `GET`. Backs Jelajah's three lists and a
- * profile's follower/following screens (Task 5): anyone can browse who
- * follows whom or search for an account, same as `getProfileByHandle`
- * below, which does not go through `apiRequest` for the same reason —
- * attaching a stale Authorization header to a request nothing checks is
- * pointless, and a signed-out visitor must be able to browse at all.
+ * profile's follower/following screens.
+ *
+ * **IT SENDS THE VIEWER'S TOKEN, and that is the whole point of this
+ * function.** Its docstring used to justify sending nothing with "attaching a
+ * stale Authorization header to a request nothing checks is pointless" — true
+ * when written, and false from the moment the final review's item 1 put
+ * `resolveViewerId` on all three of `/explore`, `/:handle/followers` and
+ * `/:handle/following`. That viewer id is the ONLY input to the per-row
+ * `viewerFollows`, so with no header every row of `/@you/mengikuti` comes back
+ * `viewerFollows: null` and renders "Masuk untuk mengikuti" to somebody who is
+ * signed in — the gate's Critical from `11b8848`, verbatim, one function over.
+ * The review named this seam explicitly: "it becomes the gate's Critical again
+ * the moment item 1 is done, and nothing guards it." Both directions are now
+ * pinned in `apiClient.test.ts`.
+ *
+ * Deliberately NOT routed through `apiRequest`, for the same reason
+ * `getProfileByHandle` is not: `apiRequest` clears the session and throws
+ * `SESSION_EXPIRED_MESSAGE` on a 401, which is right for a route that REQUIRES
+ * a session and wrong for one that merely NOTICES it. These three routes never
+ * answer 401 at all — `resolveViewerId` degrades a bad token to anonymous — so
+ * an expired token must show the anonymous view, never sign a visitor out
+ * mid-browse. `authorizedHeaders` attaches the token when there is one and
+ * nothing whatsoever when there is not, so the signed-out path is byte-identical
+ * on the wire to sending no init at all.
  */
 async function publicGet<T>(path: string, fallback: string): Promise<T> {
-  const res = await fetch(path);
+  const res = await fetch(path, { headers: authorizedHeaders(undefined, getUserToken()) });
   if (!res.ok) {
     throw await readError(res, fallback);
   }
@@ -492,19 +511,24 @@ export function completePasswordReset(token: string, newPassword: string): Promi
 }
 
 /**
- * A single row in a follower/following list or a Jelajah result — mirrors
- * the API's own `FollowListRow` (`apps/api/src/application/ports/
- * follow-repository.port.ts`) exactly: the same public projection backs
- * `GET /:handle/followers`, `/:handle/following` and `/explore`'s three
- * lists. Deliberately narrower than `PublicUserProfile` — no counts, no
- * `viewerFollows`: none of these three endpoints compute a per-row follow
- * state (see `FollowRow` in `JelajahPage.tsx` for how the UI copes with
- * that gap).
+ * A single row in a follower/following list or a Jelajah result — mirrors the
+ * API's own `FollowListRowForViewer`
+ * (`apps/api/src/application/use-cases/viewer-follow-state.ts`) exactly: the
+ * same shape backs `GET /:handle/followers`, `/:handle/following` and
+ * `/explore`'s three lists.
+ *
+ * Still narrower than `PublicUserProfile` — no counts — but it DOES carry
+ * `viewerFollows` as of the final review's item 1, with the identical contract:
+ * `null` when the request carried no usable viewer, `boolean` when it did, and
+ * **`false` on your own row**, since the API emits no self-signal. Before this,
+ * `FollowRow` guessed the value from whether a session existed, so every row of
+ * `/@you/mengikuti` — the list of everyone you follow — read "Ikuti".
  */
 export interface FollowListRow {
   handle: string;
   displayName: string;
   bio: string | null;
+  viewerFollows: boolean | null;
 }
 
 /**

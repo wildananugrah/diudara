@@ -384,3 +384,91 @@ describe("DrizzleFollowRepository.follow concurrency", () => {
     expect(rows).toHaveLength(1);
   });
 });
+
+/**
+ * Final review, must-fix item 1 — the batch lookup behind the per-row
+ * `viewerFollows` on `/explore`, `/:handle/followers` and `/:handle/following`.
+ * Proven against real Postgres, because `inArray` over a joined column is the
+ * part a fake cannot tell you anything about.
+ */
+describe("DrizzleFollowRepository.followedHandlesAmong", () => {
+  it("returns exactly the handles the viewer follows, and none of the others", async () => {
+    const viewer = await seedUser();
+    const followed = await seedUser();
+    const alsoFollowed = await seedUser();
+    const stranger = await seedUser();
+    await repo.follow(viewer.id, followed.id);
+    await repo.follow(viewer.id, alsoFollowed.id);
+
+    const result = await repo.followedHandlesAmong(viewer.id, [
+      followed.handle,
+      alsoFollowed.handle,
+      stranger.handle,
+    ]);
+
+    expect([...result].sort()).toEqual([alsoFollowed.handle, followed.handle].sort());
+  });
+
+  it("is scoped to the VIEWER — somebody else's follows never leak in", async () => {
+    const viewer = await seedUser();
+    const other = await seedUser();
+    const target = await seedUser();
+    // `other` follows `target`; `viewer` does not.
+    await repo.follow(other.id, target.id);
+
+    expect(await repo.followedHandlesAmong(viewer.id, [target.handle])).toEqual([]);
+    expect(await repo.followedHandlesAmong(other.id, [target.handle])).toEqual([target.handle]);
+  });
+
+  it("returns nothing for a handle that does not exist, rather than erroring", async () => {
+    const viewer = await seedUser();
+
+    expect(await repo.followedHandlesAmong(viewer.id, ["nosuchhandle"])).toEqual([]);
+  });
+
+  /**
+   * The viewer cannot follow themselves (`follow_no_self`), so their own handle
+   * is simply absent — which is what makes `viewerFollows` come out `false` on
+   * your own row rather than `true` or anything self-specific. Pinned here
+   * because that is the ledger's binding ruling and it is easy to "helpfully"
+   * break by special-casing self somewhere up the stack.
+   */
+  it("never reports the viewer as following themselves", async () => {
+    const viewer = await seedUser();
+
+    expect(await repo.followedHandlesAmong(viewer.id, [viewer.handle])).toEqual([]);
+  });
+
+  /**
+   * ONE statement for a whole page, counted at the driver rather than asserted
+   * from a fake. `pg_stat_statements` is not installed here, so the count comes
+   * from a drizzle instance with its own logger — the same technique the
+   * `ON CONFLICT ... target` test in this file uses to inspect emitted SQL.
+   */
+  it("issues exactly ONE statement for a 50-handle page", async () => {
+    const viewer = await seedUser();
+    const targets = [];
+    for (let i = 0; i < 50; i++) targets.push(await seedUser());
+    for (const target of targets.slice(0, 10)) await repo.follow(viewer.id, target.id);
+
+    const statements: string[] = [];
+    const logged = drizzle(pgClient, {
+      schema,
+      logger: {
+        logQuery(query) {
+          statements.push(query);
+        },
+      },
+    });
+    const result = await new DrizzleFollowRepository(logged).followedHandlesAmong(
+      viewer.id,
+      targets.map((t) => t.handle)
+    );
+
+    expect(result).toHaveLength(10);
+    expect(statements).toHaveLength(1);
+    // And it really is a set-membership query, not 50 ORs stitched together.
+    expect(statements[0]).toContain(" in ");
+    expect(statements[0]).not.toContain("limit");
+  });
+});

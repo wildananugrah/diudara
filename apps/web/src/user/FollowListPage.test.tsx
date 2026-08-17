@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import FollowListPage from "./FollowListPage";
+import { setUserSession } from "./apiClient";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -38,7 +39,7 @@ describe("FollowListPage", () => {
     const calls: string[] = [];
     global.fetch = mock(async (url: string) => {
       calls.push(url);
-      return jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null }]);
+      return jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null, viewerFollows: null }]);
     }) as unknown as typeof fetch;
 
     renderAt("/@wildan/pengikut");
@@ -52,7 +53,7 @@ describe("FollowListPage", () => {
     const calls: string[] = [];
     global.fetch = mock(async (url: string) => {
       calls.push(url);
-      return jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null }]);
+      return jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null, viewerFollows: null }]);
     }) as unknown as typeof fetch;
 
     renderAt("/@wildan/mengikuti");
@@ -98,7 +99,7 @@ describe("FollowListPage", () => {
 
   it("each row links to /@handle", async () => {
     global.fetch = mock(async () =>
-      jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null }])
+      jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null, viewerFollows: null }])
     ) as unknown as typeof fetch;
 
     renderAt("/@wildan/pengikut");
@@ -121,7 +122,7 @@ describe("FollowListPage", () => {
    */
   it("offers a back link to the profile the list belongs to", async () => {
     global.fetch = mock(async () =>
-      jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null }])
+      jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null, viewerFollows: null }])
     ) as unknown as typeof fetch;
 
     renderAt("/@wildan/pengikut");
@@ -155,5 +156,111 @@ describe("FollowListPage", () => {
     await screen.findByRole("heading", { name: "Gagal memuat daftar" });
     const back = screen.getByRole("link", { name: "Kembali ke @wildan" });
     expect(back.getAttribute("href")).toBe("/@wildan");
+  });
+});
+
+/**
+ * FINAL REVIEW, MUST-FIX ITEM 1 — THE PAGE THE DEFECT WAS ABOUT.
+ *
+ * `/@you/mengikuti` is defined as "everyone you follow", and every row of it read
+ * "Ikuti" because no list endpoint answered the question per row. Task 6 measured
+ * the whole sequence in a real browser: tap 1 was a silent no-op re-follow (the
+ * follow row count stayed at 1, no duplicate, no error), tap 2 was the real
+ * DELETE. So unfollowing from a list took TWO taps and the first did nothing
+ * visible — and combined with the (then) total absence of an error surface, a
+ * user could not tell a no-op from a failure.
+ */
+describe("FollowListPage — per-row follow state and one-tap unfollow (item 1)", () => {
+  const SESSION = { id: "u1", handle: "wildan", displayName: "Wildan", email: "w@example.com" };
+
+  it("your own /mengikuti list reads Mengikuti on every row, never Ikuti", async () => {
+    setUserSession("jwt-abc", SESSION);
+    global.fetch = mock(async () =>
+      jsonResponse([
+        { handle: "budi", displayName: "Budi", bio: null, viewerFollows: true },
+        { handle: "rina", displayName: "Rina", bio: null, viewerFollows: true },
+      ])
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/mengikuti");
+
+    await screen.findByText("Budi");
+    expect(screen.getAllByRole("button", { name: "Mengikuti" }).length).toBe(2);
+    expect(screen.queryAllByRole("button", { name: "Ikuti" }).length).toBe(0);
+  });
+
+  /**
+   * ONE TAP, and the request it issues. The old behaviour's first tap was a
+   * POST — a re-follow of somebody already followed — so the assertion that
+   * matters is the METHOD of the first request, not just the resulting label.
+   */
+  it("ONE tap unfollows: the first request is a DELETE, not a re-follow POST", async () => {
+    setUserSession("jwt-abc", SESSION);
+    const calls: Array<{ url: string; method: string | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      if (url.includes("/mengikuti") || url.endsWith("/following")) {
+        calls.push({ url, method: init?.method });
+        return jsonResponse([{ handle: "budi", displayName: "Budi", bio: null, viewerFollows: true }]);
+      }
+      calls.push({ url, method: init?.method });
+      return jsonResponse({ following: false });
+    }) as unknown as typeof fetch;
+
+    renderAt("/@wildan/mengikuti");
+    const toggle = await screen.findByRole("button", { name: "Mengikuti" });
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Ikuti" })).toBeTruthy();
+    });
+    const followCalls = calls.filter((c) => c.url === "/users/budi/follow");
+    expect(followCalls).toHaveLength(1);
+    expect(followCalls[0]!.method).toBe("DELETE");
+  });
+
+  it("a followers list mixes states honestly — one already followed, one not", async () => {
+    setUserSession("jwt-abc", SESSION);
+    global.fetch = mock(async () =>
+      jsonResponse([
+        { handle: "budi", displayName: "Budi", bio: null, viewerFollows: true },
+        { handle: "rina", displayName: "Rina", bio: null, viewerFollows: false },
+      ])
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/pengikut");
+
+    await screen.findByText("Budi");
+    expect(screen.getAllByRole("button", { name: "Mengikuti" }).length).toBe(1);
+    expect(screen.getAllByRole("button", { name: "Ikuti" }).length).toBe(1);
+  });
+
+  it("signed out: every row offers the sign-in link, never a live toggle", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse([{ handle: "budi", displayName: "Budi", bio: null, viewerFollows: null }])
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/pengikut");
+
+    await screen.findByText("Budi");
+    expect(screen.getByRole("link", { name: "Masuk untuk mengikuti" })).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: "Ikuti" }).length).toBe(0);
+  });
+
+  /**
+   * Task 6 recorded that `/@x/pengikut` shows no button on your own row, so a
+   * followers list is not somewhere you can unfollow from. That stays true, and
+   * for the right reason — the handle comparison, not the value.
+   */
+  it("your own row carries no control, even though the API reports false for it", async () => {
+    setUserSession("jwt-abc", SESSION);
+    global.fetch = mock(async () =>
+      jsonResponse([{ handle: "wildan", displayName: "Wildan", bio: null, viewerFollows: false }])
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi/pengikut");
+
+    await screen.findByText("Wildan");
+    expect(screen.queryAllByRole("button", { name: "Ikuti" }).length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: "Mengikuti" }).length).toBe(0);
   });
 });

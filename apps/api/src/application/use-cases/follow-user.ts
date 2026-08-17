@@ -1,7 +1,12 @@
 import { ConflictError, NotFoundError } from "../errors";
 import { normalizeHandle } from "../../domain/handle";
 import type { UserRepositoryPort } from "../ports/user-repository.port";
-import type { FollowListRow, FollowRepositoryPort } from "../ports/follow-repository.port";
+import type { FollowRepositoryPort } from "../ports/follow-repository.port";
+import {
+  resolveViewerFollowSet,
+  withViewerFollows,
+  type FollowListRowForViewer,
+} from "./viewer-follow-state";
 
 /**
  * The exact Bahasa Indonesia 409 message for tapping "Follow"/"Unfollow" on
@@ -103,6 +108,13 @@ export const DEFAULT_FOLLOW_LIST_LIMIT = 50;
  * whatever positive integer it is given. `FollowRepositoryPort.listFollowers`
  * /`listFollowing` still clamp a non-positive or non-finite value to zero
  * rows as their OWN backstop; that is not duplicated here.
+ *
+ * **Rows carry a per-row `viewerFollows`** as of the final review's item 1 —
+ * `null` for an anonymous request, `boolean` for a signed-in one, and `false`
+ * on the viewer's own row. Resolved in ONE extra query for the whole page (see
+ * `resolveViewerFollowSet`), never one per row. Before this, `/@you/mengikuti`
+ * — the list of everyone you follow — rendered "Ikuti" on 100% of its rows,
+ * which is not an edge case, it is the page.
  */
 export class ListFollows {
   constructor(
@@ -114,7 +126,9 @@ export class ListFollows {
     handle: string;
     direction: "followers" | "following";
     limit?: number;
-  }): Promise<FollowListRow[]> {
+    /** The CALLER's id if signed in, `null` if anonymous — resolved by the route via `resolveViewerId`, which never throws on these public routes. Decides `viewerFollows` alone; never gates whether the list is returned. */
+    viewerId?: string | null;
+  }): Promise<FollowListRowForViewer[]> {
     const handle = normalizeHandle(input.handle);
     const user = await this.users.findByHandle(handle);
     if (!user) {
@@ -122,8 +136,16 @@ export class ListFollows {
     }
 
     const limit = input.limit ?? DEFAULT_FOLLOW_LIST_LIMIT;
-    return input.direction === "followers"
-      ? this.follows.listFollowers(user.id, limit)
-      : this.follows.listFollowing(user.id, limit);
+    const rows =
+      input.direction === "followers"
+        ? await this.follows.listFollowers(user.id, limit)
+        : await this.follows.listFollowing(user.id, limit);
+
+    const followed = await resolveViewerFollowSet(
+      this.follows,
+      input.viewerId ?? null,
+      rows.map((row) => row.handle)
+    );
+    return withViewerFollows(rows, followed);
   }
 }

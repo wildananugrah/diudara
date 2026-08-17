@@ -51,4 +51,24 @@ export interface FollowRepositoryPort {
   listFollowers(userId: string, limit: number): Promise<FollowListRow[]>;
   /** See `listFollowers`'s `limit` contract — identical here. */
   listFollowing(userId: string, limit: number): Promise<FollowListRow[]>;
+  /**
+   * Of `handles`, which does `viewerId` already follow? **ONE query for a whole
+   * page of rows** — the final review's item 1 requires the per-row follow state
+   * on all three list endpoints and explicitly rules out N lookups.
+   *
+   * Returns the matching subset, in no defined order; callers build a `Set` and
+   * treat absence as "not followed". A handle that does not exist is simply
+   * absent, never an error — this is a read over the caller's own follow rows,
+   * not a resolution of the handles themselves.
+   *
+   * Keyed on HANDLE rather than on `followeeId` because the public list
+   * projection deliberately does not fetch `app_user.id` at all — see
+   * `resolveViewerFollowSet`'s own docstring for that reasoning in full.
+   * `app_user.handle` is unique, so it is an equally total key.
+   *
+   * `handles` empty is the caller's job to short-circuit (`resolveViewerFollowSet`
+   * does): an empty `IN ()` is not something to make this method's contract
+   * about.
+   */
+  followedHandlesAmong(viewerId: string, handles: readonly string[]): Promise<string[]>;
 }
