@@ -112,3 +112,62 @@ describe("routing — the personal-account routes", () => {
     expect(screen.getByText("Halaman tidak ditemukan")).toBeTruthy();
   });
 });
+
+/**
+ * Task 4: the app shell. `/beranda`, `/jelajah` and `/siaran` are new,
+ * static, single-segment routes — the brief requires they be registered
+ * BEFORE `/:handleParam` (already last, per the block above) precisely so
+ * they cannot be shadowed by it. React Router ranks static segments above
+ * dynamic ones regardless of declaration order, so this is defensive rather
+ * than load-bearing, same reasoning as the block above — which is exactly
+ * why it gets its own test rather than trust alone.
+ */
+describe("routing — the app shell", () => {
+  it("resolves /beranda inside the shell, with Beranda's empty-state copy", () => {
+    renderAt("/beranda");
+
+    expect(screen.getByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
+    expect(screen.getAllByRole("navigation").length).toBeGreaterThan(0);
+  });
+
+  it("resolves /jelajah inside the shell", () => {
+    renderAt("/jelajah");
+
+    expect(screen.getAllByRole("navigation").length).toBeGreaterThan(0);
+  });
+
+  it("resolves /siaran inside the shell, with Siaran's empty-state copy", () => {
+    renderAt("/siaran");
+
+    expect(screen.getByText("Belum ada siaran langsung.")).toBeTruthy();
+    expect(screen.getAllByRole("navigation").length).toBeGreaterThan(0);
+  });
+
+  /**
+   * The one a future refactor breaks silently, per the brief: a signed-out
+   * visitor on the signup page must see no navigation at all — every
+   * destination behind the shell requires a session.
+   */
+  it("renders no navigation shell on the signed-out signup page", () => {
+    renderAt("/signup");
+
+    expect(screen.queryAllByRole("navigation").length).toBe(0);
+  });
+
+  it("renders no navigation shell on the login page", () => {
+    renderAt("/masuk");
+
+    expect(screen.queryAllByRole("navigation").length).toBe(0);
+  });
+
+  it("renders no navigation shell on a public profile page", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ handle: "wildan", displayName: "Wildan", bio: null, createdAt: "2026-01-01T00:00:00.000Z" })
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan");
+
+    await screen.findByText("Wildan");
+    expect(screen.queryAllByRole("navigation").length).toBe(0);
+  });
+});

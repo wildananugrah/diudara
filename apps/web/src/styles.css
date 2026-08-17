@@ -916,3 +916,89 @@ tbody tr:last-child td {
   margin-top: 20px;
   white-space: pre-wrap;
 }
+
+/* ---------------------------------------------------------------
+   Task 4: the app shell. ONE component (AppShell.tsx) renders the same
+   destinations array twice — .bottom-nav and .side-rail — and this is the
+   ONLY place that decides which one is visible, at the breakpoint the task
+   brief fixes: 768px, distinct from the dashboard's 720px above (that
+   number is this section's own, not shared). Mobile-first, like .landing
+   above and unlike the desktop-first dashboard: bottom tabs are the shape
+   phone-first, Indonesian users already have muscle memory for.
+   --------------------------------------------------------------- */
+.app-shell {
+  min-height: 100vh;
+}
+
+.app-shell-main {
+  /* Room for the fixed .bottom-nav below md so its own content is never hidden behind it. */
+  padding-bottom: 72px;
+}
+
+.side-rail {
+  display: none;
+}
+
+.bottom-nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  justify-content: space-around;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  padding: 8px 4px;
+}
+
+.bottom-nav a {
+  color: var(--ink-faint);
+  text-decoration: none;
+  font-size: 0.8rem;
+  text-align: center;
+  padding: 4px 10px;
+}
+
+.bottom-nav a.active {
+  color: var(--green-dark);
+  font-weight: 600;
+}
+
+@media (min-width: 768px) {
+  .bottom-nav {
+    display: none;
+  }
+
+  .side-rail {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 220px;
+    padding: 24px 16px;
+    border-right: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .side-rail a {
+    color: var(--ink-soft);
+    text-decoration: none;
+    font-size: 0.95rem;
+    padding: 8px 10px;
+    border-radius: 6px;
+  }
+
+  .side-rail a.active {
+    color: var(--ink);
+    font-weight: 600;
+    background: var(--canvas);
+  }
+
+  .app-shell-main {
+    margin-left: 220px;
+    padding-bottom: 0;
+  }
+}

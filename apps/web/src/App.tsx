@@ -23,6 +23,18 @@ import SettingsPage from "./user/SettingsPage";
 import ResetRequestPage from "./user/ResetRequestPage";
 import ResetCompletePage from "./user/ResetCompletePage";
 import ProfilePage from "./user/ProfilePage";
+import AppShell from "./user/AppShell";
+import BerandaPage from "./user/BerandaPage";
+import SiaranPage from "./user/SiaranPage";
+
+/** A bare stand-in for Task 5's real Jelajah screen — enough for the route and the shell to exist. */
+function JelajahPlaceholder() {
+  return (
+    <main className="user-page">
+      <h1>Jelajah</h1>
+    </main>
+  );
+}
 
 export function AppRoutes() {
   return (
@@ -83,14 +95,34 @@ export function AppRoutes() {
 
       {/*
         Task 6: personal accounts — a separate session from the creator
-        dashboard above (see user/apiClient.ts's own docstring). All public
-        except /pengaturan, which guards itself (see SettingsPage.tsx).
+        dashboard above (see user/apiClient.ts's own docstring). All public,
+        rendered OUTSIDE the shell below: no session, so no navigation.
       */}
       <Route path="/signup" element={<UserSignupPage />} />
       <Route path="/masuk" element={<UserLoginPage />} />
-      <Route path="/pengaturan" element={<SettingsPage />} />
       <Route path="/lupa-sandi" element={<ResetRequestPage />} />
       <Route path="/reset/:token" element={<ResetCompletePage />} />
+
+      {/*
+        Task 4: the app shell — see AppShell.tsx and
+        docs/superpowers/specs/2026-08-17-member-ui-design.md §3. A path-less
+        layout route, so every child below renders inside the shared bottom
+        bar / side rail. /pengaturan moves in here from the block above;
+        SettingsPage keeps its own session guard unchanged (see
+        SettingsPage.tsx), so a signed-out visit to any of these four still
+        lands on /masuk — just via a route now nested one level deeper.
+
+        Static, single-segment paths — registered here, BEFORE /:handleParam
+        below, for the same reason /signup and /masuk are: see that route's
+        own comment on why this ordering is defensive rather than load-bearing.
+      */}
+      <Route element={<AppShell />}>
+        <Route path="/beranda" element={<BerandaPage />} />
+        {/* Task 5 fills this in for real; Task 4 only wires the route and the shell. */}
+        <Route path="/jelajah" element={<JelajahPlaceholder />} />
+        <Route path="/siaran" element={<SiaranPage />} />
+        <Route path="/pengaturan" element={<SettingsPage />} />
+      </Route>
 
       {/*
         THE PROFILE ROUTE — path="/:handleParam", NOT path="/@:handle".
