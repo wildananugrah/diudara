@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "bun:test";
 import { RequestPasswordReset } from "./request-password-reset";
 import { hashResetToken } from "../../domain/reset-token";
@@ -217,21 +218,67 @@ describe("RequestPasswordReset", () => {
     expect((email as FakeEmailAdapter).sent).toHaveLength(3);
   });
 
-  it("refuses after 10 requests from the same IP within the hour, across different accounts, returning the SAME shape", async () => {
-    const users = Array.from({ length: 11 }, (_, i) =>
+  /**
+   * Review finding F4: the per-IP cap was dropped — `X-Forwarded-For` is
+   * client-supplied and this repository has no verified proxy config
+   * overwriting it (see the class docstring). 15 different accounts from
+   * ONE IP — more than the OLD cap of 10 — must all still succeed and send,
+   * since only the PER-ACCOUNT limit (3/hour/account) is load-bearing now.
+   */
+  it("never limits by IP — 15 different accounts from the SAME IP all get sent to", async () => {
+    const users = Array.from({ length: 15 }, (_, i) =>
       record({ id: `user-${i}`, handle: `user${i}`, email: `user${i}@example.com` })
     );
-    const { useCase, rows } = harness({ users });
+    const { useCase, email, rows } = harness({ users });
 
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 15; i++) {
       const res = await useCase.execute({ email: `user${i}@example.com`, ip: "9.9.9.9" });
       expect(res).toEqual({ ok: true });
     }
-    expect(rows).toHaveLength(10);
 
-    const eleventh = await useCase.execute({ email: "user10@example.com", ip: "9.9.9.9" });
-    expect(eleventh).toEqual({ ok: true });
-    expect(rows).toHaveLength(10);
+    expect(rows).toHaveLength(15);
+    expect((email as FakeEmailAdapter).sent).toHaveLength(15);
+  });
+
+  /**
+   * Review finding F4 (minor half): mutating the IP-hashing call to store
+   * the raw IP instead must fail this test — the stored value is neither
+   * the raw address nor the token's own hash, and independently recomputing
+   * sha256(ip) must match it.
+   */
+  it("stores the request IP only as its sha256 hash, never raw", async () => {
+    const { useCase, rows } = harness();
+
+    await useCase.execute({ email: "wildan@example.com", ip: "203.0.113.42" });
+
+    expect(rows).toHaveLength(1);
+    const stored = rows[0].requestIpHash;
+    expect(stored).not.toBeNull();
+    expect(stored).not.toBe("203.0.113.42");
+    expect(stored).toMatch(/^[0-9a-f]{64}$/);
+    expect(stored).toBe(createHash("sha256").update("203.0.113.42").digest("hex"));
+  });
+
+  /**
+   * Review finding F5 (the spec-clause failure): a token's `expiresAt` must
+   * actually be 30 minutes from mint time — a HARDCODED literal, not a
+   * re-import of `RESET_TOKEN_TTL_MS`, so a mutation that changes the
+   * OFFSET USED HERE (e.g. to 30 days) without touching the constant's own
+   * definition still fails this test. `RESET_TOKEN_TTL_MS`'s own value is
+   * separately pinned in `domain/reset-token.test.ts`; this test pins that
+   * `RequestPasswordReset` actually APPLIES it when writing the row.
+   */
+  it("mints a token that expires in exactly 30 minutes from now — pinned independently of the TTL constant", async () => {
+    const { useCase, rows } = harness();
+
+    await useCase.execute({ email: "wildan@example.com", ip: "1.2.3.4" });
+
+    expect(rows).toHaveLength(1);
+    const THIRTY_MINUTES_MS = 30 * 60 * 1000;
+    expect(rows[0].expiresAt.getTime()).toBe(NOW.getTime() + THIRTY_MINUTES_MS);
+    // Anything wildly different (a day, a month) would trip this bound too,
+    // catching a mutation that used the right unit but the wrong magnitude.
+    expect(rows[0].expiresAt.getTime() - NOW.getTime()).toBeLessThan(31 * 60 * 1000);
   });
 
   it("does not rate-limit across different IPs for the per-account limit boundary", async () => {
@@ -254,13 +301,14 @@ describe("RequestPasswordReset", () => {
     expect((email as FakeEmailAdapter).sent).toHaveLength(1);
   });
 
-  it("works with no client IP at all — the per-IP limit simply never triggers", async () => {
-    const { useCase, email } = harness();
+  it("works with no client IP at all — requestIpHash is simply null", async () => {
+    const { useCase, email, rows } = harness();
 
     const result = await useCase.execute({ email: "wildan@example.com", ip: null });
 
     expect(result).toEqual({ ok: true });
     expect((email as FakeEmailAdapter).sent).toHaveLength(1);
+    expect(rows[0].requestIpHash).toBeNull();
   });
 
   it("swallows a send failure and still returns { ok: true } — a provider outage must not leak account existence", async () => {

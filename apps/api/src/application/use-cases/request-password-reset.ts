@@ -16,8 +16,6 @@ export interface RequestPasswordResetResult {
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 /** Refuse a user's own requests past this count within the window. */
 const MAX_REQUESTS_PER_USER = 3;
-/** Refuse requests from one IP past this count within the window, across every account. */
-const MAX_REQUESTS_PER_IP = 10;
 
 /**
  * `POST /users/password-reset/request`.
@@ -33,7 +31,7 @@ const MAX_REQUESTS_PER_IP = 10;
  *
  *   1. No account has this email.
  *   2. An account exists, has a channel, and a link was sent.
- *   3. An account exists but is over the per-account or per-IP rate limit.
+ *   3. An account exists but is over the per-account rate limit.
  *   4. An account exists but has NO available channel (no email provider
  *      configured on this box AND no WhatsApp number on file).
  *
@@ -47,16 +45,32 @@ const MAX_REQUESTS_PER_IP = 10;
  * endpoint's response, which has no way to prove the caller who typed the
  * email is the account's owner.
  *
- * NO USER (case 1) returns immediately, before any database write and
- * before any external call — cheaper, not more expensive, than every other
- * case. That is a real, if narrow, timing signal this class does not close:
- * closing it fully would mean never awaiting the send inline (deferring it
- * through the outbox, the way every OTHER external send in this codebase
- * works), which the spec's own numbered steps do not ask for here — Task 5
- * asks for the same synchronous-send shape `RegisterUser`'s duplicate-email
- * notice uses. Rate limiting keeps this from being useful at scale even
- * though it is not literally zero; see the task report for the full
- * reasoning.
+ * NO PER-IP LIMIT ANYMORE — Task 5 review finding F4. The original design
+ * capped requests per hashed IP too, read from `X-Forwarded-For`. Measured:
+ * 30 requests with a rotated header all sailed past a cap of 10, because
+ * `X-Forwarded-For`'s leftmost entry is CLIENT-SUPPLIED and this repository
+ * has no committed nginx configuration for the general API surface that
+ * proves anything ever overwrites it (`infra/nginx/live-hls.conf.template`
+ * is a fragment scoped to `/live/`, `/whip/` and `/webhooks/mediamtx/` only
+ * — see its own header comment: the real `/users/...` proxy lives in "the
+ * real public HTTPS server block", outside this repository, unverified). A
+ * limit keyed on a value the caller can set to anything is not a limit; it
+ * is decoration. Dropping it also closes review finding F6 for free: the
+ * shared per-IP counter was itself an oracle (only a REAL account's request
+ * can ever produce a row, so an attacker could read whether some OTHER
+ * email exists by watching their OWN IP's counter climb only on hits) —
+ * with no per-IP limit left to consult, there is no shared counter to read.
+ * `requestIpHash` is still captured and stored (see `routes/users.ts`'s
+ * `clientIp`, which now reads the LAST `X-Forwarded-For` entry rather than
+ * the first, and is pinned by its own test) — for forensic/audit value if
+ * this box's proxy is ever verified trustworthy, never to gate a decision.
+ *
+ * NO USER (case 1) still returns before any database write. The SEND
+ * (case 2) is deliberately NOT awaited — see `send`'s own docstring for why
+ * that closes review finding F1 (measured: an awaited real provider call
+ * made the "found and sent" branch ~290x slower than the "no such user"
+ * branch) without going through the outbox the way every OTHER external
+ * send in this codebase does.
  */
 export class RequestPasswordReset {
   constructor(
@@ -81,12 +95,12 @@ export class RequestPasswordReset {
 
     const now = this.clock.now();
     const windowStart = new Date(now.getTime() - RATE_LIMIT_WINDOW_MS);
+    // Recorded regardless of trust — see the class docstring's F4 note. Never
+    // read back to gate a decision.
     const ipHash = input.ip !== null ? hashRequestIp(input.ip) : null;
 
     const overUserLimit = (await this.passwordResets.countForUserSince(user.id, windowStart)) >= MAX_REQUESTS_PER_USER;
-    const overIpLimit =
-      ipHash !== null && (await this.passwordResets.countForIpSince(ipHash, windowStart)) >= MAX_REQUESTS_PER_IP;
-    if (overUserLimit || overIpLimit) {
+    if (overUserLimit) {
       // Case 3. A distinct rate-limit message would itself be an oracle —
       // see the class docstring.
       return { ok: true };
@@ -108,17 +122,45 @@ export class RequestPasswordReset {
     });
 
     const link = `${this.config.appBaseUrl}/reset/${token}`;
-    await this.send(channel, user, link);
+    // NOT AWAITED — review finding F1. The mint-and-store above already
+    // happened (a fast local INSERT, and the thing the rate limit actually
+    // reads), so nothing about it depends on `send` finishing before this
+    // method returns. `send` never throws (see its own docstring), so a
+    // fire-and-forget call here cannot produce an unhandled rejection.
+    //
+    // WHY NOT THE OUTBOX, even though every other external send in this
+    // codebase (`SendRenewalReminder`, `NotifyJoinRequest`) goes through it:
+    // the outbox persists its payload as a `jsonb` column, readable by any
+    // ordinary `SELECT` on that table for however long the row is queued.
+    // The one thing this whole feature is built never to do is let a
+    // database read yield a working reset link (see `PasswordResetTokenRecord`'s
+    // own docstring and the drizzle repository's plaintext test) — an
+    // outbox row carrying this token would violate that the moment it was
+    // enqueued, not merely if the table were ever compromised. `GrantChannelAccess`
+    // sets the precedent for the alternative already: mint the CREDENTIAL at
+    // delivery time, and let the outbox carry only ids. Applying that here
+    // would mean minting a SECOND, real token in the worker and leaving this
+    // one an inert, never-sent decoy — doubling every row this table gets for
+    // no correctness gain over simply not awaiting the send. Fire-and-forget,
+    // entirely in this process, gets the SAME measured outcome (the HTTP
+    // response no longer depends on provider latency) without either cost.
+    // This process is a persistent Bun server (see `infra/docker-compose.yml`),
+    // not a request-scoped serverless runtime, so a promise kept alive past
+    // the point its handler returned keeps running normally.
+    void this.send(channel, user, link);
 
     // Case 2.
     return { ok: true };
   }
 
   /**
-   * Never allowed to throw out of `execute` — a provider outage must not
+   * Never allowed to throw — not just because a provider outage must not
    * turn a real account's reset request into a 500 while a nonexistent
-   * email's request stays a 200. Logged, not silently dropped, so an
-   * operator can still see a real delivery failure.
+   * email's request stays a 200, but because `execute` above does not await
+   * this call at all: an unhandled rejection from a fire-and-forget promise
+   * would crash nothing in THIS method, but would still be the wrong way to
+   * learn about a real delivery failure. Logged instead, so an operator can
+   * still see one.
    */
   private async send(channel: "email" | "whatsapp", user: UserRecord, link: string): Promise<void> {
     try {
