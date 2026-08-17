@@ -13,6 +13,26 @@ describe("normalizeHandle", () => {
   it("only strips a single leading @, not one buried in the handle", () => {
     expect(normalizeHandle("@wil@dan")).toBe("wil@dan");
   });
+
+  it("strips only ONE leading @ from a doubled @@, leaving the second", () => {
+    expect(normalizeHandle("@@wildan")).toBe("@wildan");
+  });
+
+  it("normalises a bare @ to the empty string", () => {
+    expect(normalizeHandle("@")).toBe("");
+  });
+
+  it("normalises a bare @ surrounded by whitespace to the empty string", () => {
+    expect(normalizeHandle("  @  ")).toBe("");
+  });
+
+  it("a leading @ plus a 31-character handle normalises to 31 characters (still too long)", () => {
+    const withoutAt = "a".repeat(31);
+    const normalised = normalizeHandle(`@${withoutAt}`);
+    expect(normalised).toBe(withoutAt);
+    expect(normalised).toHaveLength(31);
+    expect(isValidHandle(normalised)).toBe(false);
+  });
 });
 
 describe("isValidHandle", () => {

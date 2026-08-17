@@ -132,6 +132,20 @@ describe("DrizzleUserRepository.findByHandle", () => {
   it("returns null when no user has that handle", async () => {
     expect(await repo.findByHandle("nosuchhandle")).toBeNull();
   });
+
+  // This is the method Task 3 puts behind an UNAUTHENTICATED public-profile
+  // endpoint, so a hash leaking into UserRecord here is reachable by anyone
+  // who knows a handle — not merely a layering slip. TypeScript's structural
+  // typing accepts an extra passwordHash property silently (a Drizzle row
+  // returned as-is structurally satisfies UserRecord even with one), so only
+  // a runtime key check catches a `.select(userColumns)` regressing to a
+  // bare `.select()`.
+  it("never exposes passwordHash", async () => {
+    const created = await repo.create(seedInput({ handle: "nohashhandle" }));
+    const found = await repo.findByHandle("nohashhandle");
+    expect("passwordHash" in (found as object)).toBe(false);
+    expect(found?.id).toBe(created.id);
+  });
 });
 
 describe("DrizzleUserRepository.findById", () => {
@@ -142,6 +156,13 @@ describe("DrizzleUserRepository.findById", () => {
 
   it("returns null for an unknown id", async () => {
     expect(await repo.findById("00000000-0000-0000-0000-000000000000")).toBeNull();
+  });
+
+  // Same rationale as findByHandle above — same silent-structural-typing hole.
+  it("never exposes passwordHash", async () => {
+    const created = await repo.create(seedInput());
+    const found = await repo.findById(created.id);
+    expect("passwordHash" in (found as object)).toBe(false);
   });
 });
 
@@ -198,6 +219,14 @@ describe("DrizzleUserRepository.updateProfile", () => {
     expect(
       await repo.updateProfile("00000000-0000-0000-0000-000000000000", { bio: "x" })
     ).toBeNull();
+  });
+
+  // Same rationale as findByHandle/findById above — same silent-structural-typing hole,
+  // this time on `.returning(userColumns)` regressing to a bare `.returning()`.
+  it("never exposes passwordHash", async () => {
+    const created = await repo.create(seedInput());
+    const updated = await repo.updateProfile(created.id, { bio: "Halo" });
+    expect("passwordHash" in (updated as object)).toBe(false);
   });
 });
 
