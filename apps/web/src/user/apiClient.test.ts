@@ -9,12 +9,14 @@ import {
   getUserToken,
   login,
   requestPasswordReset,
+  SESSION_EXPIRED_MESSAGE,
   setUserSession,
   signup,
   updateOwnProfile,
   UserApiError,
   USER_TOKEN_STORAGE_KEY,
 } from "./apiClient";
+import { SESSION_EXPIRED_MESSAGE as DASHBOARD_SESSION_EXPIRED_MESSAGE } from "../dashboard/apiClient";
 
 const USER = { id: "user-1", handle: "wildan", displayName: "Wildan", email: "wildan@example.com" };
 
@@ -66,12 +68,28 @@ describe("apiFetch (authenticated)", () => {
     expect(new Headers(calls[0]!.init.headers).get("Authorization")).toBe("Bearer jwt-abc");
   });
 
-  it("clears the token on a 401 from any endpoint", async () => {
+  it("clears the token on a 401 from any endpoint, with the session-expired message", async () => {
     setUserSession("jwt-stale", USER);
     global.fetch = mock(async () => jsonResponse({ error: "invalid or expired token" }, 401)) as unknown as typeof fetch;
 
-    await expect(apiFetch("/users/me")).rejects.toThrow();
+    const err = (await apiFetch("/users/me").catch((e: unknown) => e)) as UserApiError;
+
+    expect(err.message).toBe(SESSION_EXPIRED_MESSAGE);
     expect(getUserToken()).toBeNull();
+  });
+
+  /**
+   * F5 (review): `SESSION_EXPIRED_MESSAGE` was never asserted at all, let
+   * alone pinned against the dashboard's own copy of it — so the two could
+   * drift apart silently (a creator's session expiring would say one thing,
+   * a member's another, with nothing here to notice). Both are hardcoded
+   * independently in their own module rather than shared (see this file's
+   * copy of `parseFieldErrors` for the same "stay independent" reasoning),
+   * so equality between them is a fact worth pinning, not a given.
+   */
+  it("uses the exact same session-expired copy as the creator dashboard's own apiClient", () => {
+    expect(SESSION_EXPIRED_MESSAGE).toBe("Sesi Anda sudah berakhir. Silakan masuk kembali.");
+    expect(SESSION_EXPIRED_MESSAGE).toBe(DASHBOARD_SESSION_EXPIRED_MESSAGE);
   });
 
   it("throws a 404 without clearing the token", async () => {
