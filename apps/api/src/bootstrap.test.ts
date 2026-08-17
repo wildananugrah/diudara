@@ -35,6 +35,8 @@ import { RegisterCreator } from "./application/use-cases/register-creator";
 import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
 import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
+import { GetUserProfile } from "./application/use-cases/get-user-profile";
+import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
@@ -529,6 +531,8 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeUserTokenIssuer
       ),
+      getUserProfile: new GetUserProfile(fakeUserRepository),
+      updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),
       updateCommunity: new UpdateCommunity(fakeCommunityRepository),
@@ -696,6 +700,8 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeUserTokenIssuer
       ),
+      getUserProfile: new GetUserProfile(fakeUserRepository),
+      updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       createCommunity: new CreateCommunity(fakeCommunityRepository),
       listCommunities: new ListCommunities(fakeCommunityRepository),
       updateCommunity: new UpdateCommunity(fakeCommunityRepository),

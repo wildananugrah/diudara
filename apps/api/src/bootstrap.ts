@@ -9,6 +9,8 @@ import { RegisterCreator } from "./application/use-cases/register-creator";
 import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
 import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
+import { GetUserProfile } from "./application/use-cases/get-user-profile";
+import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { CreateCommunity } from "./application/use-cases/create-community";
 import { ListCommunities } from "./application/use-cases/list-communities";
 import { UpdateCommunity } from "./application/use-cases/update-community";
@@ -131,6 +133,16 @@ export interface Dependencies {
   registerUser: RegisterUser;
   /** `POST /users/login`. */
   authenticateUser: AuthenticateUser;
+  /**
+   * Task 3's `GET /users/by-handle/:handle` (public) and `GET /users/me`
+   * (behind `requireUserAuth`). One class, two methods — see its own
+   * docstring for why the public projection and the owner's own, wider one
+   * are kept as separate return types rather than one shape with optional
+   * fields.
+   */
+  getUserProfile: GetUserProfile;
+  /** Task 3's `PATCH /users/me`, behind `requireUserAuth`. Handle is not editable — see `updateProfileSchema`. */
+  updateUserProfile: UpdateUserProfile;
   createCommunity: CreateCommunity;
   listCommunities: ListCommunities;
   updateCommunity: UpdateCommunity;
@@ -1399,6 +1411,8 @@ export function bootstrap(): Dependencies {
   const userTokenIssuer = new HonoJwtUserTokenIssuer(jwtSecret);
   const registerUser = new RegisterUser(userRepository, passwordHasher);
   const authenticateUser = new AuthenticateUser(userRepository, passwordHasher, userTokenIssuer);
+  const getUserProfile = new GetUserProfile(userRepository);
+  const updateUserProfile = new UpdateUserProfile(userRepository);
 
   const communityRepository = new DrizzleCommunityRepository(db);
   const listCommunities = new ListCommunities(communityRepository);
@@ -1743,6 +1757,8 @@ export function bootstrap(): Dependencies {
     userTokenIssuer,
     registerUser,
     authenticateUser,
+    getUserProfile,
+    updateUserProfile,
     createCommunity,
     listCommunities,
     updateCommunity,

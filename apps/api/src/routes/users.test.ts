@@ -32,6 +32,26 @@ const VALID = {
   displayName: "Wildan",
 };
 
+/** Signs up (if not already) and logs in `VALID`, returning the bearer token. */
+async function tokenForValidUser(a = app()) {
+  await a.request("/users/signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(VALID),
+  });
+  const res = await a.request("/users/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: VALID.email, password: VALID.password }),
+  });
+  const body = await res.json();
+  return body.token as string;
+}
+
+function authed(token: string) {
+  return { Authorization: `Bearer ${token}` };
+}
+
 describe("POST /users/signup", () => {
   it("creates a user and returns ONLY { ok: true } — no user, no token", async () => {
     const res = await signup(VALID);
@@ -201,5 +221,196 @@ describe("POST /users/login", () => {
 
     expect(unknown.status).toBe(wrong.status);
     expect(await unknown.text()).toBe(await wrong.text());
+  });
+});
+
+describe("GET /users/by-handle/:handle", () => {
+  it("returns EXACTLY handle/displayName/bio/createdAt — no email, no anything else", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/by-handle/wildan");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    // Assert on the response body's ACTUAL keys, not on the type — extra
+    // properties (email, whatsappNumber, id, sessionEpoch) would pass a
+    // structural-type check silently even though they must never appear
+    // here. This is the form that catches that.
+    expect(Object.keys(body).sort()).toEqual(["bio", "createdAt", "displayName", "handle"]);
+    expect(body.handle).toBe("wildan");
+    expect(body.displayName).toBe(VALID.displayName);
+    expect(body.email).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain(VALID.email);
+  });
+
+  it("404s for an unknown handle", async () => {
+    const res = await app().request("/users/by-handle/nobody-at-all");
+    expect(res.status).toBe(404);
+  });
+
+  it("a handle sent with a leading @ still resolves — normalizeHandle is forgiving, not a 404", async () => {
+    const a = app();
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(VALID),
+    });
+
+    const res = await a.request("/users/by-handle/%40wildan");
+    expect(res.status).toBe(200);
+    expect((await res.json()).handle).toBe("wildan");
+  });
+});
+
+describe("GET /users/me", () => {
+  it("requires auth — no Authorization header is a 401", async () => {
+    const res = await app().request("/users/me");
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a garbage bearer token with 401", async () => {
+    const res = await app().request("/users/me", { headers: authed("not-a-real-token") });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns the caller's own profile, INCLUDING email — driven through the real requireUserAuth middleware", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/me", { headers: authed(token) });
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(Object.keys(body).sort()).toEqual([
+      "bio",
+      "createdAt",
+      "displayName",
+      "email",
+      "handle",
+      "whatsappNumber",
+    ]);
+    expect(body.email).toBe(VALID.email);
+    expect(body.handle).toBe("wildan");
+  });
+});
+
+describe("PATCH /users/me", () => {
+  it("requires auth — no Authorization header is a 401", async () => {
+    const res = await app().request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ displayName: "New Name" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("updates the display name", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ displayName: "Wildan Baru" }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).displayName).toBe("Wildan Baru");
+
+    const confirm = await a.request("/users/me", { headers: authed(token) });
+    expect((await confirm.json()).displayName).toBe("Wildan Baru");
+  });
+
+  it("clears the bio with an EXPLICIT null", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const setBio = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ bio: "hello world" }),
+    });
+    expect(setBio.status).toBe(200);
+    expect((await setBio.json()).bio).toBe("hello world");
+
+    const clearBio = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ bio: null }),
+    });
+    expect(clearBio.status).toBe(200);
+    expect((await clearBio.json()).bio).toBeNull();
+  });
+
+  it("an ABSENT bio leaves the existing value alone", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ bio: "keep me" }),
+    });
+
+    const res = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ displayName: "Only Name Changed" }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).bio).toBe("keep me");
+  });
+
+  it("rejects an empty patch with 400", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("CANNOT change the handle: PATCH { handle } alone is a 400 (stripped, leaving an empty patch), and the handle never changes", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ handle: "someone-else" }),
+    });
+    expect(res.status).toBe(400);
+
+    // Confirm via the real lookup route, not just that the PATCH 400'd.
+    const stillThere = await a.request("/users/by-handle/wildan");
+    expect(stillThere.status).toBe(200);
+    const gone = await a.request("/users/by-handle/someone-else");
+    expect(gone.status).toBe(404);
+  });
+
+  it("a handle alongside a valid field is still rejected as 400 if handle is the ONLY effective key — but a genuinely valid field survives Zod's silent strip", async () => {
+    // `handle` is stripped silently by Zod; `displayName` alone is a valid,
+    // non-empty patch, so this succeeds — it is the mirror image of the
+    // handle-only case above, proving the strip (not a body-shape rejection)
+    // is what is happening.
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ handle: "someone-else", displayName: "Still Wildan" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.displayName).toBe("Still Wildan");
+    expect(body.handle).toBe("wildan");
   });
 });
