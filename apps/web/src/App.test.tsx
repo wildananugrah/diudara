@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { Children, isValidElement, type ReactNode } from "react";
 import { AppRoutes } from "./App";
+import AppShell from "./user/AppShell";
 
 /**
  * `path="/:handleParam"` (ProfilePage) is registered LAST, right before the
@@ -233,5 +235,144 @@ describe("routing — the app shell", () => {
 
     await screen.findByText("Wildan");
     expect(screen.queryAllByRole("navigation").length).toBe(0);
+  });
+
+  /**
+   * Final-review I1: Task 4's own I1, REINTRODUCED. Task 4 found
+   * `/lupa-sandi` and `/reset/:token` movable inside the `AppShell` block with
+   * the suite green and added the two assertions above; Task 5 then added two
+   * MORE outside-shell routes and covered only their route RESOLUTION, not
+   * their shell absence. Measured at HEAD `11b8848`: moving either route below
+   * inside the `AppShell` block left all 448 web tests green, while the same
+   * mutation on each of the five older outside-shell routes went red.
+   *
+   * These two are the same form as the five above. The class — "a new
+   * outside-shell route arrives with nothing holding it there" — is closed
+   * separately, by the route-table partition test at the bottom of this file.
+   */
+  it("renders no navigation shell on /@handle/pengikut", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null, viewerFollows: null }])
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/pengikut");
+
+    expect(await screen.findByText("Budi Santoso")).toBeTruthy();
+    expect(screen.queryAllByRole("navigation").length).toBe(0);
+  });
+
+  it("renders no navigation shell on /@handle/mengikuti", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null, viewerFollows: null }])
+    ) as unknown as typeof fetch;
+
+    renderAt("/@wildan/mengikuti");
+
+    expect(await screen.findByText("Budi Santoso")).toBeTruthy();
+    expect(screen.queryAllByRole("navigation").length).toBe(0);
+  });
+});
+
+/**
+ * One `<Route>` in the real table, flattened: its `path` and whether it sits
+ * under the path-less `<Route element={<AppShell />}>` layout route.
+ */
+interface FlatRoute {
+  path: string;
+  insideShell: boolean;
+}
+
+/**
+ * Reads `AppRoutes`' REAL element tree — not a stand-in table — and returns
+ * every top-level route plus every child of the `AppShell` layout route.
+ *
+ * `AppRoutes` is called as a plain function rather than rendered: it takes no
+ * props and calls no hooks, so the `<Routes>` element it returns can be walked
+ * directly, and walking it is the only way to see the SHAPE of the table (a
+ * rendered tree shows one matched route at a time, which is why five separate
+ * `renderAt` assertions were needed to cover five routes, and why a sixth
+ * route could arrive uncovered).
+ *
+ * A route that has BOTH a `path` and children (`/dashboard`) is recorded and
+ * its children skipped — the dashboard owns its own nesting and is explicitly
+ * out of scope for this phase (UI spec §6: not restyled, not touched).
+ */
+function flattenRouteTable(): FlatRoute[] {
+  const table = AppRoutes();
+  const flat: FlatRoute[] = [];
+  Children.forEach((table.props as { children?: ReactNode }).children, (child) => {
+    if (!isValidElement(child)) return;
+    const props = child.props as { path?: string; element?: ReactNode; children?: ReactNode };
+    if (typeof props.path === "string") {
+      flat.push({ path: props.path, insideShell: false });
+      return;
+    }
+    // A path-less layout route. `AppShell` is the only one this app has; any
+    // other would land here with `insideShell: false` for its children and
+    // fail the assertions below, which is the correct outcome — a second
+    // layout route is a decision that must be made deliberately.
+    const isShell = isValidElement(props.element) && props.element.type === AppShell;
+    Children.forEach(props.children, (grandchild) => {
+      if (!isValidElement(grandchild)) return;
+      const grandchildProps = grandchild.props as { path?: string };
+      if (typeof grandchildProps.path === "string") {
+        flat.push({ path: grandchildProps.path, insideShell: isShell });
+      }
+    });
+  });
+  return flat;
+}
+
+/**
+ * Final-review recommendation, closing the CLASS rather than the instance.
+ *
+ * Twice now — Task 4's I1 (`/lupa-sandi`, `/reset/:token`) and the final
+ * review's I1 (`/:handleParam/pengikut`, `/:handleParam/mengikuti`) — a new
+ * outside-shell route has arrived with nothing holding it outside, and both
+ * times the fix was to hand-write the missing per-route assertion. Those
+ * assertions cannot cover a route that does not exist yet; this one can,
+ * because it asserts the whole PARTITION rather than sampling it.
+ *
+ * IT IS MEANT TO FAIL when the route table changes. That is not brittleness,
+ * it is the point: adding a route, or moving one across the shell boundary,
+ * must be a deliberate edit to the expected list below and a deliberate
+ * decision about whether the new page renders navigation. The design spec
+ * (`2026-08-17-member-ui-design.md` §3) and the ledger's binding ruling name
+ * signup, login, the two reset pages and `/@handle` as outside; the final
+ * review ruled the two follow-list pages outside too.
+ */
+describe("routing — the shell partition of the real route table", () => {
+  it("renders EXACTLY these four paths inside the AppShell layout route", () => {
+    const inside = flattenRouteTable()
+      .filter((route) => route.insideShell)
+      .map((route) => route.path)
+      .sort();
+
+    expect(inside).toEqual(["/beranda", "/jelajah", "/pengaturan", "/siaran"]);
+  });
+
+  it("renders EXACTLY these paths OUTSIDE the shell — the two follow lists among them", () => {
+    const outside = flattenRouteTable()
+      .filter((route) => !route.insideShell)
+      .map((route) => route.path)
+      .sort();
+
+    expect(outside).toEqual([
+      "*",
+      "/",
+      "/:handleParam",
+      "/:handleParam/mengikuti",
+      "/:handleParam/pengikut",
+      "/c/:slug",
+      "/c/:slug/request/:joinRequestId",
+      "/c/:slug/status/:subscriptionId",
+      "/dashboard",
+      "/dashboard/login",
+      "/lupa-sandi",
+      "/masuk",
+      "/reset/:token",
+      "/signup",
+      "/watch/:token",
+    ]);
   });
 });
