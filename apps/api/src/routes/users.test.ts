@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach } from "bun:test";
+import { Hono } from "hono";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { resetDatabase } from "../db/test-helpers";
@@ -6,6 +7,7 @@ import { FakeEmailAdapter } from "../infrastructure/email/fake-email.adapter";
 import { FakeMessagingAdapter } from "../infrastructure/messaging/fake-messaging.adapter";
 import { BunPasswordHasher } from "../infrastructure/auth/bun-password.hasher";
 import { RegisterUser } from "../application/use-cases/register-user";
+import { clientIp } from "./users";
 
 beforeEach(resetDatabase);
 
@@ -517,6 +519,50 @@ describe("PATCH /users/me", () => {
   });
 });
 
+/**
+ * Review finding F4's pinning test: `clientIp` must read the LAST
+ * `X-Forwarded-For` entry, not the first — mutating it back to the first
+ * entry must fail this test. Driven through a real Hono `Context` (a
+ * throwaway app with one route) rather than a hand-built fake, since
+ * `Context` has no small, stable shape worth faking.
+ */
+describe("clientIp", () => {
+  function ipApp() {
+    const a = new Hono();
+    a.get("/ip", (c) => c.json({ ip: clientIp(c) }));
+    return a;
+  }
+
+  it("returns null when the header is absent", async () => {
+    const res = await ipApp().request("/ip");
+    expect((await res.json()).ip).toBeNull();
+  });
+
+  it("returns the single entry when there is only one", async () => {
+    const res = await ipApp().request("/ip", { headers: { "X-Forwarded-For": "203.0.113.42" } });
+    expect((await res.json()).ip).toBe("203.0.113.42");
+  });
+
+  it("returns the LAST entry of a multi-hop chain, not the first — the first is client-supplied", async () => {
+    const res = await ipApp().request("/ip", {
+      headers: { "X-Forwarded-For": "9.9.9.9, 10.0.0.1, 172.16.0.5" },
+    });
+    expect((await res.json()).ip).toBe("172.16.0.5");
+  });
+
+  it("trims whitespace around the last entry", async () => {
+    const res = await ipApp().request("/ip", {
+      headers: { "X-Forwarded-For": "9.9.9.9,   172.16.0.5  " },
+    });
+    expect((await res.json()).ip).toBe("172.16.0.5");
+  });
+
+  it("returns null for an empty header", async () => {
+    const res = await ipApp().request("/ip", { headers: { "X-Forwarded-For": "" } });
+    expect((await res.json()).ip).toBeNull();
+  });
+});
+
 describe("POST /users/password-reset/request", () => {
   it("returns 200 { ok: true } for an unknown email", async () => {
     const res = await requestReset({ email: "nobody@example.com" });
@@ -756,7 +802,17 @@ describe("POST /users/signup — Task 5's existing-email notice", () => {
     // constructed with either way.
     const deps = bootstrap();
     const notifier = deps.messaging.notifier as FakeMessagingAdapter;
-    const useCase = new RegisterUser(deps.userRepository, new BunPasswordHasher(), null, notifier);
+    // A throwaway, never-limiting signup-notice ledger and a real-time
+    // clock — this test is about the CHANNEL fallback, not the rate limit,
+    // which has its own dedicated tests in register-user.test.ts.
+    const useCase = new RegisterUser(
+      deps.userRepository,
+      new BunPasswordHasher(),
+      null,
+      notifier,
+      { async countForUserSince() { return 0; }, async record() {} },
+      { now: () => new Date() }
+    );
 
     await deps.userRepository.create({
       handle: "existing",

@@ -17,20 +17,38 @@ import { requireUserAuth, type UserAuthVariables } from "../http/user-auth.middl
 import type { Dependencies } from "../bootstrap";
 
 /**
- * The caller's IP, for `RequestPasswordReset`'s per-IP rate limit — read
- * from `X-Forwarded-For` (the leftmost entry, the ORIGINAL client, since
- * `infra/nginx` sits in front of this process the way every deployment in
- * this repository assumes — see e.g. `MediaMTX`'s own webhook secret
- * comment on the same header being how a real deployment carries this).
- * `null` when the header is absent, which every test in this suite hits
- * (`.request()` never sets it) — `RequestPasswordReset` treats a `null` ip
- * as "the per-IP limit simply never triggers", not as an error.
+ * The caller's IP, recorded (hashed) against every password-reset request
+ * for forensic/audit value — see `RequestPasswordReset`'s own docstring for
+ * why it is NO LONGER used to enforce a rate limit (review finding F4).
+ *
+ * Reads the LAST `X-Forwarded-For` entry, not the first — fixed by the same
+ * review finding, which measured 30 requests with a ROTATED header all
+ * sailing past the (then-enforced) cap of 10 by reading the FIRST entry,
+ * which is CLIENT-SUPPLIED: anyone can put whatever they like at the front
+ * of that header. The LAST entry is what the proxy closest to this process
+ * appended, if one does — the only position a chain of proxies cannot let a
+ * client forge, since each hop can only APPEND, never rewrite what came
+ * before it. Pinned by this function's own test:
+ * `describe("clientIp")` in `users.test.ts`.
+ *
+ * THIS DOES NOT, BY ITSELF, MAKE THE VALUE TRUSTWORTHY. This repository has
+ * no committed nginx configuration for the general `/users/...` API surface
+ * that proves anything ever appends to this header at all —
+ * `infra/nginx/live-hls.conf.template` is a fragment scoped to `/live/`,
+ * `/whip/` and `/webhooks/mediamtx/` only; the real deployment's general
+ * proxy lives in "the real public HTTPS server block", outside this
+ * repository (see that file's own header comment). Reading the last entry
+ * is the correct thing to do IF a trusted proxy is ever verified in front
+ * of this box; it does not conjure one. `null` when the header is absent,
+ * which every test in this suite hits by default (`.request()` never sets
+ * it) — `RequestPasswordReset` accepts a `null` ip and simply records no hash.
  */
-function clientIp(c: Context): string | null {
+export function clientIp(c: Context): string | null {
   const header = c.req.header("x-forwarded-for");
   if (!header) return null;
-  const first = header.split(",")[0]?.trim();
-  return first && first.length > 0 ? first : null;
+  const entries = header.split(",");
+  const last = entries[entries.length - 1]?.trim();
+  return last && last.length > 0 ? last : null;
 }
 
 /**
