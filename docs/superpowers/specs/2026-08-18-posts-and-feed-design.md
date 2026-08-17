@@ -101,13 +101,20 @@ shipped three times.
 | Route | Auth | Notes |
 |---|---|---|
 | `POST /users/posts` | required | 201 with the created post |
-| `GET /users/feed?tab=untuk-anda\|mengikuti` | see below | `{ posts, nextCursor }` |
-| `GET /users/:handle/posts` | public | `{ posts, nextCursor }` |
+| `GET /users/feed?tab=untuk-anda\|mengikuti&before=` | see below | `{ posts, nextCursor }` |
+| `GET /users/:handle/posts?before=` | public | `{ posts, nextCursor }` |
 | `PATCH /users/posts/:id` | required, author only | 200 with the updated post |
 | `DELETE /users/posts/:id` | required, author only | 200, **idempotent** |
 
 `limit` defaults to 20 and is clamped at 50, from the same shared constant the client uses.
 `nextCursor` is `null` when the page is the last one.
+
+**Pagination reuses `apps/api/src/domain/keyset-cursor.ts`** rather than inventing a cursor. That
+module already exists, is already shared by the activity feed and the member roster, and already
+encodes `(timestamp, id)` for exactly the reason §4.1 gives. Hence the parameter is **`?before=`**,
+matching what it and `routes/analytics.ts` already use. A malformed value is a 400, never a silent
+restart at page 1 — a "load more" button given a corrupt cursor would otherwise loop for ever
+showing the same rows.
 
 ### 5.1 Untuk Anda is public; Mengikuti requires a session
 
@@ -186,6 +193,14 @@ reaches it — the quota path is closed — but it was recorded as this phase's 
 re-run `setUserSession`. Not by patching the three screens that render wrongly, which is the
 instance rather than the class — a distinction that already cost this project a round when two fixes
 each closed their own call site and a guard test then found four more offenders.
+
+**This requires dropping `id` from `SessionUser`.** `GET /users/me` has never returned the user's id,
+so the account blob cannot be rebuilt from it while `id` is required. The field is **read nowhere** —
+every consumer uses `handle` or `displayName` — so it goes, rather than widening an endpoint to
+supply something nothing needs. Existing stored blobs still parse, since an extra key is ignored.
+
+If the re-fetch itself fails with a 401 the token is genuinely dead, and the existing
+`apiRequest` behaviour applies: clear it and let the person sign in again.
 
 ## 10. Testing
 
