@@ -36,6 +36,14 @@ export class DrizzleFollowRepository implements FollowRepositoryPort {
    * `target` is given explicitly, matching `follow_follower_followee_unique`
    * exactly, so a future unique constraint added to this table cannot start
    * silently swallowing an unrelated conflict here.
+   *
+   * DOES NOT GUARD `followerId === followeeId` OR EITHER ID EXISTING — see the
+   * port docstring. A self-follow raises `23514` (the `follow_no_self` CHECK)
+   * and a nonexistent user raises `23503` (the foreign key), both RAW,
+   * straight out of this call, on purpose: this is a backstop, not the guard,
+   * and swallowing either here would tempt exactly the transaction-poisoning
+   * mistake `createPending`'s docstring already warns about for `23505`. The
+   * caller must reject a self-follow and confirm both users exist first.
    */
   async follow(followerId: string, followeeId: string): Promise<boolean> {
     const [row] = await this.db
@@ -83,8 +91,13 @@ export class DrizzleFollowRepository implements FollowRepositoryPort {
       .from(follows)
       .innerJoin(appUsers, eq(follows.followerId, appUsers.id))
       .where(eq(follows.followeeId, userId))
-      .orderBy(desc(follows.createdAt))
-      .limit(limit);
+      // id as a tiebreaker: `createdAt` alone is not a total order, and two
+      // rows can in principle share a timestamp. Not observed as a flake
+      // today (60 rapid follows produced 60 distinct microsecond values in
+      // testing) but keyset pagination built on this column later would be
+      // unsound without a deterministic tiebreak.
+      .orderBy(desc(follows.createdAt), desc(follows.id))
+      .limit(clampLimit(limit));
   }
 
   /** Who `userId` follows, newest first. */
@@ -94,7 +107,19 @@ export class DrizzleFollowRepository implements FollowRepositoryPort {
       .from(follows)
       .innerJoin(appUsers, eq(follows.followeeId, appUsers.id))
       .where(eq(follows.followerId, userId))
-      .orderBy(desc(follows.createdAt))
-      .limit(limit);
+      .orderBy(desc(follows.createdAt), desc(follows.id))
+      .limit(clampLimit(limit));
   }
+}
+
+/**
+ * See `FollowRepositoryPort.listFollowers`'s `limit` contract. Drizzle passes
+ * a negative `LIMIT` straight to postgres.js, which silently DROPS the clause
+ * rather than erroring — so `listFollowers(id, -1)` would otherwise return
+ * every row in the table under a malformed query param. Clamping to zero
+ * rows for any non-positive or non-finite input is a defined, tested
+ * contract rather than a silent pass-through.
+ */
+function clampLimit(limit: number): number {
+  return Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 0;
 }
