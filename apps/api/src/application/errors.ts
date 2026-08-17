@@ -165,6 +165,10 @@ export const UniqueRule = {
   creatorEmail: "creator_email",
   communitySlug: "community_slug",
   channelPlatformGroup: "channel_platform_group",
+  /** `app_user_handle_unique` — the handle a user picked at signup. */
+  userHandle: "user_handle",
+  /** `app_user_email_unique` — the email a user signed up with. */
+  userEmail: "user_email",
   /**
    * `subscription_member_tier_active_unique` — a member may hold at most one
    * `active` subscription per tier. `DecideJoinRequest` (free communities) is

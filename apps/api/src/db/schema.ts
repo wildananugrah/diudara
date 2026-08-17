@@ -13,6 +13,35 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
+/**
+ * The pivot's third, independent identity table — a user who follows, posts,
+ * goes live and offers memberships. `creator` and `member` are unchanged and
+ * keep both existing login paths working; nothing here migrates them. Named
+ * `app_user`, not `user`: `user` is a reserved SQL keyword that would need
+ * quoting in every hand-written query, and this project debugs through
+ * `psql` constantly.
+ */
+export const appUsers = pgTable(
+  "app_user",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    handle: varchar("handle", { length: 30 }).notNull().unique(),
+    email: varchar("email", { length: 255 }).notNull().unique(),
+    // Nullable: offered at signup, not required. A user without one has
+    // exactly one reset channel — see the spec's §5.
+    whatsappNumber: varchar("whatsapp_number", { length: 32 }),
+    passwordHash: varchar("password_hash", { length: 255 }).notNull(),
+    displayName: varchar("display_name", { length: 255 }).notNull(),
+    bio: varchar("bio", { length: 300 }),
+    // Bumped by a completed password reset. The token carries the value it
+    // was issued under and `requireUserAuth` compares — which is what makes
+    // "a reset ends all sessions" possible at all, since a JWT is stateless
+    // and cannot otherwise be revoked short of rotating JWT_SECRET.
+    sessionEpoch: integer("session_epoch").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+);
+
 export const creators = pgTable(
   "creator",
   {

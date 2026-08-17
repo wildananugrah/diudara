@@ -21,6 +21,7 @@ import {
   aiMessages,
   aiConversations,
   aiUsage,
+  appUsers,
 } from "./schema";
 
 /**
@@ -89,4 +90,7 @@ export async function resetDatabase() {
   await db.delete(aiConversations);
   await db.delete(aiUsage);
   await db.delete(creators);
+  // app_user is a fully independent identity table (Phase 9's pivot) — no FK
+  // relationship to anything above yet, so its position here is free.
+  await db.delete(appUsers);
 }

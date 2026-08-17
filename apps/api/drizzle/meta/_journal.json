@@ -127,6 +127,13 @@
       "when": 1786582188066,
       "tag": "0017_left_nighthawk",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1786943336440,
+      "tag": "0018_secret_dark_phoenix",
+      "breakpoints": true
     }
   ]
 }
