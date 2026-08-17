@@ -114,7 +114,35 @@ describe("RegisterUser", () => {
     expect(result).toEqual({ ok: true });
     expect(rows).toHaveLength(1);
     expect(rows[0].handle).toBe("wildan");
+    expect(rows[0].displayName).toBe("Wildan");
     expect(hashes.get(rows[0].id)).toBe("hashed:supersecret123");
+  });
+
+  it("passes displayName through to the repository unchanged", async () => {
+    const { repository, rows } = fakeRepository();
+    const useCase = new RegisterUser(repository, fakeHasher);
+
+    await useCase.execute({ ...VALID, displayName: "Wildan Anugrah" });
+
+    expect(rows[0].displayName).toBe("Wildan Anugrah");
+  });
+
+  it("passes a provided whatsappNumber through to the repository unchanged", async () => {
+    const { repository, rows } = fakeRepository();
+    const useCase = new RegisterUser(repository, fakeHasher);
+
+    await useCase.execute({ ...VALID, whatsappNumber: "+6281234567890" });
+
+    expect(rows[0].whatsappNumber).toBe("+6281234567890");
+  });
+
+  it("stores whatsappNumber as null when none is provided", async () => {
+    const { repository, rows } = fakeRepository();
+    const useCase = new RegisterUser(repository, fakeHasher);
+
+    await useCase.execute(VALID);
+
+    expect(rows[0].whatsappNumber).toBeNull();
   });
 
   it("normalises the handle before storing it, stripping a leading @ and lowercasing", async () => {
@@ -164,6 +192,32 @@ describe("RegisterUser", () => {
     await expect(
       useCase.execute({ ...VALID, handle: "wildan", email: "new@example.com" })
     ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it("REGRESSION (critical): a taken handle 409s even when the email in the same request is ALSO already registered", async () => {
+    // The bug this pins: an earlier version checked email BEFORE handle and
+    // returned `{ ok: true }` on a hit, so `create()` — and with it the
+    // handle-uniqueness check — never ran when the email was already
+    // registered. A taken handle then 409'd ONLY when paired with a FREE
+    // email, and silently answered success when paired with a REGISTERED
+    // one. Since handles are public, that turned "is this handle taken"
+    // into "does this email have an account" — the exact oracle this class
+    // exists to prevent — discoverable with one known handle and a guessed
+    // email, no setup required. Every OTHER duplicate-email test in this
+    // file pairs it with a FREE handle, which is precisely the one
+    // combination that already answered identically; this is the one
+    // combination that didn't.
+    const { repository, rows } = fakeRepository([
+      record({ handle: "taken", email: "registered@example.com" }),
+    ]);
+    const useCase = new RegisterUser(repository, fakeHasher);
+
+    await expect(
+      useCase.execute({ ...VALID, handle: "taken", email: "registered@example.com" })
+    ).rejects.toBeInstanceOf(ConflictError);
+
+    // No second row, and the existing one is untouched.
+    expect(rows).toHaveLength(1);
   });
 
   it("returns success-shaped output for a duplicate email, rather than throwing — enumeration safety", async () => {

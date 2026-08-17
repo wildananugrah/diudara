@@ -69,6 +69,34 @@ describe("POST /users/signup", () => {
     expect(res.status).toBe(409);
   });
 
+  it("REGRESSION (critical): a taken handle 409s even when the request's email is ALSO already registered", async () => {
+    // Handles are public (`/@wildan` is browsable), so an attacker needs
+    // only one known handle to probe this. An earlier version checked email
+    // first and returned early, so a taken handle's 409 depended on whether
+    // the ACCOMPANYING email happened to be free — 201 for a registered
+    // email, 409 for an unregistered one — turning a deliberately public
+    // fact (handle taken) into an oracle for a deliberately hidden one
+    // (email registered).
+    const first = await signup({ ...VALID, handle: "wildan", email: "registered@example.com" });
+    expect(first.status).toBe(201);
+
+    const registeredEmailProbe = await signup({
+      ...VALID,
+      handle: "wildan",
+      email: "registered@example.com",
+    });
+    const unknownEmailProbe = await signup({
+      ...VALID,
+      handle: "wildan",
+      email: "never-signed-up@example.com",
+    });
+
+    // Both probes collide on the SAME handle, so both must 409 the SAME
+    // way — the email's registration status must not change the outcome.
+    expect(registeredEmailProbe.status).toBe(409);
+    expect(unknownEmailProbe.status).toBe(409);
+  });
+
   it("returns 201 with { ok: true } for a duplicate email — indistinguishable from a fresh signup", async () => {
     const fresh = await signup(VALID);
     expect(fresh.status).toBe(201);
@@ -143,6 +171,7 @@ describe("POST /users/login", () => {
     expect(body.token.split(".").length).toBe(3);
     expect(body.user.handle).toBe("wildan");
     expect(body.user.email).toBe(VALID.email);
+    expect(body.user.displayName).toBe(VALID.displayName);
   });
 
   it("never includes the password hash in the response", async () => {

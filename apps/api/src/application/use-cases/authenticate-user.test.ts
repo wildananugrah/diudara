@@ -103,6 +103,23 @@ describe("AuthenticateUser", () => {
     expect(result.token).toBe("token-for-user-1-epoch-0");
     expect(result.user.id).toBe("user-1");
     expect(result.user.handle).toBe("wildan");
+    expect(result.user.email).toBe("wildan@example.com");
+    expect(result.user.displayName).toBe("Wildan");
+  });
+
+  it("returns the ACTUAL row's displayName, not a placeholder — round-trips a distinctive value", async () => {
+    const useCase = new AuthenticateUser(
+      seeded({ displayName: "Wildan Anugrah Pratama" }),
+      fakeHasher,
+      fakeIssuer
+    );
+
+    const result = await useCase.execute({
+      email: "wildan@example.com",
+      password: "supersecret123",
+    });
+
+    expect(result.user.displayName).toBe("Wildan Anugrah Pratama");
   });
 
   it("issues a token carrying the user's current sessionEpoch", async () => {

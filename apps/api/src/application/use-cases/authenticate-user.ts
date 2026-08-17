@@ -59,11 +59,12 @@ export class AuthenticateUser {
       throw new UnauthorizedError(GENERIC_FAILURE);
     }
 
-    const token = await this.tokens.issue({
-      userId: found.id,
-      sessionEpoch: found.sessionEpoch,
-    });
-
+    // Read BEFORE issuing the token — not after. A token is a signed,
+    // irrevocable-until-expiry credential the moment it exists; minting one
+    // and only then discovering the profile read failed would mean handing
+    // out a valid token on a path that immediately throws instead of
+    // returning it. Reading first means the only way this method issues a
+    // token is the only way it also returns one.
     const profile = await this.users.findById(found.id);
     if (!profile) {
       // Credentials existed a moment ago; the row cannot have vanished
@@ -72,6 +73,11 @@ export class AuthenticateUser {
       // say to the caller.
       throw new UnauthorizedError(GENERIC_FAILURE);
     }
+
+    const token = await this.tokens.issue({
+      userId: found.id,
+      sessionEpoch: found.sessionEpoch,
+    });
 
     return {
       user: {

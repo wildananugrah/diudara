@@ -24,9 +24,24 @@ import type { UserRepositoryPort } from "../ports/user-repository.port";
  * confusing error for a legitimate collision, and it would still let a
  * caller who cares about timing distinguish the two paths (see below).
  *
- * The password is hashed UNCONDITIONALLY, before the duplicate-email check
- * runs, for the same reason `AuthenticateCreator`/`AuthenticateUser` pay the
- * argon2id cost on every rejection path: skipping the hash on the
+ * THE HANDLE CHECK RUNS FIRST, BEFORE THE EMAIL CHECK — this order is
+ * load-bearing, not incidental. An earlier version checked email first and
+ * returned early on a hit, so `create()` (and its handle-uniqueness check)
+ * only ran when the email was free. A taken handle then 409'd ONLY when the
+ * email was ALSO free, and silently answered `{ ok: true }` when the email
+ * was already registered — turning "is this handle taken" (intentionally
+ * public) into "does this EMAIL have an account" (the one thing this class
+ * exists to hide), discoverable with nothing but one known handle and a
+ * guessed email. Checking the handle first closes that: a taken handle
+ * 409s regardless of what the email check would have found, because the
+ * email check never runs at all in that case.
+ *
+ * The password is hashed UNCONDITIONALLY between the two checks — after the
+ * handle check (a taken handle is disclosed outright via its own 409
+ * message, so there is nothing to hide there and no reason to pay for a
+ * hash first) but before the duplicate-email check and every path beyond
+ * it. That is for the same reason `AuthenticateCreator`/`AuthenticateUser`
+ * pay the argon2id cost on every rejection path: skipping the hash on the
  * duplicate-email branch would make it measurably faster than a fresh
  * signup, and that timing gap is itself an oracle even though the response
  * body is identical.
@@ -52,8 +67,14 @@ export class RegisterUser {
     }
     const email = normalizeEmail(input.email);
 
-    // Paid for on every path, including the ones that end in `{ ok: true }`
-    // without ever inserting a row — see the class docstring.
+    // MUST run before the email check below — see the class docstring for
+    // why the order is load-bearing rather than arbitrary.
+    if (await this.users.findByHandle(handle)) {
+      throw new UniqueViolationError(UniqueRule.userHandle, "handle is already taken");
+    }
+
+    // Paid for on every remaining path, including the ones that end in
+    // `{ ok: true }` without ever inserting a row — see the class docstring.
     const passwordHash = await this.hasher.hash(input.password);
 
     if (await this.users.findByEmail(email)) {
@@ -75,9 +96,12 @@ export class RegisterUser {
         // Same enumeration-safety rule applies — answer identically.
         return { ok: true };
       }
-      // A userHandle violation is already a `UniqueViolationError`, which
-      // extends `ConflictError` — rethrown as-is (409), and anything else
-      // (a bug, an unrelated DB error) rethrown untouched too.
+      // A userHandle violation here means a concurrent signup claimed the
+      // SAME handle between our pre-check above and this INSERT — the
+      // pre-check is not atomic with the write, so the unique index is
+      // still the real arbiter. It is already a `UniqueViolationError`,
+      // which extends `ConflictError` — rethrown as-is (409), and anything
+      // else (a bug, an unrelated DB error) rethrown untouched too.
       throw err;
     }
 
