@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type Ref } from "react";
 import { MAX_POST_BODY_LENGTH } from "@diudara/shared";
 import { describeRequestFailure } from "./errorCopy";
 
@@ -27,6 +27,14 @@ export interface PostComposerProps {
   onSubmit: (body: string) => Promise<void>;
   /** Renders a `Batal` button when present. Absent for the create composer, which has nothing to cancel back to. */
   onCancel?: () => void;
+  /**
+   * The `<form>` element, for a caller that has to reveal this composer —
+   * `EditComposer` scrolls it into view and focuses the textarea inside it
+   * (whole-branch review I2). Declared as a plain prop rather than via
+   * `forwardRef`, exactly like `PostFeed`'s own `ref`: React 19 passes `ref` to
+   * function components as an ordinary prop and `forwardRef` is deprecated.
+   */
+  ref?: Ref<HTMLFormElement>;
 }
 
 /**
@@ -66,6 +74,7 @@ export default function PostComposer({
   submitLabel,
   onSubmit,
   onCancel,
+  ref,
 }: PostComposerProps) {
   const [body, setBody] = useState(initialBody);
   const [submitting, setSubmitting] = useState(false);
@@ -97,7 +106,7 @@ export default function PostComposer({
   }
 
   return (
-    <form className="post-composer" onSubmit={handleSubmit}>
+    <form className="post-composer" onSubmit={handleSubmit} ref={ref}>
       <textarea
         className="post-composer-body"
         value={body}

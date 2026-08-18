@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useImperativeHandle, useState, type Ref } from "react";
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import PostCard from "./PostCard";
 import { describeRequestFailure } from "./errorCopy";
 import type { FeedPage, PostView } from "./apiClient";
@@ -69,42 +69,101 @@ export default function PostFeed({ load, emptyMessage, ownHandle, onEdit, onDele
   const [error, setError] = useState<string | null>(null);
   const [firstPageLoaded, setFirstPageLoaded] = useState(false);
 
+  /**
+   * **The token every in-flight request checks before it writes anything.**
+   *
+   * Whole-branch review C1. `fetchPage` had no cancellation and the effect
+   * below had no cleanup, so when `load` changed identity — a Beranda tab
+   * switch, a link from one profile to another — the PREVIOUS request's
+   * `setPosts`/`setNextCursor`/`setError`/`setLoading` all still landed. And a
+   * first page is fetched with `before === null`, whose setter REPLACES rather
+   * than appends, so the old feed overwrote the new one: measured on the real
+   * `BerandaPage`, tapping Mengikuti while Untuk Anda was still loading left
+   * Mengikuti selected and showing the viewer's OWN post — a row excluded from
+   * that tab by the `follow_no_self` CHECK constraint and therefore impossible
+   * there. Two more effects from the same path: the stale `nextCursor` made
+   * "Muat lebih banyak" page the OLD feed, and a stale load-more response
+   * appended old rows to the new list.
+   *
+   * A ref rather than a plain effect-scoped `let`, because "load more" is
+   * fired from a CLICK, outside the effect, and it needs the same token. The
+   * effect replaces this on every run and its cleanup marks the outgoing one
+   * cancelled; `ProfilePage`'s own profile fetch uses the same idiom.
+   */
+  const run = useRef<{ cancelled: boolean }>({ cancelled: false });
+
+  /**
+   * Rows added through `prepend` since the current `load` began.
+   *
+   * The parked "create racing the first page load" finding: `handleCreate`
+   * prepends a just-created post, and if the first page had not arrived yet,
+   * its `before === null` write REPLACED the list and the author watched their
+   * own post vanish. These rows are re-applied on top of the first page that
+   * arrives, then cleared. `replace`/`remove` maintain this list too, so a post
+   * edited or deleted during that same window cannot come back from the dead.
+   */
+  const pending = useRef<PostView[]>([]);
+
+  /** Applies one update to the visible list AND to the pending-prepend list, so the two can never disagree. */
+  const apply = useCallback((update: (rows: PostView[]) => PostView[]) => {
+    pending.current = update(pending.current);
+    setPosts(update);
+  }, []);
+
   const fetchPage = useCallback(
-    async (before: string | null) => {
+    async (before: string | null, isStale: () => boolean) => {
       setLoading(true);
+      // Cleared on the way IN, not only on success: a stale error banner from a
+      // failed load must not survive into the next tab or the next profile.
       setError(null);
       try {
         const page = await load(before);
-        setPosts((current) => (before === null ? page.posts : [...current, ...page.posts]));
+        if (isStale()) return;
+        if (before === null) {
+          setPosts([...pending.current, ...page.posts]);
+          pending.current = [];
+        } else {
+          setPosts((current) => [...current, ...page.posts]);
+        }
         setNextCursor(page.nextCursor);
         setFirstPageLoaded(true);
       } catch (err: unknown) {
+        if (isStale()) return;
         setError(describeRequestFailure(err));
       } finally {
-        setLoading(false);
+        // A stale request must not turn the spinner off under the request that
+        // replaced it, either.
+        if (!isStale()) setLoading(false);
       }
     },
     [load]
   );
 
   useEffect(() => {
+    const token = { cancelled: false };
+    run.current = token;
+    pending.current = [];
     setPosts([]);
     setNextCursor(null);
     setFirstPageLoaded(false);
-    void fetchPage(null);
+    void fetchPage(null, () => token.cancelled);
+    return () => {
+      token.cancelled = true;
+    };
   }, [fetchPage]);
 
-  // Empty deps: all three are pure `setPosts` updaters and close over nothing
-  // that changes, so the handle's identity is stable for the feed's lifetime.
+  // Deps are `[apply]`, which is itself stable (empty deps): all three are pure
+  // list updaters closing over nothing that changes, so the handle's identity
+  // is stable for the feed's lifetime.
   useImperativeHandle(
     ref,
     () => ({
-      prepend: (post: PostView) => setPosts((current) => [post, ...current]),
+      prepend: (post: PostView) => apply((current) => [post, ...current]),
       replace: (post: PostView) =>
-        setPosts((current) => current.map((row) => (row.id === post.id ? post : row))),
-      remove: (id: string) => setPosts((current) => current.filter((row) => row.id !== id)),
+        apply((current) => current.map((row) => (row.id === post.id ? post : row))),
+      remove: (id: string) => apply((current) => current.filter((row) => row.id !== id)),
     }),
-    []
+    [apply]
   );
 
   return (
@@ -133,7 +192,17 @@ export default function PostFeed({ load, emptyMessage, ownHandle, onEdit, onDele
       ) : null}
 
       {nextCursor !== null ? (
-        <button type="button" disabled={loading} onClick={() => void fetchPage(nextCursor)}>
+        <button
+          type="button"
+          disabled={loading}
+          onClick={() => {
+            // Captured at click time: the page this click belongs to. If `load`
+            // changes while this request is out, the response is discarded
+            // rather than appended to somebody else's feed.
+            const token = run.current;
+            void fetchPage(nextCursor, () => token.cancelled);
+          }}
+        >
           {loading ? "Memuat..." : "Muat lebih banyak"}
         </button>
       ) : null}

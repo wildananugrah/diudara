@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { createRef, type RefObject } from "react";
 import { MemoryRouter } from "react-router-dom";
 import PostFeed, { type PostFeedHandle } from "./PostFeed";
-import { listFeed, type PostView } from "./apiClient";
+import { listFeed, UserApiError, type FeedPage, type PostView } from "./apiClient";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -392,5 +392,254 @@ describe("PostFeed — PostFeedHandle", () => {
       "Isi kiriman 7",
       "Isi kiriman 9",
     ]);
+  });
+});
+
+/**
+ * **Whole-branch review, C1.** `fetchPage` had no cancellation token and the
+ * effect had no cleanup, so when `load` changed identity — a Beranda tab
+ * switch, an in-app link from one profile to another — the PREVIOUS request's
+ * `setPosts`/`setNextCursor`/`setError`/`setLoading` all still landed. And
+ * because a first page is fetched with `before === null`, the setter REPLACES
+ * rather than appends: the old feed overwrote the new one.
+ *
+ * Measured on the real `BerandaPage`: tapping Mengikuti while Untuk Anda's
+ * first page was in flight left Mengikuti selected (`aria-current`,
+ * `?tab=mengikuti` in the URL) showing the viewer's OWN post — a row that is
+ * architecturally impossible on that tab, excluded by the `follow_no_self`
+ * CHECK constraint, and the exact reason `handleCreate` refuses to prepend
+ * into Mengikuti.
+ *
+ * **Every test below gates the stale response on a captured `resolve`, never a
+ * `setTimeout`** — a timer makes the ordering a race against the test runner's
+ * own scheduling, and this whole finding is about ordering. Each also carries
+ * an INTEGRITY GUARD asserting the stale request is genuinely still in flight
+ * at the moment of the switch; remove the gate and that guard fails, which is
+ * what stops these tests silently degrading into the "old response arrived
+ * first" case that already passed before the fix.
+ */
+/** A feed driven by an explicit `load` function, so a test can change its IDENTITY the way a tab switch does. */
+function tree(load: (before: string | null) => Promise<FeedPage>) {
+  return (
+    <MemoryRouter>
+      <PostFeed load={load} emptyMessage="Belum ada kiriman." ownHandle={null} />
+    </MemoryRouter>
+  );
+}
+
+/** Lets every already-resolved promise settle and React flush what they caused. */
+async function settle(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+describe("PostFeed — a changed `load` cancels the page still in flight", () => {
+  it("a first page arriving AFTER the load prop changed must not replace the new list", async () => {
+    let releaseOld: (page: FeedPage) => void = () => {};
+    const oldPage = new Promise<FeedPage>((resolve) => {
+      releaseOld = resolve;
+    });
+    const loadOld = mock(() => oldPage);
+    const loadNew = mock(async () => ({ posts: [makePost("baru")], nextCursor: null }));
+
+    const { rerender } = render(tree(loadOld));
+
+    // INTEGRITY GUARD. Every microtask has settled, so an UNGATED `loadOld`
+    // would already have put "Isi kiriman lama" on screen here. This is the
+    // assertion that fails if the gate is removed.
+    await settle();
+    expect(loadOld).toHaveBeenCalledTimes(1);
+    expect(screen.queryAllByText("Isi kiriman lama").length).toBe(0);
+
+    rerender(tree(loadNew));
+    await screen.findByText("Isi kiriman baru");
+
+    // The old page lands now — a whole tab switch too late.
+    await act(async () => {
+      releaseOld({ posts: [makePost("lama")], nextCursor: "kursor-lama" });
+      await Promise.resolve();
+    });
+
+    // PRESENCE control first: the new feed is what is on screen. Without it a
+    // component that rendered nothing at all would pass the absence check
+    // below on its own.
+    expect(screen.getByText("Isi kiriman baru")).toBeTruthy();
+    expect(screen.queryAllByText("Isi kiriman lama").length).toBe(0);
+  });
+
+  it("a stale first page must not leave its cursor behind — 'Muat lebih banyak' asks the NEW feed", async () => {
+    let releaseOld: (page: FeedPage) => void = () => {};
+    const oldPage = new Promise<FeedPage>((resolve) => {
+      releaseOld = resolve;
+    });
+    const loadOld = mock(() => oldPage);
+    const newCalls: (string | null)[] = [];
+    const loadNew = mock(async (before: string | null) => {
+      newCalls.push(before);
+      return before === null
+        ? { posts: [makePost("baru")], nextCursor: "kursor-baru" }
+        : { posts: [makePost("baru2")], nextCursor: null };
+    });
+
+    const { rerender } = render(tree(loadOld));
+    // INTEGRITY GUARD — see the describe block's docstring.
+    await settle();
+    expect(screen.queryAllByText("Isi kiriman lama").length).toBe(0);
+
+    rerender(tree(loadNew));
+    await screen.findByText("Isi kiriman baru");
+    await act(async () => {
+      releaseOld({ posts: [makePost("lama")], nextCursor: "kursor-lama" });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Muat lebih banyak" }));
+    await screen.findByText("Isi kiriman baru2");
+
+    // PRESENCE control: the new feed's own first page is still there.
+    expect(screen.getByText("Isi kiriman baru")).toBeTruthy();
+    // The cursor that was forwarded came from the NEW feed, not the stale one.
+    expect(newCalls).toEqual([null, "kursor-baru"]);
+    expect(loadOld).toHaveBeenCalledTimes(1);
+  });
+
+  it("a stale 'load more' response must not APPEND its rows to the new list", async () => {
+    let releaseMore: (page: FeedPage) => void = () => {};
+    const morePage = new Promise<FeedPage>((resolve) => {
+      releaseMore = resolve;
+    });
+    const loadOld = mock(async (before: string | null) =>
+      before === null ? { posts: [makePost("lama")], nextCursor: "kursor-lama" } : morePage
+    );
+    const loadNew = mock(async () => ({ posts: [makePost("baru")], nextCursor: null }));
+
+    const { rerender } = render(tree(loadOld));
+    await screen.findByText("Isi kiriman lama");
+
+    fireEvent.click(screen.getByRole("button", { name: "Muat lebih banyak" }));
+    // INTEGRITY GUARD: the second page is genuinely still in flight. Ungate
+    // `morePage` and "Isi kiriman lama2" is on screen here instead.
+    await settle();
+    expect(screen.queryAllByText("Isi kiriman lama2").length).toBe(0);
+
+    rerender(tree(loadNew));
+    await screen.findByText("Isi kiriman baru");
+
+    await act(async () => {
+      releaseMore({ posts: [makePost("lama2")], nextCursor: null });
+      await Promise.resolve();
+    });
+
+    // PRESENCE control, then the absence.
+    expect(screen.getByText("Isi kiriman baru")).toBeTruthy();
+    expect(screen.queryAllByText("Isi kiriman lama2").length).toBe(0);
+    expect(screen.queryAllByText("Isi kiriman lama").length).toBe(0);
+  });
+
+  /**
+   * The parked "create racing the first page load" finding, folded in here
+   * because it is the same root cause: a first page arrives with
+   * `before === null` and REPLACES whatever `posts` holds. Somebody who posts
+   * before the feed's first page has landed watched their post appear and then
+   * silently vanish. `prepend` now seeds a pending row that survives the first
+   * page's arrival and sits on top of it.
+   */
+  it("a post prepended while the first page is in flight survives that page's arrival", async () => {
+    let releaseFirst: (page: FeedPage) => void = () => {};
+    const firstPage = new Promise<FeedPage>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const handle = createRef<PostFeedHandle>();
+
+    render(
+      <MemoryRouter>
+        <PostFeed
+          ref={handle}
+          load={() => firstPage}
+          emptyMessage="Belum ada kiriman."
+          ownHandle="wildan"
+        />
+      </MemoryRouter>
+    );
+
+    // INTEGRITY GUARD: the first page has NOT arrived — that is the whole
+    // scenario. Ungate `firstPage` and "Isi kiriman 1" is already on screen.
+    await settle();
+    expect(screen.queryAllByText("Isi kiriman 1").length).toBe(0);
+
+    act(() => handle.current!.prepend({ ...makePost("0"), body: "Kiriman baru saya" }));
+    expect(screen.getByText("Kiriman baru saya")).toBeTruthy();
+
+    await act(async () => {
+      releaseFirst({ posts: [makePost("1"), makePost("2")], nextCursor: null });
+      await Promise.resolve();
+    });
+
+    // PRESENCE control (the page did load) and the survival, in one assertion
+    // on ORDER: the new post sits on top, exactly where `prepend` put it.
+    expect(
+      screen
+        .getAllByRole("article")
+        .map((article) => article.querySelector(".post-card-body")?.textContent ?? "")
+    ).toEqual(["Kiriman baru saya", "Isi kiriman 1", "Isi kiriman 2"]);
+  });
+});
+
+/**
+ * **Whole-branch review, I1.** `PostFeed.test.tsx` had five error-related
+ * tests and every one of them was about a failed "load more" — none about a
+ * failed FIRST page, and none about the error ever CLEARING. The production
+ * code was right; the pins were missing, and the review measured it by
+ * deleting one line at a time and watching the full 645-test web suite stay
+ * green:
+ *
+ * | deletion | harm it let through | suite |
+ * |---|---|---|
+ * | `setError(null)` at the top of `fetchPage` | a stale error banner survives into the next tab or profile | 645 pass |
+ * | the `firstPageLoaded &&` guard on the empty message | a FAILED first page reads "Belum ada kiriman..." beside its own error | 645 pass |
+ *
+ * Both tests below carry a PRESENCE control — the thing that SHOULD be on
+ * screen is asserted alongside the thing that should not — because an absence
+ * check on its own is also passed by a component that rendered nothing at all.
+ */
+describe("PostFeed — the error lifecycle", () => {
+  it("a FAILED first page shows the error and NOT the empty message", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "internal server error" }, 500)
+    ) as unknown as typeof fetch;
+
+    renderFeed();
+
+    // PRESENCE control: the failure really did reach the screen, in Bahasa.
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("Server sedang bermasalah. Coba lagi sebentar lagi.");
+    // ...and the feed does NOT also claim to be empty. Telling somebody there
+    // is nothing to read, when in fact the request failed, is a different and
+    // worse lie than showing them the failure alone.
+    expect(screen.queryAllByText("Belum ada kiriman.").length).toBe(0);
+  });
+
+  it("clears a previous load's error when the next load succeeds — no banner carried across", async () => {
+    const failing = mock(async () => {
+      throw new UserApiError("internal server error", 500);
+    });
+    const succeeding = mock(async () => ({ posts: [makePost("1")], nextCursor: null }));
+
+    const { rerender } = render(tree(failing));
+
+    // The error is on screen first — otherwise "it cleared" means nothing.
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Server sedang bermasalah. Coba lagi sebentar lagi."
+    );
+
+    // A tab switch / a link to another profile: same component, new `load`.
+    rerender(tree(succeeding));
+
+    // PRESENCE control: the new feed loaded...
+    expect(await screen.findByText("Isi kiriman 1")).toBeTruthy();
+    // ...and the previous load's banner is gone rather than sitting above it.
+    expect(screen.queryByRole("alert") === null).toBe(true);
   });
 });

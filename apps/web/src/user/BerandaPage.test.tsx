@@ -835,3 +835,132 @@ describe("BerandaPage — editing your own post", () => {
     expect(screen.queryAllByRole("button", { name: "Simpan" }).length).toBe(0);
   });
 });
+
+/**
+ * **Whole-branch review, I2.** The confirmation panel and the edit composer
+ * both render ABOVE the feed, so with 20 posts loaded, tapping Hapus on the
+ * 20th inserted "Hapus kiriman ini?" roughly twenty rows above the viewport
+ * with `document.activeElement` still on `body` — nothing scrolled, nothing
+ * took focus, no live region announced it. On a 390px phone that is four to
+ * six cards per screen, so **from about the sixth post down, tapping Hapus or
+ * Edit appeared to do nothing at all.** The audience is phone-first.
+ *
+ * Neither happy-dom (which has no layout) nor the Playwright gate (whose
+ * `.click()` auto-scrolls the target into view before clicking) can see the
+ * scroll half, which is why it survived a 59-check browser gate. What happy-dom
+ * CAN see is asserted here: `scrollIntoView` was called on the right element,
+ * focus moved to it, and the panel carries the announcing role.
+ */
+/**
+ * **Never let a happy-dom node reach a bun:test failure diff.** `expect(node)`
+ * serialises the element's whole object graph to build the message: measured
+ * with bun 1.3.14, a failing `toEqual` against a BARE detached `<div>` builds
+ * an 848 KB message and a failing `toBe` a 2 MB one. Against a node attached to
+ * a document holding twenty rendered posts it does not terminate — it allocated
+ * ~80 MB/s until the OOM killer took the process, and on a machine without swap
+ * that takes the machine with it. Identity is compared as a BOOLEAN here, so a
+ * regression prints `true !== false` and the suite stays runnable.
+ *
+ * `name` is what the failure says instead of the node, since a bare boolean
+ * names nothing.
+ */
+function isNode(actual: unknown, expected: Element | null, name: string): string {
+  return actual === expected ? name : `NOT ${name}`;
+}
+
+describe("BerandaPage — the panel and the composer bring themselves into view (I2)", () => {
+  let originalScrollIntoView: typeof Element.prototype.scrollIntoView;
+  let scrolled: { element: Element; options: unknown }[];
+
+  beforeEach(() => {
+    originalScrollIntoView = Element.prototype.scrollIntoView;
+    scrolled = [];
+    Element.prototype.scrollIntoView = function (this: Element, options?: unknown) {
+      scrolled.push({ element: this, options });
+    };
+  });
+
+  afterEach(() => {
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+  });
+
+  /** Twenty rows, so the panel really is far from the tapped card — the measured shape of the bug. */
+  function twentyPosts(): PostView[] {
+    return Array.from({ length: 20 }, (_, index) => makePost(`p${index + 1}`, `kiriman ${index + 1}`));
+  }
+
+  it("tapping Hapus on the LAST of twenty posts scrolls the confirmation panel into view and focuses it", async () => {
+    setUserSession("jwt-abc", USER);
+    mockFetch(() => jsonResponse({ posts: twentyPosts(), nextCursor: null }));
+
+    renderBeranda();
+    await screen.findByText("kiriman 20");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Hapus" })[19]!);
+
+    // PRESENCE control: the panel is on screen at all, and announces itself.
+    // `alertdialog` is the role `MembersPage`'s own two confirmation panels
+    // already use — a screen reader announces it on arrival, which `group`
+    // (what this was) does not.
+    const panel = screen.getByRole("alertdialog", { name: "Konfirmasi hapus" });
+    expect(panel.textContent).toContain("Hapus kiriman ini?");
+
+    expect(scrolled.length).toBe(1);
+    expect(isNode(scrolled[0]!.element, panel, "the panel")).toBe("the panel");
+    expect(scrolled[0]!.options).toEqual({ block: "center" });
+    // Focus lands on the PANEL, never on "Ya, hapus" — a stray Enter must not
+    // delete a post.
+    expect(isNode(document.activeElement, panel, "the panel")).toBe("the panel");
+  });
+
+  it("tapping Edit on the LAST of twenty posts scrolls the composer into view and puts the caret in the box", async () => {
+    setUserSession("jwt-abc", USER);
+    mockFetch(() => jsonResponse({ posts: twentyPosts(), nextCursor: null }));
+
+    renderBeranda();
+    await screen.findByText("kiriman 20");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[19]!);
+
+    // PRESENCE control: the edit composer opened, pre-filled with THAT post.
+    const box = screen.getByLabelText("Apa yang terjadi?") as HTMLTextAreaElement;
+    expect(box.value).toBe("kiriman 20");
+
+    expect(scrolled.length).toBe(1);
+    // The composer's own `<form>` — asserted as the textarea's parent rather
+    // than with `element.contains(box)`, which this happy-dom version answers
+    // `false` for even a direct child (measured while writing this test).
+    expect(isNode(scrolled[0]!.element, box.parentElement, "the composer form")).toBe(
+      "the composer form"
+    );
+    expect(scrolled[0]!.options).toEqual({ block: "center" });
+    expect(isNode(document.activeElement, box, "the textarea")).toBe("the textarea");
+  });
+
+  it("re-opens for a DIFFERENT post: the panel scrolls and refocuses again", async () => {
+    setUserSession("jwt-abc", USER);
+    mockFetch(() => jsonResponse({ posts: twentyPosts(), nextCursor: null }));
+
+    renderBeranda();
+    await screen.findByText("kiriman 20");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Hapus" })[19]!);
+    const panel = screen.getByRole("alertdialog", { name: "Konfirmasi hapus" });
+    // Focus somewhere else, exactly as a reader scrolling away would.
+    (screen.getAllByRole("button", { name: "Hapus" })[0] as HTMLButtonElement).focus();
+    expect(isNode(document.activeElement, panel, "the panel")).toBe("NOT the panel");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Hapus" })[0]!);
+
+    // Same panel element (it never unmounted), revealed a second time for the
+    // new post — the effect is keyed on the post's id, not on mounting.
+    expect(scrolled.length).toBe(2);
+    expect(
+      isNode(
+        document.activeElement,
+        screen.getByRole("alertdialog", { name: "Konfirmasi hapus" }),
+        "the panel"
+      )
+    ).toBe("the panel");
+  });
+});

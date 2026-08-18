@@ -2,21 +2,16 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import { Link, useSearchParams } from "react-router-dom";
 import PostFeed, { type PostFeedHandle } from "./PostFeed";
 import PostComposer from "./PostComposer";
+import { DeleteConfirm, EditComposer, usePostOwnerActions } from "./postOwnerActions";
 import {
   createPost,
-  deletePost,
-  editPost,
   getSessionUser,
   isUserSignedIn,
   listFeed,
   subscribeToUserAuth,
 } from "./apiClient";
-import { describeRequestFailure } from "./errorCopy";
-import type { PostView } from "./apiClient";
 
 type Tab = "untuk-anda" | "mengikuti";
-
-const DELETE_FAILED_PREFIX = "Gagal menghapus kiriman.";
 
 /**
  * `/beranda` — the two-tab member feed (design spec §2), plus composing,
@@ -61,12 +56,24 @@ export default function BerandaPage() {
   const ownHandle = getSessionUser()?.handle ?? null;
 
   const feed = useRef<PostFeedHandle>(null);
-  /** The post being edited, or `null` when composing a new one. Never a boolean plus an id — the composer needs the body to pre-fill. */
-  const [editing, setEditing] = useState<PostView | null>(null);
-  /** The id awaiting confirmation. `null` means nothing is being deleted; there is no separate "confirming" flag to drift out of step with it. */
-  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
+  /**
+   * Edit and delete, shared verbatim with `ProfilePage` — see
+   * `usePostOwnerActions`, which also owns the per-tab reset of all four
+   * pieces of its state. Keyed on `tab` here: a tab change replaces the whole
+   * list, so nothing about a row in the old one may survive it.
+   */
+  const {
+    editing,
+    pendingDelete,
+    deleting,
+    deleteError,
+    onEdit,
+    onDeleteRequested,
+    confirmDelete,
+    cancelDelete,
+    cancelEdit,
+    saveEdit,
+  } = usePostOwnerActions(feed, tab);
   /** Set by a successful create made from Mengikuti, which cannot show it. Cleared by the tab-change effect below — see there for why this is not derived from `tab`. */
   const [postSent, setPostSent] = useState(false);
 
@@ -78,7 +85,9 @@ export default function BerandaPage() {
   /**
    * **Everything transient is about a row in the list the CURRENT tab is
    * showing, and a tab change replaces that list wholesale.** So all of it is
-   * dropped here (fix round 1).
+   * dropped here (fix round 1). The edit/delete half of it lives in
+   * `usePostOwnerActions`, keyed on the same `tab`; this notice is Beranda's
+   * alone, so it is reset here.
    *
    * This used to be a `sentFrom: Tab | null` compared against `tab` during
    * render, which HID the notice on the other tab without ever CLEARING it —
@@ -96,9 +105,6 @@ export default function BerandaPage() {
    * no extra render.
    */
   useEffect(() => {
-    setEditing(null);
-    setPendingDelete(null);
-    setDeleteError(null);
     setPostSent(false);
   }, [tab]);
 
@@ -118,36 +124,6 @@ export default function BerandaPage() {
     // tab. It was removable with the whole suite green, which made it a third
     // state nothing owned rather than a safety net.
     feed.current?.prepend(created);
-  }
-
-  async function handleSaveEdit(body: string): Promise<void> {
-    const target = editing;
-    if (target === null) return;
-    // Deliberately NOT wrapped in try/catch: a rejection has to reach
-    // `PostComposer`, which is what keeps the author's text and shows the
-    // error. Swallowing it here would clear the box on a failed save.
-    const updated = await editPost(target.id, body);
-    feed.current?.replace(updated);
-    setEditing(null);
-  }
-
-  async function confirmDelete(): Promise<void> {
-    const id = pendingDelete;
-    if (id === null) return;
-    setDeleting(true);
-    setDeleteError(null);
-    try {
-      await deletePost(id);
-      feed.current?.remove(id);
-      setPendingDelete(null);
-      // Editing the post you just deleted would leave a composer saving into a
-      // 404.
-      if (editing?.id === id) setEditing(null);
-    } catch (err: unknown) {
-      setDeleteError(`${DELETE_FAILED_PREFIX} ${describeRequestFailure(err)}`);
-    } finally {
-      setDeleting(false);
-    }
   }
 
   return (
@@ -171,14 +147,9 @@ export default function BerandaPage() {
         // Keyed, so switching between composing and editing — and between two
         // different posts — resets the box rather than carrying the previous
         // text over. `initialBody` alone would not: it only seeds `useState`.
+        // The edit half of that keying lives in `EditComposer`.
         editing !== null ? (
-          <PostComposer
-            key={editing.id}
-            initialBody={editing.body}
-            submitLabel="Simpan"
-            onSubmit={handleSaveEdit}
-            onCancel={() => setEditing(null)}
-          />
+          <EditComposer post={editing} onSubmit={saveEdit} onCancel={cancelEdit} />
         ) : (
           <PostComposer key="baru" submitLabel="Kirim" onSubmit={handleCreate} />
         )
@@ -191,18 +162,12 @@ export default function BerandaPage() {
       ) : null}
 
       {pendingDelete !== null ? (
-        <div className="delete-confirm" role="group" aria-label="Konfirmasi hapus">
-          <p>Hapus kiriman ini?</p>
-          {/* "Tidak jadi" rather than "Batal", which the edit composer above
-              already uses — two buttons with one name is an ambiguity a user
-              and a test both have to resolve by position. */}
-          <button type="button" className="button-primary" disabled={deleting} onClick={() => void confirmDelete()}>
-            Ya, hapus
-          </button>
-          <button type="button" className="button-quiet" disabled={deleting} onClick={() => setPendingDelete(null)}>
-            Tidak jadi
-          </button>
-        </div>
+        <DeleteConfirm
+          postId={pendingDelete}
+          deleting={deleting}
+          onConfirm={() => void confirmDelete()}
+          onCancel={cancelDelete}
+        />
       ) : null}
 
       {deleteError !== null ? (
@@ -220,23 +185,8 @@ export default function BerandaPage() {
           ref={feed}
           load={load}
           ownHandle={ownHandle}
-          onEdit={(post) => {
-            // Fix round 1: opening Edit for one post must close a delete
-            // confirmation for another (or the same) post, or both panels
-            // can render at once.
-            setDeleteError(null);
-            setPendingDelete(null);
-            setEditing(post);
-          }}
-          onDeleteRequested={(id) => {
-            // `PostCard` raises this on the TAP, not after a delete — nothing
-            // has been removed yet. Confirmation happens here.
-            // Symmetric with `onEdit` above (fix round 1) — requesting a
-            // delete must close an open edit composer.
-            setDeleteError(null);
-            setEditing(null);
-            setPendingDelete(id);
-          }}
+          onEdit={onEdit}
+          onDeleteRequested={onDeleteRequested}
           emptyMessage={
             tab === "mengikuti"
               ? "Belum ada kiriman dari orang yang Anda ikuti."
