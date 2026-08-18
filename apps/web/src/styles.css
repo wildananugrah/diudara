@@ -1312,6 +1312,14 @@ tbody tr:last-child td {
   display: none;
 }
 
+/* One sentence about what the last pick could not take. Red like every other
+   failure line in this app, and below the button that produced it. */
+.media-strip-notice {
+  color: var(--red);
+  font-size: 0.8125rem;
+  margin: 8px 0 0;
+}
+
 .media-strip-counter {
   color: var(--ink-faint);
   font-size: 0.8125rem;

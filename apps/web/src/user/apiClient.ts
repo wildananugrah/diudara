@@ -660,6 +660,26 @@ export function uploadMedia(file: File): Promise<MediaView> {
   return apiFetch<MediaView>("/users/media", { method: "POST", body: form });
 }
 
+/**
+ * **The biggest photo the API will accept, mirrored here so a file that cannot
+ * possibly succeed is refused before it is uploaded.**
+ *
+ * Fix round 1, Important 1. This is the same 10 MB as `MAX_UPLOAD_BYTES` in
+ * `apps/api/src/domain/image.ts`, copied rather than shared for the same reason
+ * every other value in this file is (see the module docstring): the web is a
+ * static build with no access to the API's modules. Unlike the image LIMIT
+ * above, this one is not env-driven — it is a compile-time constant on both
+ * sides — so the two can only drift by somebody editing one and not the other.
+ *
+ * **The server remains the authority.** `UploadMedia` checks the byte length
+ * itself before sharp ever sees the bytes; this copy only saves a person on a
+ * phone connection from spending a 12 MB upload to be told no. If it ever drifts
+ * LOW, the cost is refusing a file the server would have taken, in Bahasa, with
+ * the limit named — which is why the check lives beside the picker and not
+ * anywhere a request could already be in flight.
+ */
+export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
 /** `GET /users/limits`'s response shape — one number today (spec §6). */
 export interface PostLimits {
   maxPostImages: number;
@@ -865,4 +885,3 @@ export function editPost(id: string, body: string, mediaIds?: string[]): Promise
 export function deletePost(id: string): Promise<void> {
   return apiFetch<void>(`/users/posts/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
-

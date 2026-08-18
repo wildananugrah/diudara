@@ -446,8 +446,22 @@ async function setLimitTo(max: number): Promise<void> {
   global.fetch = before;
 }
 
-function jpeg(name: string): File {
-  return new File([new Uint8Array([1, 2, 3])], name, { type: "image/jpeg" });
+function jpeg(name: string, bytes = 3): File {
+  return new File([new Uint8Array(bytes)], name, { type: "image/jpeg" });
+}
+
+/** Just over the API's own `MAX_UPLOAD_BYTES`, written as the LITERAL 10 MB. */
+function tooBigJpeg(name: string): File {
+  return jpeg(name, 10 * 1024 * 1024 + 1);
+}
+
+/** Chooses arbitrary `File`s in the picker, for the cases `choose(...names)` cannot build. */
+function chooseFiles(...files: File[]): void {
+  fireEvent.change(screen.getByTestId("media-picker"), { target: { files } });
+}
+
+function notices(): (string | null)[] {
+  return screen.queryAllByRole("alert").map((node) => node.textContent);
 }
 
 /** Chooses files in the strip's picker, as tapping "Tambah foto" and picking would. */
@@ -738,18 +752,28 @@ describe("PostComposer — a failed upload", () => {
     expect(onSubmit).toHaveBeenCalledWith("halo", ["media-1"]);
   });
 
-  it("never shows the server's own error text on a failed upload", async () => {
-    mockFetch(() => jsonResponse({ error: "unsupported image format" }, 400));
+  /**
+   * Fix round 1, Important 1. A 400 from the upload route means the bytes are
+   * not a supported image — the size case never gets this far, being refused
+   * locally — so the person is told WHICH thing to change, and HEIC is named
+   * because it is what an iPhone hands over by default. "Coba lagi" alone sent
+   * them round a loop that retrying cannot break.
+   */
+  it("says what is actually wrong on a format refusal, and never the server's own text", async () => {
+    mockFetch(() => jsonResponse({ error: "Format foto tidak didukung. Gunakan JPG, PNG, atau WebP." }, 400));
     renderComposer();
 
-    choose("foto.txt");
+    choose("foto.heic");
 
     await waitFor(() => {
       expect(screen.getByRole("alert").textContent).toBe(
-        "Foto gagal diunggah. Permintaan tidak dapat diproses. Coba lagi."
+        "Foto gagal diunggah. Format ini tidak didukung. Gunakan JPG, PNG, atau WebP — foto iPhone (HEIC) belum didukung."
       );
     });
-    expect(screen.queryAllByText(/unsupported image format/).length).toBe(0);
+    // The API answers Bahasa here, which makes it the easiest place to justify
+    // rendering `err.message`. The rule is that a screen never prints the wire's
+    // sentence, whatever language it is in.
+    expect(screen.queryAllByText(/Format foto tidak didukung/).length).toBe(0);
   });
 });
 
@@ -1091,5 +1115,177 @@ describe("PostComposer — local previews are freed", () => {
 
     expect(seen.created.length).toBe(1);
     expect(seen.revoked).toEqual(seen.created);
+  });
+});
+
+/**
+ * Fix round 1, Important 1 and 2. Two failures that happen before any request:
+ * a photo bigger than the API will accept, and a pick with more photos than
+ * there is room for. Both used to be reported through AMBIENT state — the
+ * counter and a disabled button — which can say "no more fit" but can never say
+ * "I dropped three of the eight you just chose", nor why.
+ */
+describe("PostComposer — files refused before any request", () => {
+  it("refuses a photo over the size limit WITHOUT a request, and says the limit — LITERAL 10 MB", async () => {
+    const calls = mockSuccessfulUploads();
+    renderComposer();
+
+    chooseFiles(tooBigJpeg("besar.jpg"));
+    await settle();
+
+    // Not one byte left the phone: a 10 MB round trip to be told no is the
+    // thing this check exists to avoid.
+    expect(calls.length).toBe(0);
+    expect(previewSources().length).toBe(0);
+    expect(notices()).toEqual(["1 foto tidak ditambahkan — ukuran foto maksimal 10 MB."]);
+  });
+
+  it("keeps the photos that DO fit when one in the same pick is too big", async () => {
+    const calls = mockSuccessfulUploads();
+    renderComposer();
+
+    chooseFiles(jpeg("kecil.jpg"), tooBigJpeg("besar.jpg"));
+    await uploadsSettled();
+
+    expect(calls.map((call) => call.url)).toEqual(["/users/media"]);
+    expect(previewSources().length).toBe(1);
+    expect(notices()).toEqual(["1 foto tidak ditambahkan — ukuran foto maksimal 10 MB."]);
+  });
+
+  it("says how many photos the LIMIT dropped, not just that the strip is full", async () => {
+    await setLimitTo(2);
+    mockSuccessfulUploads();
+    renderComposer();
+
+    choose("satu.jpg", "dua.jpg", "tiga.jpg", "empat.jpg");
+    await uploadsSettled();
+
+    expect(notices()).toEqual(["2 foto tidak ditambahkan — maksimal 2 foto per kiriman."]);
+    expect(screen.getByText("2/2 foto")).toBeTruthy();
+  });
+
+  it("reports both reasons when one pick hits both", async () => {
+    await setLimitTo(1);
+    mockSuccessfulUploads();
+    renderComposer();
+
+    chooseFiles(jpeg("satu.jpg"), jpeg("dua.jpg"), tooBigJpeg("besar.jpg"));
+    await uploadsSettled();
+
+    expect(notices()).toEqual([
+      "1 foto tidak ditambahkan — ukuran foto maksimal 10 MB. 1 foto tidak ditambahkan — maksimal 1 foto per kiriman.",
+    ]);
+  });
+
+  it("says nothing when every chosen photo was taken", async () => {
+    mockSuccessfulUploads();
+    renderComposer();
+
+    choose("satu.jpg", "dua.jpg");
+    await uploadsSettled();
+
+    expect(notices()).toEqual([]);
+  });
+
+  it("drops a stale notice once the next pick is clean", async () => {
+    await setLimitTo(2);
+    mockSuccessfulUploads();
+    renderComposer();
+
+    choose("satu.jpg", "dua.jpg", "tiga.jpg");
+    await uploadsSettled();
+    expect(notices().length).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus foto 1" }));
+    choose("empat.jpg");
+    await uploadsSettled();
+
+    // The sentence counted photos dropped from a pick that is now history, and
+    // there is room again — repeating it would be a lie about this pick.
+    expect(notices()).toEqual([]);
+  });
+
+  it("drops the notice when a removal makes room, before anything else is picked", async () => {
+    await setLimitTo(1);
+    mockSuccessfulUploads();
+    renderComposer();
+
+    choose("satu.jpg", "dua.jpg");
+    await uploadsSettled();
+    expect(notices().length).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus foto 1" }));
+
+    expect(notices()).toEqual([]);
+  });
+});
+
+describe("PostComposer — the strip while the post is being sent", () => {
+  /**
+   * Fix round 1, Minor 4: `busy={submitting}` was unpinned — mutating it to
+   * `busy={false}` left the whole suite green. The list of ids in flight must
+   * not change under the request that is sending it.
+   */
+  it("freezes the strip while the send is in flight, and frees it again after", async () => {
+    mockSuccessfulUploads();
+    let release: (() => void) | null = null;
+    const onSubmit = mock(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    renderComposer({ onSubmit });
+
+    choose("satu.jpg");
+    await uploadsSettled();
+    type("halo");
+    fireEvent.click(submitButton());
+
+    expect(addButton().disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Hapus foto 1" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+
+    await act(async () => {
+      release!();
+    });
+
+    // Sent: the strip is empty, and adding is possible again.
+    await waitFor(() => {
+      expect(textarea().value).toBe("");
+    });
+    expect(addButton().disabled).toBe(false);
+  });
+
+  it("freezes a failed image's retry too, so the list cannot change mid-send", async () => {
+    let attempt = 0;
+    mockFetch(() => {
+      attempt += 1;
+      return attempt === 1
+        ? jsonResponse({ id: "media-1", width: 800, height: 600 }, 201)
+        : jsonResponse({ error: "internal server error" }, 500);
+    });
+    let release: (() => void) | null = null;
+    const onSubmit = mock(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    renderComposer({ onSubmit });
+
+    choose("satu.jpg", "dua.jpg");
+    await uploadsSettled();
+    type("halo");
+    fireEvent.click(submitButton());
+
+    expect(
+      (screen.getByRole("button", { name: "Coba lagi unggah foto 2" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+
+    await act(async () => {
+      release!();
+    });
   });
 });

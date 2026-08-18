@@ -65,3 +65,47 @@ export function describeRequestFailure(err: unknown): string {
   // trying again.
   return "Permintaan tidak dapat diproses. Coba lagi.";
 }
+
+/**
+ * **A failed PHOTO UPLOAD, which needs one distinction the general sentence
+ * cannot make.**
+ *
+ * Fix round 1, Important 1. `describeRequestFailure` answers every 4xx with
+ * "Permintaan tidak dapat diproses. Coba lagi." — deliberately vague, and right
+ * for the routes it was written for. It is wrong here, because the two upload
+ * failures an Indonesian phone actually produces are both plain 400s and
+ * NEITHER can be fixed by trying again:
+ *
+ * | failure | what the person must do |
+ * |---|---|
+ * | over the size limit | pick a smaller photo — refused LOCALLY now, before any request |
+ * | **HEIC** (every iPhone's default) | export or re-save as JPG |
+ *
+ * Telling somebody with an iPhone photo to "coba lagi" sends them round a loop
+ * that cannot terminate, and spec §9 already names HEIC as the first thing this
+ * phase will have to revisit — an undiagnosable failure is the worst possible
+ * state for it to be in when that happens.
+ *
+ * **The sentence is still chosen by the SHAPE of the failure and authored
+ * here.** The shape is "a 400 from `POST /users/media`": that route's only
+ * other 400s are a missing file (`uploadMedia` always sends one) and the size
+ * limit (`PostComposer` refuses those locally against the same
+ * `MAX_UPLOAD_BYTES` the API enforces), so what is left is bytes that are not a
+ * supported image. Nothing is read off `err.message` — see
+ * `src/test/no-raw-server-errors.test.ts`, and note that the API's own sentence
+ * here is BAHASA, which makes this the easiest place in the codebase to justify
+ * printing the wire's text. The rule is not "English is banned"; it is that a
+ * screen never prints what the wire sent.
+ *
+ * Every other shape — 401, 429, 5xx, a dropped connection — is delegated
+ * unchanged, because for those "coba lagi" is genuinely the right advice.
+ */
+export function describeUploadFailure(err: unknown): string {
+  if (err instanceof UserApiError && err.status === 400) {
+    // Names the formats that DO work rather than only the one that does not:
+    // mirrors the API's own reasoning in `domain/image.ts`, whose message says
+    // "Gunakan JPG, PNG, atau WebP" for the same reason.
+    return "Format ini tidak didukung. Gunakan JPG, PNG, atau WebP — foto iPhone (HEIC) belum didukung.";
+  }
+  return describeRequestFailure(err);
+}

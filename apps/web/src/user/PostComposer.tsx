@@ -8,10 +8,11 @@ import {
   type Ref,
 } from "react";
 import { MAX_POST_BODY_LENGTH } from "@diudara/shared";
-import { describeRequestFailure } from "./errorCopy";
+import { describeRequestFailure, describeUploadFailure } from "./errorCopy";
 import MediaStrip, { type MediaStripItem } from "./MediaStrip";
 import {
   getMaxPostImages,
+  MAX_UPLOAD_BYTES,
   mediaThumbUrl,
   subscribeToPostImageLimit,
   uploadMedia,
@@ -84,6 +85,21 @@ const SUBMIT_FAILED_PREFIX = "Kiriman gagal disimpan.";
 const UPLOAD_FAILED_PREFIX = "Foto gagal diunggah.";
 
 /**
+ * How many photos were dropped, and why — one Bahasa sentence per reason.
+ *
+ * Both reasons count PHOTOS rather than describing the rule, because that is
+ * the part ambient state cannot convey: "5/5 foto" says the strip is full and
+ * says nothing about the three that were just discarded. Indonesian does not
+ * inflect for plural, so one sentence shape serves any count.
+ */
+function droppedNotice(count: number, reason: string): string {
+  return `${count} foto tidak ditambahkan — ${reason}.`;
+}
+
+/** The size limit as a whole number of MB, derived so the copy cannot drift from the constant. */
+const MAX_UPLOAD_MB = MAX_UPLOAD_BYTES / (1024 * 1024);
+
+/**
  * One image in this composer: everything `MediaStrip` renders, plus the two
  * things only the composer needs.
  *
@@ -151,6 +167,12 @@ export default function PostComposer({
   // A lazy initialiser, so the seed is built once rather than on every render
   // — and so a later `initialMedia` identity change cannot reach this state.
   const [images, setImages] = useState<ComposerImage[]>(() => seedImages(initialMedia ?? []));
+  /**
+   * What the LAST pick could not take (fix round 1, Important 2). Recomputed by
+   * every pick and cleared by anything that makes it stale — see `attachFiles`
+   * and `removeImage`.
+   */
+  const [notice, setNotice] = useState<string | null>(null);
 
   /**
    * The advisory cap, learned once at boot by `App` and read here as a store so
@@ -229,7 +251,7 @@ export default function PostComposer({
                 ...image,
                 status: "failed",
                 mediaId: null,
-                error: `${UPLOAD_FAILED_PREFIX} ${describeRequestFailure(err)}`,
+                error: `${UPLOAD_FAILED_PREFIX} ${describeUploadFailure(err)}`,
               }
             : image
         )
@@ -250,9 +272,26 @@ export default function PostComposer({
    * runs twice under StrictMode, which would double every upload.
    */
   function attachFiles(files: File[]): void {
-    const room = maxImages - images.length;
-    if (room <= 0) return;
-    const added: ComposerImage[] = files.slice(0, room).map((file) => ({
+    const room = Math.max(0, maxImages - images.length);
+    // Order matters: a file that is too big is not "one that did not fit", so
+    // it is counted against its own reason first and never occupies a slot.
+    const smallEnough = files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+    const oversized = files.length - smallEnough.length;
+    const overLimitCount = Math.max(0, smallEnough.length - room);
+
+    const sentences: string[] = [];
+    if (oversized > 0) {
+      sentences.push(droppedNotice(oversized, `ukuran foto maksimal ${MAX_UPLOAD_MB} MB`));
+    }
+    if (overLimitCount > 0) {
+      sentences.push(droppedNotice(overLimitCount, `maksimal ${maxImages} foto per kiriman`));
+    }
+    // Always written, never only when non-empty: a clean pick must clear what
+    // the previous one said, or a stale count sits there describing photos the
+    // person has since dealt with.
+    setNotice(sentences.length > 0 ? sentences.join(" ") : null);
+
+    const added: ComposerImage[] = smallEnough.slice(0, room).map((file) => ({
       key: crypto.randomUUID(),
       status: "uploading",
       previewUrl: previewFor(file),
@@ -272,6 +311,9 @@ export default function PostComposer({
     const target = images.find((image) => image.key === key);
     if (target !== undefined) releasePreview(target);
     setImages((current) => current.filter((image) => image.key !== key));
+    // The notice counts photos a PAST pick could not take. Removing one makes
+    // room, so repeating it would misdescribe what can be added now.
+    setNotice(null);
   }
 
   /** Re-sends the SAME file, on the same row, clearing that row's failure. */
@@ -327,6 +369,7 @@ export default function PostComposer({
       setBody("");
       for (const image of images) releasePreview(image);
       setImages([]);
+      setNotice(null);
     } catch (err: unknown) {
       setError(`${SUBMIT_FAILED_PREFIX} ${describeRequestFailure(err)}`);
     } finally {
@@ -342,6 +385,7 @@ export default function PostComposer({
         items={images}
         max={maxImages}
         busy={submitting}
+        notice={notice}
         onAdd={attachFiles}
         onRemove={removeImage}
         onRetry={retryImage}

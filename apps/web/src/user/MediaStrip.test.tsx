@@ -32,6 +32,7 @@ function renderStrip(props: Partial<MediaStripProps> = {}) {
       items={props.items ?? []}
       max={props.max ?? 5}
       busy={props.busy ?? false}
+      notice={props.notice ?? null}
       onAdd={onAdd}
       onRemove={onRemove}
       onRetry={onRetry}
@@ -261,5 +262,46 @@ describe("MediaStrip — while the post itself is being sent", () => {
     expect(
       (screen.getByRole("button", { name: "Coba lagi unggah foto 2" }) as HTMLButtonElement).disabled
     ).toBe(true);
+  });
+});
+
+/**
+ * Fix round 1, Important 2. The clamp on a multi-pick reports an EVENT — "I
+ * dropped three of the eight you just chose" — and it used to report it through
+ * AMBIENT state: "5/5 foto" and a disabled button, which say only that no more
+ * can be added and cannot say how many were lost. The composer decides the
+ * sentence; this component gives it somewhere to appear.
+ */
+describe("MediaStrip — the notice", () => {
+  it("shows the composer's sentence in an alert region", () => {
+    renderStrip({ notice: "3 foto tidak ditambahkan — maksimal 5 foto per kiriman." });
+
+    expect(screen.getAllByRole("alert").length).toBe(1);
+    expect(screen.getByRole("alert").textContent).toBe(
+      "3 foto tidak ditambahkan — maksimal 5 foto per kiriman."
+    );
+  });
+
+  it("renders no element at all when there is nothing to say", () => {
+    renderStrip({ items: [item()] });
+
+    expect(screen.queryAllByRole("alert").length).toBe(0);
+  });
+
+  it("keeps a per-image failure and the notice apart — two different alerts", () => {
+    renderStrip({
+      items: [item({ key: "k1", status: "failed", error: "Foto gagal diunggah." })],
+      notice: "1 foto tidak ditambahkan — ukuran foto maksimal 10 MB.",
+    });
+
+    expect(
+      screen
+        .getAllByRole("alert")
+        .map((node) => node.textContent)
+        .sort()
+    ).toEqual([
+      "1 foto tidak ditambahkan — ukuran foto maksimal 10 MB.",
+      "Foto gagal diunggah.",
+    ]);
   });
 });

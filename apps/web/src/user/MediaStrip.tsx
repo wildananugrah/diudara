@@ -34,6 +34,17 @@ export interface MediaStripProps {
   max: number;
   /** True while the POST/PATCH itself is in flight: the list being sent must not change under it. */
   busy: boolean;
+  /**
+   * One Bahasa sentence about the LAST pick — how many photos were not added,
+   * and why — or `null` when there is nothing to say.
+   *
+   * Fix round 1, Important 2. The composer drops files it cannot take (over the
+   * size limit, or past the image limit), and that is an EVENT: "I dropped three
+   * of the eight you just chose." The counter and a disabled "Tambah foto" are
+   * AMBIENT state — they can say no more fit, they can never say how many were
+   * lost or why. This is where the composer says it.
+   */
+  notice: string | null;
   onAdd: (files: File[]) => void;
   onRemove: (key: string) => void;
   onRetry: (key: string) => void;
@@ -59,6 +70,7 @@ export default function MediaStrip({
   items,
   max,
   busy,
+  notice,
   onAdd,
   onRemove,
   onRetry,
@@ -179,6 +191,16 @@ export default function MediaStrip({
             counter in `PostComposer`. */}
         <span className="media-strip-counter">{`${items.length}/${max} foto`}</span>
       </div>
+
+      {/* Below the button that produced it, and `role="alert"` like every other
+          failure sentence under src/user — a person who just tapped "Tambah
+          foto" and got fewer photos than they picked has to be TOLD, not left
+          to infer it from a counter. */}
+      {notice !== null ? (
+        <p className="media-strip-notice" role="alert">
+          {notice}
+        </p>
+      ) : null}
     </div>
   );
 }
