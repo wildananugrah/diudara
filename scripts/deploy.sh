@@ -41,6 +41,21 @@ git pull --ff-only origin main
 echo "==> bun install"
 bun install
 
+# sharp (apps/api/src/domain/image.ts) is this project's only native
+# dependency — everything else here is pure TypeScript. `bun install` above
+# can succeed while the prebuilt binary it downloaded still doesn't load on
+# THIS box (wrong libc, missing shared lib, architecture mismatch — see
+# sharp's own install docs). Left unchecked, that failure surfaces the moment
+# a real person uploads their first photo, as an opaque 500 nobody on this
+# box is watching for. Catching it here, synchronously, in the one place an
+# operator running a real redeploy IS watching — same reasoning as the
+# postgres and api health polls below.
+echo "==> verifying sharp (the only native dependency)"
+if ! (cd apps/api && bun -e 'import("sharp").then(s => s.default.versions)') >/dev/null 2>&1; then
+  echo "sharp failed to load — images cannot be processed on this box. Deploy stopped." >&2
+  exit 1
+fi
+
 echo "==> postgres up"
 docker compose -f infra/docker-compose.yml up -d
 echo -n "waiting for postgres to be healthy"
