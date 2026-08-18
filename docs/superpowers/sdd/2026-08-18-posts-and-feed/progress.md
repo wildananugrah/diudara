@@ -486,10 +486,121 @@ the profile header's `0 Mengikuti` count link and reported the bug as still live
 A probe printing every matching element settled it in one run. **When an assertion about absence
 fails, print what actually matched before believing it.**
 
+## The whole-branch review — run, then LOST, then reconstructed
+
+**Read this section knowing what it is.** The review ran in a session that died before it wrote a
+report, and its scratchpad went with it. Its fixes survived only as uncommitted working-tree changes.
+Everything below about *what it found* is reconstructed from the code comments those changes carry,
+which are detailed and name each finding; nothing here is a fresh judgement about severity, and there
+is no reviewer's transcript to appeal to. **What is first-hand is the verification** — every test
+result, measurement and defect in "found while verifying" below was produced in the resuming session.
+
+Four findings, all fixed in `67a1786`:
+
+- **C1 — `PostFeed` had no request cancellation.** `fetchPage` carried no token and its effect no
+  cleanup, so a changed `load` identity (a Beranda tab switch, a link from one profile to another)
+  left the PREVIOUS request's setters landing. A first page is fetched with `before === null`, whose
+  setter REPLACES rather than appends, so the old feed overwrote the new: tapping Mengikuti while
+  Untuk Anda was still loading left Mengikuti selected and showing the viewer's own post — a row the
+  `follow_no_self` CHECK makes impossible on that tab. Stale cursor and stale load-more append are
+  the same bug's other two faces. Four tests.
+- **I1 — the error lifecycle was unpinned.** A failed first page must show the error and NOT the
+  empty message; a later success must clear the banner rather than carry it across a tab or profile.
+- **I2 — the panel and the composer did not bring themselves into view.** Both render ABOVE the feed,
+  so with 20 posts loaded, tapping Hapus on the 20th inserted the panel ~20 rows above the viewport
+  with `document.activeElement` still on `body`. On a 390px phone that is four to six cards per
+  screen: **from about the sixth post down, tapping Hapus or Edit appeared to do nothing.** The panel
+  also gains `role="alertdialog"`, the role `MembersPage`'s panels already use.
+- **The deferred Task 6 ruling, now taken.** `usePostOwnerActions`, `DeleteConfirm` and
+  `EditComposer` (`postOwnerActions.tsx`) hold the edit/delete flow once for both pages. The
+  duplication had already cost a real defect inside this one phase.
+
+**Why I2 survived a 59-check browser gate, and this generalises.** happy-dom has no layout, so it
+cannot see a scroll. Playwright's `.click()` **auto-scrolls the target into view before clicking** —
+so the gate silently supplied the very behaviour the product was missing. *A driver that fixes up the
+environment before acting cannot test whether the environment needed fixing up.*
+
+### Found while verifying — two defects, one of them in the tooling
+
+**1. `DeleteConfirm` was missing the `scrollIntoView` half of its own I2 fix.** `EditComposer` had it;
+the delete panel had only `focus()`, while its docstring described a scroll it did not perform. The
+session died mid-edit. Caught because the test asserting it failed.
+
+**2. A failing bun:test assertion holding a happy-dom node OOM-kills the machine.** Building the diff
+serialises the element's whole object graph. Measured on bun 1.3.14:
+
+```
+failing toEqual vs a BARE detached <div>      →   848 KB message
+failing toBe    vs a BARE detached <div>      →     2 MB message
+failing toEqual vs a node attached to a 20-post document
+                                              →   does not terminate
+                                                  ~80 MB/s until the OOM killer fires
+```
+
+`bun test` for `apps/web` died at **exit 137 with no failure reported**. On this machine — 7.8 GB,
+**zero swap** — it took the machine with it, which is what ended the review session in the first
+place. **Passing assertions never serialise**, so a green suite hides this completely; it detonates
+the first time any DOM-node assertion goes red.
+
+The I2 tests now compare identity through `isNode(actual, expected, "the panel")`, which returns a
+short STRING, so a regression prints `"NOT the panel" !== "the panel"`. **The rule for this
+workspace: never put a DOM node on either side of an assertion that can fail.**
+
+Three habits from that hunt, all cheap and all repeatable:
+
+- **`ulimit -v` is the wrong instrument for a suspected OOM.** JSC reserves a large virtual address
+  space, so a `-v` cap produces a spurious `MemoryExhaustion` crash in runs that are perfectly
+  healthy — it made a passing probe look like the failing one. Watch RSS with a watchdog instead, and
+  the watchdog also keeps the machine safe while reproducing.
+- **`console.log` is lost when the process is killed** — bun buffers per test. `appendFileSync`
+  breadcrumbs to a file survive, and they are what showed the test body running to completion with
+  the explosion happening in the *assertion*, not in the render.
+- **Bisect the assertion, not just the test.** A bare `document.createElement("div")` reproduced it
+  in a three-line file with no React, which is what turned "our component loops" into "the runner
+  serialises DOM nodes".
+
+### State at close
+
+**2810 pass / 0 fail** — shared 82, worker 38, web 654, api 2036. Typecheck clean in all four
+workspaces. Commit `67a1786` on `main`.
+
+**The gate was NOT re-run against `67a1786`, and I did not run it.** Standing instruction from the
+project owner: the browser gate and anything that boots a dev server is theirs to run, because a
+runaway test run on this machine costs a server restart. What changed since the 59/59 run at
+`de84e4a` and therefore wants gating: feed request cancellation (switch Beranda tabs *mid-load* —
+that is C1), the delete panel scrolling and taking focus (tap Hapus on a post far down a 20-post feed
+at 390px), and both pages now sharing one hook.
+
+## Parked findings — at close of Phase 3
+
+- **Reserved handles — being done now**, as the next piece of work after this ledger entry. Exactly
+  five registerable collisions: `posts`, `feed`, `signup`, `login`, `explore`. `me`, `by-handle` and
+  `password-reset` are already impossible under `^[a-z0-9_]{3,30}$`. 0 rows in `app_user` and nothing
+  deployed, so there is nothing to grandfather.
+- **`ProfilePage.test.tsx` was never updated for I2.** The scroll/focus behaviour is covered only
+  through Beranda. Both pages render the same shared components so coverage is not zero, but the
+  profile path itself is unasserted. Cheapest real gap left in this phase.
+- The `no-raw-server-errors` guard still cannot see `(err as any)!.message`, `(<Error>err).message`
+  or `(err satisfies Error).message`. The C1-class widening keeps accreting.
+- Task 7's minor: `setBrowserPath`'s `afterEach` in `App.test.tsx` resets the shared happy-dom URL to
+  `/` rather than to the original `about:blank`, so coverage of the two `window.location.origin`
+  branches (`WatchPage.tsx:62`, `dashboard/format.ts:308`) is file-order-dependent. One line.
+- The dead `if (editing?.id === id) setEditing(null)` is **gone** — removed with the extraction, and
+  `postOwnerActions.tsx` records at the site why the guard is not needed rather than leaving a reader
+  to wonder.
+- Earlier parked items from Tasks 1-5 stand as recorded above.
+
 ## NEXT ACTION ON RESUME
 
-The whole-branch review — the last step. Run it on the most capable model available and point it at
-the parked-findings list above, including the sharpened reserved-handle decision.
+**Phase 3 is complete.** Tasks 1-8 and the whole-branch review are done, committed and verified.
+
+1. Reserved handles (in progress at the time of writing).
+2. The browser gate against `67a1786` — **the project owner's to run**, targeting the three changes
+   listed under "State at close".
+3. Then **Phase 4 — images**: upload, thumbnails, and delivery through an endpoint that can check
+   entitlement. It has **no spec and no plan yet**, so it starts with brainstorming, not code. Note
+   §5.1 of `docs/superpowers/specs/2026-08-17-member-ui-design.md` — media must never sit on a public
+   bucket URL, because Phase 6's paywall is built on top of whatever Phase 4 chooses.
 
 **Do not run `git worktree remove` before extracting this ledger's carry-forward.** Phase 2's entire
 record was destroyed that way.
