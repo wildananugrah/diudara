@@ -4,8 +4,9 @@ Phase 4 of the DIUDARA pivot. Parent specs: `2026-08-17-member-ui-design.md` (§
 `2026-08-18-posts-and-feed-design.md` (which deferred images here and left `PostCard` a media slot
 rather than a rewrite).
 
-**Status: awaiting review.** One decision inside is mine rather than the owner's and is marked
-**ASSUMED** in §3 — overrule it and §7 changes shape.
+**Status: awaiting review.** Every decision here is the owner's, including the one this spec
+originally assumed the other way — images are editable after posting, decided against a first draft
+that said they were not (§3).
 
 ---
 
@@ -43,13 +44,17 @@ Not re-opened here:
 | Images per post | **5, from `MAX_POST_IMAGES`** | Owner's call, made after the trade-off below was put to them. |
 | Limit configurability | **Runtime env var**, not a shared constant | Owner's call. `MAX_POST_BODY_LENGTH` stays a shared constant; the inconsistency is deliberate and §6 says how the web learns the value without a blocking fetch. |
 
-**ASSUMED, and the one thing most worth overruling: a post's images cannot be changed after it is
-posted.** Editing stays text-only, exactly as Phase 3 shipped it. Rationale: the edit composer would
-otherwise have to load existing media, remove individual images, add new ones, and reconcile
-`position` — the largest single piece of UI work in the phase, in a phase that is already building
-upload, storage, thumbnails and delivery from nothing. The cost to a person is that a wrong photo
-means delete and repost, while a typo stays fixable. If this is wrong, say so now: it changes §7 and
-adds a `PATCH` path to §5.
+**A post's images ARE editable after posting** — owner's decision, taken against a first draft of
+this spec that assumed the opposite. The draft's argument was cost: the edit composer has to load
+existing media, remove individual images, add new ones and reconcile `position`, which is the largest
+single piece of UI work in a phase that is already building upload, storage, thumbnails and delivery
+from nothing. That cost is real and is accepted, because the alternative is that a wrong photo can
+only be fixed by deleting the post and losing its replies, timestamp and any links to it, while a
+typo stays fixable — an asymmetry with no defence once you say it out loud.
+
+Three consequences, each handled where it lands: `PATCH` takes the full desired media list (§5.2),
+removed images are unclaimed rather than deleted (§8), and an image-only change still marks the post
+edited (§5.3).
 
 ## 4. The model
 
@@ -91,6 +96,8 @@ no bucket path is ever guessable from anything a browser has seen.
 unknown, belongs to someone else, is already claimed by another post, or when there are more than
 `MAX_POST_IMAGES` of them. `position` is the array's order.
 
+`PATCH /users/posts/:id` gains the same field — see §5.2.
+
 ### 5.1 Why delivery proxies rather than redirects
 
 The two `GET` routes read from the bucket and stream the bytes through the API. They do **not** 302
@@ -106,7 +113,34 @@ two handlers is a small change; Phase 6 rebuilding delivery is not.
 The cost is honest and should be stated: **every image view spends VPS bandwidth twice** — bucket to
 API, API to browser. §9 records what to do when that starts to hurt.
 
-### 5.2 `media` must be reserved
+### 5.2 Editing a post's images
+
+`PATCH /users/posts/:id` accepts `{ body, mediaIds }`, and **`mediaIds` is the complete desired list,
+not a delta.** The client sends the final state — the images that should be on the post when the
+request finishes, in the order they should appear. No add/remove/move verbs, so the same request
+applied twice leaves the same post, and there is no way for client and server to disagree about what
+"remove the second one" meant.
+
+The ownership rules shift by exactly one clause from `POST`. An id is accepted when it is unknown to
+no one, belongs to the editor, and is either unclaimed **or already claimed by this same post**. That
+last clause is what lets an image stay put across an edit; without it, every edit would reject its
+own existing images. An id claimed by a *different* post is still refused — otherwise editing a post
+could steal media out of another one, including someone else's.
+
+Reordering is free on the server: `position` is the array's order, so a reordered list is a valid
+edit. **Whether the composer offers drag-to-reorder is a separate question, and Phase 4 says no** —
+touch reordering on a 390px screen is its own piece of work. Adding and removing is enough to fix the
+mistake people actually make, and the API is already able to reorder when a later phase builds the
+interaction.
+
+### 5.3 An image-only change still counts as an edit
+
+Changing only the images sets `edited_at`, exactly as changing the text does, and `PostCard` shows
+its existing `· diedit`. What a reader saw is not what they would see now, and the marker exists to
+say so — attaching it to the text alone would let a post's content change silently, which is the
+thing the marker is for.
+
+### 5.4 `media` must be reserved
 
 `/users/media/...` adds a new literal segment under `/users`, and `media` satisfies
 `^[a-z0-9_]{3,30}$` — so it is registerable as a handle, and would shadow these routes.
@@ -144,13 +178,31 @@ the post is sent.
 - **Kirim stays disabled while any upload is still in flight** — the post cannot reference an id that
   does not exist yet.
 - A failed upload marks that one image, leaves the text alone, and offers a retry.
-- Per §3, there is no image editing in the edit composer. Editing a post edits its text.
+
+**The edit composer is the same strip, seeded with the post's existing images.** It loads them as
+thumbnails, each removable, and "Tambah foto" adds more up to the limit. Simpan sends the resulting
+list, and Batal discards the whole edit — including any image uploaded during it, which is then
+unclaimed and swept by §8 like any other abandoned upload.
+
+Per §5.2 there is no drag-to-reorder in this phase.
 
 ## 8. Lifecycle
 
 **Orphans.** Someone attaches a photo and abandons the post, and the row keeps `post_id = null`
 forever. `apps/worker` sweeps unclaimed media older than 24 hours, deleting the objects and then the
 row. The window is generous on purpose: a person may leave a composer open for an hour.
+
+**Removed by an edit.** An image dropped from a post by `PATCH` (§5.2) has its `post_id` set back to
+`null` — it is **unclaimed, not deleted**. It then becomes an ordinary orphan and the same sweep
+collects it, so removal has exactly one code path whether the person abandoned a composer or edited
+an image away.
+
+Two things follow that should not be mistaken for bugs. An image uploaded days ago and removed today
+is swept on the next run rather than after a fresh 24 hours, because the window is measured from
+`created_at` — correct, since nothing references it any more and no composer is waiting on it. And
+**removal is not undoable**: re-editing to bring an image back is not supported, because once swept
+the bytes are gone. Undo would need a deleted-at column and a restore path, and is deliberately not
+built.
 
 **Deletion.** Post deletion stays soft, and deleting a post **leaves its media rows and its objects
 untouched** — nothing is removed from the bucket. The post's row still exists and can still be read
@@ -203,6 +255,14 @@ particular ways:
 - **The delivery routes must be proven to proxy**, not redirect: assert a 200 with image bytes and a
   correct content type, and assert explicitly that no `Location` header and no bucket hostname ever
   appears in any response.
+- **Editing must be proven not to steal.** A `PATCH` naming media that belongs to another post — and
+  specifically to another *person's* post — is refused, while a `PATCH` naming the post's own
+  existing images succeeds. Those two live one clause apart in §5.2, so a mutation that widens the
+  ownership check has to redden a named test rather than pass quietly.
+- **Editing must be proven to unclaim.** Removing an image leaves its row with `post_id = null`
+  rather than deleting it, and the sweep is what collects it. Assert the intermediate state, not
+  just the absence from the post — a test that only checks the post no longer shows the image passes
+  equally well against an implementation that deletes the bytes immediately.
 
 ## 12. Honest limitations
 
@@ -211,6 +271,7 @@ particular ways:
 - No alt text. It is the cheapest accessibility win available in a later phase and is deliberately
   not smuggled into this one.
 - No cropping, rotation or filters.
-- Images are not editable after posting (§3).
+- Images are editable after posting (§5.2), but not reorderable in this phase and not restorable
+  once removed (§8).
 - Gating is Phase 6. Everything here is public; the design is what makes gating a change to two
   handlers rather than a rebuild.
