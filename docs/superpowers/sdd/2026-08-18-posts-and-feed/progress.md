@@ -401,16 +401,95 @@ What the gate proved that no unit test had:
   or `(err satisfies Error).message`. The C1-class widening keeps accreting.
 - Earlier parked items from Tasks 1-5 stand as recorded above.
 
+## Task 7 — repairing the split session
+
+- Implementer: `e2b3a44`. **2799 pass / 0 fail** (web 643). Typecheck clean. Report `61d4f21`.
+
+**The implementer disclosed TWO things, and both paid off.**
+
+1. **No red phase** for the implementation — it transcribed the brief's code before writing tests, then
+   recovered a red phase by reverting only the implementation files while keeping the tests. The
+   review reproduced that reconstruction byte-for-byte and confirmed it honest. It also drew out a
+   qualification the report did not: because `apiClient.test.ts` failed to *load* in that state, the
+   four `repairSplitSession` tests never failed for their own reasons — the red phase proved the
+   export was missing, not that each test discriminates. Five separate mutations closed that gap.
+2. **One of the brief's prescribed mutations is a TRUE NO-OP.** `isUserSignedIn()` is
+   `getUserToken() !== null`, and `repairSplitSession` re-checked `token === null` two lines later, so
+   deleting the `!isUserSignedIn()` clause alone is behaviourally identical code — **unfalsifiable**.
+   Confirmed independently. This is a defect in MY BRIEF, inherited from the plan.
+
+**RULING — drop the dead clause**, keep the `token === null` return (load-bearing: it narrows
+`string | null` for `setUserSession`), and comment that the token read IS the signed-in check.
+*Reason:* a dead condition is not neutral — it already misled one cycle by making a prescribed
+mutation unfalsifiable, and the next reviewer to mutate it would see green and wrongly conclude the
+test was vacuous. *Cost if wrong:* nil; behaviour is identical and the remaining guard is pinned
+(removing it reddens exactly 2 tests).
+
+**Review: IMPORTANT 1 — the fix repaired `localStorage` but NOT the SCREEN.** The task's whole
+purpose survived it. `setUserSession` calls `notify()`, but the three `getSessionUser()` consumers
+are unsubscribed render-time reads, and the `useSyncExternalStore` subscribers snapshot
+`isUserSignedIn()`/`getUserToken()` — **unchanged by the repair**, since the token was already there
+and stays byte-identical. So every snapshot compares equal, React re-renders nothing, and the stale
+`session === null` render stands. React runs child effects before parent effects, so `ProfilePage`'s
+fetch is always issued first. Measured, not reasoned:
+
+```
+CONTROL (repair disabled)                → IKUTI BUTTONS: 1     ← the Phase-2 bug
+REPAIR, /users/me resolves immediately   → IKUTI BUTTONS: 0
+REPAIR, /users/me 40 ms slower           → IKUTI BUTTONS: 1     ← STILL BROKEN
+                                            (storage correctly repaired in this case)
+```
+
+Two authenticated round-trips landing within 40 ms of each other is a coin flip, not an edge case.
+**Invisible to every Task 7 test**, because all of them assert on `fetch` or `localStorage` and none
+on the DOM. Fixed at the cause — one call site, a root-level state change on completion; the three
+consumer screens were NOT patched, which is the explicit condition Phase 2's review attached.
+
+- Fix round 1: `86d5668` (+ `de84e4a`). **2801 pass / 0 fail** (web 645). Typecheck clean.
+- Scoped re-review: all findings + the ruling **ADDRESSED**, each by independent mutation on a named,
+  reachable assertion.
+
+**Two things from that re-review worth copying as habits:**
+
+- **A test-integrity mutation.** Ungating `/users/me` so it resolves fast made the new test's GUARD
+  fail — because with fast ordering the stale "Ikuti" never appears at all. That proves the test's
+  pass depends entirely on the slow ordering and cannot silently degrade into the fast case that was
+  already passing before the round. Gating on a captured `resolve`, never a `setTimeout`, is what
+  makes it deterministic.
+- **No harness.** The implementer rendered the REAL `App` and solved happy-dom's `about:blank`
+  problem with `happyDOM.setURL`, rather than reconstructing `App`'s effect in a lookalike. Reverting
+  production `App.tsx` reddens the test — which a self-contained harness could never detect. When a
+  harness is avoidable, avoid it.
+
+**Task 7: complete** (commits `e2b3a44`..`de84e4a`).
+
+**Task 7: minor (deferred), from the re-review:** `setBrowserPath`'s `afterEach` resets the shared
+happy-dom URL to `/` rather than to the original `about:blank`, so the leak is narrowed, not closed.
+Nothing breaks today, but `WatchPage.tsx:62` and `dashboard/format.ts:308` both branch on
+`window.location.origin`, and that branch's COVERAGE is now file-order-dependent. One-line fix.
+
+## Task 8 — the gate, RE-RUN against the final code
+
+**59/59 checks passed, 0 failed**, across all 13 stages at `de84e4a` — including a new
+`splitsession` stage written specifically to verify Task 7 end to end:
+
+- token present, account blob absent — the real divergent state;
+- **no `.follow-button` and no button named exactly "Ikuti" on your own profile**;
+- the blob rebuilt from `/users/me` with the right handle AND the right display name (not a copy of
+  the handle), and **no `id` field**;
+- a POSITIVE control (the profile actually rendered) and a NEGATIVE control (the same selector DOES
+  find a follow control on someone else's profile).
+
+**A false positive I created and caught, recorded because the lesson generalises.** The stage's first
+locator was `:has-text("Ikuti")`, which in Playwright is a case-insensitive SUBSTRING match — it hit
+the profile header's `0 Mengikuti` count link and reported the bug as still live when it was fixed.
+A probe printing every matching element settled it in one run. **When an assertion about absence
+fails, print what actually matched before believing it.**
+
 ## NEXT ACTION ON RESUME
 
-Task 7 — repair the split session. Both of its central claims were **verified against this checkout**
-before starting: `SessionUser.id` is read nowhere (only `.handle`, at `FollowButton.tsx:100`,
-`BerandaPage.tsx:61`, `ProfilePage.tsx:64`), and `/users/me` returns `handle`/`displayName`/`email`
-but **no `id`** — so the blob genuinely cannot be rebuilt while `id` is required. Test fixtures pass
-`USER` as a *variable*, not a fresh literal, so dropping `id` will not trip TypeScript's
-excess-property check.
-
-Then the whole-branch review on the most capable model, pointed at the parked list above.
+The whole-branch review — the last step. Run it on the most capable model available and point it at
+the parked-findings list above, including the sharpened reserved-handle decision.
 
 **Do not run `git worktree remove` before extracting this ledger's carry-forward.** Phase 2's entire
 record was destroyed that way.
