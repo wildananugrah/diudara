@@ -27,6 +27,9 @@ function makePost(id: string, body: string, handle = "wildan"): PostView {
     createdAt: "2026-08-18T00:00:00.000Z",
     editedAt: null,
     author: { handle, displayName: handle === "wildan" ? "Wildan" : "Budi" },
+    // `[]` rather than absent: the API sends this key on every post, edited or
+    // not (see `toPostView`), and `PostView` requires it for that reason.
+    media: [],
   };
 }
 
@@ -962,5 +965,92 @@ describe("BerandaPage — the panel and the composer bring themselves into view 
         "the panel"
       )
     ).toBe("the panel");
+  });
+});
+
+/**
+ * Task 8. `PostComposer` and `MediaStrip` are tested on their own; these two
+ * pin the WIRING — that the ids the strip collected actually reach
+ * `createPost`/`editPost` through this page, in order, as the complete list.
+ * Without them, `handleCreate` could drop its second argument and the whole
+ * media suite would stay green while no photo ever reached a post.
+ */
+describe("BerandaPage — a post carries its photos (Task 8)", () => {
+  it("sends the uploaded ids with the new post, in order", async () => {
+    setUserSession("jwt-abc", USER);
+    let uploaded = 0;
+    const calls = mockFetch((url, init) => {
+      if (url === "/users/media") {
+        uploaded += 1;
+        return jsonResponse({ id: `media-${uploaded}`, width: 800, height: 600 }, 201);
+      }
+      if (init?.method === "POST") return jsonResponse(makePost("p2", "kiriman baru"), 201);
+      return jsonResponse({ posts: [], nextCursor: null });
+    });
+
+    renderBeranda();
+    await screen.findByRole("button", { name: "Kirim" });
+
+    fireEvent.change(screen.getByTestId("media-picker"), {
+      target: {
+        files: [
+          new File([new Uint8Array([1])], "satu.jpg", { type: "image/jpeg" }),
+          new File([new Uint8Array([2])], "dua.jpg", { type: "image/jpeg" }),
+        ],
+      },
+    });
+    // The strip's progress indicators disappear when both uploads have landed.
+    await waitFor(() => {
+      expect(screen.queryAllByRole("progressbar").length).toBe(0);
+    });
+
+    fireEvent.change(screen.getByLabelText("Apa yang terjadi?"), {
+      target: { value: "kiriman baru" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Kirim" }));
+
+    await screen.findByText("kiriman baru");
+    const created = calls.find((call) => call.url === "/users/posts")!;
+    expect(JSON.parse(String(created.init?.body))).toEqual({
+      body: "kiriman baru",
+      mediaIds: ["media-1", "media-2"],
+    });
+  });
+
+  it("an edit sends the post's images back as the COMPLETE list, minus the one removed", async () => {
+    setUserSession("jwt-abc", USER);
+    const withPhotos = {
+      ...makePost("p1", "isi lama"),
+      media: [
+        { id: "media-1", width: 800, height: 600 },
+        { id: "media-2", width: 800, height: 600 },
+      ],
+    };
+    const calls = mockFetch((url, init) => {
+      if (init?.method === "PATCH") return jsonResponse({ ...withPhotos, body: "isi baru" });
+      return jsonResponse({ posts: [withPhotos], nextCursor: null });
+    });
+
+    renderBeranda();
+    await screen.findByText("isi lama");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    // Seeded from the post: both images are in the strip, as thumbnails.
+    // Queried by the STRIP's own alt text rather than by role, so this keeps
+    // meaning the strip once Task 9 renders images on the card too.
+    expect(
+      screen.getAllByAltText(/^Pratinjau foto/).map((img) => img.getAttribute("src"))
+    ).toEqual(["/users/media/media-1/thumb", "/users/media/media-2/thumb"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus foto 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Simpan" }));
+
+    await screen.findByText("isi baru");
+    const patched = calls.find((call) => call.init?.method === "PATCH")!;
+    expect(JSON.parse(String(patched.init?.body))).toEqual({
+      body: "isi lama",
+      mediaIds: ["media-2"],
+    });
   });
 });

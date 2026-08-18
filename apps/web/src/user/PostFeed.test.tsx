@@ -18,6 +18,7 @@ function makePost(id: string, handle = "wildan"): PostView {
     body: `Isi kiriman ${id}`,
     createdAt: "2026-08-18T00:00:00.000Z",
     editedAt: null,
+    media: [],
     author: { handle, displayName: "Wildan" },
   };
 }

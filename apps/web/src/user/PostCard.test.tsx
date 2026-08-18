@@ -14,6 +14,7 @@ const POST: PostView = {
   body: "Halo semua!\nIni baris kedua.",
   createdAt: new Date(NOW.getTime() - HOUR).toISOString(),
   editedAt: null,
+  media: [],
   author: { handle: "wildan", displayName: "Wildan" },
 };
 

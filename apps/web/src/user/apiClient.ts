@@ -247,7 +247,18 @@ export const SESSION_EXPIRED_MESSAGE = "Sesi Anda sudah berakhir. Silakan masuk 
 function authorizedHeaders(init: RequestInit | undefined, token: string | null): Headers {
   const headers = new Headers(init?.headers);
   if (token !== null) headers.set("Authorization", `Bearer ${token}`);
-  if (init?.body !== undefined && init.body !== null && !headers.has("Content-Type")) {
+  // `FormData` is the one body this must NOT label. Task 8's `uploadMedia`
+  // sends multipart, and `fetch` generates the `boundary=...` parameter itself
+  // — but only when it is the one setting `Content-Type`. Writing
+  // `application/json` over it (which this did for ANY body before the media
+  // upload existed) sends a body the API parses as an empty form and refuses
+  // with "berkas foto wajib disertakan", for a request that carried the file.
+  if (
+    init?.body !== undefined &&
+    init.body !== null &&
+    !(init.body instanceof FormData) &&
+    !headers.has("Content-Type")
+  ) {
     headers.set("Content-Type", "application/json");
   }
   return headers;
@@ -601,6 +612,147 @@ export function exploreUsers(input: { q?: string; limit?: number } = {}): Promis
 }
 
 /**
+ * One image on a post, as the wire sees it — mirrors the API's own `MediaView`
+ * (`apps/api/src/application/use-cases/post-views.ts`) exactly: three fields,
+ * and **no URL**. The id is the only identifier that ever leaves the server, and
+ * every path is derived from it on this side (see `mediaThumbUrl`), which is
+ * what lets Phase 6 gate delivery in one place — a URL handed out today would
+ * outlive any check added later (spec §5.1).
+ *
+ * `width` and `height` are what a card needs to reserve space, so a feed does
+ * not reflow as images land.
+ */
+export interface MediaView {
+  id: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * The thumbnail path for one media id — `GET /users/media/:id/thumb`, which
+ * PROXIES the bytes rather than redirecting to the bucket (spec §5.1).
+ *
+ * Encoded even though the API only ever emits uuids: this value goes straight
+ * into an `<img src>`, and an id carrying a `/` or a `?` would otherwise
+ * address a different route entirely.
+ */
+export function mediaThumbUrl(id: string): string {
+  return `/users/media/${encodeURIComponent(id)}/thumb`;
+}
+
+/**
+ * `POST /users/media` (201) — one photo, as multipart, under the field name
+ * the route reads (`form.get("file")` in `apps/api/src/routes/media.ts`;
+ * anything else is a 400 in Bahasa).
+ *
+ * Goes through `apiFetch` like every other authenticated call, so a 401 clears
+ * the session in the one place that does that. **It deliberately sets no
+ * `Content-Type`** — see `authorizedHeaders` above for why writing one here
+ * would send a request the API parses as an empty form.
+ *
+ * The upload is claimed by nothing until a post names its id: an id that is
+ * never sent to `POST`/`PATCH /users/posts` stays unclaimed and is swept
+ * (spec §8), which is exactly what makes "Batal" on the edit composer safe.
+ */
+export function uploadMedia(file: File): Promise<MediaView> {
+  const form = new FormData();
+  form.append("file", file);
+  return apiFetch<MediaView>("/users/media", { method: "POST", body: form });
+}
+
+/** `GET /users/limits`'s response shape — one number today (spec §6). */
+export interface PostLimits {
+  maxPostImages: number;
+}
+
+/**
+ * `GET /users/limits` — public and cheap. See `loadPostImageLimit` for the one
+ * caller that matters and for what happens when this fails.
+ */
+export function getLimits(): Promise<PostLimits> {
+  return publicGet<PostLimits>("/users/limits", "gagal memuat batas kiriman");
+}
+
+/**
+ * **How many photos the composer offers when the server has not said
+ * otherwise, and the answer to a `GET /users/limits` that never arrives.**
+ *
+ * Deliberately a SEPARATE number from the API's own `DEFAULT_MAX_POST_IMAGES`
+ * (`apps/api/src/bootstrap.ts`) rather than a shared constant, and the two
+ * being equal today is a coincidence this file must not depend on: the API
+ * reads `MAX_POST_IMAGES` from its env at boot, so any deployment can move its
+ * real cap without the web build changing at all. **The server is the
+ * authority** — the route schema enforces the real number and answers a Bahasa
+ * 400 — and this copy is ADVISORY, which is precisely what makes the failure
+ * path below safe (spec §6).
+ */
+export const FALLBACK_MAX_POST_IMAGES = 5;
+
+let maxPostImages: number = FALLBACK_MAX_POST_IMAGES;
+const postImageLimitListeners = new Set<Listener>();
+
+/** Subscribes to changes in the advisory limit, in the shape `useSyncExternalStore` expects. */
+export function subscribeToPostImageLimit(listener: Listener): () => void {
+  postImageLimitListeners.add(listener);
+  return () => {
+    postImageLimitListeners.delete(listener);
+  };
+}
+
+/**
+ * `useSyncExternalStore`'s snapshot: the limit as currently known. **Never
+ * fetches** — it is read during render, and a render must not start a request.
+ */
+export function getMaxPostImages(): number {
+  return maxPostImages;
+}
+
+/**
+ * Learns the server's limit, ONCE, at app boot (`App.tsx`), and tells every
+ * mounted composer.
+ *
+ * **It cannot fail.** A dead endpoint, a 500, an offline phone, a proxy error
+ * page, an older server that does not know this route — every one of them
+ * leaves `FALLBACK_MAX_POST_IMAGES` in place and resolves. Spec §6 states the
+ * reason as a product decision rather than a defensive habit: "a composer that
+ * refuses to open because a config endpoint is down would be a worse product
+ * than one that occasionally offers a sixth photo and is told no." The cost of
+ * being wrong here is bounded at exactly one Bahasa 400 from a route that was
+ * always the authority.
+ *
+ * The shape is checked rather than trusted for the same reason: `{ maxPostImages:
+ * "5" }` or a `0` from something upstream would otherwise become the composer's
+ * cap and disable "Tambah foto" for ever — refusing to attach anything, which is
+ * the failure this whole design exists to avoid.
+ */
+export async function loadPostImageLimit(): Promise<void> {
+  let limits: PostLimits;
+  try {
+    limits = await getLimits();
+  } catch {
+    return;
+  }
+  const value = limits.maxPostImages as unknown;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) return;
+  if (value === maxPostImages) return;
+  maxPostImages = value;
+  // A copy: a listener that unsubscribes itself while being notified would
+  // otherwise mutate the set mid-iteration — same rule as `notify()` above.
+  for (const listener of [...postImageLimitListeners]) listener();
+}
+
+/**
+ * TEST-ONLY. Puts the advisory limit back to the built-in default — this module
+ * is a singleton for the life of the page (or of a test file), so without it a
+ * test that sets the limit to 2 decides what the next test's composer allows.
+ * Mirrors `dashboard/paymentAccount.ts`'s own `resetPaymentAccountCacheForTesting`.
+ * Never called from application code.
+ */
+export function resetPostImageLimitForTesting(): void {
+  maxPostImages = FALLBACK_MAX_POST_IMAGES;
+}
+
+/**
  * A single post as the API renders it — Task 3 declares this shape so
  * `PostCard` has something to import; Task 4 adds the endpoint functions
  * (`createPost`, `listPosts`, ...) that actually resolve one.
@@ -628,6 +780,14 @@ export interface PostView {
     handle: string;
     displayName: string;
   };
+  /**
+   * The post's images, in `position` order. REQUIRED and `[]` on a post with
+   * none, never absent — the API states that guarantee explicitly (`toPostView`
+   * takes `media` rather than defaulting it) and mirroring it here is what lets
+   * the edit composer seed itself with `post.media` and a card iterate it,
+   * neither of them writing `?? []` over a field the server always sends.
+   */
+  media: MediaView[];
 }
 
 /** One keyset page of posts — `nextCursor` is `null` on the last page, never absent. */
@@ -666,16 +826,38 @@ export function listUserPosts(handle: string, before?: string | null): Promise<F
   );
 }
 
-/** `POST /users/posts` (201). Requires a live session, same as every other `apiFetch` call. */
-export function createPost(body: string): Promise<PostView> {
-  return apiFetch<PostView>("/users/posts", { method: "POST", body: JSON.stringify({ body }) });
+/**
+ * `POST /users/posts` (201). Requires a live session, same as every other
+ * `apiFetch` call.
+ *
+ * `mediaIds` is the images this post carries, in the order they should appear
+ * (`position` IS the array's order, spec §5.2). **Omitted entirely when the
+ * caller passes nothing**, rather than sent as `[]`: the two are the same thing
+ * on `POST`, but they are NOT on `PATCH` (see `editPost`), and one rule for both
+ * keeps the distinction where it is real instead of teaching this file that an
+ * empty list and no list are interchangeable.
+ */
+export function createPost(body: string, mediaIds?: string[]): Promise<PostView> {
+  return apiFetch<PostView>("/users/posts", {
+    method: "POST",
+    body: JSON.stringify(mediaIds === undefined ? { body } : { body, mediaIds }),
+  });
 }
 
-/** `PATCH /users/posts/:id`. */
-export function editPost(id: string, body: string): Promise<PostView> {
+/**
+ * `PATCH /users/posts/:id`.
+ *
+ * **`mediaIds` is the COMPLETE desired list, not a delta** (spec §5.2): the
+ * images the post should carry when the request finishes, in the order they
+ * should appear. So the two empty cases are genuinely different and both are
+ * reachable from here — an explicit `[]` REMOVES every image, while omitting
+ * the key leaves the post's images exactly as they were, which is what a
+ * text-only edit sends.
+ */
+export function editPost(id: string, body: string, mediaIds?: string[]): Promise<PostView> {
   return apiFetch<PostView>(`/users/posts/${encodeURIComponent(id)}`, {
     method: "PATCH",
-    body: JSON.stringify({ body }),
+    body: JSON.stringify(mediaIds === undefined ? { body } : { body, mediaIds }),
   });
 }
 
@@ -683,3 +865,4 @@ export function editPost(id: string, body: string): Promise<PostView> {
 export function deletePost(id: string): Promise<void> {
   return apiFetch<void>(`/users/posts/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
+

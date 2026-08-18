@@ -32,6 +32,7 @@ function makePost(id: string, body: string, handle: string): PostView {
     body,
     createdAt: "2026-08-18T00:00:00.000Z",
     editedAt: null,
+    media: [],
     author: { handle, displayName: handle === "wildan" ? "Wildan" : "Budi" },
   };
 }

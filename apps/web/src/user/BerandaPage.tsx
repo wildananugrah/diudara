@@ -108,8 +108,11 @@ export default function BerandaPage() {
     setPostSent(false);
   }, [tab]);
 
-  async function handleCreate(body: string): Promise<void> {
-    const created = await createPost(body);
+  async function handleCreate(body: string, mediaIds: string[]): Promise<void> {
+    // The composer sends the complete list of ids it managed to upload — see
+    // `PostComposer`'s `onSubmit`. Passed straight through: `position` is the
+    // array's order (spec §5.2), so this page must not reorder or filter it.
+    const created = await createPost(body, mediaIds);
     // `mengikuti` is "posts by people you follow, never your own" — measured in
     // `drizzle-post.repository.test.ts`'s "returns only followed authors' posts,
     // never the viewer's own". Prepending your new post there would show a row

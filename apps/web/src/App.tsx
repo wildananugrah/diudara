@@ -29,7 +29,7 @@ import AppShell from "./user/AppShell";
 import BerandaPage from "./user/BerandaPage";
 import SiaranPage from "./user/SiaranPage";
 import JelajahPage from "./user/JelajahPage";
-import { repairSplitSession } from "./user/apiClient";
+import { loadPostImageLimit, repairSplitSession } from "./user/apiClient";
 
 export function AppRoutes() {
   return (
@@ -186,6 +186,12 @@ export default function App() {
   const [, setRepaired] = useState(0);
   useEffect(() => {
     void repairSplitSession().then(() => setRepaired((n) => n + 1));
+    // Task 8, spec §6: the web is a static build served by nginx and cannot
+    // read the API's `MAX_POST_IMAGES`, so it asks once, here, at boot. It
+    // CANNOT fail — a dead endpoint leaves the built-in fallback in place and
+    // every composer works — and it needs no re-render of its own: composers
+    // subscribe to the value, unlike the session repair above.
+    void loadPostImageLimit();
   }, []);
 
   return (

@@ -27,7 +27,7 @@ export interface PostOwnerActions {
   cancelDelete: () => void;
   /** The edit composer's "Batal". Its own function rather than a raw `setEditing` a page could misuse. */
   cancelEdit: () => void;
-  saveEdit: (body: string) => Promise<void>;
+  saveEdit: (body: string, mediaIds: string[]) => Promise<void>;
 }
 
 /**
@@ -93,13 +93,18 @@ export function usePostOwnerActions(
   const cancelEdit = useCallback(() => setEditing(null), []);
 
   const saveEdit = useCallback(
-    async (body: string): Promise<void> => {
+    async (body: string, mediaIds: string[]): Promise<void> => {
       const target = editing;
       if (target === null) return;
       // Deliberately NOT wrapped in try/catch: a rejection has to reach
-      // `PostComposer`, which is what keeps the author's text and shows the
-      // error. Swallowing it here would clear the box on a failed save.
-      const updated = await editPost(target.id, body);
+      // `PostComposer`, which is what keeps the author's text AND its photos
+      // and shows the error. Swallowing it here would clear the box on a
+      // failed save.
+      //
+      // `mediaIds` is the COMPLETE desired list, not a delta (spec §5.2) — the
+      // composer seeded itself with this post's images, so what comes back is
+      // the final state, including `[]` when every image was removed.
+      const updated = await editPost(target.id, body, mediaIds);
       feed.current?.replace(updated);
       setEditing(null);
     },
@@ -208,8 +213,12 @@ export function DeleteConfirm({
 }
 
 /**
- * The edit composer — a `PostComposer` pre-filled with the post's body, that
- * brings itself into view and puts the caret in the box.
+ * The edit composer — a `PostComposer` pre-filled with the post's body AND its
+ * images, that brings itself into view and puts the caret in the box.
+ *
+ * "Batal" discards the whole edit, including any photo uploaded during it
+ * (spec §7): this component unmounts, the ids it uploaded are never sent, and
+ * an unclaimed upload is swept by §8 like any other orphan.
  *
  * Keyed on `post.id`: editing post A then post B without the key silently
  * saves A's text over B, because `initialBody` only seeds `useState` and does
@@ -228,7 +237,7 @@ export function EditComposer({
   onCancel,
 }: {
   post: PostView;
-  onSubmit: (body: string) => Promise<void>;
+  onSubmit: (body: string, mediaIds: string[]) => Promise<void>;
   onCancel: () => void;
 }) {
   const form = useRef<HTMLFormElement>(null);
@@ -245,6 +254,11 @@ export function EditComposer({
       key={post.id}
       ref={form}
       initialBody={post.body}
+      // Seeded with the post's own images (spec §7), each removable. `key`
+      // above remounts per post, which is what stops one post's strip being
+      // carried into another's edit — `initialMedia` is read once, exactly
+      // like `initialBody`.
+      initialMedia={post.media}
       submitLabel="Simpan"
       onSubmit={onSubmit}
       onCancel={onCancel}

@@ -1225,6 +1225,99 @@ tbody tr:last-child td {
   color: var(--red);
 }
 
+/* --- The composer's media strip (Task 8, spec §7) ------------------------ */
+
+.media-strip {
+  margin-bottom: 8px;
+}
+
+.media-strip-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.media-strip-item {
+  position: relative;
+  width: 96px;
+}
+
+.media-strip-preview {
+  display: block;
+  width: 96px;
+  height: 96px;
+  /* Cropped to a square tile rather than letterboxed: the strip is a row of
+     handles for photos the author already recognises, not a viewer. The post
+     itself shows them whole. */
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.media-strip-item.uploading .media-strip-preview {
+  opacity: 0.5;
+}
+
+.media-strip-progress,
+.media-strip-error {
+  display: block;
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+}
+
+.media-strip-progress {
+  color: var(--ink-faint);
+}
+
+.media-strip-error {
+  color: var(--red);
+}
+
+/* A 28px tap target on the corner of the tile — the phone-first minimum this
+   app uses elsewhere, and inside the tile so the row stays one line tall. */
+.media-strip-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.media-strip-remove:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.media-strip-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Driven by the "Tambah foto" button beside it — see `MediaStrip.tsx`. A bare
+   file input reads as "Browse… no file selected" and cannot be styled. */
+.media-strip-picker {
+  display: none;
+}
+
+.media-strip-counter {
+  color: var(--ink-faint);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .post-composer-error {
   color: var(--red);
   font-size: 0.875rem;
