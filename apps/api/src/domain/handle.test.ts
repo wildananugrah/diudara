@@ -78,12 +78,13 @@ describe("isValidHandle", () => {
  * is what keeps the list honest as routes are added.
  */
 describe("isReservedHandle", () => {
-  it("reserves each of the five handles that shadow a real /users route", () => {
+  it("reserves each of the six handles that shadow a real /users route", () => {
     expect(isReservedHandle("posts")).toBe(true);
     expect(isReservedHandle("feed")).toBe(true);
     expect(isReservedHandle("signup")).toBe(true);
     expect(isReservedHandle("login")).toBe(true);
     expect(isReservedHandle("explore")).toBe(true);
+    expect(isReservedHandle("media")).toBe(true);
   });
 
   it("does not reserve an ordinary handle", () => {

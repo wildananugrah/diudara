@@ -87,6 +87,8 @@ import type { UserRepositoryPort } from "./application/ports/user-repository.por
 import type { FollowRepositoryPort } from "./application/ports/follow-repository.port";
 import type { PostRepositoryPort } from "./application/ports/post-repository.port";
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
+import type { MediaRepositoryPort } from "./application/ports/media-repository.port";
+import { UploadMedia } from "./application/use-cases/upload-media";
 import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
@@ -808,6 +810,35 @@ describe("Dependencies (composition root contract)", () => {
       // see `mediaStorage`'s own field docstring — so this needs a real fake,
       // unlike the streaming fields just above.
       mediaStorage: new FakeMediaStorageAdapter(),
+      // Task 4's upload endpoint. Never undefined/null either — mirrors
+      // `mediaStorage` just above. Neither of these two tests calls
+      // `uploadMedia.execute`, so its repository fake never needs to do
+      // anything but satisfy the port's shape.
+      uploadMedia: new UploadMedia(
+        {
+          async create(): Promise<never> {
+            throw new Error("not used");
+          },
+          async findById() {
+            return null;
+          },
+          async findManyByIds() {
+            return [];
+          },
+          async claim() {},
+          async listForPost() {
+            return [];
+          },
+          async listForPosts() {
+            return [];
+          },
+          async listUnclaimedBefore() {
+            return [];
+          },
+          async deleteById() {},
+        } satisfies MediaRepositoryPort,
+        new FakeMediaStorageAdapter()
+      ),
     };
 
     const created = await deps.creatorRepository.create({
@@ -1011,6 +1042,35 @@ describe("Dependencies (composition root contract)", () => {
       // see `mediaStorage`'s own field docstring — so this needs a real fake,
       // unlike the streaming fields just above.
       mediaStorage: new FakeMediaStorageAdapter(),
+      // Task 4's upload endpoint. Never undefined/null either — mirrors
+      // `mediaStorage` just above. Neither of these two tests calls
+      // `uploadMedia.execute`, so its repository fake never needs to do
+      // anything but satisfy the port's shape.
+      uploadMedia: new UploadMedia(
+        {
+          async create(): Promise<never> {
+            throw new Error("not used");
+          },
+          async findById() {
+            return null;
+          },
+          async findManyByIds() {
+            return [];
+          },
+          async claim() {},
+          async listForPost() {
+            return [];
+          },
+          async listForPosts() {
+            return [];
+          },
+          async listUnclaimedBefore() {
+            return [];
+          },
+          async deleteById() {},
+        } satisfies MediaRepositoryPort,
+        new FakeMediaStorageAdapter()
+      ),
     };
 
     const res = await createApp(deps).request("/health");

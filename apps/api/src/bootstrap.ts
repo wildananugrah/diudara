@@ -16,6 +16,8 @@ import { ExploreUsers } from "./application/use-cases/explore-users";
 import { DrizzleFollowRepository } from "./infrastructure/repositories/drizzle-follow.repository";
 import { DrizzlePostRepository } from "./infrastructure/repositories/drizzle-post.repository";
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
+import { DrizzleMediaRepository } from "./infrastructure/repositories/drizzle-media.repository";
+import { UploadMedia } from "./application/use-cases/upload-media";
 import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
@@ -526,6 +528,12 @@ export interface Dependencies {
    * constructed itself.
    */
   mediaStorage: MediaStoragePort;
+  /**
+   * Task 4's `POST /users/media`. Writes both re-encoded variants to
+   * `mediaStorage` and inserts the unclaimed row — see `UploadMedia`'s own
+   * docstring for the ordering between those two writes and why it matters.
+   */
+  uploadMedia: UploadMedia;
 }
 
 /**
@@ -1951,6 +1959,11 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
+  // Task 4's `POST /users/media`. One repository, one use case — mirrors
+  // `postRepository`'s shape above. Constructed right after `mediaStorage`
+  // because it is the use case's other dependency.
+  const uploadMedia = new UploadMedia(new DrizzleMediaRepository(db), mediaStorage);
+
   // Task 5's password reset, and `registerUser`'s existing-email notice.
   // Constructed HERE, not up with `userRepository`/`authenticateUser` above,
   // because both need `messaging.notifier` (just resolved) and `email`/
@@ -2199,5 +2212,6 @@ export function bootstrap(): Dependencies {
     mediamtxWebhookSecret,
     handleStreamLifecycle,
     mediaStorage,
+    uploadMedia,
   };
 }

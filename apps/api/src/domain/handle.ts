@@ -38,6 +38,7 @@ export const RESERVED_HANDLES: ReadonlySet<string> = new Set([
   "explore",
   "feed",
   "login",
+  "media",
   "posts",
   "signup",
 ]);

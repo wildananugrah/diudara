@@ -11,7 +11,19 @@ export interface MediaRow {
 }
 
 export interface MediaRepositoryPort {
+  /**
+   * `id` is OPTIONAL and exists for exactly one caller: Task 4's `UploadMedia`,
+   * which must write both variants to `MediaStoragePort` under a media id
+   * BEFORE this row exists — an interrupted upload then leaves at worst an
+   * unreferenced object (spec §8), where a row created before its bytes land
+   * would leave an id that 404s forever. That ordering only works if the same
+   * id backs the storage keys and the row, so the caller generates it and
+   * passes it through here rather than letting the column's own default
+   * assign one after the fact. Omitted, the column's default applies exactly
+   * as before — every other caller in this codebase omits it.
+   */
   create(input: {
+    id?: string;
     ownerId: string;
     width: number;
     height: number;

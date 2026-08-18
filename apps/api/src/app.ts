@@ -3,6 +3,7 @@ import { healthRoute } from "./routes/health";
 import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
 import { postRoutes } from "./routes/posts";
+import { mediaRoutes } from "./routes/media";
 import { communityRoutes } from "./routes/communities";
 import { tierRoutes } from "./routes/tiers";
 import { channelRoutes } from "./routes/channels";
@@ -58,6 +59,12 @@ export function createApp(deps: Dependencies) {
   // time.
   app.route("/users", userRoutes(deps));
   app.route("/users", postRoutes(deps));
+  // Task 4 (images): `POST /users/media`. Same rule as `postRoutes` above —
+  // must come after `userRoutes` so a handle equal to this router's own
+  // literal segment ("media", reserved in `domain/handle.ts`) can never
+  // shadow it. Mount order relative to `postRoutes` does not matter: neither
+  // router declares a literal segment the other one does.
+  app.route("/users", mediaRoutes(deps));
   app.route("/payment-account", paymentAccountRoutes(deps));
   // Mounted before publicCommunityRoutes: /c/:slug is a single path segment,
   // while this route's literal "subscription"/"watch" prefixes and their

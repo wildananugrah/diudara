@@ -8,6 +8,7 @@ export class DrizzleMediaRepository implements MediaRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
 
   async create(input: {
+    id?: string;
     ownerId: string;
     width: number;
     height: number;
@@ -16,6 +17,10 @@ export class DrizzleMediaRepository implements MediaRepositoryPort {
     const [row] = await this.db
       .insert(postMedia)
       .values({
+        // Omitted entirely rather than passed as `undefined` — the column's
+        // own `defaultRandom()` only fires when the key is absent from
+        // `.values()`, not merely `undefined`-valued.
+        ...(input.id !== undefined ? { id: input.id } : {}),
         ownerId: input.ownerId,
         width: input.width,
         height: input.height,
