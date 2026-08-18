@@ -186,6 +186,19 @@ unclaimed and swept by §8 like any other abandoned upload.
 
 Per §5.2 there is no drag-to-reorder in this phase.
 
+### 7.1 A photo is a caption's illustration, not a post on its own
+
+**Body text stays required. A post carrying only images is a 400** — owner's decision, taken during
+Task 6 when the question surfaced. The rule is not new: `WritePost` has always answered
+`"kiriman tidak boleh kosong"` for an empty body, and `PostComposer` has always measured the TRIMMED
+length for both its counter and its disabled state.
+
+**This is a trap for the composer, and it is the obvious way to get it wrong.** The instinct when
+adding a media strip is to widen the send condition to "there is text OR there is an image". That
+would let a caption-less photo be sent, which the API then refuses — turning a rule the UI could have
+enforced quietly into a server error the person has to decode. `canSubmit` stays exactly what it is:
+trimmed body length above zero. An attached photo must never enable Kirim on its own.
+
 ## 8. Lifecycle
 
 **Orphans.** Someone attaches a photo and abandons the post, and the row keeps `post_id = null`
