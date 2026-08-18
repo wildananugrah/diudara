@@ -252,10 +252,165 @@ the body before saving. Rewritten to submit without retyping, it prints
   tapping Hapus then Edit renders the edit composer **and** the "Hapus kiriman ini?" panel at once.
   Predates fix round 1 (`git show f8e7ad4` confirms the shape).
 
+---
+
+# CONTINUATION ON A NEW MACHINE — 2026-08-18, picked up from HANDOFF.md
+
+Resumed at `655ba26` on `main`. **Per the user's explicit instruction this continuation works
+directly on `main`, not in a worktree** — recorded because it departs from how Tasks 1-6 were built.
+
+## Environment: 14 failures, two causes, neither of them the recorded flake family
+
+`bun run test` was red at **2022 pass / 14 fail** on the first run here, stable across runs. The
+handoff's §8 warns about the `apps/api` clock flakes and orphaned processes; **it was neither**.
+Capturing the `(fail)` lines verbatim before re-running — the handoff's own advice — is what
+separated them.
+
+**Cause 1 (13 of 14) — a real hole in the test preload, of a class it already closes.** This
+machine's `apps/api/.env` carries real `TELEGRAM_BOT_TOKEN` and `FONNTE_API_TOKEN` (it drives a local
+bot). `test-env-preload.ts` already deletes the five `MEDIAMTX_*`/`STREAM_*` variables, arguing in
+its own docstring that no test's `bootstrap()` may depend on what `.env` happens to hold — but the
+messaging credentials were never added. With both set, `selectMessagingProviders` returns
+`TelegramBotAdapter` + `FonnteWhatsAppAdapter`: the branch whose startup line reads *"real invites
+will be issued and real messages sent"*, while `bootstrap.ts:578` states the invariant plainly —
+*"the whole suite depends on the fake adapter."* Nothing enforced it. The 13 failures were the
+harmless half; the same configuration hands a live bot token to any bare `bootstrap()` in 139 files.
+
+**Ruling:** close it at the cause, in the preload, exactly as the streaming five were closed. Added
+`TELEGRAM_BOT_TOKEN`, `FONNTE_API_TOKEN`, `XENDIT_SECRET_KEY`, `XENDIT_SPLIT_RULE_ID`.
+`XENDIT_CALLBACK_TOKEN` deliberately EXCLUDED — it authenticates inbound webhooks and selects no
+adapter, so deleting it would newly exercise the payments-disabled branch rather than close a hazard.
+*Cost if wrong:* a test wanting a real adapter must now set it explicitly, which is what
+`bootstrap.test.ts`'s `withEnv` already does.
+
+**Cause 2 (the 14th) — a box-speed race, not a defect.** `routes/users.test.ts`'s "defaults to 50
+rows" signs up 61 real users; each signup pays for an argon2id hash. Measured here: **224ms per hash,
+3590ms for 60 concurrent** — over Bun's 5000ms default on its own, and the test failed at a
+suspiciously exact ~5026ms every run. **Ruling:** an explicit 30s timeout on that one test. The
+assertion is untouched. *Cost if wrong:* a genuinely slow regression in that endpoint surfaces later.
+
+Both fixed in `af873f2`. Gate restored to **2781 pass / 0 fail** with NO environment workarounds.
+
+## Task 6 — reviewed at last, and it was not clean
+
+**Review (`8749868`, base `0592db2`).** Spec ❌. Three Important findings, all found by mutation:
+
+1. **A stale delete confirmation fires a DELETE on the wrong profile.** `ProfilePage` is one route
+   element, so `/@wildan` → `/@budi` keeps the instance and the "Hapus kiriman ini?" panel with it.
+   Measured: clicking "Ya, hapus" on Budi's profile fired `DELETE /users/posts/p1` — wildan's post.
+   `BerandaPage` fixed this exact bug at `:98-103`; Task 6 copied the panel but not the reset.
+2. **`Edit` rendered but did nothing.**
+3. **The task's headline claim was untested.** Replacing `listUserPosts(handle, …)` with a hardcoded
+   stranger's handle left **625 pass / 0 fail** across the entire web suite.
+
+Two further mutations survived and were classed Minor: a signed-out viewer could be treated as the
+owner, and a swallowed delete error was wholly untested. A sixth finding: `(err as Error).message`
+**evades** the project-wide `no-raw-server-errors` guard.
+
+**RULING — the Edit button must be wired** (the decision HANDOFF §3.1 said was owed first). The
+implementer argued scope from the plan's narrow "Consumes" list. The spec is the authority over the
+plan: §7 makes the Edit/Hapus menu a property of `PostCard` **on your own posts**, not of one page,
+and the goal sentence is "see someone's posts on their profile, **and edit or delete your own**". A
+rendered control that does nothing is the worst of the three options. *Cost if wrong:* some
+duplicated edit wiring on `ProfilePage`.
+
+**RULING — Minors 4, 5 and 6 folded into the fix round** rather than deferred. 4 and 5 close
+mutation-proven holes in the exact tests being rewritten, so the marginal cost is near zero and
+deferring means a second pass over the same file. 6 is infrastructure with direct precedent: Task 4's
+C1 was a hole in *this same guard*, found the same way, fixed immediately. *Cost if wrong:* a more
+permissive regex — mitigated by requiring the three-direction proof Task 4 used.
+
+**RULING — extracting a shared `useDeleteFlow` hook is DEFERRED.** Two consumers, not three;
+premature abstraction is its own finding. Carry to the whole-branch review.
+
+- Fix round 1: `3b71073`. All 7 addressed. **2790 pass / 0 fail** (+9). Typecheck clean.
+- Scoped re-review: all 7 confirmed ADDRESSED by independent mutation — including the
+  `key={editing.id}` line the implementer **disclosed it had written before its test**. The reviewer
+  proved it three ways and found it genuinely pinned, and pinned *upstream* of the harm. The
+  disclosure is what aimed the budget there; it keeps earning its keep.
+- **New finding N1 from that re-review:** the `setEditing(null)` half of the new reset effect was
+  unpinned — deleting the line left 25 pass / 0 fail. Harm measured, not reasoned: an edit composer
+  surviving a profile change PATCHes the *previous* profile's post. Production code was correct; only
+  the test was missing.
+- Fix round 2: `685d07a`, **test-only** (+2 tests, no production change). **2792 pass / 0 fail.**
+
+**Task 6: complete** (commits `8749868`..`685d07a`).
+
+## Task 8 — the gate, run EARLY and out of order, in a real browser
+
+Run against `3b71073`'s production code (round 2 changed only tests, so the result stands for
+`685d07a`). **This is the first time anything in Phase 3 has been rendered outside happy-dom.**
+
+**Result: 50/50 checks passed, 0 failed.** Harness in the session scratchpad (`gate.mjs`), driving
+Chromium 151 via Playwright.
+
+Environment notes for whoever runs this next:
+
+- **Port 3000 on this machine is Grafana.** `apps/api/.env` sets `PORT=3004`, but `vite.config.ts`
+  hardcodes `localhost:3000` in **8** places with no env override. The repo is internally consistent
+  (`.env.example` says `PORT=3000`) — this is a LOCAL collision, not a defect, and must not be
+  "fixed" by editing the real config. The gate used an untracked `apps/web/vite.gate.config.ts`
+  (listed in `.git/info/exclude`) that imports the real config and rewrites only the proxy TARGET,
+  leaving the proxy TABLE exactly as shipped — the table being the thing worth gating.
+- **The gate API ran on 3005 with the messaging tokens blanked**, forcing `FakeMessagingAdapter` for
+  both gating and notification. The pm2 instance holds live Telegram and Fonnte credentials, and a
+  gate that signs up accounts must not be able to message a real person.
+- **Signup returns `{"ok":true}` with no token** — you log in separately. The login response DOES
+  carry the user's `id`; `/users/me` does not. That asymmetry is exactly why Task 7 must drop `id`.
+
+What the gate proved that no unit test had:
+
+- The Vite proxy genuinely forwards `/users/*` to the API and returns JSON, not `index.html` — the
+  precise class of bug that killed six pages in the previous phase's gate.
+- A post composed in a browser appears immediately AND survives a reload.
+- `maxLength` is the literal 1000, typing 1001 clamps to 1000, and **no POST fires** while over.
+- Pagination: exactly 20 rows on the first page, "Muat lebih banyak" exhausts correctly and
+  disappears, and **53 rows / 53 distinct** — no post rendered twice across pages.
+- Signed out: Untuk Anda loads, the composer is absent, and Mengikuti reads "Masuk untuk melihat"
+  while firing **zero** feed requests — proven by recording actual network traffic, not by reading
+  the DOM. This is §5.1, the whole reason the auth split exists.
+- Edit saves, `· diedit` appears, and a delete vanishes from Beranda AND the profile AND stays gone
+  after a reload. **The Edit wiring the ruling above required works end to end.**
+- A visitor sees no Edit/Hapus while the owner sees 20 of each — the negative check carries a
+  **positive control**, because on the gate's first run it passed *vacuously*: the account blob was
+  written without `id`, `getSessionUser()` requires `id` today, so no owner controls rendered at all
+  and "no Edit for a visitor" looked like a pass. Worth remembering: an absence check without a
+  presence control is close to vacuous.
+- Narrow (390px) shows `.bottom-nav` and hides `.side-rail`; wide (1440px) the reverse; all four nav
+  destinations render at both. The CSS had never been exercised at any viewport.
+- The creator dashboard still loads and is untouched.
+- **The wire projection**, signed out, on both `/users/feed` and `/users/:handle/posts`: keys are
+  exactly `author, body, createdAt, editedAt, id` and the author exactly `displayName, handle`. No
+  `authorId`, no `deletedAt`, no `email`, no user `id`.
+- **The delete is genuinely soft**: after deleting through the API the row is still in `post` with
+  `deleted_at` set, absent from both read paths, and a second DELETE returns 200 — idempotent.
+
+## Parked findings — updated
+
+- **Reserved-handle list — SHARPENED, and the window to act is now.** The collision set is exactly
+  five registerable handles: `posts`, `feed`, `signup`, `login`, `explore`. `me` (2 chars),
+  `by-handle` and `password-reset` (hyphens) are **already impossible** under
+  `^[a-z0-9_]{3,30}$`. The local database holds **0 `app_user` rows**, and production has no
+  personal-account code deployed at all — so there is **nothing to grandfather**. This converts the
+  finding from "needs a product decision that may strand existing users" into "free to do now, and
+  strictly harder later." Still a product decision; carry to the whole-branch review.
+- `if (editing?.id === id) setEditing(null)` in `confirmDelete` is now **dead on both pages**
+  (`onDeleteRequested` clears `editing` first). Harmless; candidate for removal at whole-branch
+  review. Deliberately NOT removed in the fix rounds.
+- The `no-raw-server-errors` guard still cannot see `(err as any)!.message`, `(<Error>err).message`
+  or `(err satisfies Error).message`. The C1-class widening keeps accreting.
+- Earlier parked items from Tasks 1-5 stand as recorded above.
+
 ## NEXT ACTION ON RESUME
 
-Task 6 — posts on the profile. Base for its review package is `0592db2`. Base for its review package is `53fb863`.
+Task 7 — repair the split session. Both of its central claims were **verified against this checkout**
+before starting: `SessionUser.id` is read nowhere (only `.handle`, at `FollowButton.tsx:100`,
+`BerandaPage.tsx:61`, `ProfilePage.tsx:64`), and `/users/me` returns `handle`/`displayName`/`email`
+but **no `id`** — so the blob genuinely cannot be rebuilt while `id` is required. Test fixtures pass
+`USER` as a *variable*, not a fresh literal, so dropping `id` will not trip TypeScript's
+excess-property check.
+
+Then the whole-branch review on the most capable model, pointed at the parked list above.
 
 **Do not run `git worktree remove` before extracting this ledger's carry-forward.** Phase 2's entire
-record was destroyed that way. This workspace lives in the main repo precisely so that cannot happen
-again, but the habit is what matters.
+record was destroyed that way.
