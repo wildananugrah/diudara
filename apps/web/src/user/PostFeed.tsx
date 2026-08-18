@@ -78,7 +78,14 @@ export default function PostFeed({ load, emptyMessage, ownHandle, onEdit, onDele
         <p className="empty">{emptyMessage}</p>
       ) : null}
 
-      {error !== null ? <p className="feed-error">{error}</p> : null}
+      {/* `role="alert"` matches every other top-level request-failure element
+          under src/user (FollowButton, LoginPage, SignupPage, ...) — a screen
+          reader must announce this the same way it announces theirs. */}
+      {error !== null ? (
+        <p className="feed-error" role="alert">
+          {error}
+        </p>
+      ) : null}
 
       {nextCursor !== null ? (
         <button type="button" disabled={loading} onClick={() => void fetchPage(nextCursor)}>

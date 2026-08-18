@@ -75,9 +75,15 @@ describe("PostFeed", () => {
     fireEvent.click(button);
 
     await screen.findByText("Isi kiriman 2");
+    // Checked BEFORE the "still on screen" assertion below: with the append
+    // logic keyed off `before === null`, a mutation that drops the cursor
+    // (calling `fetchPage(null)` on click) makes posts get REPLACED rather
+    // than appended, which would otherwise fail the assertion below first and
+    // mask the fact that the URL itself never carried `before=` at all. This
+    // line is the one that actually proves the cursor was forwarded.
+    expect(calls[1]).toBe("/users/feed?tab=untuk-anda&before=cursor-a");
     // The first page's post is still there — appended, not replaced.
     expect(screen.getByText("Isi kiriman 1")).toBeTruthy();
-    expect(calls[1]).toBe("/users/feed?tab=untuk-anda&before=cursor-a");
   });
 
   it("hides the button once a page comes back with nextCursor: null", async () => {
@@ -115,7 +121,7 @@ describe("PostFeed", () => {
     fireEvent.click(button);
 
     await waitFor(() => {
-      expect(screen.getByText("Server sedang bermasalah. Coba lagi sebentar lagi.")).toBeTruthy();
+      expect(screen.getByRole("alert").textContent).toBe("Server sedang bermasalah. Coba lagi sebentar lagi.");
     });
     // Still on screen — the point of the test.
     expect(screen.getByText("Isi kiriman 1")).toBeTruthy();
@@ -134,10 +140,29 @@ describe("PostFeed", () => {
     fireEvent.click(button);
 
     await waitFor(() => {
-      expect(screen.getByText("Server sedang bermasalah. Coba lagi sebentar lagi.")).toBeTruthy();
+      expect(screen.getByRole("alert").textContent).toBe("Server sedang bermasalah. Coba lagi sebentar lagi.");
     });
     expect(screen.queryAllByText("internal server error").length).toBe(0);
     expect(screen.queryAllByText(/internal server error/).length).toBe(0);
+  });
+
+  /**
+   * Fix round 1, I3. Every other top-level request-failure element under
+   * `src/user` (`FollowButton`, `LoginPage`, `SignupPage`, `ResetCompletePage`,
+   * `SettingsPage`, both Jelajah error paragraphs) carries `role="alert"`;
+   * `PostFeed`'s error paragraph came from the brief's own code sample, which
+   * omitted it — the one place this component diverged from the rest of the
+   * codebase's accessibility convention. Pinned explicitly, via `role`, so the
+   * next component copied from this one inherits the right thing rather than
+   * the gap.
+   */
+  it("exposes the feed error as role=alert, matching every other error paragraph under src/user", async () => {
+    global.fetch = mock(async () => jsonResponse({ error: "server error" }, 500)) as unknown as typeof fetch;
+
+    renderFeed();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.className).toBe("feed-error");
   });
 
   it('clicking "Muat lebih banyak" twice quickly fires only one extra request', async () => {

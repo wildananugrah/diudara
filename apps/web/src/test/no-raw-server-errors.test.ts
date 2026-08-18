@@ -76,8 +76,20 @@ function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 }
 
-/** `} catch (err) {` — a statement-form catch binding. */
-const STATEMENT_CATCH = /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)/g;
+/**
+ * `} catch (err) {` — a statement-form catch binding. Also matches a
+ * TYPE-ANNOTATED binding, `} catch (err: unknown) {`: `PostFeed.tsx` (Task 4)
+ * is the first file under `src/user` to write it that way — every earlier
+ * file (`FollowButton`, `LoginPage`, `SignupPage`, `ResetCompletePage`,
+ * `SettingsPage`, ...) leaves the binding untyped — and the un-annotated
+ * form here required the identifier to be followed immediately by `)`, so
+ * the annotation broke the match. Proved by mutation: putting the banned
+ * `err instanceof Error ? err.message : ...` pattern into a typed
+ * `catch (err: unknown)` block used to pass this guard at 5/5 green. The
+ * optional `(?::[^)]*)?` mirrors `CALLBACK_CATCH`'s own handling of
+ * `(err: unknown) =>` just below.
+ */
+const STATEMENT_CATCH = /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)\s*(?::[^)]*)?\)/g;
 /** `.catch((err: unknown) => ...)` — a callback-form catch binding. */
 const CALLBACK_CATCH = /\.catch\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)\s*(?::[^)]*)?\)?\s*=>/g;
 
@@ -128,6 +140,31 @@ describe("no raw server errors reach a member-facing screen", () => {
     // Renaming the binding must not evade it.
     const renamed = `try { go(); } catch (problem) { setError(problem.message); }`;
     expect(readsMessageOffACaughtError(renamed)).toBe(true);
+  });
+
+  /**
+   * Fix round 1, C1. `catch (err: unknown)` — a TYPE-ANNOTATED statement-form
+   * binding, exactly `PostFeed.tsx`'s own shape — used to slip past
+   * `STATEMENT_CATCH` because that regex required the identifier to be
+   * followed immediately by `)`. Reviewer's mutation, reproduced here: this
+   * exact banned expression, in this exact typed catch, reached the screen
+   * while the guard reported 5 pass / 0 fail on the real file tree.
+   */
+  it("detects the banned pattern inside a TYPE-ANNOTATED statement-form catch — PostFeed.tsx's own shape", () => {
+    const typedCatch = `try { go(); } catch (err: unknown) { setError(err instanceof Error ? err.message : describeRequestFailure(err)); }`;
+    expect(readsMessageOffACaughtError(typedCatch)).toBe(true);
+
+    // A more elaborate type annotation must not evade it either.
+    const unionTyped = `try { go(); } catch (err: Error | unknown) { setError(err.message); }`;
+    expect(readsMessageOffACaughtError(unionTyped)).toBe(true);
+
+    // The fixed shape — same typed binding, but never reading .message off it
+    // — must still pass. Without this half, a regex that flagged EVERY typed
+    // catch regardless of what it does with the binding would "fix" C1 by
+    // turning every legitimate typed catch in this codebase into a false
+    // positive.
+    const typedCatchFixed = `try { go(); } catch (err: unknown) { setError(describeRequestFailure(err)); }`;
+    expect(readsMessageOffACaughtError(typedCatchFixed)).toBe(false);
   });
 
   it("does NOT flag the pattern quoted in a COMMENT — see stripComments", () => {

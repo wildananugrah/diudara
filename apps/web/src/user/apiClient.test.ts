@@ -912,6 +912,41 @@ describe("apiClient — posts and the feed (Task 4)", () => {
     expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
   });
 
+  /**
+   * Fix round 1, I2. `publicGet` and `apiFetch` both call `authorizedHeaders(_,
+   * getUserToken())`, so the header tests above pass identically whichever one
+   * `listFeed`'s `untuk-anda` branch is wired to — they pin a real regression
+   * (Phase 2's unreachable follow button) but do not distinguish the two
+   * helpers from each other. The one behavioural difference between them is
+   * 401 handling: `apiRequest` (which backs `apiFetch`) clears the session on
+   * ANY 401; `publicGet` never does, because `untuk-anda` must degrade to the
+   * anonymous view rather than sign a visitor out mid-browse. Proved by
+   * mutation below (reviewer's own repro): swapping `untuk-anda` from
+   * `publicGet` to `apiFetch` left the whole web suite green until these two
+   * tests existed.
+   */
+  it("listFeed('untuk-anda') leaves the session intact on a 401 — publicGet never clears it", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "invalid or expired token" }, 401)
+    ) as unknown as typeof fetch;
+
+    await listFeed("untuk-anda").catch(() => {});
+
+    expect(isUserSignedIn()).toBe(true);
+  });
+
+  it("listFeed('mengikuti') clears the session on a 401 — apiFetch always does", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "invalid or expired token" }, 401)
+    ) as unknown as typeof fetch;
+
+    await listFeed("mengikuti").catch(() => {});
+
+    expect(isUserSignedIn()).toBe(false);
+  });
+
   it("listFeed appends before= only when given a cursor", async () => {
     const calls: string[] = [];
     global.fetch = mock(async (url: string) => {
