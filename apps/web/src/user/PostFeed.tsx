@@ -36,7 +36,7 @@ interface Props {
   /** The signed-in viewer's handle, or `null` when signed out. Decides which rows get a menu. */
   ownHandle: string | null;
   onEdit?: (post: PostView) => void;
-  onDeleted?: (id: string) => void;
+  onDeleteRequested?: (id: string) => void;
   /**
    * Optional access to `PostFeedHandle` above. Declared as a plain prop rather
    * than via `forwardRef`: React 19 (this project is on 19.2.8) passes `ref`
@@ -60,7 +60,7 @@ interface Props {
  * already loaded on screen, with the error shown alongside it, not instead
  * of it.
  */
-export default function PostFeed({ load, emptyMessage, ownHandle, onEdit, onDeleted, ref }: Props) {
+export default function PostFeed({ load, emptyMessage, ownHandle, onEdit, onDeleteRequested, ref }: Props) {
   const [posts, setPosts] = useState<PostView[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -99,12 +99,7 @@ export default function PostFeed({ load, emptyMessage, ownHandle, onEdit, onDele
   useImperativeHandle(
     ref,
     () => ({
-      prepend: (post: PostView) => {
-        setPosts((current) => [post, ...current]);
-        // A prepend means at least one row exists, so the empty state must not
-        // win a race with a first page that came back empty.
-        setFirstPageLoaded(true);
-      },
+      prepend: (post: PostView) => setPosts((current) => [post, ...current]),
       replace: (post: PostView) =>
         setPosts((current) => current.map((row) => (row.id === post.id ? post : row))),
       remove: (id: string) => setPosts((current) => current.filter((row) => row.id !== id)),
@@ -120,7 +115,7 @@ export default function PostFeed({ load, emptyMessage, ownHandle, onEdit, onDele
           post={post}
           isOwn={ownHandle !== null && post.author.handle === ownHandle}
           onEdit={onEdit}
-          onDeleted={onDeleted}
+          onDeleteRequested={onDeleteRequested}
         />
       ))}
 

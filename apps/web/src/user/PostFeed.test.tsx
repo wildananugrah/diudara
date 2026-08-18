@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createRef, type RefObject } from "react";
 import { MemoryRouter } from "react-router-dom";
-import PostFeed from "./PostFeed";
+import PostFeed, { type PostFeedHandle } from "./PostFeed";
 import { listFeed, type PostView } from "./apiClient";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -226,18 +227,170 @@ describe("PostFeed", () => {
     expect(screen.getAllByRole("button", { name: "Hapus" }).length).toBe(1);
   });
 
-  it("calls onDeleted with the post's id when Hapus is clicked on an owned post", async () => {
+  it("calls onDeleteRequested with the post's id when Hapus is clicked on an owned post", async () => {
     global.fetch = mock(async () =>
       jsonResponse({ posts: [makePost("1", "wildan")], nextCursor: null })
     ) as unknown as typeof fetch;
-    const onDeleted = mock(() => {});
+    const onDeleteRequested = mock(() => {});
 
-    renderFeed({ ownHandle: "wildan", onDeleted });
+    renderFeed({ ownHandle: "wildan", onDeleteRequested });
     await screen.findByText("Isi kiriman 1");
 
     fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
 
-    expect(onDeleted).toHaveBeenCalledTimes(1);
-    expect(onDeleted).toHaveBeenCalledWith("1");
+    expect(onDeleteRequested).toHaveBeenCalledTimes(1);
+    expect(onDeleteRequested).toHaveBeenCalledWith("1");
+  });
+
+  /**
+   * Fix round 1, R4. The callback fires on the TAP, before any DELETE exists —
+   * it was called `onDeleted` with a docstring claiming "the row is gone once
+   * this fires", which was false in both halves. This pins the true half: the
+   * feed does NOT remove anything of its own accord, so a consumer that wires a
+   * list removal straight to this callback is removing a row the server was
+   * never asked about.
+   */
+  it("does NOT remove the row itself when Hapus is tapped — the caller decides", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ posts: [makePost("1", "wildan")], nextCursor: null })
+    ) as unknown as typeof fetch;
+
+    renderFeed({ ownHandle: "wildan", onDeleteRequested: () => {} });
+    await screen.findByText("Isi kiriman 1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+
+    expect(screen.getByText("Isi kiriman 1")).toBeTruthy();
+    expect(screen.getAllByRole("article").length).toBe(1);
+  });
+});
+
+/**
+ * Fix round 1, I1 and I2. `PostFeedHandle` is the seam Task 5 added so a page
+ * can mutate the list this component owns, and it had NO direct tests at all —
+ * every exercise of it went through `BerandaPage.test.tsx`, whose fixtures are
+ * all ONE row. With one row, "removes the row" cannot tell the right row from
+ * row 0, and "in place" has no position to keep. Both were measured green under
+ * mutation:
+ *
+ * | mutation | web suite |
+ * |---|---|
+ * | `remove` → `current.slice(1)` | 598 pass / 0 fail |
+ * | `replace` → `[...current.filter(...), post]` | 598 pass / 0 fail |
+ *
+ * So every test below uses THREE rows and asserts the ORDER, not just the
+ * membership. Task 6 consumes this handle next.
+ */
+describe("PostFeed — PostFeedHandle", () => {
+  /** The bodies of every rendered row, in document order. Order is the whole point here. */
+  function bodies(): string[] {
+    return screen
+      .getAllByRole("article")
+      .map((article) => article.querySelector(".post-card-body")?.textContent ?? "");
+  }
+
+  async function renderThreeRows(): Promise<RefObject<PostFeedHandle | null>> {
+    global.fetch = mock(async () =>
+      jsonResponse({
+        posts: [makePost("1"), makePost("2"), makePost("3")],
+        nextCursor: null,
+      })
+    ) as unknown as typeof fetch;
+    const handle = createRef<PostFeedHandle>();
+
+    renderFeed({ ref: handle, ownHandle: "wildan" });
+    await screen.findByText("Isi kiriman 1");
+    // Guards every assertion below: if the fixture were not three rows, "the
+    // MIDDLE one" would mean nothing.
+    expect(bodies()).toEqual(["Isi kiriman 1", "Isi kiriman 2", "Isi kiriman 3"]);
+
+    return handle;
+  }
+
+  it("remove drops the post with THAT id, not whichever row happens to be first", async () => {
+    const handle = await renderThreeRows();
+
+    act(() => handle.current!.remove("2"));
+
+    expect(bodies()).toEqual(["Isi kiriman 1", "Isi kiriman 3"]);
+  });
+
+  it("remove leaves the list untouched for an id that is not on screen", async () => {
+    const handle = await renderThreeRows();
+
+    act(() => handle.current!.remove("99"));
+
+    expect(bodies()).toEqual(["Isi kiriman 1", "Isi kiriman 2", "Isi kiriman 3"]);
+  });
+
+  it("replace swaps a post IN PLACE — the row keeps its position", async () => {
+    const handle = await renderThreeRows();
+
+    act(() => handle.current!.replace({ ...makePost("2"), body: "Isi kiriman 2 (diubah)" }));
+
+    // Still in the MIDDLE. A replace that removed and re-appended would put it
+    // last, which is what a reader watching their own edit would experience as
+    // the post jumping to the bottom of the feed.
+    expect(bodies()).toEqual([
+      "Isi kiriman 1",
+      "Isi kiriman 2 (diubah)",
+      "Isi kiriman 3",
+    ]);
+  });
+
+  it("replace leaves the list untouched for a post that is not on screen", async () => {
+    const handle = await renderThreeRows();
+
+    act(() => handle.current!.replace({ ...makePost("99"), body: "tidak ada di sini" }));
+
+    expect(bodies()).toEqual(["Isi kiriman 1", "Isi kiriman 2", "Isi kiriman 3"]);
+    expect(screen.queryAllByText("tidak ada di sini").length).toBe(0);
+  });
+
+  it("prepend puts the post at the TOP and keeps the rest in order", async () => {
+    const handle = await renderThreeRows();
+
+    act(() => handle.current!.prepend({ ...makePost("0"), body: "Isi kiriman baru" }));
+
+    expect(bodies()).toEqual([
+      "Isi kiriman baru",
+      "Isi kiriman 1",
+      "Isi kiriman 2",
+      "Isi kiriman 3",
+    ]);
+  });
+
+  it("keeps the handle usable across a refetch, still targeting the right row", async () => {
+    // The handle's identity is stable (empty `useImperativeHandle` deps) while
+    // `posts` underneath it is replaced wholesale by a refetch. This pins that
+    // the two stay connected — a handle that closed over a stale `posts` would
+    // operate on the previous page.
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({
+        posts:
+          calls.length === 1
+            ? [makePost("1"), makePost("2")]
+            : [makePost("7"), makePost("8"), makePost("9")],
+        nextCursor: "cursor-a",
+      });
+    }) as unknown as typeof fetch;
+    const handle = createRef<PostFeedHandle>();
+
+    renderFeed({ ref: handle, ownHandle: "wildan" });
+    await screen.findByText("Isi kiriman 1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Muat lebih banyak" }));
+    await screen.findByText("Isi kiriman 8");
+
+    act(() => handle.current!.remove("8"));
+
+    expect(bodies()).toEqual([
+      "Isi kiriman 1",
+      "Isi kiriman 2",
+      "Isi kiriman 7",
+      "Isi kiriman 9",
+    ]);
   });
 });

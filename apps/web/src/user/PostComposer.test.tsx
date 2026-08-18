@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import PostComposer from "./PostComposer";
 import { UserApiError } from "./apiClient";
 
@@ -17,8 +17,24 @@ const LIMIT = 1000;
 
 function renderComposer(props: Partial<Parameters<typeof PostComposer>[0]> = {}) {
   const onSubmit = props.onSubmit ?? mock(async () => {});
-  render(<PostComposer submitLabel="Kirim" {...props} onSubmit={onSubmit} />);
-  return { onSubmit };
+  const { container } = render(
+    <PostComposer submitLabel="Kirim" {...props} onSubmit={onSubmit} />
+  );
+  return { onSubmit, container };
+}
+
+/**
+ * Submits the FORM directly, bypassing the submit button entirely.
+ *
+ * This is the only way to reach `handleSubmit`'s own `if (!canSubmit) return;`
+ * guard from a test: every other path goes through a button carrying
+ * `disabled`, which stops the event before the handler runs. Fix round 1 —
+ * the reviewer deleted that guard and the whole web suite stayed at 598/0,
+ * because nothing exercised what it is actually for. A real browser reaches it
+ * via Enter in the textarea and via `form.requestSubmit()`.
+ */
+function submitForm(container: HTMLElement): void {
+  fireEvent.submit(container.querySelector("form")!);
 }
 
 function textarea(): HTMLTextAreaElement {
@@ -31,6 +47,13 @@ function submitButton(label = "Kirim"): HTMLButtonElement {
 
 function type(value: string): void {
   fireEvent.change(textarea(), { target: { value } });
+}
+
+/** Gives a promise chain a chance to run before an ABSENCE is asserted. */
+function settle(): Promise<void> {
+  return act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
 }
 
 describe("PostComposer — what may be sent", () => {
@@ -253,6 +276,66 @@ describe("PostComposer — submitting", () => {
     await waitFor(() => {
       expect(textarea().value).toBe("");
     });
+  });
+
+  /**
+   * Fix round 1. The three tests below reach `handleSubmit`'s own guard, which
+   * `disabled` alone hides — see `submitForm`'s docstring. Without the guard,
+   * `onSubmit("")` reaches the API and the server answers a 400 the composer
+   * then has to explain, for a form the UI already said could not be sent.
+   */
+  it("sends nothing when the FORM is submitted with an empty box", async () => {
+    const { onSubmit, container } = renderComposer();
+
+    submitForm(container);
+    await settle();
+
+    expect(onSubmit).toHaveBeenCalledTimes(0);
+  });
+
+  it("sends nothing when the FORM is submitted with a whitespace-only box", async () => {
+    const { onSubmit, container } = renderComposer();
+
+    type("   \n  ");
+    submitForm(container);
+    await settle();
+
+    expect(onSubmit).toHaveBeenCalledTimes(0);
+  });
+
+  it("sends nothing when the FORM is submitted again mid-flight", async () => {
+    let release: () => void = () => {};
+    const onSubmit = mock(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    const { container } = renderComposer({ onSubmit });
+
+    type("halo");
+    submitForm(container);
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+
+    submitForm(container);
+    submitForm(container);
+    await settle();
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+
+    release();
+    await waitFor(() => {
+      expect(textarea().value).toBe("");
+    });
+  });
+
+  it("sends nothing when the FORM is submitted with an over-limit body", async () => {
+    const { onSubmit, container } = renderComposer({ initialBody: "a".repeat(1001) });
+
+    submitForm(container);
+    await settle();
+
+    expect(onSubmit).toHaveBeenCalledTimes(0);
   });
 });
 

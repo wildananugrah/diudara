@@ -15,8 +15,22 @@ export interface PostCardProps {
   now?: Date;
   /** Told the FULL post, since editing needs the current body to pre-fill a form — not just the id. */
   onEdit?: (post: PostView) => void;
-  /** Told only the id: the row is gone once this fires, and that is all a caller removing it from a list needs. */
-  onDeleted?: (id: string) => void;
+  /**
+   * **Raised on the TAP of `Hapus`, BEFORE anything has been deleted.** This
+   * card does not call the API and does not confirm; it reports that the owner
+   * asked to delete, and the caller decides what that means — `BerandaPage`
+   * shows a confirmation, then sends the DELETE, then removes the row.
+   *
+   * It was called `onDeleted` until fix round 1, with a docstring that read
+   * "the row is gone once this fires". That was false in both halves, and it is
+   * exactly the sentence a second consumer would read and trust: wiring a list
+   * removal straight to this callback deletes rows on screen that the server
+   * was never asked about, and leaves them deleted when the DELETE fails.
+   *
+   * Told only the id, not the post — removing a row needs nothing else, and an
+   * edit (which does need the body) has `onEdit` for it.
+   */
+  onDeleteRequested?: (id: string) => void;
 }
 
 /**
@@ -33,7 +47,7 @@ export interface PostCardProps {
  * the reverse, so a single guard is the honest shape rather than two that
  * could drift apart.
  */
-export default function PostCard({ post, isOwn, now, onEdit, onDeleted }: PostCardProps) {
+export default function PostCard({ post, isOwn, now, onEdit, onDeleteRequested }: PostCardProps) {
   const clock = now ?? new Date();
 
   return (
@@ -59,7 +73,7 @@ export default function PostCard({ post, isOwn, now, onEdit, onDeleted }: PostCa
           <button type="button" className="button-quiet" onClick={() => onEdit?.(post)}>
             Edit
           </button>
-          <button type="button" className="button-quiet" onClick={() => onDeleted?.(post.id)}>
+          <button type="button" className="button-quiet" onClick={() => onDeleteRequested?.(post.id)}>
             Hapus
           </button>
         </div>

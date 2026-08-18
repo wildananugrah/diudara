@@ -89,14 +89,14 @@ describe("PostCard", () => {
     expect(onEdit).toHaveBeenCalledWith(POST);
   });
 
-  it("calls onDeleted with the post's id (not the post) when Hapus is clicked", () => {
-    const onDeleted = mock(() => {});
-    renderCard({ isOwn: true, onDeleted });
+  it("calls onDeleteRequested with the post's id (not the post) when Hapus is clicked", () => {
+    const onDeleteRequested = mock(() => {});
+    renderCard({ isOwn: true, onDeleteRequested });
 
     fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
 
-    expect(onDeleted).toHaveBeenCalledTimes(1);
-    expect(onDeleted).toHaveBeenCalledWith(POST.id);
+    expect(onDeleteRequested).toHaveBeenCalledTimes(1);
+    expect(onDeleteRequested).toHaveBeenCalledWith(POST.id);
   });
 
   it("renders no follow button at all, regardless of isOwn", () => {

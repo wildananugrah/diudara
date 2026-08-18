@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import PostFeed, { type PostFeedHandle } from "./PostFeed";
 import PostComposer from "./PostComposer";
@@ -9,6 +9,7 @@ import {
   getSessionUser,
   isUserSignedIn,
   listFeed,
+  subscribeToUserAuth,
 } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
 import type { PostView } from "./apiClient";
@@ -46,7 +47,17 @@ const DELETE_FAILED_PREFIX = "Gagal menghapus kiriman.";
 export default function BerandaPage() {
   const [params, setParams] = useSearchParams();
   const tab: Tab = params.get("tab") === "mengikuti" ? "mengikuti" : "untuk-anda";
-  const signedIn = isUserSignedIn();
+  /**
+   * SUBSCRIBED, not read once per render (fix round 1). `apiFetch` clears the
+   * session on any 401, so a token that expires while somebody is reading
+   * Mengikuti makes this false — and the review measured what a plain
+   * `isUserSignedIn()` call left behind: the composer and its live "Kirim"
+   * button still on screen beside a session that no longer exists, with the
+   * next submit guaranteed to 401 too. `AppShell` already answers this question
+   * exactly this way, and `isUserSignedIn` returns a boolean precisely so it is
+   * a stable snapshot.
+   */
+  const signedIn = useSyncExternalStore(subscribeToUserAuth, isUserSignedIn, () => false);
   const ownHandle = getSessionUser()?.handle ?? null;
 
   const feed = useRef<PostFeedHandle>(null);
@@ -56,17 +67,40 @@ export default function BerandaPage() {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  /**
-   * The tab a post was just created from, when that tab cannot show it. Stored
-   * as the TAB rather than a boolean so switching tabs hides the notice for
-   * free, with no effect and nothing to clear by hand.
-   */
-  const [sentFrom, setSentFrom] = useState<Tab | null>(null);
+  /** Set by a successful create made from Mengikuti, which cannot show it. Cleared by the tab-change effect below — see there for why this is not derived from `tab`. */
+  const [postSent, setPostSent] = useState(false);
 
   // Memoised on `tab` so PostFeed refetches when the tab changes and NOT on
   // every render. See PostFeed's own note: without this the effect loops, which
   // is a hang rather than a slowdown.
   const load = useCallback((before: string | null) => listFeed(tab, before), [tab]);
+
+  /**
+   * **Everything transient is about a row in the list the CURRENT tab is
+   * showing, and a tab change replaces that list wholesale.** So all of it is
+   * dropped here (fix round 1).
+   *
+   * This used to be a `sentFrom: Tab | null` compared against `tab` during
+   * render, which HID the notice on the other tab without ever CLEARING it —
+   * so posting from Mengikuti, visiting Untuk Anda and coming back put
+   * "Kiriman Anda terkirim" on screen again, announcing a post that was sent
+   * minutes ago. The confirmation panel and the edit composer had the same
+   * shape of bug and were worse: "Hapus kiriman ini?" survived a tab switch
+   * with zero rows rendered behind it, and "Ya, hapus" still fired the DELETE
+   * for a post that was no longer on screen.
+   *
+   * An effect rather than the two tab buttons' `onClick`, because the tab also
+   * changes on back/forward and on a shared link, which never go through those
+   * handlers. It runs on mount too, where every setter is already at its
+   * initial value — React bails out of an equal `useState` write, so that costs
+   * no extra render.
+   */
+  useEffect(() => {
+    setEditing(null);
+    setPendingDelete(null);
+    setDeleteError(null);
+    setPostSent(false);
+  }, [tab]);
 
   async function handleCreate(body: string): Promise<void> {
     const created = await createPost(body);
@@ -76,10 +110,13 @@ export default function BerandaPage() {
     // that the very next refetch silently removes, so that tab says what
     // happened instead of showing something untrue.
     if (tab === "mengikuti") {
-      setSentFrom("mengikuti");
+      setPostSent(true);
       return;
     }
-    setSentFrom(null);
+    // No `setPostSent(false)` here: `postSent` can only ever have been set from
+    // Mengikuti, and the tab-change effect above clears it on the way to this
+    // tab. It was removable with the whole suite green, which made it a third
+    // state nothing owned rather than a safety net.
     feed.current?.prepend(created);
   }
 
@@ -147,7 +184,7 @@ export default function BerandaPage() {
         )
       ) : null}
 
-      {sentFrom === tab ? (
+      {postSent ? (
         <p className="feed-notice" role="status">
           Kiriman Anda terkirim. Buka tab Untuk Anda untuk melihatnya.
         </p>
@@ -187,7 +224,7 @@ export default function BerandaPage() {
             setDeleteError(null);
             setEditing(post);
           }}
-          onDeleted={(id) => {
+          onDeleteRequested={(id) => {
             // `PostCard` raises this on the TAP, not after a delete — nothing
             // has been removed yet. Confirmation happens here.
             setDeleteError(null);

@@ -9,7 +9,7 @@ import {
   useLocation,
 } from "react-router-dom";
 import BerandaPage from "./BerandaPage";
-import { setUserSession, type PostView } from "./apiClient";
+import { getUserToken, setUserSession, type PostView } from "./apiClient";
 
 const USER = { id: "user-1", handle: "wildan", displayName: "Wildan", email: "wildan@example.com" };
 
@@ -398,6 +398,131 @@ describe("BerandaPage — signed in", () => {
   });
 });
 
+/**
+ * Fix round 1. Everything transient on this page is ABOUT a row in the list the
+ * current tab is showing, and a tab change replaces that list wholesale. All
+ * three of these survived a tab switch before the `useEffect` on `[tab]`.
+ */
+describe("BerandaPage — a tab change clears what belonged to the old tab", () => {
+  it("does NOT show the sent notice again after leaving Mengikuti and returning", async () => {
+    setUserSession("jwt-abc", USER);
+    mockFetch((url, init) => {
+      if (init?.method === "POST") return jsonResponse(makePost("p2", "kiriman baru"), 201);
+      return jsonResponse({ posts: [], nextCursor: null });
+    });
+
+    renderBeranda("/beranda?tab=mengikuti");
+    await screen.findByText("Belum ada kiriman dari orang yang Anda ikuti.");
+
+    fireEvent.change(screen.getByLabelText("Apa yang terjadi?"), {
+      target: { value: "kiriman baru" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Kirim" }));
+    await screen.findByText("Kiriman Anda terkirim. Buka tab Untuk Anda untuk melihatnya.");
+
+    fireEvent.click(tabButton("Untuk Anda"));
+    await screen.findByText("Belum ada kiriman untuk ditampilkan.");
+    expect(screen.queryAllByText(/Kiriman Anda terkirim/).length).toBe(0);
+
+    // Back to Mengikuti. The notice was HIDDEN by the old `sentFrom === tab`
+    // comparison, never cleared, so it came back here — announcing a post that
+    // was sent minutes ago.
+    fireEvent.click(tabButton("Mengikuti"));
+    await screen.findByText("Belum ada kiriman dari orang yang Anda ikuti.");
+
+    expect(screen.queryAllByText(/Kiriman Anda terkirim/).length).toBe(0);
+  });
+
+  it("drops a pending delete confirmation, so 'Ya, hapus' cannot fire for an unrendered post", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls = mockFetch((url, init) => {
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      if (url.includes("tab=mengikuti")) return jsonResponse({ posts: [], nextCursor: null });
+      return jsonResponse({ posts: [makePost("p1", "kiriman lama")], nextCursor: null });
+    });
+
+    renderBeranda();
+    await screen.findByText("kiriman lama");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    expect(screen.getByText("Hapus kiriman ini?")).toBeTruthy();
+
+    fireEvent.click(tabButton("Mengikuti"));
+    await screen.findByText("Belum ada kiriman dari orang yang Anda ikuti.");
+
+    expect(screen.queryAllByText("Hapus kiriman ini?").length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: "Ya, hapus" }).length).toBe(0);
+    // No DELETE was ever sent — only the two feed GETs.
+    expect(calls.filter((call) => call.init?.method === "DELETE").length).toBe(0);
+  });
+
+  it("closes an open edit composer, so Simpan cannot write to an unrendered post", async () => {
+    setUserSession("jwt-abc", USER);
+    mockFetch((url) => {
+      if (url.includes("tab=mengikuti")) return jsonResponse({ posts: [], nextCursor: null });
+      return jsonResponse({ posts: [makePost("p1", "isi lama")], nextCursor: null });
+    });
+
+    renderBeranda();
+    await screen.findByText("isi lama");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByRole("button", { name: "Simpan" })).toBeTruthy();
+
+    fireEvent.click(tabButton("Mengikuti"));
+    await screen.findByText("Belum ada kiriman dari orang yang Anda ikuti.");
+
+    expect(screen.queryAllByRole("button", { name: "Simpan" }).length).toBe(0);
+    expect(screen.getByRole("button", { name: "Kirim" })).toBeTruthy();
+    expect((screen.getByLabelText("Apa yang terjadi?") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("clears a delete failure", async () => {
+    setUserSession("jwt-abc", USER);
+    mockFetch((url, init) => {
+      if (init?.method === "DELETE") return jsonResponse({ error: "internal server error" }, 500);
+      if (url.includes("tab=mengikuti")) return jsonResponse({ posts: [], nextCursor: null });
+      return jsonResponse({ posts: [makePost("p1", "kiriman lama")], nextCursor: null });
+    });
+
+    renderBeranda();
+    await screen.findByText("kiriman lama");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ya, hapus" }));
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeTruthy();
+    });
+
+    fireEvent.click(tabButton("Mengikuti"));
+    await screen.findByText("Belum ada kiriman dari orang yang Anda ikuti.");
+
+    expect(screen.queryAllByRole("alert").length).toBe(0);
+  });
+});
+
+/**
+ * Fix round 1, Concern 3 — measured by the reviewer, not merely reasoned.
+ * `signedIn` is now a `useSyncExternalStore` subscription, the same pattern
+ * `AppShell` uses, so a session cleared by `apiFetch`'s 401 handler reaches
+ * this page immediately instead of at whatever render happens next.
+ */
+describe("BerandaPage — a session that expires mid-browse", () => {
+  it("drops the composer when Mengikuti's 401 clears the session", async () => {
+    setUserSession("jwt-abc", USER);
+    mockFetch(() => jsonResponse({ error: "invalid or expired token" }, 401));
+
+    renderBeranda("/beranda?tab=mengikuti");
+
+    // The signed-out branch takes over: a live "Kirim" button attached to a
+    // session that no longer exists is the state this replaces.
+    expect(await screen.findByRole("link", { name: "Masuk untuk melihat" })).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: "Kirim" }).length).toBe(0);
+    expect(screen.queryAllByLabelText("Apa yang terjadi?").length).toBe(0);
+    expect(getUserToken() === null).toBe(true);
+  });
+});
+
 describe("BerandaPage — deleting your own post", () => {
   it("asks for confirmation before sending anything, then removes the row on confirm", async () => {
     setUserSession("jwt-abc", USER);
@@ -463,6 +588,61 @@ describe("BerandaPage — deleting your own post", () => {
     });
     expect(screen.getByText("kiriman lama")).toBeTruthy();
     expect(screen.queryAllByText(/internal server error/).length).toBe(0);
+  });
+
+  /**
+   * Fix round 1. `setDeleteError(null)` in the `onDeleteRequested` and `onEdit`
+   * handlers was removable with the suite green. The behaviour it produces is
+   * right and worth keeping, so it is pinned rather than deleted: a failure
+   * about the LAST delete must not sit under the confirmation panel for the
+   * NEXT one, where it reads as a failure that has already happened to the post
+   * you are about to confirm.
+   */
+  it("clears a previous delete failure when another delete is requested", async () => {
+    setUserSession("jwt-abc", USER);
+    mockFetch((url, init) => {
+      if (init?.method === "DELETE") return jsonResponse({ error: "internal server error" }, 500);
+      return jsonResponse({
+        posts: [makePost("p1", "kiriman satu"), makePost("p2", "kiriman dua")],
+        nextCursor: null,
+      });
+    });
+
+    renderBeranda();
+    await screen.findByText("kiriman satu");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Hapus" })[0]!);
+    fireEvent.click(screen.getByRole("button", { name: "Ya, hapus" }));
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Hapus" })[1]!);
+
+    expect(screen.queryAllByRole("alert").length).toBe(0);
+    expect(screen.getByText("Hapus kiriman ini?")).toBeTruthy();
+  });
+
+  it("clears a previous delete failure when an edit is started instead", async () => {
+    setUserSession("jwt-abc", USER);
+    mockFetch((url, init) => {
+      if (init?.method === "DELETE") return jsonResponse({ error: "internal server error" }, 500);
+      return jsonResponse({ posts: [makePost("p1", "kiriman satu")], nextCursor: null });
+    });
+
+    renderBeranda();
+    await screen.findByText("kiriman satu");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ya, hapus" }));
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    expect(screen.queryAllByRole("alert").length).toBe(0);
+    expect(screen.getByRole("button", { name: "Simpan" })).toBeTruthy();
   });
 
   it("offers no owner controls on somebody else's post", async () => {
@@ -541,6 +721,74 @@ describe("BerandaPage — editing your own post", () => {
       "isi baru"
     );
     expect(screen.getByText("isi lama")).toBeTruthy();
+  });
+
+  /**
+   * Fix round 1, Minor. `key={editing.id}` on the edit composer was deletable
+   * with all 23 tests green, because nothing ever opened a SECOND edit without
+   * cancelling the first. `initialBody` only seeds `useState`, so without the
+   * key React reuses the same component instance and its stale body:
+   * tap Edit on A, then Edit on B, and B's box holds A's text — then Simpan
+   * writes A's words onto B's post. Two own posts is all it takes to see it.
+   */
+  it("re-fills the box when Edit is tapped on a SECOND post without cancelling the first", async () => {
+    setUserSession("jwt-abc", USER);
+    mockFetch(() =>
+      jsonResponse({
+        posts: [makePost("p1", "isi satu"), makePost("p2", "isi dua")],
+        nextCursor: null,
+      })
+    );
+
+    renderBeranda();
+    await screen.findByText("isi satu");
+
+    const editButtons = () => screen.getAllByRole("button", { name: "Edit" });
+    expect(editButtons().length).toBe(2);
+
+    fireEvent.click(editButtons()[0]!);
+    expect((screen.getByLabelText("Apa yang terjadi?") as HTMLTextAreaElement).value).toBe(
+      "isi satu"
+    );
+
+    fireEvent.click(editButtons()[1]!);
+
+    expect((screen.getByLabelText("Apa yang terjadi?") as HTMLTextAreaElement).value).toBe(
+      "isi dua"
+    );
+  });
+
+  /**
+   * The harm the missing key actually does, rather than the state that causes
+   * it. Nothing is retyped: the box is submitted exactly as the second Edit
+   * left it. Without the key that is the FIRST post's body, sent to the SECOND
+   * post's id — one tap silently overwrites B's words with A's.
+   */
+  it("saves the SECOND post's own text, never the first post's, when Edit is tapped twice", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls = mockFetch((url, init) => {
+      if (init?.method === "PATCH") {
+        return jsonResponse({ ...makePost("p2", "isi dua"), editedAt: "2026-08-18T01:00:00.000Z" });
+      }
+      return jsonResponse({
+        posts: [makePost("p1", "isi satu"), makePost("p2", "isi dua")],
+        nextCursor: null,
+      });
+    });
+
+    renderBeranda();
+    await screen.findByText("isi satu");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]!);
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]!);
+    fireEvent.click(screen.getByRole("button", { name: "Simpan" }));
+
+    await waitFor(() => {
+      expect(calls.length).toBe(2);
+    });
+    expect(calls[1]!.url).toBe("/users/posts/p2");
+    expect(JSON.parse(String(calls[1]!.init?.body)).body).toBe("isi dua");
+    expect(screen.getByText("isi satu")).toBeTruthy();
   });
 
   it("abandons an edit on Batal, returning to the create composer", async () => {
