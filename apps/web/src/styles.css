@@ -1144,6 +1144,24 @@ tbody tr:last-child td {
   margin-top: 8px;
 }
 
+/* Task 4: PostFeed. `.post-feed` itself needs no layout of its own — each
+   `.post-card` already draws its own `border-bottom` and vertical padding,
+   so the list reads correctly as a plain stack of block children. */
+.post-feed .empty {
+  margin-top: 12px;
+}
+
+.post-feed .feed-error {
+  color: var(--red);
+  font-size: 0.875rem;
+  margin: 12px 0 0;
+}
+
+.post-feed > button {
+  display: block;
+  margin: 16px auto 0;
+}
+
 @media (min-width: 768px) {
   .bottom-nav {
     display: none;
