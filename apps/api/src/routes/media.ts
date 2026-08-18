@@ -10,16 +10,36 @@ import {
 import type { Dependencies } from "../bootstrap";
 
 const NO_FILE_MESSAGE = "berkas foto wajib disertakan";
-const NOT_FOUND_MESSAGE = "media tidak ditemukan";
+const NOT_FOUND_MESSAGE = "media not found";
+// English, not Bahasa — `NotFoundError` is English at every one of its
+// other ~54 call sites in this codebase (`"post not found"`,
+// `"community not found"`, etc.), without exception. `ValidationError`/
+// `ConflictError` copy IS Bahasa here (see `NO_FILE_MESSAGE` above, from
+// Task 4) — that split is real, not an oversight: those are messages a
+// human reads in a form; `NotFoundError` on this route is a status code
+// with an internal label, matching the rest of the codebase's technical
+// 404s.
 
 /**
  * Immutable because the id names one exact re-encoded artefact — Task 4's
  * upload pipeline writes it once and never touches it again, so there is no
- * future version to invalidate this cache for. Safe to keep word-for-word
- * once Phase 6 adds an entitlement check in front of these handlers (see the
- * comment on each route below): the check runs BEFORE any bytes are read, so
- * a viewer who fails it never receives a response this header could apply
- * to. Do not widen this to cover a response served before that check exists.
+ * future version to invalidate this cache for THIS byte content.
+ *
+ * SAFE ONLY BECAUSE EVERY POST IS PUBLIC TODAY (Phase 3) — this is not a
+ * property of the id, it is a property of the current phase, and Phase 6
+ * breaks it. `public` licenses ANY downstream cache (an nginx layer, a CDN,
+ * a browser shared with other profiles) to replay a cached 200 to a
+ * DIFFERENT caller WITHOUT ever re-entering this handler, and
+ * `max-age=31536000, immutable` keeps a member's own browser replaying it
+ * for a year after their entitlement is revoked. Neither of those is a bug
+ * today because there is nothing to gate; both become the exact hole §5.1
+ * warns about the moment Phase 6 lands. When Phase 6 adds the entitlement
+ * check named on each route below, it MUST also stop sending this header on
+ * the gated path — `private, no-store` (or omitting caching entirely) for
+ * any response the entitlement check gated, keeping `public, immutable`
+ * only for media that stays ungated. Widening this header to cover a
+ * response served before that check runs is the mistake this comment exists
+ * to prevent.
  */
 const CACHE_CONTROL = "public, max-age=31536000, immutable";
 

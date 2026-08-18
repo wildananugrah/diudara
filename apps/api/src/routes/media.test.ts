@@ -104,19 +104,35 @@ describe("POST /users/media", () => {
   });
 });
 
+/**
+ * WebP's magic number: a RIFF container (bytes 0-3) whose form type (bytes
+ * 8-11, RIFF's chunk size sits in between) is WEBP. Checked against the
+ * BODY ITSELF, never the `Content-Type` header — a route that lied about its
+ * header, or answered with a JSON body like `{"url": "..."}`, would still
+ * fail this even though a header-only check would wave it through.
+ */
+function isWebp(bytes: Uint8Array): boolean {
+  const ascii = (offset: number, length: number) =>
+    String.fromCharCode(...bytes.subarray(offset, offset + length));
+  return bytes.length >= 12 && ascii(0, 4) === "RIFF" && ascii(8, 4) === "WEBP";
+}
+
 describe("GET /users/media/:id and /thumb", () => {
   let a: ReturnType<typeof app>;
   let storage: ReturnType<typeof bootstrap>["mediaStorage"];
+  let mediaRepository: ReturnType<typeof bootstrap>["mediaRepository"];
   let token: string;
 
   beforeEach(async () => {
-    // `a` and `storage` come from the SAME `bootstrap()` call — Task 4's
-    // `POST /users/media` (behind `a`) and the fake this block pokes at
-    // directly with `storage.remove` must be the one adapter the app is
-    // actually wired to, not a second fake the test built itself.
+    // `a`, `storage` and `mediaRepository` come from the SAME `bootstrap()`
+    // call — Task 4's `POST /users/media` (behind `a`) and the fakes this
+    // block pokes at directly (`storage.remove`, `mediaRepository.deleteById`)
+    // must be the ones the app is actually wired to, not fakes the test built
+    // itself.
     const deps = bootstrap();
     a = createApp(deps);
     storage = deps.mediaStorage;
+    mediaRepository = deps.mediaRepository;
     token = await tokenForValidUser(a);
   });
 
@@ -142,6 +158,19 @@ describe("GET /users/media/:id and /thumb", () => {
     expect((await res.bytes()).length).toBeGreaterThan(0);
   });
 
+  // Review round 1, I2: the full route had this assertion and the thumb
+  // route did not — a mutation deleting the thumb route's own null-check on
+  // `mediaStorage.get` stayed green because nothing exercised that code path.
+  it("streams the thumbnail as bytes, with an image content type", async () => {
+    const id = await uploadFixture(a, token, "small.png");
+
+    const res = await a.request(`/users/media/${id}/thumb`);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/webp");
+    expect((await res.bytes()).length).toBeGreaterThan(0);
+  });
+
   it("streams the thumbnail, and it is SMALLER than the full image", async () => {
     const id = await uploadFixture(a, token, "photo-with-gps.jpg");
 
@@ -149,28 +178,61 @@ describe("GET /users/media/:id and /thumb", () => {
     const thumb = await (await a.request(`/users/media/${id}/thumb`)).bytes();
 
     // Proves the two routes serve different variants rather than the same object
-    // twice — an assertion on status alone passes against that bug.
+    // twice — an assertion on status alone passes against that bug. NOTE this
+    // comparison alone is not enough to prove neither route redirects: a 302's
+    // empty body is ALSO "smaller than the full image" — see the PROXIES tests
+    // below, which is why size-comparison and proxy-vs-redirect are two
+    // separate tests rather than one combined into the other.
     expect(thumb.length).toBeLessThan(full.length);
   });
 
   /**
    * Spec §5.1. This is the assertion the whole phase's shape exists to satisfy,
    * and Phase 6's paywall is built on it holding.
+   *
+   * Checked against the BODY's own WebP magic number, not just headers — a
+   * `{"url": "..."}` JSON response has no `Location` header and no bucket
+   * hostname in its headers either, so a header-only check cannot tell it
+   * apart from the real bytes.
    */
-  it("PROXIES: never a redirect, and never a bucket hostname in any header", async () => {
-    const id = await uploadFixture(a, token, "small.png");
-
-    const res = await a.request(`/users/media/${id}`, { redirect: "manual" });
+  async function expectProxiesRealBytes(path: string) {
+    const res = await a.request(path, { redirect: "manual" });
 
     expect(res.status).toBe(200);
     expect(res.status).not.toBe(302);
     expect(res.headers.get("location")).toBe(null);
     const headers = JSON.stringify([...res.headers.entries()]);
     expect(headers).not.toMatch(/biznetgio|amazonaws|s3\./i);
+
+    const bytes = await res.bytes();
+    expect(isWebp(bytes)).toBe(true);
+  }
+
+  // Review round 1, C1 (Critical): this test used to check the full route
+  // ONLY. A mutation turning the THUMB handler into a 302-to-a-bucket-URL
+  // left the suite at 12/12 green, because "streams the thumbnail... SMALLER"
+  // above measures a redirect's EMPTY body as smaller than the full image —
+  // the exact property that test exists to catch is the one a redirect
+  // satisfies by accident. Both routes now get the full PROXIES assertions,
+  // independently.
+  it("PROXIES on the full route: never a redirect, never a bucket hostname, and the body is really the image", async () => {
+    const id = await uploadFixture(a, token, "small.png");
+    await expectProxiesRealBytes(`/users/media/${id}`);
+  });
+
+  it("PROXIES on the thumb route: never a redirect, never a bucket hostname, and the body is really the image", async () => {
+    const id = await uploadFixture(a, token, "small.png");
+    await expectProxiesRealBytes(`/users/media/${id}/thumb`);
   });
 
   it("404s an unknown id", async () => {
     expect((await a.request("/users/media/8a1f0e6e-0000-4000-8000-000000000000")).status).toBe(404);
+  });
+
+  it("404s an unknown id on the thumb route", async () => {
+    expect(
+      (await a.request("/users/media/8a1f0e6e-0000-4000-8000-000000000000/thumb")).status
+    ).toBe(404);
   });
 
   it("404s a row whose bytes are missing, rather than 500ing", async () => {
@@ -178,6 +240,38 @@ describe("GET /users/media/:id and /thumb", () => {
     await storage.remove(id);
 
     expect((await a.request(`/users/media/${id}`)).status).toBe(404);
+  });
+
+  // Review round 1, I2: same guard as the full route's test above, pinned
+  // separately for the thumb route — deleting `mediaStorage.get`'s null
+  // check on ONLY the thumb handler used to leave the suite green.
+  it("404s a row whose thumb bytes are missing, rather than 500ing", async () => {
+    const id = await uploadFixture(a, token, "small.png");
+    await storage.remove(id);
+
+    expect((await a.request(`/users/media/${id}/thumb`)).status).toBe(404);
+  });
+
+  // Review round 1, I3 (Important): deleting the `mediaRepository.findById`
+  // lookup from a handler used to leave the suite green, because
+  // `mediaStorage.get` also returns `null` for a plain unknown id — nothing
+  // distinguished "never existed" from "row gone, bytes orphaned". This test
+  // creates exactly that gap (delete the row, leave the bytes) so only the
+  // row lookup — not the storage lookup — can catch it. Also the anchor
+  // Phase 6's entitlement check will read from: without this row, there is
+  // nothing to check tier/ownership against.
+  it("404s when the row has been deleted from the database but its bytes remain in storage (full route)", async () => {
+    const id = await uploadFixture(a, token, "small.png");
+    await mediaRepository.deleteById(id);
+
+    expect((await a.request(`/users/media/${id}`)).status).toBe(404);
+  });
+
+  it("404s when the row has been deleted from the database but its bytes remain in storage (thumb route)", async () => {
+    const id = await uploadFixture(a, token, "small.png");
+    await mediaRepository.deleteById(id);
+
+    expect((await a.request(`/users/media/${id}/thumb`)).status).toBe(404);
   });
 
   // Not in the brief's own list, but called out in its prose: the precedent
@@ -196,6 +290,16 @@ describe("GET /users/media/:id and /thumb", () => {
     const id = await uploadFixture(a, token, "small.png");
 
     const res = await a.request(`/users/media/${id}`);
+
+    expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  });
+
+  // Review round 1, I2: same as the content-type/missing-bytes pair above —
+  // the full route had this assertion, the thumb route did not.
+  it("sets long-lived, immutable caching on the thumbnail bytes it returns", async () => {
+    const id = await uploadFixture(a, token, "small.png");
+
+    const res = await a.request(`/users/media/${id}/thumb`);
 
     expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
   });
