@@ -1091,6 +1091,59 @@ tbody tr:last-child td {
   font-weight: 600;
 }
 
+/* ---------------------------------------------------------------
+   Task 3: PostCard. `.post-card-body` is `white-space: pre-wrap` because
+   `PostCard.tsx` renders `post.body` as a plain text node (never
+   `dangerouslySetInnerHTML` — a post body is untrusted input from any
+   signed-up user) and plain text collapses newlines by default; this is
+   what makes the line breaks the author actually typed survive.
+   --------------------------------------------------------------- */
+.post-card {
+  border-bottom: 1px solid var(--line);
+  padding: 12px 0;
+}
+
+.post-card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.post-card-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  text-decoration: none;
+  color: inherit;
+  min-width: 0;
+}
+
+.post-card-name {
+  font-weight: 600;
+}
+
+.post-card-handle {
+  color: var(--ink-faint);
+}
+
+.post-card-meta {
+  color: var(--ink-faint);
+  font-size: 0.8125rem;
+  flex-shrink: 0;
+}
+
+.post-card-body {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+}
+
+.post-card-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+}
+
 @media (min-width: 768px) {
   .bottom-nav {
     display: none;

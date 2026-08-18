@@ -565,3 +565,33 @@ export function exploreUsers(input: { q?: string; limit?: number } = {}): Promis
   const search = query.length > 0 ? `?${query}` : "";
   return publicGet<ExploreResult>(`/users/explore${search}`, "gagal memuat Jelajah");
 }
+
+/**
+ * A single post as the API renders it — Task 3 declares this shape so
+ * `PostCard` has something to import; Task 4 adds the endpoint functions
+ * (`createPost`, `listPosts`, ...) that actually resolve one.
+ *
+ * `createdAt`/`editedAt` stay raw ISO-8601 strings here, same rule as
+ * `UserProfileCore.createdAt` above: nothing in this file does date
+ * arithmetic, so there is nothing to gain from parsing early and a `Date`
+ * object would just be re-serialised at the fetch boundary anyway.
+ * `editedAt` is explicitly `null` on a never-edited post, never absent —
+ * `PostCard` depends on being able to tell "not edited" from "field missing"
+ * without an `in` check.
+ *
+ * Deliberately NO `viewerFollows` and no follow state of any kind: a post
+ * card renders one author's name and handle, not a relationship to them, and
+ * this project already lost a review round to that field getting guessed
+ * back into existence (`false` when signed out) in exactly this kind of
+ * component. See `PostCard.tsx`'s own docstring.
+ */
+export interface PostView {
+  id: string;
+  body: string;
+  createdAt: string;
+  editedAt: string | null;
+  author: {
+    handle: string;
+    displayName: string;
+  };
+}
