@@ -633,5 +633,9 @@ arrays are untouched.
 ## Commit (fix round 1)
 
 ```
-<filled in after commit>
+86d5668 fix(web): repair the SCREEN too, not just localStorage (Task 7 fix round 1)
 ```
+
+5 files changed, 445 insertions(+), 10 deletions(-):
+`apps/web/src/App.test.tsx`, `apps/web/src/App.tsx`, `apps/web/src/user/apiClient.test.ts`,
+`apps/web/src/user/apiClient.ts`, `docs/superpowers/sdd/2026-08-18-posts-and-feed/task-7-report.md`.
