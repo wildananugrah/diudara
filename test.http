@@ -1,0 +1,10 @@
+curl -s -X POST https://api.xendit.co/split_rules \
+  -u "xnd_development_m1aTQCMrLBFaYMUMeYVAAx2DrDo2ilgGYjJjKAvtwPgMjShQzI33QLz7Flpg0I:" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "DIUDARA platform fee",
+    "description": "Platform fee routed to the DIUDARA master account",
+    "routes": [
+      { "percent_amount": 5, "currency": "IDR", "reference_id": "diudara-platform-fee" }
+    ]
+  }'
