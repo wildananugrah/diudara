@@ -983,3 +983,85 @@ describe("PostComposer — Batal discards the whole edit", () => {
     expect(onSubmit).toHaveBeenCalledTimes(0);
   });
 });
+
+/**
+ * An object URL pins its `Blob` in memory until it is revoked or the document
+ * goes away. This is a phone-first app: a few megabytes leaked per abandoned
+ * composer is a tab the operating system kills in the background, so the
+ * revocation is behaviour rather than tidiness — and it is invisible to every
+ * other test here, which is why it gets its own.
+ */
+describe("PostComposer — local previews are freed", () => {
+  /** Records what was created and what was revoked, and puts the originals back. */
+  async function watchingObjectUrls(
+    body: (seen: { created: string[]; revoked: string[] }) => Promise<void>
+  ): Promise<{ created: string[]; revoked: string[] }> {
+    const seen = { created: [] as string[], revoked: [] as string[] };
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = ((blob: Blob) => {
+      const url = originalCreate(blob);
+      seen.created.push(url);
+      return url;
+    }) as typeof URL.createObjectURL;
+    URL.revokeObjectURL = ((url: string) => {
+      seen.revoked.push(url);
+      originalRevoke(url);
+    }) as typeof URL.revokeObjectURL;
+    try {
+      await body(seen);
+    } finally {
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
+    }
+    return seen;
+  }
+
+  it("frees a removed photo's preview", async () => {
+    const seen = await watchingObjectUrls(async () => {
+      mockSuccessfulUploads();
+      renderComposer();
+
+      choose("satu.jpg");
+      await uploadsSettled();
+      fireEvent.click(screen.getByRole("button", { name: "Hapus foto 1" }));
+    });
+
+    expect(seen.created.length).toBe(1);
+    expect(seen.revoked).toEqual(seen.created);
+  });
+
+  it("frees every preview once the post is sent", async () => {
+    const seen = await watchingObjectUrls(async () => {
+      mockSuccessfulUploads();
+      renderComposer();
+
+      choose("satu.jpg", "dua.jpg");
+      await uploadsSettled();
+      type("halo");
+      fireEvent.click(submitButton());
+      await waitFor(() => {
+        expect(textarea().value).toBe("");
+      });
+    });
+
+    expect(seen.created.length).toBe(2);
+    expect(seen.revoked).toEqual(seen.created);
+  });
+
+  it("frees what is left when the composer goes away — Batal, or leaving the page", async () => {
+    const seen = await watchingObjectUrls(async () => {
+      mockSuccessfulUploads();
+      const { unmount } = render(
+        <PostComposer submitLabel="Kirim" onSubmit={async () => {}} />
+      );
+
+      choose("satu.jpg");
+      await uploadsSettled();
+      unmount();
+    });
+
+    expect(seen.created.length).toBe(1);
+    expect(seen.revoked).toEqual(seen.created);
+  });
+});
