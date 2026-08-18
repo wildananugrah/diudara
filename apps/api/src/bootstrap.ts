@@ -85,6 +85,7 @@ import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-sto
 import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage.adapter";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { MediaStoragePort } from "./application/ports/media-storage.port";
+import type { MediaRepositoryPort } from "./application/ports/media-repository.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
@@ -534,6 +535,16 @@ export interface Dependencies {
    * docstring for the ordering between those two writes and why it matters.
    */
   uploadMedia: UploadMedia;
+  /**
+   * Task 5's delivery routes (`GET /users/media/:id` and `/thumb`) need the
+   * row — `findById` — to 404 an id that is well-formed but unknown, and
+   * later to give Phase 6's entitlement check something to read ownership
+   * and tier from before any bytes leave `mediaStorage`. Exposed as its own
+   * field rather than only wired into `uploadMedia`, because that use case
+   * is write-only; the SAME instance backs both, constructed once in this
+   * function.
+   */
+  mediaRepository: MediaRepositoryPort;
 }
 
 /**
@@ -1961,8 +1972,12 @@ export function bootstrap(): Dependencies {
 
   // Task 4's `POST /users/media`. One repository, one use case — mirrors
   // `postRepository`'s shape above. Constructed right after `mediaStorage`
-  // because it is the use case's other dependency.
-  const uploadMedia = new UploadMedia(new DrizzleMediaRepository(db), mediaStorage);
+  // because it is the use case's other dependency. Kept in its own variable
+  // (rather than inlined into `UploadMedia`'s constructor, as before Task 5)
+  // because Task 5's delivery routes need the SAME repository to look up a
+  // row by id.
+  const mediaRepository = new DrizzleMediaRepository(db);
+  const uploadMedia = new UploadMedia(mediaRepository, mediaStorage);
 
   // Task 5's password reset, and `registerUser`'s existing-email notice.
   // Constructed HERE, not up with `userRepository`/`authenticateUser` above,
@@ -2213,5 +2228,6 @@ export function bootstrap(): Dependencies {
     handleStreamLifecycle,
     mediaStorage,
     uploadMedia,
+    mediaRepository,
   };
 }

@@ -1,6 +1,8 @@
 import { Hono } from "hono";
-import { ValidationError } from "../application/errors";
+import { z } from "zod";
+import { NotFoundError, ValidationError } from "../application/errors";
 import { UnsupportedImageError } from "../domain/image";
+import { uuidParam, validateParams } from "../http/validate";
 import {
   requireUserAuth,
   type UserAuthVariables,
@@ -8,9 +10,27 @@ import {
 import type { Dependencies } from "../bootstrap";
 
 const NO_FILE_MESSAGE = "berkas foto wajib disertakan";
+const NOT_FOUND_MESSAGE = "media tidak ditemukan";
+
+/**
+ * Immutable because the id names one exact re-encoded artefact — Task 4's
+ * upload pipeline writes it once and never touches it again, so there is no
+ * future version to invalidate this cache for. Safe to keep word-for-word
+ * once Phase 6 adds an entitlement check in front of these handlers (see the
+ * comment on each route below): the check runs BEFORE any bytes are read, so
+ * a viewer who fails it never receives a response this header could apply
+ * to. Do not widen this to cover a response served before that check exists.
+ */
+const CACHE_CONTROL = "public, max-age=31536000, immutable";
+
+/** Same idiom as `postIdParams` in `routes/posts.ts`: a malformed `:id` is a 400 here, never a raw uuid-syntax error from the database driver. */
+const mediaIdParams = z.object({ id: uuidParam });
 
 export function mediaRoutes(
-  deps: Pick<Dependencies, "userTokenIssuer" | "userRepository" | "uploadMedia">
+  deps: Pick<
+    Dependencies,
+    "userTokenIssuer" | "userRepository" | "uploadMedia" | "mediaStorage" | "mediaRepository"
+  >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
   const requireAuth = requireUserAuth(deps.userTokenIssuer, deps.userRepository);
@@ -37,6 +57,59 @@ export function mediaRoutes(
       }
       throw err;
     }
+  });
+
+  // Spec §5.1: "The API must never send the media URL to a non-member."
+  // PHASE 6 GOES HERE, before `deps.mediaStorage.get` below — an
+  // entitlement check that reads the row, decides whether the caller may
+  // see it, and throws before a single byte is touched. This handler
+  // reads the bytes out of `MediaStoragePort` and writes them into the
+  // response BY HAND, on purpose: a redirect (302 to a signed URL, or to
+  // the bucket directly) would hand the caller a URL that outlives
+  // whatever check produced it, and Phase 6's gate would then be a
+  // decision this route makes once and the internet gets to keep forever.
+  // Do not "optimise" this into a redirect — read why above before you do.
+  app.get("/media/:id", validateParams(mediaIdParams), async (c) => {
+    const { id } = c.get("validatedParams") as { id: string };
+    const row = await deps.mediaRepository.findById(id);
+    if (row === null) throw new NotFoundError(NOT_FOUND_MESSAGE);
+
+    const object = await deps.mediaStorage.get(id, "full");
+    // A row with no bytes behind it (interrupted upload, manual bucket
+    // interference) is absence from the caller's point of view — 404, never
+    // a 500 from dereferencing `null`. Mirrors `MediaStoragePort.get`'s own
+    // docstring.
+    if (object === null) throw new NotFoundError(NOT_FOUND_MESSAGE);
+
+    // `new Uint8Array(...)` copies onto a concrete `ArrayBuffer` — `MediaObject.bytes`
+    // is typed over the wider `ArrayBufferLike` (it may back onto a `SharedArrayBuffer`
+    // depending on how the adapter read it), which Hono's `BodyRespond` does not accept.
+    return c.body(new Uint8Array(object.bytes), 200, {
+      "Content-Type": object.contentType,
+      "Cache-Control": CACHE_CONTROL,
+    });
+  });
+
+  // Same rule as `/media/:id` above, same reason — see that route's comment
+  // for where Phase 6's entitlement check goes and why it cannot be a
+  // redirect. Kept as a second, separate handler rather than a `?thumb=1`
+  // query flag so the two are two lines the router can gate independently,
+  // not one line a future change could gate halfway.
+  app.get("/media/:id/thumb", validateParams(mediaIdParams), async (c) => {
+    const { id } = c.get("validatedParams") as { id: string };
+    const row = await deps.mediaRepository.findById(id);
+    if (row === null) throw new NotFoundError(NOT_FOUND_MESSAGE);
+
+    const object = await deps.mediaStorage.get(id, "thumb");
+    if (object === null) throw new NotFoundError(NOT_FOUND_MESSAGE);
+
+    // `new Uint8Array(...)` copies onto a concrete `ArrayBuffer` — `MediaObject.bytes`
+    // is typed over the wider `ArrayBufferLike` (it may back onto a `SharedArrayBuffer`
+    // depending on how the adapter read it), which Hono's `BodyRespond` does not accept.
+    return c.body(new Uint8Array(object.bytes), 200, {
+      "Content-Type": object.contentType,
+      "Cache-Control": CACHE_CONTROL,
+    });
   });
 
   return app;

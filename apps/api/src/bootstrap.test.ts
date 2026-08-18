@@ -127,6 +127,37 @@ import type { PaymentProviderPort } from "./application/ports/payment-provider.p
  * a plain object literal without a cast, so the fakes below construct real
  * instances of those classes wrapping hand-written fake ports instead.
  */
+/**
+ * Task 5's delivery routes need `mediaRepository` on `Dependencies` in
+ * addition to `uploadMedia`. Neither test that builds a `Dependencies` by
+ * hand below calls `mediaRepository.findById` or `uploadMedia.execute` — both
+ * are here purely to satisfy the port's shape — so one shared fake, reused at
+ * both call sites, is enough; unlike `fakeCreatorRepository` below it needs
+ * no per-test state.
+ */
+const fakeMediaRepository: MediaRepositoryPort = {
+  async create(): Promise<never> {
+    throw new Error("not used");
+  },
+  async findById() {
+    return null;
+  },
+  async findManyByIds() {
+    return [];
+  },
+  async claim() {},
+  async listForPost() {
+    return [];
+  },
+  async listForPosts() {
+    return [];
+  },
+  async listUnclaimedBefore() {
+    return [];
+  },
+  async deleteById() {},
+};
+
 const fakeTokenIssuer: TokenIssuerPort = {
   async issue() {
     return "fake.token.value";
@@ -812,33 +843,13 @@ describe("Dependencies (composition root contract)", () => {
       mediaStorage: new FakeMediaStorageAdapter(),
       // Task 4's upload endpoint. Never undefined/null either — mirrors
       // `mediaStorage` just above. Neither of these two tests calls
-      // `uploadMedia.execute`, so its repository fake never needs to do
-      // anything but satisfy the port's shape.
-      uploadMedia: new UploadMedia(
-        {
-          async create(): Promise<never> {
-            throw new Error("not used");
-          },
-          async findById() {
-            return null;
-          },
-          async findManyByIds() {
-            return [];
-          },
-          async claim() {},
-          async listForPost() {
-            return [];
-          },
-          async listForPosts() {
-            return [];
-          },
-          async listUnclaimedBefore() {
-            return [];
-          },
-          async deleteById() {},
-        } satisfies MediaRepositoryPort,
-        new FakeMediaStorageAdapter()
-      ),
+      // `uploadMedia.execute`, so its repository fake (the module-level
+      // `fakeMediaRepository`) never needs to do anything but satisfy the
+      // port's shape.
+      uploadMedia: new UploadMedia(fakeMediaRepository, new FakeMediaStorageAdapter()),
+      // Task 5's delivery routes. Same fake as `uploadMedia` above — neither
+      // test calls `mediaRepository.findById` either.
+      mediaRepository: fakeMediaRepository,
     };
 
     const created = await deps.creatorRepository.create({
@@ -1044,33 +1055,13 @@ describe("Dependencies (composition root contract)", () => {
       mediaStorage: new FakeMediaStorageAdapter(),
       // Task 4's upload endpoint. Never undefined/null either — mirrors
       // `mediaStorage` just above. Neither of these two tests calls
-      // `uploadMedia.execute`, so its repository fake never needs to do
-      // anything but satisfy the port's shape.
-      uploadMedia: new UploadMedia(
-        {
-          async create(): Promise<never> {
-            throw new Error("not used");
-          },
-          async findById() {
-            return null;
-          },
-          async findManyByIds() {
-            return [];
-          },
-          async claim() {},
-          async listForPost() {
-            return [];
-          },
-          async listForPosts() {
-            return [];
-          },
-          async listUnclaimedBefore() {
-            return [];
-          },
-          async deleteById() {},
-        } satisfies MediaRepositoryPort,
-        new FakeMediaStorageAdapter()
-      ),
+      // `uploadMedia.execute`, so its repository fake (the module-level
+      // `fakeMediaRepository`) never needs to do anything but satisfy the
+      // port's shape.
+      uploadMedia: new UploadMedia(fakeMediaRepository, new FakeMediaStorageAdapter()),
+      // Task 5's delivery routes. Same fake as `uploadMedia` above — neither
+      // test calls `mediaRepository.findById` either.
+      mediaRepository: fakeMediaRepository,
     };
 
     const res = await createApp(deps).request("/health");
