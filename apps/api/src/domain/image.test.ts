@@ -4,6 +4,29 @@ import { processUpload, UnsupportedImageError, MAX_UPLOAD_BYTES } from "./image"
 
 const fixture = (name: string) => Bun.file(`${import.meta.dir}/../test-support/fixtures/${name}`).bytes();
 
+/**
+ * Walks the TIFF structure inside an EXIF blob (the same bytes `sharp`'s
+ * `metadata().exif` returns) far enough to tell whether IFD0 carries tag
+ * 0x8825 — the GPS-IFD pointer. `metadata().exif` being merely *defined*
+ * does not prove GPS data exists: an EXIF blob with only e.g. Make/Model
+ * would pass a "toBeDefined()" guard while making the strip-GPS assertion
+ * below meaningless. This is what actually confirms the fixture carries GPS.
+ */
+function hasGpsIfdPointer(exif: Buffer): boolean {
+  const tiffStart = 6; // skip the leading "Exif\0\0"
+  const little = String.fromCharCode(exif[tiffStart]!, exif[tiffStart + 1]!) === "II";
+  const u16 = (off: number) => (little ? exif.readUInt16LE(off) : exif.readUInt16BE(off));
+  const u32 = (off: number) => (little ? exif.readUInt32LE(off) : exif.readUInt32BE(off));
+
+  const ifd0Offset = tiffStart + u32(tiffStart + 4);
+  const entryCount = u16(ifd0Offset);
+  for (let i = 0; i < entryCount; i++) {
+    const entryOffset = ifd0Offset + 2 + i * 12;
+    if (u16(entryOffset) === 0x8825) return true;
+  }
+  return false;
+}
+
 describe("processUpload", () => {
   it("produces a WebP full image capped at 1600px on the long edge", async () => {
     const result = await processUpload(await fixture("photo-with-gps.jpg"));
@@ -30,8 +53,12 @@ describe("processUpload", () => {
    */
   it("strips EXIF, including GPS", async () => {
     const source = await fixture("photo-with-gps.jpg");
-    // GUARD: the fixture must actually carry EXIF, or this test proves nothing.
-    expect((await sharp(source).metadata()).exif).toBeDefined();
+    // GUARD: the fixture must actually carry GPS data (not just SOME EXIF —
+    // e.g. Make/Model alone would satisfy a bare toBeDefined() and leave
+    // this test proving nothing about the GPS-stripping behaviour it names).
+    const sourceExif = (await sharp(source).metadata()).exif;
+    expect(sourceExif).toBeDefined();
+    expect(hasGpsIfdPointer(sourceExif!)).toBe(true);
 
     const result = await processUpload(source);
 
@@ -46,6 +73,21 @@ describe("processUpload", () => {
     expect(result.height).toBe(150);
   });
 
+  /**
+   * `result.width`/`result.height` above are the FULL image's dimensions —
+   * they say nothing about the thumb. Decoding the thumb bytes directly is
+   * what actually pins withoutEnlargement on the thumbnail's own resize
+   * call; without this, a regression that upscales every small thumbnail
+   * would ship silently.
+   */
+  it("does not upscale the thumbnail either", async () => {
+    const result = await processUpload(await fixture("small.png"));
+
+    const meta = await sharp(result.thumb).metadata();
+    expect(meta.width).toBe(200);
+    expect(meta.height).toBe(150);
+  });
+
   it("rejects a file whose bytes are not an image, whatever it is called", async () => {
     await expect(processUpload(await fixture("not-an-image.txt"))).rejects.toBeInstanceOf(
       UnsupportedImageError
@@ -57,7 +99,7 @@ describe("processUpload", () => {
     const heic = new Uint8Array([
       0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63,
     ]);
-    await expect(processUpload(heic)).rejects.toThrow(/JPG, PNG, WebP/);
+    await expect(processUpload(heic)).rejects.toThrow(/JPG,\s*PNG,\s*(atau\s+)?WebP/);
   });
 
   it("caps uploads at 10 MB", () => {

@@ -4,13 +4,8 @@ export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 export const FULL_MAX_EDGE = 1600;
 export const THUMB_MAX_EDGE = 600;
 
-/**
- * Bahasa, and it NAMES the formats that work — "format tidak didukung" alone
- * leaves the person guessing. Phrased as "JPG, PNG, WebP" (no "atau" between
- * the last two) so the list reads as one contiguous run of supported
- * formats — that's also what the test at image.test.ts asserts on.
- */
-const UNSUPPORTED_MESSAGE = "Format foto tidak didukung. Format yang didukung: JPG, PNG, WebP.";
+/** Bahasa, and it NAMES the formats that work — "format tidak didukung" alone leaves the person guessing. */
+const UNSUPPORTED_MESSAGE = "Format foto tidak didukung. Gunakan JPG, PNG, atau WebP.";
 
 export class UnsupportedImageError extends Error {
   constructor(message = UNSUPPORTED_MESSAGE) {
