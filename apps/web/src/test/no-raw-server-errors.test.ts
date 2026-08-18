@@ -102,11 +102,25 @@ export function caughtBindings(source: string): string[] {
   return [...names];
 }
 
-/** Whether `source` reads `.message` off anything a `catch` bound. */
+/**
+ * Whether `source` reads `.message` off anything a `catch` bound.
+ *
+ * Fix round 1, item 6. Originally just `\b${name}\s*\.\s*message\b`, which
+ * requires `.message` to follow the binding's OWN name directly. A cast —
+ * `(err as Error).message` — inserts a `(`, `as SomeType` and `)` in between,
+ * and that form reached `ProfilePage.tsx:97` while this guard stayed green.
+ * Same class of miss as C1 above: a SHAPE the regex could not see, not one it
+ * was told to ignore. The second alternative below matches a parenthesised
+ * `<name> as <anything but a paren>` immediately followed by `.message`,
+ * alongside the original direct form — so both the cast and the plain shape
+ * still fire, and a cast that never reads `.message` still does not.
+ */
 export function readsMessageOffACaughtError(source: string): boolean {
   const code = stripComments(source);
   return caughtBindings(code).some((name) =>
-    new RegExp(`\\b${name}\\s*\\.\\s*message\\b`).test(code)
+    new RegExp(
+      `\\b${name}\\s*\\.\\s*message\\b|\\(\\s*${name}\\s+as\\s+[^()]+\\)\\s*\\.\\s*message\\b`
+    ).test(code)
   );
 }
 
@@ -165,6 +179,40 @@ describe("no raw server errors reach a member-facing screen", () => {
     // positive.
     const typedCatchFixed = `try { go(); } catch (err: unknown) { setError(describeRequestFailure(err)); }`;
     expect(readsMessageOffACaughtError(typedCatchFixed)).toBe(false);
+  });
+
+  /**
+   * Fix round 1, item 6. `(err as Error).message` written into
+   * `ProfilePage.tsx` left this guard green (24 pass / 0 fail) — the original
+   * regex required `.message` to follow the binding's own name directly, and
+   * a cast inserts a `(`, `as SomeType` and `)` in between. Same class as C1
+   * just above (a form the regex could not SEE, not a form it was told to
+   * ignore); verified in three directions, same as C1's own fix round.
+   */
+  it("detects the banned pattern through an `as` CAST between the binding and .message", () => {
+    // a. the exact shape that slipped past — a cast, then `.message`.
+    const castForm = `try { go(); } catch (err: unknown) { setError((err as Error).message); }`;
+    expect(readsMessageOffACaughtError(castForm)).toBe(true);
+
+    // b. the plain, uncast form must still fire — guards against a regex
+    // loosened so far it only matches casts and stops matching the original
+    // shape, which would "fix" this vacuously.
+    const plainForm = `try { go(); } catch (err) { setError(err.message); }`;
+    expect(readsMessageOffACaughtError(plainForm)).toBe(true);
+
+    // A callback-form catch, cast the same way.
+    const castCallback = `load().catch((err: unknown) => setError((err as Error).message));`;
+    expect(readsMessageOffACaughtError(castCallback)).toBe(true);
+
+    // A cast to some other type name, and extra whitespace inside the
+    // parens — must not depend on the exact spelling of "Error".
+    const castOtherType = `try { go(); } catch (err) { setError((err   as   TypeError).message); }`;
+    expect(readsMessageOffACaughtError(castOtherType)).toBe(true);
+
+    // The fixed shape — same typed binding and even a cast elsewhere, but
+    // never reading .message off the caught value — must still pass.
+    const castFixed = `try { go(); } catch (err: unknown) { setError(describeRequestFailure(err as Error)); }`;
+    expect(readsMessageOffACaughtError(castFixed)).toBe(false);
   });
 
   it("does NOT flag the pattern quoted in a COMMENT — see stripComments", () => {

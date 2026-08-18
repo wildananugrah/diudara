@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import ProfilePage from "./ProfilePage";
 import { setUserSession, type PostView } from "./apiClient";
 
@@ -52,6 +52,27 @@ function profileBody(overrides: Record<string, unknown> = {}) {
 function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/:handleParam" element={<ProfilePage />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+/**
+ * Both `/@wildan` and `/@budi` match the SAME route element (`/:handleParam`),
+ * so React Router does not remount `ProfilePage` when a link swaps one for the
+ * other — only `handleParam` changes. This is what lets state opened on one
+ * profile (a pending delete confirmation, an open edit composer) survive onto
+ * a completely different profile unless the component resets it itself. The
+ * `<Link>` lives alongside the route, exactly like a real in-app link to
+ * another handle (e.g. `PostCard`'s author link) would.
+ */
+function renderWithNav(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Link to="/@budi">Ke Budi</Link>
+      <Link to="/@wildan">Ke Wildan</Link>
       <Routes>
         <Route path="/:handleParam" element={<ProfilePage />} />
       </Routes>
@@ -248,7 +269,9 @@ describe("ProfilePage — a failed load speaks Bahasa Indonesia (N1)", () => {
  */
 describe("ProfilePage — posts (Task 6)", () => {
   it("renders that person's posts below the profile header", async () => {
+    const calls: string[] = [];
     global.fetch = mock(async (url: string) => {
+      calls.push(url);
       if (url.includes("/posts")) {
         return jsonResponse({
           posts: [makePost("p1", "Kiriman pertama", "budi"), makePost("p2", "Kiriman kedua", "budi")],
@@ -263,6 +286,13 @@ describe("ProfilePage — posts (Task 6)", () => {
     await screen.findByText("Budi");
     expect(await screen.findByText("Kiriman pertama")).toBeTruthy();
     expect(screen.getByText("Kiriman kedua")).toBeTruthy();
+
+    // Fix round 1, item 3: nothing pinned the posts request to the profile
+    // being viewed. `listUserPosts("orang-lain", before)` — a hardcoded
+    // stranger — left the whole 625-test suite green before this assertion
+    // existed.
+    const postsCall = calls.find((url) => url.includes("/posts"));
+    expect(postsCall).toBe("/users/budi/posts");
   });
 
   it("still renders the posts when signed out — listUserPosts goes through publicGet", async () => {
@@ -278,6 +308,15 @@ describe("ProfilePage — posts (Task 6)", () => {
 
     await screen.findByText("Budi");
     expect(await screen.findByText("Kiriman publik")).toBeTruthy();
+
+    // Fix round 1, item 4: a signed-out visitor must never be treated as the
+    // owner of any post they see. Changing `getSessionUser()?.handle ?? null`
+    // to `?? handle` at ProfilePage.tsx left the whole existing suite green,
+    // because nothing at page level asserted the absence of owner controls
+    // for a signed-out viewer — only that a body rendered, which the
+    // preceding test already covers.
+    expect(screen.queryAllByRole("button", { name: "Edit" }).length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: "Hapus" }).length).toBe(0);
   });
 
   it("shows honest Bahasa copy for an empty list, not a spinner", async () => {
@@ -397,5 +436,260 @@ describe("ProfilePage — posts (Task 6)", () => {
     });
     const deleteCall = calls.find((call) => call.init?.method === "DELETE");
     expect(deleteCall?.url).toBe("/users/posts/p2");
+  });
+
+  /**
+   * Fix round 1, item 5. Replacing `setDeleteError(...)`'s body with `void
+   * err` left 18 pass / 0 fail — the Bahasa error copy, the `role="alert"`
+   * paragraph and "the row is kept" were all unexercised. Copies
+   * `BerandaPage.test.tsx`'s "keeps the row and shows Bahasa copy when the
+   * delete fails".
+   */
+  it("keeps the row and shows Bahasa copy when the delete fails", async () => {
+    setUserSession("jwt-abc", USER); // handle "wildan"
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") return jsonResponse({ error: "internal server error" }, 500);
+      if (url.includes("/posts")) {
+        return jsonResponse({ posts: [makePost("p1", "Kiriman lama", "wildan")], nextCursor: null });
+      }
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan" }));
+    }) as unknown as typeof fetch;
+
+    renderAt("/@wildan");
+    await screen.findByText("Kiriman lama");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ya, hapus" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toBe(
+        "Gagal menghapus kiriman. Server sedang bermasalah. Coba lagi sebentar lagi."
+      );
+    });
+    expect(screen.getByText("Kiriman lama")).toBeTruthy();
+    expect(screen.queryAllByText(/internal server error/).length).toBe(0);
+  });
+});
+
+/**
+ * Fix round 1, item 1. `ProfilePage` is ONE route element (`/:handleParam`),
+ * so a link from `/@wildan` to `/@budi` keeps the same component instance —
+ * only `handle` (via `load`/`loadPosts`) refetches. Anything else held in
+ * state must be reset by hand or it survives onto a profile it was never
+ * about. Measured by the reviewer: a confirmation opened on wildan's own post
+ * was still on screen on budi's profile, and "Ya, hapus" there fired a DELETE
+ * for wildan's post while looking at budi's.
+ */
+describe("ProfilePage — resets per-post state when the viewed profile changes", () => {
+  it("drops a pending delete confirmation, so 'Ya, hapus' cannot fire for a post from the last profile", async () => {
+    setUserSession("jwt-abc", USER); // handle "wildan"
+    const calls: { url: string; init?: RequestInit }[] = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      if (url.includes("/wildan/posts")) {
+        return jsonResponse({ posts: [makePost("p1", "Kiriman wildan", "wildan")], nextCursor: null });
+      }
+      if (url.includes("/budi/posts")) {
+        return jsonResponse({ posts: [makePost("p2", "Kiriman budi", "budi")], nextCursor: null });
+      }
+      if (url.includes("by-handle/budi")) return jsonResponse(profileBody({ handle: "budi", displayName: "Budi" }));
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan" }));
+    }) as unknown as typeof fetch;
+
+    renderWithNav("/@wildan");
+
+    await screen.findByText("Kiriman wildan");
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    expect(screen.getByText("Hapus kiriman ini?")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("link", { name: "Ke Budi" }));
+    await screen.findByText("Kiriman budi");
+
+    // Not just a DOM check (per the finding): even if the panel somehow still
+    // rendered, click whatever "Ya, hapus" is on screen now and prove no
+    // DELETE was ever issued as a result — the real-world consequence, not an
+    // implementation detail of what happens to be visible.
+    const stillThere = screen.queryByRole("button", { name: "Ya, hapus" });
+    if (stillThere !== null) fireEvent.click(stillThere);
+
+    expect(screen.queryAllByText("Hapus kiriman ini?").length).toBe(0);
+    expect(calls.filter((call) => call.init?.method === "DELETE").length).toBe(0);
+  });
+});
+
+/**
+ * Fix round 1, item 2. `PostCard` renders the `Edit` button whenever `isOwn`
+ * is true whether or not an `onEdit` handler is supplied (`onEdit?.(post)` is
+ * a safe no-op) — so before this fix the button was visible on your own
+ * profile and did nothing when tapped. Mirrors `BerandaPage.tsx:123-132` and
+ * `:174-184`.
+ */
+describe("ProfilePage — editing your own post (Task 6, fix round 1 item 2)", () => {
+  it("opens the composer pre-filled with the post's body when Edit is tapped", async () => {
+    setUserSession("jwt-abc", USER); // handle "wildan"
+    global.fetch = mock(async (url: string) => {
+      if (url.includes("/posts")) {
+        return jsonResponse({ posts: [makePost("p1", "Isi lama", "wildan")], nextCursor: null });
+      }
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan" }));
+    }) as unknown as typeof fetch;
+
+    renderAt("/@wildan");
+
+    await screen.findByText("Isi lama");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    expect((screen.getByLabelText("Apa yang terjadi?") as HTMLTextAreaElement).value).toBe("Isi lama");
+    expect(screen.getByRole("button", { name: "Simpan" })).toBeTruthy();
+  });
+
+  /**
+   * Three rows, as the delete test above already established is necessary —
+   * the assertion is the resulting ORDER, not membership, not just that the
+   * text changed somewhere.
+   */
+  it("saves an edit IN PLACE, keeping the row's position among the others, and shows 'diedit'", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: { url: string; init?: RequestInit }[] = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (init?.method === "PATCH") {
+        return jsonResponse({
+          id: "p2",
+          body: "Sudah diedit",
+          createdAt: "2026-08-18T00:00:00.000Z",
+          editedAt: "2026-08-18T01:00:00.000Z",
+          author: { handle: "wildan", displayName: "Wildan" },
+        });
+      }
+      if (url.includes("/posts")) {
+        return jsonResponse({
+          posts: [
+            makePost("p1", "Kiriman satu", "wildan"),
+            makePost("p2", "Kiriman dua", "wildan"),
+            makePost("p3", "Kiriman tiga", "wildan"),
+          ],
+          nextCursor: null,
+        });
+      }
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan" }));
+    }) as unknown as typeof fetch;
+
+    function bodies(): string[] {
+      return screen
+        .getAllByRole("article")
+        .map((article) => article.querySelector(".post-card-body")?.textContent ?? "");
+    }
+
+    renderAt("/@wildan");
+
+    await screen.findByText("Kiriman satu");
+    expect(bodies()).toEqual(["Kiriman satu", "Kiriman dua", "Kiriman tiga"]);
+
+    const editButtons = screen.getAllByRole("button", { name: "Edit" });
+    fireEvent.click(editButtons[1]!); // editing "Kiriman dua", the middle row
+
+    fireEvent.change(screen.getByLabelText("Apa yang terjadi?"), { target: { value: "Sudah diedit" } });
+    fireEvent.click(screen.getByRole("button", { name: "Simpan" }));
+
+    await waitFor(() => {
+      expect(bodies()).toEqual(["Kiriman satu", "Sudah diedit", "Kiriman tiga"]);
+    });
+    // The "diedit" marker lives in the row's own metadata line, not its body
+    // (the body could coincidentally contain that word too).
+    const metaTexts = Array.from(document.querySelectorAll(".post-card-meta")).map((el) => el.textContent ?? "");
+    expect(metaTexts.some((text) => text.includes("diedit"))).toBe(true);
+    const patchCall = calls.find((call) => call.init?.method === "PATCH");
+    expect(patchCall?.url).toBe("/users/posts/p2");
+  });
+
+  it("keeps the typed text in the composer when a save fails", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") return jsonResponse({ error: "internal server error" }, 500);
+      if (url.includes("/posts")) {
+        return jsonResponse({ posts: [makePost("p1", "Isi lama", "wildan")], nextCursor: null });
+      }
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan" }));
+    }) as unknown as typeof fetch;
+
+    renderAt("/@wildan");
+
+    await screen.findByText("Isi lama");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Apa yang terjadi?"), {
+      target: { value: "Isi baru yang gagal disimpan" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Simpan" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeTruthy();
+    });
+    expect((screen.getByLabelText("Apa yang terjadi?") as HTMLTextAreaElement).value).toBe(
+      "Isi baru yang gagal disimpan"
+    );
+  });
+
+  /**
+   * `BerandaPage`'s own fix round 1: `key={editing.id}` on the composer was
+   * deletable there with the whole suite green, because nothing ever opened a
+   * SECOND edit without cancelling the first. `initialBody` only seeds
+   * `useState`, so without the key React reuses the same component instance
+   * and its stale body — tap Edit on post A, then on post B, and B's box
+   * would hold A's text. Same shape, same fix, on the profile.
+   */
+  it("re-fills the box when Edit is tapped on a SECOND post without cancelling the first", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) => {
+      if (url.includes("/posts")) {
+        return jsonResponse({
+          posts: [makePost("p1", "isi satu", "wildan"), makePost("p2", "isi dua", "wildan")],
+          nextCursor: null,
+        });
+      }
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan" }));
+    }) as unknown as typeof fetch;
+
+    renderAt("/@wildan");
+    await screen.findByText("isi satu");
+
+    const editButtons = () => screen.getAllByRole("button", { name: "Edit" });
+    expect(editButtons().length).toBe(2);
+
+    fireEvent.click(editButtons()[0]!);
+    expect((screen.getByLabelText("Apa yang terjadi?") as HTMLTextAreaElement).value).toBe("isi satu");
+
+    fireEvent.click(editButtons()[1]!);
+    expect((screen.getByLabelText("Apa yang terjadi?") as HTMLTextAreaElement).value).toBe("isi dua");
+  });
+
+  /**
+   * A parked finding from Task 5, fixed here and in `BerandaPage.tsx` at the
+   * same time: opening one of the edit/delete panels must close the other,
+   * never let both render together for the same post.
+   */
+  it("opening Edit closes an open delete confirmation, and requesting a delete closes an open edit composer", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) => {
+      if (url.includes("/posts")) {
+        return jsonResponse({ posts: [makePost("p1", "Isi lama", "wildan")], nextCursor: null });
+      }
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan" }));
+    }) as unknown as typeof fetch;
+
+    renderAt("/@wildan");
+    await screen.findByText("Isi lama");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    expect(screen.getByText("Hapus kiriman ini?")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByRole("button", { name: "Simpan" })).toBeTruthy();
+    expect(screen.queryAllByText("Hapus kiriman ini?").length).toBe(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    expect(screen.getByText("Hapus kiriman ini?")).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: "Simpan" }).length).toBe(0);
   });
 });

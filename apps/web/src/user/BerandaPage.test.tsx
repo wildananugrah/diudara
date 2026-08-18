@@ -809,4 +809,29 @@ describe("BerandaPage — editing your own post", () => {
     expect(screen.getByRole("button", { name: "Kirim" })).toBeTruthy();
     expect(screen.getByText("isi lama")).toBeTruthy();
   });
+
+  /**
+   * Fix round 1, item 2 (a parked finding from Task 5, fixed on the profile in
+   * the same round). `onEdit` and `onDeleteRequested` each cleared
+   * `deleteError` but neither cleared the OTHER's own state — Hapus then Edit
+   * rendered the edit composer AND the "Hapus kiriman ini?" panel at once.
+   */
+  it("opening Edit closes an open delete confirmation, and requesting a delete closes an open edit composer", async () => {
+    setUserSession("jwt-abc", USER);
+    mockFetch(() => jsonResponse({ posts: [makePost("p1", "isi lama")], nextCursor: null }));
+
+    renderBeranda();
+    await screen.findByText("isi lama");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    expect(screen.getByText("Hapus kiriman ini?")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByRole("button", { name: "Simpan" })).toBeTruthy();
+    expect(screen.queryAllByText("Hapus kiriman ini?").length).toBe(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    expect(screen.getByText("Hapus kiriman ini?")).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: "Simpan" }).length).toBe(0);
+  });
 });

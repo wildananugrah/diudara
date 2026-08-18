@@ -221,13 +221,20 @@ export default function BerandaPage() {
           load={load}
           ownHandle={ownHandle}
           onEdit={(post) => {
+            // Fix round 1: opening Edit for one post must close a delete
+            // confirmation for another (or the same) post, or both panels
+            // can render at once.
             setDeleteError(null);
+            setPendingDelete(null);
             setEditing(post);
           }}
           onDeleteRequested={(id) => {
             // `PostCard` raises this on the TAP, not after a delete — nothing
             // has been removed yet. Confirmation happens here.
+            // Symmetric with `onEdit` above (fix round 1) — requesting a
+            // delete must close an open edit composer.
             setDeleteError(null);
+            setEditing(null);
             setPendingDelete(id);
           }}
           emptyMessage={

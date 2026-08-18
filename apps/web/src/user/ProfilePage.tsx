@@ -3,14 +3,17 @@ import { Link, useParams } from "react-router-dom";
 import NotFoundPage from "../pages/NotFoundPage";
 import {
   deletePost,
+  editPost,
   getProfileByHandle,
   getSessionUser,
   listUserPosts,
   UserApiError,
+  type PostView,
   type PublicUserProfile,
 } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
 import FollowButton from "./FollowButton";
+import PostComposer from "./PostComposer";
 import PostFeed, { type PostFeedHandle } from "./PostFeed";
 
 const DELETE_FAILED_PREFIX = "Gagal menghapus kiriman.";
@@ -68,6 +71,8 @@ export default function ProfilePage() {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  /** The post being edited, or `null` when nothing is. Never a boolean plus an id — the composer needs the body to pre-fill. Mirrors `BerandaPage`'s own shape (fix round 1, item 2). */
+  const [editing, setEditing] = useState<PostView | null>(null);
 
   /**
    * `PostFeed` fetches through this, entirely on its own — see `PostFeed`'s
@@ -84,6 +89,35 @@ export default function ProfilePage() {
    */
   const loadPosts = useCallback((before: string | null) => listUserPosts(handle, before), [handle]);
 
+  /**
+   * `ProfilePage` is ONE route element (`/:handleParam`, App.tsx) — a link
+   * from `/@wildan` to `/@budi` keeps this same component instance, only
+   * `handle` changes. Everything below is about a post on the profile the
+   * viewer was JUST looking at, so it is dropped here rather than carried
+   * onto a different person's posts. Fix round 1, item 1: measured by the
+   * reviewer, a delete confirmation opened on one profile survived onto the
+   * next and fired a DELETE for a post that was no longer even on screen.
+   * Mirrors `BerandaPage`'s own reset effect, keyed on `tab` there and on
+   * `handle` here for the same reason.
+   */
+  useEffect(() => {
+    setPendingDelete(null);
+    setDeleteError(null);
+    setEditing(null);
+  }, [handle]);
+
+  async function handleSaveEdit(body: string): Promise<void> {
+    const target = editing;
+    if (target === null) return;
+    // Deliberately NOT wrapped in try/catch — same reasoning as
+    // `BerandaPage.handleSaveEdit`: a rejection has to reach `PostComposer`,
+    // which is what keeps the author's text and shows the error. Swallowing
+    // it here would clear the box on a failed save.
+    const updated = await editPost(target.id, body);
+    postsFeed.current?.replace(updated);
+    setEditing(null);
+  }
+
   async function confirmDelete(): Promise<void> {
     const id = pendingDelete;
     if (id === null) return;
@@ -93,6 +127,9 @@ export default function ProfilePage() {
       await deletePost(id);
       postsFeed.current?.remove(id);
       setPendingDelete(null);
+      // Editing the post you just deleted would leave a composer saving into
+      // a 404 — same guard as `BerandaPage.confirmDelete`.
+      if (editing?.id === id) setEditing(null);
     } catch (err: unknown) {
       setDeleteError(`${DELETE_FAILED_PREFIX} ${describeRequestFailure(err)}`);
     } finally {
@@ -198,6 +235,22 @@ export default function ProfilePage() {
         </Link>
       </div>
 
+      {/*
+        Keyed on `editing.id`, exactly like `BerandaPage`'s edit composer —
+        Beranda's own fix round 1 found that without the key, editing post A
+        then post B silently saves A's text over B, because `initialBody`
+        alone only seeds `useState` and does not reset it on a later render.
+      */}
+      {editing !== null ? (
+        <PostComposer
+          key={editing.id}
+          initialBody={editing.body}
+          submitLabel="Simpan"
+          onSubmit={handleSaveEdit}
+          onCancel={() => setEditing(null)}
+        />
+      ) : null}
+
       {pendingDelete !== null ? (
         <div className="delete-confirm" role="group" aria-label="Konfirmasi hapus">
           <p>Hapus kiriman ini?</p>
@@ -231,8 +284,20 @@ export default function ProfilePage() {
         ref={postsFeed}
         load={loadPosts}
         ownHandle={ownHandle}
-        onDeleteRequested={(id) => {
+        onEdit={(post) => {
+          // Opening Edit for one post must close a delete confirmation for
+          // another (or the same) post — otherwise both panels can render at
+          // once. A parked finding from Task 5: this exact bug existed on
+          // `BerandaPage` and is fixed there too in this same round.
           setDeleteError(null);
+          setPendingDelete(null);
+          setEditing(post);
+        }}
+        onDeleteRequested={(id) => {
+          // Symmetric with `onEdit` above — requesting a delete must close an
+          // open edit composer.
+          setDeleteError(null);
+          setEditing(null);
           setPendingDelete(id);
         }}
         emptyMessage="Belum ada kiriman untuk ditampilkan."
