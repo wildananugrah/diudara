@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { Children, isValidElement, type ReactNode } from "react";
-import { AppRoutes } from "./App";
+import App, { AppRoutes } from "./App";
 import AppShell from "./user/AppShell";
+import { USER_TOKEN_STORAGE_KEY } from "./user/apiClient";
 
 /**
  * `path="/:handleParam"` (ProfilePage) is registered LAST, right before the
@@ -278,6 +279,53 @@ describe("routing — the app shell", () => {
 
     expect(await screen.findByText("Budi Santoso")).toBeTruthy();
     expect(screen.queryAllByRole("navigation").length).toBe(0);
+  });
+});
+
+/**
+ * Task 7. `App` (not `AppRoutes`) is the one component with the repair
+ * `useEffect`, so it — and its own `<BrowserRouter>` — must actually be
+ * rendered here, unlike every other test in this file which renders
+ * `AppRoutes` inside a `MemoryRouter`. `App` brings its own router, so it is
+ * NOT wrapped in another one.
+ */
+describe("App — repairs a split session once, above the router (Task 7)", () => {
+  it("triggers exactly one /users/me request when the session is split", async () => {
+    localStorage.setItem(USER_TOKEN_STORAGE_KEY, "jwt-abc");
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({
+        handle: "wildan",
+        displayName: "Wildan",
+        bio: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        email: "wildan@example.com",
+        whatsappNumber: null,
+      });
+    }) as unknown as typeof fetch;
+
+    render(<App />);
+
+    await waitFor(() => expect(calls.length).toBe(1));
+    expect(calls[0]).toBe("/users/me");
+  });
+
+  it("triggers no /users/me request when there is no session at all", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({});
+    }) as unknown as typeof fetch;
+
+    render(<App />);
+
+    // `repairSplitSession` returns before ever awaiting when there is no
+    // token, but this still crosses at least one microtask inside the async
+    // function — waiting a tick is proof enough that the effect, if it were
+    // going to call fetch, already would have.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.length).toBe(0);
   });
 });
 

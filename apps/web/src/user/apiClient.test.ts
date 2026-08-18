@@ -20,6 +20,7 @@ import {
   listFollowing,
   listUserPosts,
   login,
+  repairSplitSession,
   requestPasswordReset,
   SESSION_EXPIRED_MESSAGE,
   SessionStorageError,
@@ -62,6 +63,18 @@ const OWN_PROFILE_SHAPE_PIN: OwnUserProfile = {
 void OWN_PROFILE_SHAPE_PIN;
 
 const USER = { id: "user-1", handle: "wildan", displayName: "Wildan", email: "wildan@example.com" };
+
+/**
+ * `SessionUser` no longer declares `id` (Task 7, step 1) — `GET /users/me`
+ * has never returned one, so `repairSplitSession` could not rebuild the
+ * cached blob if `id` stayed required. `USER` above keeps its `id` because
+ * dropping it would be unrelated fixture churn (passing `USER` where
+ * `SessionUser` is expected still typechecks — it's a variable, not a fresh
+ * object literal, so TypeScript's excess-property check does not apply).
+ * This is the shape `getSessionUser()` actually returns now: `id`, if it
+ * made it into storage at all, is read back and ignored.
+ */
+const SESSION_USER = { handle: USER.handle, displayName: USER.displayName, email: USER.email };
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -156,8 +169,27 @@ describe("session storage", () => {
 
   it("round-trips the cached account", () => {
     setUserSession("jwt-abc", USER);
-    expect(getSessionUser()).toEqual(USER);
+    // Not `toEqual(USER)`: `getSessionUser()` only ever reads back the three
+    // fields `SessionUser` declares. `USER`'s `id` is stored (see the next
+    // test) but never returned.
+    expect(getSessionUser()).toEqual(SESSION_USER);
     expect(getUserToken()).toBe("jwt-abc");
+  });
+
+  /**
+   * Task 7, step 1. `GET /users/me` has never returned an `id`, so
+   * `SessionUser` dropped the field — but a blob written by a build that
+   * still had it (or hand-edited in devtools) must not suddenly stop
+   * parsing. Extra keys are ignored, not rejected.
+   */
+  it("still parses a stored blob that contains an id key from an older build", () => {
+    localStorage.setItem(USER_TOKEN_STORAGE_KEY, "jwt-abc");
+    localStorage.setItem(
+      "diudara.user.account",
+      JSON.stringify({ id: "user-1", handle: "wildan", displayName: "Wildan", email: "wildan@example.com" })
+    );
+
+    expect(getSessionUser()).toEqual(SESSION_USER);
   });
 });
 
@@ -299,7 +331,95 @@ describe("session storage — atomicity and one source of truth (item 4)", () =>
     // Deliberately asserted the other way round from the test above: a reader
     // that had been switched to the account key would pass one of these two
     // and fail the other, never both.
-    expect(getSessionUser()).toEqual(USER);
+    expect(getSessionUser()).toEqual(SESSION_USER);
+  });
+});
+
+/**
+ * Task 7. The token key and the account key can disagree — a corrupt or
+ * hand-edited account blob leaves `isUserSignedIn()` true while
+ * `getSessionUser()` is null, and in that state a live "Ikuti" renders on
+ * your own profile (Phase 2's final review, repaired at the cause here
+ * rather than at each screen that renders wrongly because of it).
+ */
+describe("repairSplitSession", () => {
+  it("rebuilds the account blob when a token is present and the account is missing", async () => {
+    // arrange: write ONLY the token key, no account key
+    localStorage.setItem(USER_TOKEN_STORAGE_KEY, "jwt-abc");
+    expect(getSessionUser()).toBeNull();
+
+    // arrange: fetch returns the /users/me shape
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({
+        handle: "wildan",
+        displayName: "Wildan",
+        bio: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        email: "wildan@example.com",
+        whatsappNumber: null,
+      });
+    }) as unknown as typeof fetch;
+
+    // act
+    await repairSplitSession();
+
+    // assert: fetch was called with /users/me — the positive control for the
+    // two "does nothing" tests below, which assert the opposite.
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.url).toBe("/users/me");
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+
+    // assert: getSessionUser() is non-null, handle matches
+    const session = getSessionUser();
+    expect(session !== null).toBe(true);
+    expect(session!.handle).toBe("wildan");
+    expect(getUserToken()).toBe("jwt-abc");
+  });
+
+  it("does nothing when both keys are present", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({});
+    }) as unknown as typeof fetch;
+
+    await repairSplitSession();
+
+    expect(calls.length).toBe(0);
+  });
+
+  it("does nothing when there is no token at all", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({});
+    }) as unknown as typeof fetch;
+
+    // A signed-out visitor must not hit /users/me.
+    expect(isUserSignedIn()).toBe(false);
+
+    await repairSplitSession();
+
+    expect(calls.length).toBe(0);
+  });
+
+  it("leaves the user signed out when /users/me 401s", async () => {
+    localStorage.setItem(USER_TOKEN_STORAGE_KEY, "jwt-dead");
+    global.fetch = mock(async () => jsonResponse({ error: "unauthorized" }, 401)) as unknown as typeof fetch;
+
+    let thrown: unknown = null;
+    try {
+      // apiFetch clears the token on a 401.
+      await repairSplitSession();
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeNull();
+    expect(isUserSignedIn()).toBe(false);
   });
 });
 
@@ -383,7 +503,10 @@ describe("login", () => {
     await login({ email: "wildan@example.com", password: "supersecret123" });
 
     expect(getUserToken()).toBe("jwt-fresh");
-    expect(getSessionUser()).toEqual(USER);
+    // The server's `/users/login` response still carries `id` (confirmed
+    // against the running server) — it lands in storage as an extra key and
+    // is simply ignored on read-back, same as `SESSION_USER` above.
+    expect(getSessionUser()).toEqual(SESSION_USER);
   });
 
   it("posts to /users/login with the credentials, no Authorization header even with a stale token", async () => {

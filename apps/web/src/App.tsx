@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import LandingPage from "./pages/LandingPage";
 import NotFoundPage from "./pages/NotFoundPage";
@@ -28,6 +29,7 @@ import AppShell from "./user/AppShell";
 import BerandaPage from "./user/BerandaPage";
 import SiaranPage from "./user/SiaranPage";
 import JelajahPage from "./user/JelajahPage";
+import { repairSplitSession } from "./user/apiClient";
 
 export function AppRoutes() {
   return (
@@ -157,7 +159,18 @@ export function AppRoutes() {
   );
 }
 
+/**
+ * Task 7: repairs a split session (a token with no cached account) once, at
+ * the root, above the router — so it covers `/@handle` and `/jelajah` alike,
+ * the two surfaces where the bad state is visible sit on opposite sides of
+ * the `AppShell` boundary. See `repairSplitSession`'s own docstring for why
+ * this fixes the CAUSE rather than patching each screen.
+ */
 export default function App() {
+  useEffect(() => {
+    void repairSplitSession();
+  }, []);
+
   return (
     <BrowserRouter>
       <AppRoutes />

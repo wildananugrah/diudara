@@ -23,7 +23,6 @@ export const USER_TOKEN_STORAGE_KEY = "diudara.user.token";
 const USER_ACCOUNT_STORAGE_KEY = "diudara.user.account";
 
 export interface SessionUser {
-  id: string;
   handle: string;
   displayName: string;
   email: string;
@@ -97,16 +96,15 @@ export function getSessionUser(): SessionUser | null {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== "object" || parsed === null) return null;
-    const { id, handle, displayName, email } = parsed as Record<string, unknown>;
-    if (
-      typeof id !== "string" ||
-      typeof handle !== "string" ||
-      typeof displayName !== "string" ||
-      typeof email !== "string"
-    ) {
+    // Extra keys (an `id` a pre-Task-7 build wrote) are ignored, not
+    // rejected — see `repairSplitSession`'s docstring for why `id` was
+    // dropped from `SessionUser` and why an already-stored blob containing
+    // it must still parse.
+    const { handle, displayName, email } = parsed as Record<string, unknown>;
+    if (typeof handle !== "string" || typeof displayName !== "string" || typeof email !== "string") {
       return null;
     }
-    return { id, handle, displayName, email };
+    return { handle, displayName, email };
   } catch {
     // Hand-edited in devtools, or written by an older build. Losing the
     // cached account is acceptable; crashing every page that reads it is not.
@@ -451,6 +449,34 @@ export interface OwnUserProfile extends UserProfileCore {
 
 export function getOwnProfile(): Promise<OwnUserProfile> {
   return apiFetch<OwnUserProfile>("/users/me");
+}
+
+/**
+ * The token key and the account key can disagree — a corrupt or hand-edited
+ * account blob leaves `isUserSignedIn()` true while `getSessionUser()` is null,
+ * and in that state a live "Ikuti" renders on your own profile.
+ *
+ * Repaired AT THE CAUSE. Phase 2 shipped this residual and its review's condition
+ * was that Phase 3 fix the cause rather than the three screens that render
+ * wrongly because of it — the instance-versus-class distinction that cost this
+ * project a whole extra round when two fixes each closed their own call site and
+ * a guard test then found four more offenders.
+ *
+ * Swallows its own failure deliberately: this runs on every app start, and a
+ * network blip must not stop the app rendering. A 401 inside `apiFetch` already
+ * clears the dead token, which is the correct outcome.
+ */
+export async function repairSplitSession(): Promise<void> {
+  if (!isUserSignedIn() || getSessionUser() !== null) return;
+  const token = getUserToken();
+  if (token === null) return;
+  try {
+    const me = await getOwnProfile();
+    setUserSession(token, { handle: me.handle, displayName: me.displayName, email: me.email });
+  } catch {
+    // Nothing to do: a 401 has already cleared the token, and any other failure
+    // leaves the split state to be retried on the next start.
+  }
 }
 
 /**
