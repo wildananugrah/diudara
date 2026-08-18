@@ -31,6 +31,19 @@ const MAX_FEED_PAGE_SIZE = 50;
  */
 const postBodySchema = z.object({
   body: z.string().trim().max(MAX_POST_BODY_LENGTH),
+  /**
+   * The COMPLETE desired list of images, in order — not a delta (spec §5.2).
+   * `.optional()` is load-bearing on PATCH: an OMITTED `mediaIds` is a
+   * text-only edit that leaves the post's images alone, while an explicit `[]`
+   * removes them all. Zod strips unknown keys, so the two are distinguishable
+   * here only because the field is declared.
+   *
+   * Ownership — mine, and unclaimed or already this post's — is `write-post.ts`'s
+   * to decide; this layer only says the ids are shaped like ids. A non-uuid
+   * would otherwise reach a uuid column and 500, the same defect `:id` params
+   * were fixed for.
+   */
+  mediaIds: z.array(z.string().uuid()).optional(),
 });
 
 const postIdParams = z.object({ id: uuidParam });
@@ -78,8 +91,12 @@ export function postRoutes(
   const requireAuth = requireUserAuth(deps.userTokenIssuer, deps.userRepository);
 
   app.post("/posts", requireAuth, validate(postBodySchema), async (c) => {
-    const input = c.get("validated") as { body: string };
-    const view = await deps.createPost.execute({ authorId: c.get("userId"), body: input.body });
+    const input = c.get("validated") as { body: string; mediaIds?: string[] };
+    const view = await deps.createPost.execute({
+      authorId: c.get("userId"),
+      body: input.body,
+      mediaIds: input.mediaIds,
+    });
     return c.json(view, 201);
   });
 
@@ -96,11 +113,12 @@ export function postRoutes(
     validateParams(postIdParams),
     validate(postBodySchema),
     async (c) => {
-      const input = c.get("validated") as { body: string };
+      const input = c.get("validated") as { body: string; mediaIds?: string[] };
       const view = await deps.editPost.execute({
         editorId: c.get("userId"),
         postId: c.req.param("id"),
         body: input.body,
+        mediaIds: input.mediaIds,
       });
       return c.json(view);
     }

@@ -129,11 +129,11 @@ import type { PaymentProviderPort } from "./application/ports/payment-provider.p
  */
 /**
  * Task 5's delivery routes need `mediaRepository` on `Dependencies` in
- * addition to `uploadMedia`. Neither test that builds a `Dependencies` by
- * hand below calls `mediaRepository.findById` or `uploadMedia.execute` — both
- * are here purely to satisfy the port's shape — so one shared fake, reused at
- * both call sites, is enough; unlike `fakeCreatorRepository` below it needs
- * no per-test state.
+ * addition to `uploadMedia`, and Task 6's post use cases take it as a
+ * constructor argument. No test that builds a `Dependencies` by hand below
+ * calls any of it — every use of this fake is here purely to satisfy a shape —
+ * so one shared fake, reused at every call site, is enough; unlike
+ * `fakeCreatorRepository` below it needs no per-test state.
  */
 const fakeMediaRepository: MediaRepositoryPort = {
   async create(): Promise<never> {
@@ -710,11 +710,15 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
-      createPost: new CreatePost(fakePostRepository),
-      editPost: new EditPost(fakePostRepository),
+      createPost: new CreatePost(fakePostRepository, fakeMediaRepository),
+      editPost: new EditPost(fakePostRepository, fakeMediaRepository),
       deletePost: new DeletePost(fakePostRepository),
-      listFeed: new ListFeed(fakePostRepository),
-      listUserPosts: new ListUserPosts(fakeUserRepository, fakePostRepository),
+      listFeed: new ListFeed(fakePostRepository, fakeMediaRepository),
+      listUserPosts: new ListUserPosts(
+        fakeUserRepository,
+        fakePostRepository,
+        fakeMediaRepository
+      ),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,
@@ -922,11 +926,15 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
-      createPost: new CreatePost(fakePostRepository),
-      editPost: new EditPost(fakePostRepository),
+      createPost: new CreatePost(fakePostRepository, fakeMediaRepository),
+      editPost: new EditPost(fakePostRepository, fakeMediaRepository),
       deletePost: new DeletePost(fakePostRepository),
-      listFeed: new ListFeed(fakePostRepository),
-      listUserPosts: new ListUserPosts(fakeUserRepository, fakePostRepository),
+      listFeed: new ListFeed(fakePostRepository, fakeMediaRepository),
+      listUserPosts: new ListUserPosts(
+        fakeUserRepository,
+        fakePostRepository,
+        fakeMediaRepository
+      ),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,

@@ -1750,12 +1750,19 @@ export function bootstrap(): Dependencies {
 
   // Task 2 of posts-and-feed. One repository, five use cases — mirrors
   // `followRepository`'s shape just above.
+  //
+  // Phase 4 Task 6: four of the five now also take `mediaRepository`, because
+  // a post carries its images (`media` on every post view), a create or edit
+  // claims them, and an edit unclaims what it dropped. It is constructed HERE
+  // rather than beside `uploadMedia` further down — it needs nothing but `db`,
+  // and these use cases are built before media storage is even selected.
+  const mediaRepository = new DrizzleMediaRepository(db);
   const postRepository = new DrizzlePostRepository(db);
-  const createPost = new CreatePost(postRepository);
-  const editPost = new EditPost(postRepository);
+  const createPost = new CreatePost(postRepository, mediaRepository);
+  const editPost = new EditPost(postRepository, mediaRepository);
   const deletePost = new DeletePost(postRepository);
-  const listFeed = new ListFeed(postRepository);
-  const listUserPosts = new ListUserPosts(userRepository, postRepository);
+  const listFeed = new ListFeed(postRepository, mediaRepository);
+  const listUserPosts = new ListUserPosts(userRepository, postRepository, mediaRepository);
 
   const communityRepository = new DrizzleCommunityRepository(db);
   const listCommunities = new ListCommunities(communityRepository);
@@ -1970,13 +1977,10 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
-  // Task 4's `POST /users/media`. One repository, one use case — mirrors
-  // `postRepository`'s shape above. Constructed right after `mediaStorage`
-  // because it is the use case's other dependency. Kept in its own variable
-  // (rather than inlined into `UploadMedia`'s constructor, as before Task 5)
-  // because Task 5's delivery routes need the SAME repository to look up a
-  // row by id.
-  const mediaRepository = new DrizzleMediaRepository(db);
+  // Task 4's `POST /users/media`. `mediaRepository` itself is constructed up
+  // with `postRepository` (Task 6 needs it there); this is where it meets
+  // `mediaStorage`, the use case's other dependency. The SAME instance backs
+  // Task 5's delivery routes, which look a row up by id.
   const uploadMedia = new UploadMedia(mediaRepository, mediaStorage);
 
   // Task 5's password reset, and `registerUser`'s existing-email notice.

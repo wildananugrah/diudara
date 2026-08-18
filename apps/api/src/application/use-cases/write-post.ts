@@ -1,5 +1,6 @@
 import { MAX_POST_BODY_LENGTH } from "@diudara/shared";
 import { ForbiddenError, NotFoundError, ValidationError } from "../errors";
+import type { MediaRepositoryPort } from "../ports/media-repository.port";
 import type { PostRepositoryPort } from "../ports/post-repository.port";
 import { toPostView, type PostView } from "./post-views";
 
@@ -8,6 +9,9 @@ export { MAX_POST_BODY_LENGTH };
 const EMPTY_MESSAGE = "kiriman tidak boleh kosong";
 const TOO_LONG_MESSAGE = `kiriman maksimal ${MAX_POST_BODY_LENGTH} karakter`;
 const NOT_YOURS_MESSAGE = "kiriman ini bukan milik Anda";
+const MEDIA_NOT_YOURS_MESSAGE = "foto tidak ditemukan atau bukan milik Anda";
+const MEDIA_TAKEN_MESSAGE = "foto sudah dipakai kiriman lain";
+const MEDIA_DUPLICATE_MESSAGE = "foto yang sama tidak boleh dipakai dua kali";
 
 /**
  * Trims, then validates. In that order deliberately: a body of three spaces is
@@ -20,19 +24,99 @@ function requireBody(raw: string): string {
   return body;
 }
 
-export class CreatePost {
-  constructor(private readonly posts: PostRepositoryPort) {}
+/**
+ * The ownership rules for `mediaIds`, shared by create and edit because they
+ * differ by EXACTLY one clause (spec §5.2): an id is accepted when it exists,
+ * belongs to the actor, and is either unclaimed or already claimed by
+ * `ownPostId` — the post being edited, or `null` on create, where nothing is
+ * "already this post's" yet. That last clause is the whole difference, and
+ * without it every edit would reject its own existing images.
+ *
+ * An id claimed by a DIFFERENT post is refused whoever owns it, or editing a
+ * post could pull media out of another one — including someone else's.
+ *
+ * Unknown and not-yours share one message on purpose: media ids are handed out
+ * only to their uploader, and a distinct "no such photo" would turn this into
+ * an existence oracle for ids belonging to other people.
+ *
+ * Called BEFORE any write in both use cases, so a refused request leaves the
+ * post exactly as it was.
+ */
+async function requireAttachable(
+  media: MediaRepositoryPort,
+  actorId: string,
+  ids: string[],
+  ownPostId: string | null
+): Promise<void> {
+  if (ids.length === 0) return;
+  // One row holds one `position`, so the same id twice would claim it once and
+  // hand back a post with fewer images than were asked for — a silent
+  // disagreement between request and result, which is exactly what the
+  // whole-list semantics exist to prevent.
+  if (new Set(ids).size !== ids.length) throw new ValidationError(MEDIA_DUPLICATE_MESSAGE);
 
-  async execute(input: { authorId: string; body: string }): Promise<PostView> {
-    const row = await this.posts.create(input.authorId, requireBody(input.body));
-    return toPostView(row);
+  const rows = await media.findManyByIds(ids);
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  for (const id of ids) {
+    const row = byId.get(id);
+    if (row === undefined || row.ownerId !== actorId) {
+      throw new ValidationError(MEDIA_NOT_YOURS_MESSAGE);
+    }
+    if (row.postId !== null && row.postId !== ownPostId) {
+      throw new ValidationError(MEDIA_TAKEN_MESSAGE);
+    }
+  }
+}
+
+export class CreatePost {
+  constructor(
+    private readonly posts: PostRepositoryPort,
+    private readonly media: MediaRepositoryPort
+  ) {}
+
+  async execute(input: {
+    authorId: string;
+    body: string;
+    /** The images the new post should hold, in order. Absent and empty mean the same thing here — there is nothing to keep. */
+    mediaIds?: string[];
+  }): Promise<PostView> {
+    const body = requireBody(input.body);
+    const mediaIds = input.mediaIds ?? [];
+    // Validated before the post row exists: a refused `mediaIds` must not
+    // leave a stray post behind.
+    await requireAttachable(this.media, input.authorId, mediaIds, null);
+
+    const row = await this.posts.create(input.authorId, body);
+    if (mediaIds.length === 0) return toPostView(row, []);
+
+    await this.media.claim(row.id, mediaIds);
+    // Read back rather than echoing the ids: what the client gets is what a
+    // reload would show, ordered by the `position` that was actually stored.
+    return toPostView(row, await this.media.listForPost(row.id));
   }
 }
 
 export class EditPost {
-  constructor(private readonly posts: PostRepositoryPort) {}
+  constructor(
+    private readonly posts: PostRepositoryPort,
+    private readonly media: MediaRepositoryPort
+  ) {}
 
-  async execute(input: { editorId: string; postId: string; body: string }): Promise<PostView> {
+  async execute(input: {
+    editorId: string;
+    postId: string;
+    body: string;
+    /**
+     * The COMPLETE desired list, not a delta (spec §5.2) — the images the post
+     * should hold when this returns, in order. Images dropped from it are
+     * UNCLAIMED, never deleted (§8), and the worker's sweep collects them.
+     *
+     * OMITTED is not the same as empty: `[]` is a caller asking for no images,
+     * while leaving the field out says nothing about images at all — a
+     * text-only edit, which must not silently strip a post's photos.
+     */
+    mediaIds?: string[];
+  }): Promise<PostView> {
     const body = requireBody(input.body);
     // Ownership BEFORE the write, and a 403 that does not reveal the body:
     // returning 404 for someone else's post would make the id an existence
@@ -40,9 +124,19 @@ export class EditPost {
     // learn from the feed, where every post is public in this phase.
     const owned = await this.requireOwn(input.postId, input.editorId);
     if (owned.isDeleted) throw new NotFoundError("post not found");
+    // Before the write, so a rejected image list leaves the body untouched too.
+    if (input.mediaIds !== undefined) {
+      await requireAttachable(this.media, input.editorId, input.mediaIds, input.postId);
+    }
+
+    // `updateBody` sets `edited_at` unconditionally, which is what makes an
+    // IMAGE-ONLY change still count as an edit (§5.3): what a reader saw is
+    // not what they would see now, and `PostCard`'s `· diedit` marker exists
+    // to say so.
     const row = await this.posts.updateBody(input.postId, body);
     if (row === null) throw new NotFoundError("post not found");
-    return toPostView(row);
+    if (input.mediaIds !== undefined) await this.media.claim(input.postId, input.mediaIds);
+    return toPostView(row, await this.media.listForPost(input.postId));
   }
 
   private async requireOwn(postId: string, actorId: string) {
