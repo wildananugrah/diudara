@@ -81,6 +81,20 @@ export const MAX_EXPLORE_QUERY_LENGTH = 100;
  */
 export const DEFAULT_FOLLOW_LIST_LIMIT = 50;
 
+/**
+ * Longest post body — **the ONE definition**, imported by the server that
+ * refuses a longer one and by the client that must never send one.
+ *
+ * Same defect class as `MAX_EXPLORE_QUERY_LENGTH` above, which reached
+ * production: a limit known only to the server put a raw English Zod message on
+ * the screen. The composer's counter, its `maxLength`, and the route's validator
+ * all read this.
+ *
+ * Tests on both sides assert the LITERAL `1000`; see `MAX_EXPLORE_QUERY_LENGTH`
+ * for why never the constant.
+ */
+export const MAX_POST_BODY_LENGTH = 1000;
+
 export type UserSignupInput = z.infer<typeof userSignupSchema>;
 export type UserLoginInput = z.infer<typeof userLoginSchema>;
 

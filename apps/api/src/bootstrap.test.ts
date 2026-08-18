@@ -82,6 +82,9 @@ import type {
 } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { FollowRepositoryPort } from "./application/ports/follow-repository.port";
+import type { PostRepositoryPort } from "./application/ports/post-repository.port";
+import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
+import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
@@ -200,6 +203,36 @@ const fakeFollowRepository: FollowRepositoryPort = {
     return [];
   },
   async listFollowing() {
+    return [];
+  },
+};
+
+/** Task 2 of posts-and-feed's repository, faked the same shallow way `fakeFollowRepository` is above. */
+const fakePostRepository: PostRepositoryPort = {
+  async create(_authorId, body) {
+    return {
+      id: "fake-post",
+      body,
+      createdAt: new Date(0),
+      editedAt: null,
+      authorHandle: "fake",
+      authorDisplayName: "Fake",
+    };
+  },
+  async ownershipOf() {
+    return null;
+  },
+  async updateBody() {
+    return null;
+  },
+  async softDelete() {},
+  async listGlobal() {
+    return [];
+  },
+  async listFollowing() {
+    return [];
+  },
+  async listByAuthor() {
     return [];
   },
 };
@@ -641,6 +674,11 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
+      createPost: new CreatePost(fakePostRepository),
+      editPost: new EditPost(fakePostRepository),
+      deletePost: new DeletePost(fakePostRepository),
+      listFeed: new ListFeed(fakePostRepository),
+      listUserPosts: new ListUserPosts(fakeUserRepository, fakePostRepository),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,
@@ -835,6 +873,11 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
+      createPost: new CreatePost(fakePostRepository),
+      editPost: new EditPost(fakePostRepository),
+      deletePost: new DeletePost(fakePostRepository),
+      listFeed: new ListFeed(fakePostRepository),
+      listUserPosts: new ListUserPosts(fakeUserRepository, fakePostRepository),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,

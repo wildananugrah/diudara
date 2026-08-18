@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { healthRoute } from "./routes/health";
 import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
+import { postRoutes } from "./routes/posts";
 import { communityRoutes } from "./routes/communities";
 import { tierRoutes } from "./routes/tiers";
 import { channelRoutes } from "./routes/channels";
@@ -27,6 +28,18 @@ export function createApp(deps: Dependencies) {
   app.route("/auth", authRoutes(deps));
   // Phase 9's personal accounts — distinct from creator auth above. A
   // separate top-level path, so mount order relative to /auth does not matter.
+  //
+  // TWO routers share this one prefix, deliberately (Task 2 of
+  // posts-and-feed): mounting `postRoutes` here rather than growing
+  // `routes/users.ts` again keeps that file from becoming a catch-all. Every
+  // literal path segment either router owns (`/posts`, `/feed`, `/signup`,
+  // `/me`, `/explore`, ...) is distinct from the other's, and Hono's router
+  // resolves a static segment ahead of a `:handle`/`:id` param regardless of
+  // registration order, so which of these two lines comes first is NOT
+  // actually load-bearing — `routes/posts.test.ts`'s
+  // "both routers resolve regardless of registration order" test is what
+  // proves that rather than assumes it.
+  app.route("/users", postRoutes(deps));
   app.route("/users", userRoutes(deps));
   app.route("/payment-account", paymentAccountRoutes(deps));
   // Mounted before publicCommunityRoutes: /c/:slug is a single path segment,
