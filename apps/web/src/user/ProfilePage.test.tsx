@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import ProfilePage from "./ProfilePage";
-import { setUserSession } from "./apiClient";
+import { setUserSession, type PostView } from "./apiClient";
 
 const USER = { id: "user-1", handle: "wildan", displayName: "Wildan", email: "wildan@example.com" };
 
@@ -11,6 +11,29 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/**
+ * A page's every route now also fires `listUserPosts`, so every mock below
+ * that reaches the "ready" branch must answer BOTH `/users/by-handle/:handle`
+ * and `/users/:handle/posts` — a mock that only knows about the profile
+ * shape gets that same object handed back for the posts request, and
+ * `PostFeed` reading `.posts` off it crashes the whole render. Tests that
+ * never reach "ready" (404, network/500 profile failures) are unaffected:
+ * `PostFeed` only mounts once `load.status === "ready"`.
+ */
+function emptyPostsPage() {
+  return jsonResponse({ posts: [], nextCursor: null });
+}
+
+function makePost(id: string, body: string, handle: string): PostView {
+  return {
+    id,
+    body,
+    createdAt: "2026-08-18T00:00:00.000Z",
+    editedAt: null,
+    author: { handle, displayName: handle === "wildan" ? "Wildan" : "Budi" },
+  };
 }
 
 function profileBody(overrides: Record<string, unknown> = {}) {
@@ -53,6 +76,7 @@ describe("ProfilePage", () => {
     const calls: string[] = [];
     global.fetch = mock(async (url: string) => {
       calls.push(url);
+      if (url.includes("/posts")) return emptyPostsPage();
       return jsonResponse(
         profileBody({ handle: "wildan", displayName: "Wildan Anugrah", bio: "Membangun DIUDARA." })
       );
@@ -68,7 +92,9 @@ describe("ProfilePage", () => {
   });
 
   it("renders no bio element at all for a bio-less profile", async () => {
-    global.fetch = mock(async () => jsonResponse(profileBody())) as unknown as typeof fetch;
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts") ? emptyPostsPage() : jsonResponse(profileBody())
+    ) as unknown as typeof fetch;
 
     renderAt("/@budi");
 
@@ -95,8 +121,8 @@ describe("ProfilePage", () => {
   });
 
   it("shows both counts, each linking to the right list", async () => {
-    global.fetch = mock(async () =>
-      jsonResponse(profileBody({ followerCount: 12, followingCount: 4 }))
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts") ? emptyPostsPage() : jsonResponse(profileBody({ followerCount: 12, followingCount: 4 }))
     ) as unknown as typeof fetch;
 
     renderAt("/@budi");
@@ -110,7 +136,9 @@ describe("ProfilePage", () => {
 
   it("renders a follow button on someone else's profile", async () => {
     setUserSession("jwt-abc", USER);
-    global.fetch = mock(async () => jsonResponse(profileBody({ viewerFollows: false }))) as unknown as typeof fetch;
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts") ? emptyPostsPage() : jsonResponse(profileBody({ viewerFollows: false }))
+    ) as unknown as typeof fetch;
 
     renderAt("/@budi");
 
@@ -119,8 +147,10 @@ describe("ProfilePage", () => {
 
   it("renders NO follow button at all on your own profile", async () => {
     setUserSession("jwt-abc", USER);
-    global.fetch = mock(async () =>
-      jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan", viewerFollows: false }))
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts")
+        ? emptyPostsPage()
+        : jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan", viewerFollows: false }))
     ) as unknown as typeof fetch;
 
     renderAt("/@wildan");
@@ -136,6 +166,7 @@ describe("ProfilePage", () => {
       if (init?.method === "POST") {
         return jsonResponse({ following: true });
       }
+      if (url.includes("/posts")) return emptyPostsPage();
       return jsonResponse(profileBody({ followerCount: 5, viewerFollows: false }));
     }) as unknown as typeof fetch;
 
@@ -159,6 +190,7 @@ describe("ProfilePage", () => {
       if (init?.method === "DELETE") {
         return jsonResponse({ following: false });
       }
+      if (url.includes("/posts")) return emptyPostsPage();
       return jsonResponse(profileBody({ followerCount: 5, viewerFollows: true }));
     }) as unknown as typeof fetch;
 
@@ -204,5 +236,166 @@ describe("ProfilePage — a failed load speaks Bahasa Indonesia (N1)", () => {
     await screen.findByRole("heading", { name: "Gagal memuat profil" });
     expect(screen.getByText("Tidak dapat menghubungi server. Coba lagi.")).toBeTruthy();
     expect(screen.queryAllByText("Failed to fetch").length).toBe(0);
+  });
+});
+
+/**
+ * Task 6: a person's posts render below the header. `listUserPosts` goes
+ * through `publicGet` (Task 3's `/:handle/posts`), and `PostFeed` — not this
+ * component — owns the list, its loading state and its own error paragraph.
+ * See `PostFeed.tsx`'s own docstring for why a page cannot hold a second,
+ * parallel copy of the list.
+ */
+describe("ProfilePage — posts (Task 6)", () => {
+  it("renders that person's posts below the profile header", async () => {
+    global.fetch = mock(async (url: string) => {
+      if (url.includes("/posts")) {
+        return jsonResponse({
+          posts: [makePost("p1", "Kiriman pertama", "budi"), makePost("p2", "Kiriman kedua", "budi")],
+          nextCursor: null,
+        });
+      }
+      return jsonResponse(profileBody({ handle: "budi", displayName: "Budi" }));
+    }) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+
+    await screen.findByText("Budi");
+    expect(await screen.findByText("Kiriman pertama")).toBeTruthy();
+    expect(screen.getByText("Kiriman kedua")).toBeTruthy();
+  });
+
+  it("still renders the posts when signed out — listUserPosts goes through publicGet", async () => {
+    // No setUserSession: this is a signed-out visitor. `/@handle` is public.
+    global.fetch = mock(async (url: string) => {
+      if (url.includes("/posts")) {
+        return jsonResponse({ posts: [makePost("p1", "Kiriman publik", "budi")], nextCursor: null });
+      }
+      return jsonResponse(profileBody({ handle: "budi", displayName: "Budi" }));
+    }) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+
+    await screen.findByText("Budi");
+    expect(await screen.findByText("Kiriman publik")).toBeTruthy();
+  });
+
+  it("shows honest Bahasa copy for an empty list, not a spinner", async () => {
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts") ? emptyPostsPage() : jsonResponse(profileBody({ handle: "budi", displayName: "Budi" }))
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+
+    await screen.findByText("Budi");
+    expect(await screen.findByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
+    expect(screen.queryAllByText("Memuat...").length).toBe(0);
+  });
+
+  it("carries Edit and Hapus on your own profile's posts", async () => {
+    setUserSession("jwt-abc", USER); // handle "wildan"
+    global.fetch = mock(async (url: string) => {
+      if (url.includes("/posts")) {
+        return jsonResponse({ posts: [makePost("p1", "Punyaku sendiri", "wildan")], nextCursor: null });
+      }
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan" }));
+    }) as unknown as typeof fetch;
+
+    renderAt("/@wildan");
+
+    await screen.findByText("Punyaku sendiri");
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Hapus" })).toBeTruthy();
+  });
+
+  it("carries NEITHER Edit nor Hapus on someone else's posts", async () => {
+    setUserSession("jwt-abc", USER); // signed in as wildan, viewing budi's profile
+    global.fetch = mock(async (url: string) => {
+      if (url.includes("/posts")) {
+        return jsonResponse({ posts: [makePost("p1", "Punya Budi", "budi")], nextCursor: null });
+      }
+      return jsonResponse(profileBody({ handle: "budi", displayName: "Budi", viewerFollows: false }));
+    }) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+
+    await screen.findByText("Punya Budi");
+    expect(screen.queryAllByRole("button", { name: "Edit" }).length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: "Hapus" }).length).toBe(0);
+  });
+
+  /**
+   * The same rule Jelajah's rails follow, and the rule Phase 2's final review
+   * made a merge blocker: a failed fetch for one region of the page must not
+   * blank a DIFFERENT region that already loaded successfully. Post state and
+   * profile state are held separately for exactly this reason.
+   */
+  it("does NOT blank the profile header when the post load fails", async () => {
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts")
+        ? jsonResponse({ error: "internal server error" }, 500)
+        : jsonResponse(profileBody({ handle: "budi", displayName: "Budi" }))
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+
+    // Guard: the header actually loaded.
+    await screen.findByText("Budi");
+    // Guard: the post load actually failed and PostFeed's own error rendered
+    // — proof this isn't just "we didn't wait long enough".
+    await screen.findByRole("alert");
+
+    // The point: the header is STILL there next to that error.
+    expect(screen.getByText("Budi")).toBeTruthy();
+    expect(screen.getByText("@budi")).toBeTruthy();
+  });
+
+  /**
+   * Task 5's delete tests all used a one-row fixture, which is exactly why
+   * `PostFeedHandle.remove`'s "the right row, not just any row" guarantee
+   * went unnoticed for a whole round. Three rows here, and the assertion is
+   * the resulting ORDER, not membership or length.
+   */
+  it("deleting from your own profile removes exactly that row, keeping the others in order", async () => {
+    setUserSession("jwt-abc", USER); // handle "wildan"
+    const calls: { url: string; init?: RequestInit }[] = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      if (url.includes("/posts")) {
+        return jsonResponse({
+          posts: [
+            makePost("p1", "Kiriman satu", "wildan"),
+            makePost("p2", "Kiriman dua", "wildan"),
+            makePost("p3", "Kiriman tiga", "wildan"),
+          ],
+          nextCursor: null,
+        });
+      }
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan" }));
+    }) as unknown as typeof fetch;
+
+    function bodies(): string[] {
+      return screen
+        .getAllByRole("article")
+        .map((article) => article.querySelector(".post-card-body")?.textContent ?? "");
+    }
+
+    renderAt("/@wildan");
+
+    await screen.findByText("Kiriman satu");
+    // Guards every assertion below: if the fixture were not three rows in
+    // this order, "the MIDDLE one" would mean nothing.
+    expect(bodies()).toEqual(["Kiriman satu", "Kiriman dua", "Kiriman tiga"]);
+
+    const hapusButtons = screen.getAllByRole("button", { name: "Hapus" });
+    fireEvent.click(hapusButtons[1]!); // requests deleting "Kiriman dua", the middle row
+    fireEvent.click(screen.getByRole("button", { name: "Ya, hapus" }));
+
+    await waitFor(() => {
+      expect(bodies()).toEqual(["Kiriman satu", "Kiriman tiga"]);
+    });
+    const deleteCall = calls.find((call) => call.init?.method === "DELETE");
+    expect(deleteCall?.url).toBe("/users/posts/p2");
   });
 });

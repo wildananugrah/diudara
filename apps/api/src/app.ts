@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { healthRoute } from "./routes/health";
 import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
+import { postRoutes } from "./routes/posts";
 import { communityRoutes } from "./routes/communities";
 import { tierRoutes } from "./routes/tiers";
 import { channelRoutes } from "./routes/channels";
@@ -27,7 +28,36 @@ export function createApp(deps: Dependencies) {
   app.route("/auth", authRoutes(deps));
   // Phase 9's personal accounts — distinct from creator auth above. A
   // separate top-level path, so mount order relative to /auth does not matter.
+  //
+  // TWO routers share this one prefix, deliberately (Task 2 of
+  // posts-and-feed): mounting `postRoutes` here rather than growing
+  // `routes/users.ts` again keeps that file from becoming a catch-all.
+  //
+  // ORDER IS LOAD-BEARING HERE, unlike every other pair of routers mounted at
+  // a shared prefix in this file — and `userRoutes` MUST be mounted first.
+  // Task 2 review round 1 had this the other way round, on the claim that no
+  // route in either file shares a literal shape with a route in the other;
+  // that claim was false. Nothing reserves a handle (`domain/handle.ts`'s
+  // pattern is `/^[a-z0-9_]{3,30}$/`, no denylist — the same gap `/c` below
+  // already records for slugs), so a real user can register the handle
+  // "posts". With `postRoutes` mounted first, Hono matches its own routes
+  // against an incoming path BEFORE falling through to `userRoutes`, so
+  // `GET /users/by-handle/posts` was captured by this router's
+  // `GET /:handle/posts` (a 404, since "by-handle" is not a real handle) and
+  // `POST /users/posts/follow` was captured by `POST /posts/:id` (measured:
+  // a 200 that should have been a 404, and the matching `DELETE` a 500 from
+  // an id that is not a uuid — see I3's fix below for why that path is now a
+  // 400 instead). Mounting `userRoutes` first means ITS routes — including
+  // `/by-handle/:handle` and `/:handle/follow` — get first refusal, and a
+  // handle equal to `postRoutes`' own literal segments (`posts`, `feed`)
+  // stops being able to shadow them. `routes/posts.test.ts`'s
+  // "two routers on one prefix" block drives requests through THIS file's
+  // own exported `createApp`, not a locally reconstructed stand-in, and goes
+  // red if these two lines are swapped back — see that test for why a
+  // second, hand-built Hono instance would not have caught this the first
+  // time.
   app.route("/users", userRoutes(deps));
+  app.route("/users", postRoutes(deps));
   app.route("/payment-account", paymentAccountRoutes(deps));
   // Mounted before publicCommunityRoutes: /c/:slug is a single path segment,
   // while this route's literal "subscription"/"watch" prefixes and their

@@ -5,6 +5,9 @@ import {
   apiFetch,
   apiRequest,
   completePasswordReset,
+  createPost,
+  deletePost,
+  editPost,
   exploreUsers,
   followUser,
   getOwnProfile,
@@ -12,8 +15,10 @@ import {
   getSessionUser,
   getUserToken,
   isUserSignedIn,
+  listFeed,
   listFollowers,
   listFollowing,
+  listUserPosts,
   login,
   requestPasswordReset,
   SESSION_EXPIRED_MESSAGE,
@@ -846,5 +851,186 @@ describe("follow lists and Jelajah", () => {
 
     expect(calls[0]).toBe("/users/explore?q=budi");
     expect(calls[1]).toBe("/users/explore");
+  });
+});
+
+const POST_VIEW = {
+  id: "post-1",
+  body: "Halo",
+  createdAt: "2026-08-18T00:00:00.000Z",
+  editedAt: null,
+  author: { handle: "wildan", displayName: "Wildan" },
+};
+
+/**
+ * `untuk-anda` is PUBLIC, `mengikuti` is not — Task 4's own docstring on
+ * `listFeed` names the exact regression this pins: the header whose absence
+ * made the follow button unreachable for every signed-in user in Phase 2,
+ * one function over. All three directions matter: no session must still
+ * resolve on `untuk-anda`, a session must still be SENT on `untuk-anda`
+ * (never omitted just because the endpoint is public), and `mengikuti`
+ * requires the Bearer token since that route needs a live session.
+ */
+describe("apiClient — posts and the feed (Task 4)", () => {
+  it("listFeed('untuk-anda') sends no Authorization when there is no session, and still resolves", async () => {
+    const calls: Array<{ init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse({ posts: [], nextCursor: null });
+    }) as unknown as typeof fetch;
+
+    const page = await listFeed("untuk-anda");
+
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBeNull();
+    expect(page).toEqual({ posts: [], nextCursor: null });
+  });
+
+  it("listFeed('untuk-anda') sends the token when there IS a session", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse({ posts: [], nextCursor: null });
+    }) as unknown as typeof fetch;
+
+    await listFeed("untuk-anda");
+
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+  });
+
+  it("listFeed('mengikuti') sends the viewer's Bearer token", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ posts: [], nextCursor: null });
+    }) as unknown as typeof fetch;
+
+    await listFeed("mengikuti");
+
+    expect(calls[0]!.url).toBe("/users/feed?tab=mengikuti");
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+  });
+
+  /**
+   * Fix round 1, I2. `publicGet` and `apiFetch` both call `authorizedHeaders(_,
+   * getUserToken())`, so the header tests above pass identically whichever one
+   * `listFeed`'s `untuk-anda` branch is wired to — they pin a real regression
+   * (Phase 2's unreachable follow button) but do not distinguish the two
+   * helpers from each other. The one behavioural difference between them is
+   * 401 handling: `apiRequest` (which backs `apiFetch`) clears the session on
+   * ANY 401; `publicGet` never does, because `untuk-anda` must degrade to the
+   * anonymous view rather than sign a visitor out mid-browse. Proved by
+   * mutation below (reviewer's own repro): swapping `untuk-anda` from
+   * `publicGet` to `apiFetch` left the whole web suite green until these two
+   * tests existed.
+   */
+  it("listFeed('untuk-anda') leaves the session intact on a 401 — publicGet never clears it", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "invalid or expired token" }, 401)
+    ) as unknown as typeof fetch;
+
+    await listFeed("untuk-anda").catch(() => {});
+
+    expect(isUserSignedIn()).toBe(true);
+  });
+
+  it("listFeed('mengikuti') clears the session on a 401 — apiFetch always does", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "invalid or expired token" }, 401)
+    ) as unknown as typeof fetch;
+
+    await listFeed("mengikuti").catch(() => {});
+
+    expect(isUserSignedIn()).toBe(false);
+  });
+
+  it("listFeed appends before= only when given a cursor", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({ posts: [], nextCursor: null });
+    }) as unknown as typeof fetch;
+
+    await listFeed("untuk-anda");
+    await listFeed("untuk-anda", "cursor-1");
+
+    expect(calls[0]).toBe("/users/feed?tab=untuk-anda");
+    expect(calls[1]).toBe("/users/feed?tab=untuk-anda&before=cursor-1");
+  });
+
+  it("listUserPosts is public, sends the token when signed in, and omits before when not given", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ posts: [POST_VIEW], nextCursor: "cursor-2" });
+    }) as unknown as typeof fetch;
+
+    const page = await listUserPosts("wildan");
+
+    expect(calls[0]!.url).toBe("/users/wildan/posts");
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+    expect(page).toEqual({ posts: [POST_VIEW], nextCursor: "cursor-2" });
+  });
+
+  it("listUserPosts appends ?before= when given a cursor", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({ posts: [], nextCursor: null });
+    }) as unknown as typeof fetch;
+
+    await listUserPosts("wildan", "cursor-1");
+
+    expect(calls[0]).toBe("/users/wildan/posts?before=cursor-1");
+  });
+
+  it("createPost POSTs to /users/posts with the body as JSON", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse(POST_VIEW, 201);
+    }) as unknown as typeof fetch;
+
+    const result = await createPost("Halo");
+
+    expect(calls[0]!.url).toBe("/users/posts");
+    expect(calls[0]!.init.method).toBe("POST");
+    expect(calls[0]!.init.body).toBe(JSON.stringify({ body: "Halo" }));
+    expect(new Headers(calls[0]!.init.headers).get("Authorization")).toBe("Bearer jwt-abc");
+    expect(result).toEqual(POST_VIEW);
+  });
+
+  it("editPost PATCHes /users/posts/:id with the body as JSON", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ ...POST_VIEW, body: "Diedit" });
+    }) as unknown as typeof fetch;
+
+    await editPost("post-1", "Diedit");
+
+    expect(calls[0]!.url).toBe("/users/posts/post-1");
+    expect(calls[0]!.init.method).toBe("PATCH");
+    expect(calls[0]!.init.body).toBe(JSON.stringify({ body: "Diedit" }));
+  });
+
+  it("deletePost DELETEs /users/posts/:id", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ deleted: true });
+    }) as unknown as typeof fetch;
+
+    await deletePost("post-1");
+
+    expect(calls[0]!.url).toBe("/users/posts/post-1");
+    expect(calls[0]!.init.method).toBe("DELETE");
   });
 });

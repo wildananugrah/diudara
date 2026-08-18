@@ -1,9 +1,19 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import NotFoundPage from "../pages/NotFoundPage";
-import { getProfileByHandle, UserApiError, type PublicUserProfile } from "./apiClient";
+import {
+  deletePost,
+  getProfileByHandle,
+  getSessionUser,
+  listUserPosts,
+  UserApiError,
+  type PublicUserProfile,
+} from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
 import FollowButton from "./FollowButton";
+import PostFeed, { type PostFeedHandle } from "./PostFeed";
+
+const DELETE_FAILED_PREFIX = "Gagal menghapus kiriman.";
 
 type LoadState =
   | { status: "loading" }
@@ -36,6 +46,59 @@ export default function ProfilePage() {
   // further down.
   const [followerCount, setFollowerCount] = useState(0);
   const [viewerFollowing, setViewerFollowing] = useState<boolean | null>(null);
+
+  /**
+   * The signed-in viewer's own handle, or `null` when signed out — the same
+   * read `BerandaPage` does, not subscribed via `useSyncExternalStore`
+   * because nothing here needs to react to a mid-visit sign-out the way the
+   * composer's live "Kirim" button does.
+   *
+   * Handed to `PostFeed` as `ownHandle`; `PostFeed` is the one that compares
+   * it against each row's `post.author.handle` to decide `isOwn` (see
+   * `PostCard`'s docstring — that comparison happens once, in one place, so
+   * a profile page and Beranda can never compute "is this mine" two
+   * different ways). Every post `listUserPosts(handle, ...)` returns is
+   * authored by THIS profile's handle, so "isOwn" here really does mean
+   * "am I looking at my own profile" — never assumed as a boolean prop.
+   */
+  const ownHandle = getSessionUser()?.handle ?? null;
+
+  const postsFeed = useRef<PostFeedHandle>(null);
+  /** The id awaiting delete confirmation. `null` means nothing is pending — no separate "confirming" flag to drift out of step with it. Mirrors BerandaPage's own shape (Task 5). */
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  /**
+   * `PostFeed` fetches through this, entirely on its own — see `PostFeed`'s
+   * own `useEffect`. **Held completely apart from `load`/`setLoad` above on
+   * purpose**: a failed post fetch must not blank a profile header that
+   * already rendered successfully, the same rule Jelajah's rails follow and
+   * the rule Phase 2's final review made a merge blocker. `PostFeed` owns
+   * its own loading/error state for exactly this reason, so there is
+   * nothing here to wire the two together even by accident — no `.then`,
+   * no `.catch`, this function only forwards the cursor.
+   *
+   * Memoised on `handle` so `PostFeed` does not refetch on every render —
+   * an unmemoised `load` is a hang, not a slowdown (see `PostFeed.tsx`).
+   */
+  const loadPosts = useCallback((before: string | null) => listUserPosts(handle, before), [handle]);
+
+  async function confirmDelete(): Promise<void> {
+    const id = pendingDelete;
+    if (id === null) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deletePost(id);
+      postsFeed.current?.remove(id);
+      setPendingDelete(null);
+    } catch (err: unknown) {
+      setDeleteError(`${DELETE_FAILED_PREFIX} ${describeRequestFailure(err)}`);
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   useEffect(() => {
     if (!isProfileUrl) return;
@@ -134,6 +197,46 @@ export default function ProfilePage() {
           <strong>{profile.followingCount}</strong> Mengikuti
         </Link>
       </div>
+
+      {pendingDelete !== null ? (
+        <div className="delete-confirm" role="group" aria-label="Konfirmasi hapus">
+          <p>Hapus kiriman ini?</p>
+          {/* "Tidak jadi" — not "Batal" — for the same reason as Beranda's own
+              confirmation panel: two buttons sharing one accessible name is
+              an ambiguity a screen reader and `getByRole` both have to
+              resolve by position. */}
+          <button type="button" className="button-primary" disabled={deleting} onClick={() => void confirmDelete()}>
+            Ya, hapus
+          </button>
+          <button type="button" className="button-quiet" disabled={deleting} onClick={() => setPendingDelete(null)}>
+            Tidak jadi
+          </button>
+        </div>
+      ) : null}
+
+      {deleteError !== null ? (
+        <p className="feed-error" role="alert">
+          {deleteError}
+        </p>
+      ) : null}
+
+      {/*
+        `PostFeed` owns its own loading and error state entirely — a failed
+        fetch here shows its own `role="alert"` paragraph next to the header
+        above, which stays exactly as it was. Nothing in this component's
+        `load`/`setLoad` is touched by anything that happens inside
+        `PostFeed`.
+      */}
+      <PostFeed
+        ref={postsFeed}
+        load={loadPosts}
+        ownHandle={ownHandle}
+        onDeleteRequested={(id) => {
+          setDeleteError(null);
+          setPendingDelete(id);
+        }}
+        emptyMessage="Belum ada kiriman untuk ditampilkan."
+      />
     </main>
   );
 }

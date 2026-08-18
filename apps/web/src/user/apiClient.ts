@@ -565,3 +565,87 @@ export function exploreUsers(input: { q?: string; limit?: number } = {}): Promis
   const search = query.length > 0 ? `?${query}` : "";
   return publicGet<ExploreResult>(`/users/explore${search}`, "gagal memuat Jelajah");
 }
+
+/**
+ * A single post as the API renders it — Task 3 declares this shape so
+ * `PostCard` has something to import; Task 4 adds the endpoint functions
+ * (`createPost`, `listPosts`, ...) that actually resolve one.
+ *
+ * `createdAt`/`editedAt` stay raw ISO-8601 strings here, same rule as
+ * `UserProfileCore.createdAt` above: nothing in this file does date
+ * arithmetic, so there is nothing to gain from parsing early and a `Date`
+ * object would just be re-serialised at the fetch boundary anyway.
+ * `editedAt` is explicitly `null` on a never-edited post, never absent —
+ * `PostCard` depends on being able to tell "not edited" from "field missing"
+ * without an `in` check.
+ *
+ * Deliberately NO `viewerFollows` and no follow state of any kind: a post
+ * card renders one author's name and handle, not a relationship to them, and
+ * this project already lost a review round to that field getting guessed
+ * back into existence (`false` when signed out) in exactly this kind of
+ * component. See `PostCard.tsx`'s own docstring.
+ */
+export interface PostView {
+  id: string;
+  body: string;
+  createdAt: string;
+  editedAt: string | null;
+  author: {
+    handle: string;
+    displayName: string;
+  };
+}
+
+/** One keyset page of posts — `nextCursor` is `null` on the last page, never absent. */
+export interface FeedPage {
+  posts: PostView[];
+  nextCursor: string | null;
+}
+
+/**
+ * `untuk-anda` is PUBLIC, `mengikuti` is not — hence two different helpers for
+ * one endpoint.
+ *
+ * `publicGet` sends the viewer's token when there is one and never clears the
+ * session on a 401; `apiFetch` does clear it. `mengikuti` genuinely requires a
+ * live session, so a 401 there means the token is dead and clearing it is right.
+ * `untuk-anda` must keep working with no session at all, because `/beranda` is a
+ * publicly reachable page.
+ */
+export function listFeed(tab: "untuk-anda" | "mengikuti", before?: string | null): Promise<FeedPage> {
+  const params = new URLSearchParams({ tab });
+  if (before !== undefined && before !== null) params.set("before", before);
+  const path = `/users/feed?${params.toString()}`;
+  return tab === "mengikuti"
+    ? apiFetch<FeedPage>(path)
+    : publicGet<FeedPage>(path, "gagal memuat kiriman");
+}
+
+/** `GET /:handle/posts` — public, backs both Beranda's search-in-profile use and the profile page itself. */
+export function listUserPosts(handle: string, before?: string | null): Promise<FeedPage> {
+  const params = new URLSearchParams();
+  if (before !== undefined && before !== null) params.set("before", before);
+  const search = params.toString();
+  return publicGet<FeedPage>(
+    `/users/${encodeURIComponent(handle)}/posts${search === "" ? "" : `?${search}`}`,
+    "gagal memuat kiriman"
+  );
+}
+
+/** `POST /users/posts` (201). Requires a live session, same as every other `apiFetch` call. */
+export function createPost(body: string): Promise<PostView> {
+  return apiFetch<PostView>("/users/posts", { method: "POST", body: JSON.stringify({ body }) });
+}
+
+/** `PATCH /users/posts/:id`. */
+export function editPost(id: string, body: string): Promise<PostView> {
+  return apiFetch<PostView>(`/users/posts/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ body }),
+  });
+}
+
+/** `DELETE /users/posts/:id` — idempotent 200. */
+export function deletePost(id: string): Promise<void> {
+  return apiFetch<void>(`/users/posts/${encodeURIComponent(id)}`, { method: "DELETE" });
+}

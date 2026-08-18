@@ -860,3 +860,32 @@ export const follows = pgTable(
     check("follow_no_self", sql`${table.followerId} <> ${table.followeeId}`),
   ],
 );
+
+export const posts = pgTable(
+  "post",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    authorId: uuid("author_id")
+      .notNull()
+      .references(() => appUsers.id),
+    body: text("body").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Set on edit, null otherwise. Drives PostCard's `· diedit` marker, which is
+    // the whole of "a reader can tell a post changed" — there is no edit history.
+    editedAt: timestamp("edited_at", { withTimezone: true }),
+    // SOFT delete. Every read path must filter this, and the spec (§4.2) names a
+    // filter present on three paths and missing on the fourth as this phase's
+    // single biggest risk: each path's own tests only ever create live posts, so
+    // nothing goes red.
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (table) => [
+    // Untuk Anda: newest first across everybody. PARTIAL, so deleted rows leave
+    // the hot index entirely rather than being filtered out of every scan.
+    index("post_live_created_idx")
+      .on(table.createdAt.desc(), table.id.desc())
+      .where(sql`${table.deletedAt} is null`),
+    // A profile's posts, and the post side of the Mengikuti join.
+    index("post_author_created_idx").on(table.authorId, table.createdAt.desc()),
+  ]
+);

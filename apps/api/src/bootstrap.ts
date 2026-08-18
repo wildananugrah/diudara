@@ -14,6 +14,9 @@ import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
 import { DrizzleFollowRepository } from "./infrastructure/repositories/drizzle-follow.repository";
+import { DrizzlePostRepository } from "./infrastructure/repositories/drizzle-post.repository";
+import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
+import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
 import { DrizzlePasswordResetRepository } from "./infrastructure/repositories/drizzle-password-reset.repository";
@@ -188,6 +191,26 @@ export interface Dependencies {
    * particular exists to hold (never `email`, never `whatsapp_number`).
    */
   exploreUsers: ExploreUsers;
+  /**
+   * Task 2 of posts-and-feed's `POST /users/posts`. Behind `requireUserAuth` —
+   * see `routes/posts.ts` for why `PATCH`/`DELETE /users/posts/:id` share the
+   * same guard while the two `GET` routes on the same router (`/users/feed`,
+   * `/users/:handle/posts`) do not.
+   */
+  createPost: CreatePost;
+  /** `PATCH /users/posts/:id`. 403s a post that is not the caller's own, 404s a missing or already-deleted one. */
+  editPost: EditPost;
+  /** `DELETE /users/posts/:id`. Idempotent — deleting an already-deleted post is not an error. */
+  deletePost: DeletePost;
+  /**
+   * `GET /users/feed`. `tab=untuk-anda` is PUBLIC; `tab=mengikuti` requires a
+   * session — the route, not this class, enforces the 401 (see
+   * `routes/posts.ts`'s own docstring on that route for why: `/beranda` is a
+   * publicly reachable page).
+   */
+  listFeed: ListFeed;
+  /** `GET /users/:handle/posts`. 404s an unknown handle, same as `getUserProfile`/`listFollows`. */
+  listUserPosts: ListUserPosts;
   /**
    * Task 5's `POST /users/password-reset/request`. Always answers
    * `{ ok: true }` — see the use-case's own docstring for the enumeration-safety
@@ -1581,6 +1604,15 @@ export function bootstrap(): Dependencies {
   // screen — see `resolveViewerFollowSet`.
   const exploreUsers = new ExploreUsers(userRepository, followRepository);
 
+  // Task 2 of posts-and-feed. One repository, five use cases — mirrors
+  // `followRepository`'s shape just above.
+  const postRepository = new DrizzlePostRepository(db);
+  const createPost = new CreatePost(postRepository);
+  const editPost = new EditPost(postRepository);
+  const deletePost = new DeletePost(postRepository);
+  const listFeed = new ListFeed(postRepository);
+  const listUserPosts = new ListUserPosts(userRepository, postRepository);
+
   const communityRepository = new DrizzleCommunityRepository(db);
   const listCommunities = new ListCommunities(communityRepository);
   const getCommunity = new GetCommunity(communityRepository);
@@ -1979,6 +2011,11 @@ export function bootstrap(): Dependencies {
     followUser,
     listFollows,
     exploreUsers,
+    createPost,
+    editPost,
+    deletePost,
+    listFeed,
+    listUserPosts,
     requestPasswordReset,
     completePasswordReset,
     createCommunity,
