@@ -643,6 +643,63 @@ describe("media on posts", () => {
     expect(res.status).toBe(400);
   });
 
+  /**
+   * Review round 1, M2. An UNKNOWN id and SOMEONE ELSE'S id must come back
+   * byte-identical, and nothing but this test defends that. Media ids are
+   * handed out only to their uploader, so a distinct "foto tidak ditemukan"
+   * would let anyone probe whether a uuid is a real image — an existence
+   * oracle for other people's uploads, which is the defect class Phase 2's
+   * review already found in signup, where a taken handle's 409 revealed
+   * whether the accompanying email was registered.
+   *
+   * The two messages are asserted verbatim, per this repo's rule (never
+   * against the constant they are checked against), and then against each
+   * other — splitting them reddens this test by name rather than passing
+   * quietly.
+   */
+  it("an unknown media id and someone else's return the SAME message — no existence oracle", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a, {});
+    const otherToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    const theirs = await uploadFixture(a, otherToken);
+
+    const unknown = await createPost(a, token, "halo", [
+      "aaaaaaaa-0000-4000-8000-000000000000",
+    ]);
+    const notMine = await createPost(a, token, "halo", [theirs]);
+
+    expect(unknown.status).toBe(400);
+    expect(notMine.status).toBe(400);
+    const unknownBody = await unknown.json();
+    const notMineBody = await notMine.json();
+    expect(unknownBody.error).toBe("foto tidak ditemukan atau bukan milik Anda");
+    expect(notMineBody.error).toBe("foto tidak ditemukan atau bukan milik Anda");
+    expect(unknownBody.error).toBe(notMineBody.error);
+  });
+
+  /**
+   * The other two refusals are distinguishable on purpose — an id that is
+   * yours but already on another post, and the same id twice, are both things
+   * the composer can put right, so their copy says what happened. Asserted
+   * verbatim, and asserted as DIFFERENT from the not-yours message above, so
+   * collapsing all three into one generic string is a red test too.
+   */
+  it("says something different, in Bahasa, when the photo is on another post or listed twice", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const id = await uploadFixture(a, token);
+    await createPost(a, token, "kiriman pertama", [id]);
+    const spare = await uploadFixture(a, token);
+
+    const taken = await createPost(a, token, "kiriman kedua", [id]);
+    const duplicated = await createPost(a, token, "kiriman ketiga", [spare, spare]);
+
+    expect(taken.status).toBe(400);
+    expect(duplicated.status).toBe(400);
+    expect((await taken.json()).error).toBe("foto sudah dipakai kiriman lain");
+    expect((await duplicated.json()).error).toBe("foto yang sama tidak boleh dipakai dua kali");
+  });
+
   it("refuses media already claimed by a DIFFERENT post — 400", async () => {
     const a = app();
     const token = await tokenForValidUser(a);
