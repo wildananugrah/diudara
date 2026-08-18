@@ -46,4 +46,34 @@ describe("toFeedPage", () => {
     expect(page.posts.map((post) => post.body)).toEqual(["halo", "dua"]);
     expect(page.nextCursor).toBe("2026-08-18T03:00:00.000Z|bbbbbbbb-0000-4000-8000-000000000000");
   });
+
+  /**
+   * Review round 1, I4: mutating `rows.length > limit` to `>= limit` left the
+   * whole api workspace green — nothing exercised the boundary where the
+   * repository returned EXACTLY `limit` rows with NO probe row attached (the
+   * genuinely last page). Under that mutation an exactly-full last page
+   * would report a non-null `nextCursor`, and "Muat lebih banyak" would fetch
+   * an empty page — precisely what this function's own docstring says the
+   * probe row exists to prevent. This is the `> limit` side of the boundary;
+   * the test above ("drops the probe row...") is the `limit + 1` side.
+   */
+  it("an EXACTLY full page (no probe row) is the last page — nextCursor stays null", () => {
+    const second: PostRow = { ...row, id: "bbbbbbbb-0000-4000-8000-000000000000", body: "dua" };
+
+    const page = toFeedPage([row, second], 2);
+
+    expect(page.posts).toHaveLength(2);
+    expect(page.nextCursor === null).toBe(true);
+  });
+
+  it("a probe row beyond an exactly-full page never reaches the client", () => {
+    const second: PostRow = { ...row, id: "bbbbbbbb-0000-4000-8000-000000000000", body: "dua" };
+    const probe: PostRow = { ...row, id: "cccccccc-0000-4000-8000-000000000000", body: "TIDAK BOLEH TAMPIL" };
+
+    const page = toFeedPage([row, second, probe], 2);
+
+    expect(page.posts).toHaveLength(2);
+    expect(page.posts.map((post) => post.body)).not.toContain("TIDAK BOLEH TAMPIL");
+    expect(page.nextCursor === null).toBe(false);
+  });
 });

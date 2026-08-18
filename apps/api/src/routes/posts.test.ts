@@ -1,12 +1,7 @@
 import { describe, expect, it, beforeEach } from "bun:test";
-import { Hono } from "hono";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { resetDatabase } from "../db/test-helpers";
-import { errorHandler } from "../http/error-handler";
-import type { AuthVariables } from "../http/auth.middleware";
-import { userRoutes } from "./users";
-import { postRoutes } from "./posts";
 
 beforeEach(resetDatabase);
 
@@ -100,6 +95,22 @@ describe("POST /users/posts", () => {
 
     const res = await createPost(a, token, "a".repeat(1000));
     expect(res.status).toBe(201);
+  });
+
+  /**
+   * Review round 1, I5: the route used to check `.max()` on the RAW body,
+   * while the use case trims first — so exactly 1000 significant characters
+   * surrounded by whitespace (1004 raw characters) was accepted by
+   * `CreatePost` but rejected here. The schema now trims before measuring,
+   * so both sides agree on what "1000 characters" means.
+   */
+  it("accepts exactly 1000 characters plus surrounding whitespace — the route and the use case must agree", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await createPost(a, token, `  ${"a".repeat(1000)}  `);
+    expect(res.status).toBe(201);
+    expect((await res.json()).body).toBe("a".repeat(1000));
   });
 });
 
@@ -204,6 +215,48 @@ describe("GET /users/:handle/posts", () => {
     const res = await app().request("/users/tidak-ada/posts");
     expect(res.status).toBe(404);
   });
+
+  /**
+   * Review round 1, M6: verified working by probe but previously unpinned —
+   * this endpoint calls the same `parseBefore` as `/users/feed`, and a
+   * regression here would not be caught by that route's own tests.
+   */
+  it("rejects a garbage ?before= with 400 — NOT a silent restart at page 1", async () => {
+    const a = app();
+    await tokenForValidUser(a, {});
+
+    const res = await a.request("/users/wildan/posts?before=garbage");
+    expect(res.status).toBe(400);
+  });
+
+  /**
+   * Review round 1, M6: a full pagination round trip, not just "the cursor
+   * points somewhere" (`post-views.test.ts`) or "the repository was asked for
+   * limit + 1" (`read-posts.test.ts`) — this is the only test that drives
+   * `?before=<cursor>` through a real HTTP request and confirms page 2
+   * contains what page 1 promised, with no overlap and a null terminal cursor.
+   */
+  it("pages end to end: page 1's nextCursor fetches page 2, which is the last page", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a, {});
+    const first = await (await createPost(a, token, "post pertama")).json();
+    const second = await (await createPost(a, token, "post kedua")).json();
+    const third = await (await createPost(a, token, "post ketiga")).json();
+
+    const page1Res = await a.request("/users/wildan/posts?limit=2");
+    expect(page1Res.status).toBe(200);
+    const page1 = await page1Res.json();
+    expect(page1.posts.map((p: { id: string }) => p.id)).toEqual([third.id, second.id]);
+    expect(page1.nextCursor === null).toBe(false);
+
+    const page2Res = await a.request(
+      `/users/wildan/posts?limit=2&before=${encodeURIComponent(page1.nextCursor)}`
+    );
+    expect(page2Res.status).toBe(200);
+    const page2 = await page2Res.json();
+    expect(page2.posts.map((p: { id: string }) => p.id)).toEqual([first.id]);
+    expect(page2.nextCursor === null).toBe(true);
+  });
 });
 
 describe("PATCH /users/posts/:id", () => {
@@ -252,9 +305,58 @@ describe("PATCH /users/posts/:id", () => {
     });
     expect(res.status).toBe(401);
   });
+
+  /**
+   * Review round 1, I3: `not-a-uuid` used to reach `ownershipOf`, which
+   * queries a uuid column directly — Postgres throws and the request 500s.
+   * `validateParams` now rejects it as a 400 before any repository call, the
+   * same "bad input is a 400, not a silent reinterpretation or a crash" rule
+   * a malformed `?before=` already follows.
+   */
+  it("rejects a malformed (non-uuid) :id with 400, not a 500", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/posts/not-a-uuid", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ body: "baru" }),
+    });
+    expect(res.status).toBe(400);
+  });
 });
 
 describe("DELETE /users/posts/:id", () => {
+  /**
+   * Review round 1, I3: same malformed-id guard as PATCH above, checked
+   * independently since `validateParams` is applied per-route.
+   */
+  it("rejects a malformed (non-uuid) :id with 400, not a 500", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/posts/not-a-uuid", {
+      method: "DELETE",
+      headers: authed(token),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  /**
+   * Review round 1, M6: a well-formed uuid that never existed must 404 — the
+   * "idempotent" ruling above is specifically about a post that DID exist
+   * and was already deleted, not about an id nobody ever created.
+   */
+  it("404s a well-formed uuid that never existed", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/posts/aaaaaaaa-0000-4000-8000-000000000000", {
+      method: "DELETE",
+      headers: authed(token),
+    });
+    expect(res.status).toBe(404);
+  });
   it("403s — asserted as a STATUS CODE — when another user deletes it", async () => {
     const a = app();
     const authorToken = await tokenForValidUser(a, {});
@@ -318,57 +420,58 @@ describe("DELETE /users/posts/:id", () => {
 });
 
 /**
- * Task 2's step 8: `routes/posts.ts` and `routes/users.ts` are TWO Hono
- * sub-apps mounted at the SAME `/users` prefix (`app.ts`). A literal segment
- * one router owns (`/posts`, `/feed` here; `/signup`, `/me`, `/explore` there)
- * must never be shadowed by the other router's `:handle`/`:id` param, in
- * EITHER mount order — this is what proves that rather than assumes it, by
- * actually swapping the two lines against a throwaway app built the same way
- * `app.ts` builds the real one.
+ * Task 2 review round 1, C1/C2. This exercises `app.ts`'s OWN exported
+ * `createApp` (via the `app()` helper above), not a locally reconstructed
+ * stand-in — round 1's version of this test built its own throwaway Hono
+ * instance and asserted only `/:handle/posts` and `/:handle/followers`, two
+ * shapes that never collided in either mount order, so it could never go red
+ * from a real `app.ts` regression. It also claimed (in both the test and a
+ * code comment) that no route in either router shares a literal shape with a
+ * route in the other, which is false: nothing reserves a handle
+ * (`domain/handle.ts`'s pattern is `/^[a-z0-9_]{3,30}$/`, no denylist), so a
+ * user can register the handle "posts" — and a path like
+ * `/users/by-handle/posts` then matches BOTH `userRoutes`' literal
+ * `/by-handle/:handle` (handle="posts") AND `postRoutes`' literal
+ * `/:handle/posts` (handle="by-handle"); `/users/posts/follow` matches BOTH
+ * `userRoutes`' `/:handle/follow` (handle="posts") AND `postRoutes`'
+ * `/posts/:id` (id="follow", not a uuid — see I3 for why that no longer 500s
+ * either way). Whichever router is mounted FIRST wins the ambiguous match.
+ *
+ * `userRoutes` must be mounted first: mounting `postRoutes` first turns a
+ * handle equal to one of ITS literal segments ("posts", "feed") into a user
+ * who can never view their own `/by-handle/:handle` profile and can never
+ * unfollow through `DELETE /:handle/follow`. This test proves that against
+ * the real, exported app rather than assuming it.
  */
-describe("two routers on one prefix: /users/:handle/posts and /users/:handle/followers both resolve, regardless of mount order", () => {
-  async function seedWildanWithOnePostAndOneFollower() {
-    const deps = bootstrap();
-    const a = createApp(deps);
-    const wildanToken = await tokenForValidUser(a, {});
-    const rinaToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
-    await createPost(a, wildanToken, "halo dari wildan");
-    await a.request("/users/wildan/follow", { method: "POST", headers: authed(rinaToken) });
-    return a;
-  }
+describe("two routers on one prefix: userRoutes must be mounted before postRoutes", () => {
+  it("a handle equal to postRoutes' own literal segment ('posts') does not shadow userRoutes' by-handle lookup or follow/unfollow", async () => {
+    const a = app();
+    await tokenForValidUser(a, { handle: "posts", email: "posts@example.com" });
+    const otherToken = await tokenForValidUser(a, { handle: "lain", email: "lain@example.com" });
 
-  it("resolves both in the real app's actual mount order (posts, then users)", async () => {
-    const a = await seedWildanWithOnePostAndOneFollower();
+    // Must resolve userRoutes' GET /by-handle/:handle with handle="posts" —
+    // NOT postRoutes' GET /:handle/posts with handle="by-handle", which
+    // would 404 (no user is named "by-handle").
+    const profile = await a.request("/users/by-handle/posts");
+    expect(profile.status).toBe(200);
+    expect((await profile.json()).handle).toBe("posts");
 
-    const posts = await a.request("/users/wildan/posts");
-    expect(posts.status).toBe(200);
-    expect((await posts.json()).posts).toHaveLength(1);
+    // Must resolve userRoutes' POST/DELETE /:handle/follow with
+    // handle="posts" — NOT postRoutes' PATCH/DELETE /posts/:id with
+    // id="follow". The DELETE case is the one that used to fail: a
+    // non-uuid id reaching `ownershipOf` before I3's param validation existed.
+    const follow = await a.request("/users/posts/follow", {
+      method: "POST",
+      headers: authed(otherToken),
+    });
+    expect(follow.status).toBe(200);
+    expect(await follow.json()).toEqual({ following: true });
 
-    const followers = await a.request("/users/wildan/followers");
-    expect(followers.status).toBe(200);
-    expect(await followers.json()).toHaveLength(1);
-  });
-
-  it("resolves both with the mount order SWAPPED (users, then posts) — proves the order is not load-bearing", async () => {
-    const deps = bootstrap();
-    const swapped = new Hono<{ Variables: AuthVariables }>();
-    swapped.onError(errorHandler);
-    // Deliberately the OPPOSITE order from app.ts's real
-    // `app.route("/users", postRoutes(deps)); app.route("/users", userRoutes(deps));`.
-    swapped.route("/users", userRoutes(deps));
-    swapped.route("/users", postRoutes(deps));
-
-    const wildanToken = await tokenForValidUser(swapped, {});
-    const rinaToken = await tokenForValidUser(swapped, { handle: "rina", email: "rina@example.com" });
-    await createPost(swapped, wildanToken, "halo dari wildan");
-    await swapped.request("/users/wildan/follow", { method: "POST", headers: authed(rinaToken) });
-
-    const posts = await swapped.request("/users/wildan/posts");
-    expect(posts.status).toBe(200);
-    expect((await posts.json()).posts).toHaveLength(1);
-
-    const followers = await swapped.request("/users/wildan/followers");
-    expect(followers.status).toBe(200);
-    expect(await followers.json()).toHaveLength(1);
+    const unfollow = await a.request("/users/posts/follow", {
+      method: "DELETE",
+      headers: authed(otherToken),
+    });
+    expect(unfollow.status).toBe(200);
+    expect(await unfollow.json()).toEqual({ following: false });
   });
 });
