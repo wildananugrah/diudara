@@ -10,6 +10,7 @@ import {
   resolveAiFakeBehaviour,
   resolveAppBaseUrl,
   resolveCallbackToken,
+  resolveMaxPostImages,
   resolveTelegramWebhookSecret,
   selectAiProvider,
   selectEmailProvider,
@@ -711,6 +712,7 @@ describe("Dependencies (composition root contract)", () => {
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
       createPost: new CreatePost(fakePostRepository, fakeMediaRepository),
+      maxPostImages: 5,
       editPost: new EditPost(fakePostRepository, fakeMediaRepository),
       deletePost: new DeletePost(fakePostRepository),
       listFeed: new ListFeed(fakePostRepository, fakeMediaRepository),
@@ -927,6 +929,7 @@ describe("Dependencies (composition root contract)", () => {
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
       createPost: new CreatePost(fakePostRepository, fakeMediaRepository),
+      maxPostImages: 5,
       editPost: new EditPost(fakePostRepository, fakeMediaRepository),
       deletePost: new DeletePost(fakePostRepository),
       listFeed: new ListFeed(fakePostRepository, fakeMediaRepository),
@@ -2941,6 +2944,55 @@ describe("resolveAiDailyMessageLimit", () => {
         /must be a positive whole number/
       );
     }
+  });
+});
+
+describe("resolveMaxPostImages", () => {
+  it("defaults to 5 when MAX_POST_IMAGES is unset", () => {
+    expect(resolveMaxPostImages(undefined)).toBe(5);
+  });
+
+  it("treats an empty or whitespace-only value as unset", () => {
+    expect(resolveMaxPostImages("")).toBe(5);
+    expect(resolveMaxPostImages("   ")).toBe(5);
+  });
+
+  it("uses a configured whole number of at least 1", () => {
+    expect(resolveMaxPostImages("1")).toBe(1);
+    expect(resolveMaxPostImages("10")).toBe(10);
+  });
+
+  it("refuses a malformed value loudly rather than becoming NaN", () => {
+    expect(() => resolveMaxPostImages("banyak")).toThrow(/MAX_POST_IMAGES must be a whole number/);
+    expect(() => resolveMaxPostImages("0")).toThrow(/MAX_POST_IMAGES must be a whole number/);
+    expect(() => resolveMaxPostImages("-2")).toThrow(/MAX_POST_IMAGES must be a whole number/);
+    expect(() => resolveMaxPostImages("1.5")).toThrow(/MAX_POST_IMAGES must be a whole number/);
+  });
+});
+
+describe("bootstrap() MAX_POST_IMAGES wiring", () => {
+  it("exposes deps.maxPostImages, defaulting to 5", () => {
+    withJwtSecret("x".repeat(32), () => {
+      const deps = bootstrap();
+      expect(deps.maxPostImages).toBe(5);
+    });
+  });
+
+  it("wires a configured MAX_POST_IMAGES through to deps.maxPostImages", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ MAX_POST_IMAGES: "3" }, () => {
+        const deps = bootstrap();
+        expect(deps.maxPostImages).toBe(3);
+      });
+    });
+  });
+
+  it("fails closed on an invalid MAX_POST_IMAGES rather than silently keeping the default", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ MAX_POST_IMAGES: "not-a-number" }, () => {
+        expect(() => bootstrap()).toThrow(/MAX_POST_IMAGES must be a whole number/);
+      });
+    });
   });
 });
 

@@ -172,6 +172,7 @@ export function userRoutes(
     | "followUser"
     | "listFollows"
     | "exploreUsers"
+    | "maxPostImages"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -238,6 +239,28 @@ export function userRoutes(
     const patch = c.get("validated") as UpdateProfileInput;
     const updated = await deps.updateUserProfile.execute({ userId: c.get("userId"), patch });
     return c.json(updated);
+  });
+
+  /**
+   * Task 7 of images (design spec §6). Public and cheap — no auth, no
+   * database read, just the number `bootstrap()` already resolved from
+   * `MAX_POST_IMAGES` at boot. The web is a static build served by nginx and
+   * cannot read this process's env, so it fetches this once to learn the
+   * cap `postRoutes`' `.max()` enforces server-side.
+   *
+   * A STATIC path, mounted above every `/:handle` route on this router for
+   * the same reason `/explore` is (`limits` is 6 lowercase characters, so
+   * `HANDLE_PATTERN` would let someone register it and shadow this route —
+   * `RESERVED_HANDLES` in `domain/handle.ts` closes that, and
+   * `users.test.ts`'s route-derived guard fails loudly if this ever falls
+   * out of sync with it).
+   *
+   * Deliberately advisory only from the web's side: the server stays the
+   * authority via the schema's own `.max()`, so a fetch failure here must
+   * never be able to make the composer refuse to open.
+   */
+  app.get<"/limits">("/limits", (c) => {
+    return c.json({ maxPostImages: deps.maxPostImages });
   });
 
   // Task 2. Behind `requireUserAuth`: following requires a session, unlike

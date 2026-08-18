@@ -1066,6 +1066,21 @@ describe("GET /users/explore", () => {
   });
 });
 
+/**
+ * Task 7 of images. Public and cheap — the web fetches this once at boot to
+ * learn how many photos a post may carry, since it is a static nginx build
+ * and cannot read the API's own `MAX_POST_IMAGES` env var (images design
+ * spec §6). Deliberately unauthenticated: a composer that has not signed in
+ * yet still needs to know the limit.
+ */
+describe("GET /users/limits", () => {
+  it("reports the configured maximum, without auth — LITERAL 5", async () => {
+    const res = await app().request("/users/limits");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ maxPostImages: 5 });
+  });
+});
+
 describe("GET /users/me", () => {
   it("requires auth — no Authorization header is a 401", async () => {
     const res = await app().request("/users/me");

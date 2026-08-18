@@ -580,6 +580,72 @@ describe("two routers on one prefix: userRoutes must be mounted before postRoute
  * client sends the images the post should hold when the request finishes, in
  * order.
  */
+/**
+ * Six syntactically-valid uuids, none of which need to exist, for asserting
+ * the REFUSAL MESSAGE only: `.max()` on `mediaIds` runs inside
+ * `validate(postBodySchema)` and reports one issue per parse regardless of
+ * what the ids are, so a too-long array 400s with the schema's message
+ * before ownership is ever checked.
+ */
+const SIX_MEDIA_IDS = Array.from(
+  { length: 6 },
+  (_, i) => `aaaaaaaa-0000-4000-8000-00000000000${i}`
+);
+
+/** Uploads `n` real, owned, unclaimed media ids — see its own callers for why real ids matter here. */
+async function uploadFixtures(a: ReturnType<typeof app>, token: string, n: number): Promise<string[]> {
+  const ids: string[] = [];
+  for (let i = 0; i < n; i++) ids.push(await uploadFixture(a, token));
+  return ids;
+}
+
+describe("Task 7: MAX_POST_IMAGES", () => {
+  /**
+   * Six ids that are ALL real, owned by the caller, and unclaimed — so
+   * nothing but the count itself can produce a 400 here. Fake/unowned ids
+   * would already 400 on ownership grounds even with no cap at all, which
+   * would make this test pass for the wrong reason (measured: it does,
+   * against `SIX_MEDIA_IDS` below, before the cap existed).
+   */
+  it("POST /users/posts: a post carrying more than the maximum images is a 400 — LITERAL 6 over a default limit of 5", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const sixOwnedIds = await uploadFixtures(a, token, 6);
+
+    const res = await createPost(a, token, "banyak foto", sixOwnedIds);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("POST /users/posts: the refusal names the limit, in Bahasa — LITERAL 5", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await createPost(a, token, "banyak foto", SIX_MEDIA_IDS);
+
+    expect((await res.json()).error).toContain("maksimal 5 foto");
+  });
+
+  /**
+   * Task 6 wired `mediaIds` into `PATCH` too, and the brief is explicit: an
+   * edit that can add a sixth image while create refuses one would be the
+   * obvious hole. Same schema, same route-level `.max()`, so this must 400
+   * the same way create does — never reaching `editPost`. Real, owned,
+   * unclaimed ids again, for the same reason as the create test above.
+   */
+  it("PATCH /users/posts/:id: an edit carrying more than the maximum images is ALSO a 400", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const id = await uploadFixture(a, token);
+    const post = await (await createPost(a, token, "halo", [id])).json();
+    const sixOwnedIds = await uploadFixtures(a, token, 6);
+
+    const res = await patchPost(a, token, post.id, { body: "halo lagi", mediaIds: sixOwnedIds });
+
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("media on posts", () => {
   it("attaches media to a new post, in the order given", async () => {
     const a = app();

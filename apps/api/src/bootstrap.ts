@@ -204,6 +204,19 @@ export interface Dependencies {
    * `/users/:handle/posts`) do not.
    */
   createPost: CreatePost;
+  /**
+   * Task 7 of images: the resolved `MAX_POST_IMAGES`, defaulting to 5 —
+   * see `resolveMaxPostImages`'s own docstring for why it is a runtime env
+   * var rather than a shared constant. `postRoutes` reads this to build the
+   * `.max()` on `mediaIds` for BOTH `POST /users/posts` and
+   * `PATCH /users/posts/:id`, and `GET /users/limits` (mounted by
+   * `userRoutes`) reports it verbatim so the web — a static nginx build that
+   * cannot read this process's env — can learn it too (images design spec
+   * §6). Exposed here, rather than only closed over inside `postRoutes`, for
+   * the same reason every other resolved value on this interface is: a test
+   * must be able to prove what a given environment actually wired.
+   */
+  maxPostImages: number;
   /** `PATCH /users/posts/:id`. 403s a post that is not the caller's own, 404s a missing or already-deleted one. */
   editPost: EditPost;
   /** `DELETE /users/posts/:id`. Idempotent — deleting an already-deleted post is not an error. */
@@ -1122,6 +1135,49 @@ export function resolveAiDailyMessageLimit(env: { value: string | undefined }): 
 }
 
 /**
+ * The most images a single post may carry. Task 6 built `mediaIds` on both
+ * create and edit but deliberately left the cap unenforced; this is it.
+ *
+ * A RUNTIME env var rather than a shared constant (images design spec §6) —
+ * the owner's tradeoff, taken knowingly: the web is a static nginx build and
+ * cannot read an API-side env var, so `GET /users/limits` exists for it to
+ * learn this number instead of importing it.
+ */
+export const DEFAULT_MAX_POST_IMAGES = 5;
+
+/**
+ * Parses `MAX_POST_IMAGES`. Unlike `resolveAiDailyMessageLimit` above, this
+ * takes the raw string directly rather than `{ value }` — there is only ever
+ * one thing to resolve here, and `postRoutes`/`bootstrap()` both call it with
+ * exactly `process.env.MAX_POST_IMAGES`.
+ *
+ * Same fail-closed shape as `resolveAiDailyMessageLimit` and for the same
+ * reason: `Number("abc")` is `NaN`, and a cap silently coerced to `NaN` would
+ * make every `mediaIds.length <= NaN` comparison false — "reject every post
+ * with an image", not "no cap" — the opposite of what an operator
+ * fat-fingering this value would expect. Called UNCONDITIONALLY in
+ * `bootstrap()`, not gated behind a feature flag the way
+ * `resolveAiDailyMessageLimit` is gated behind `aiProvider`: posting is a
+ * core feature on every box, so a malformed value here must fail boot on
+ * every box, not just some.
+ */
+export function resolveMaxPostImages(value: string | undefined): number {
+  const raw = presentOrUndefined(value);
+  if (raw === undefined) {
+    return DEFAULT_MAX_POST_IMAGES;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(
+      `MAX_POST_IMAGES must be a whole number of at least 1 (got "${raw}"). Unset it to ` +
+        `use the default of ${DEFAULT_MAX_POST_IMAGES}.`
+    );
+  }
+  return parsed;
+}
+
+/**
  * Minimum `MEDIAMTX_WEBHOOK_SECRET`/`STREAM_TOKEN_SECRET` length, the same
  * floor as `JWT_SECRET`/`XENDIT_CALLBACK_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`
  * above and for the same reason: `MEDIAMTX_WEBHOOK_SECRET` is the ONLY
@@ -1758,6 +1814,12 @@ export function bootstrap(): Dependencies {
   // and these use cases are built before media storage is even selected.
   const mediaRepository = new DrizzleMediaRepository(db);
   const postRepository = new DrizzlePostRepository(db);
+  // Task 7 of images: resolved UNCONDITIONALLY, unlike
+  // `resolveAiDailyMessageLimit` (gated behind `aiProvider` further below) —
+  // posting is a core feature on every box, so a malformed `MAX_POST_IMAGES`
+  // must fail boot everywhere, not just where some optional feature happens
+  // to be enabled.
+  const maxPostImages = resolveMaxPostImages(process.env.MAX_POST_IMAGES);
   const createPost = new CreatePost(postRepository, mediaRepository);
   const editPost = new EditPost(postRepository, mediaRepository);
   const deletePost = new DeletePost(postRepository);
@@ -2184,6 +2246,7 @@ export function bootstrap(): Dependencies {
     listFollows,
     exploreUsers,
     createPost,
+    maxPostImages,
     editPost,
     deletePost,
     listFeed,
