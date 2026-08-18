@@ -159,10 +159,18 @@ describe("routing — the personal-account routes", () => {
  * why it gets its own test rather than trust alone.
  */
 describe("routing — the app shell", () => {
-  it("resolves /beranda inside the shell, with Beranda's empty-state copy", () => {
+  it("resolves /beranda inside the shell, with Beranda's empty-state copy", async () => {
+    // Task 5: Beranda now LOADS its feed, so its empty-state copy only appears
+    // once the first page resolves. Mocked and awaited for exactly the reason
+    // the /jelajah test below gives — an unmocked `fetch` here hits the real
+    // network and updates state outside any `act(...)`.
+    global.fetch = mock(async () =>
+      jsonResponse({ posts: [], nextCursor: null })
+    ) as unknown as typeof fetch;
+
     renderAt("/beranda");
 
-    expect(screen.getByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
+    expect(await screen.findByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
     expect(screen.getAllByRole("navigation").length).toBeGreaterThan(0);
   });
 
