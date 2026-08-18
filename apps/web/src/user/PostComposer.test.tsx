@@ -1187,6 +1187,28 @@ describe("PostComposer — files refused before any request", () => {
     expect(notices()).toEqual([]);
   });
 
+  /**
+   * Mutation-driven (fix round 1). The test below this one removes a photo
+   * before picking again, and REMOVAL clears the notice on its own — so a
+   * `setNotice` that only ever writes a non-empty sentence survived it. This
+   * one leaves the strip untouched between the two picks: the oversized file
+   * was never added, so there is nothing to remove and only the pick can clear.
+   */
+  it("drops a stale notice on the next clean PICK, with nothing removed in between", async () => {
+    mockSuccessfulUploads();
+    renderComposer();
+
+    chooseFiles(tooBigJpeg("besar.jpg"));
+    await settle();
+    expect(notices().length).toBe(1);
+
+    choose("kecil.jpg");
+    await uploadsSettled();
+
+    expect(notices()).toEqual([]);
+    expect(previewSources().length).toBe(1);
+  });
+
   it("drops a stale notice once the next pick is clean", async () => {
     await setLimitTo(2);
     mockSuccessfulUploads();
