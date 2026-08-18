@@ -79,7 +79,10 @@ import { ScheduleLiveSession, ListLiveSessions } from "./application/use-cases/s
 import { AuthoriseStream } from "./application/use-cases/authorise-stream";
 import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lifecycle";
 import { ResolveWatchToken } from "./application/use-cases/resolve-watch-token";
+import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-storage.adapter";
+import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage.adapter";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
+import type { MediaStoragePort } from "./application/ports/media-storage.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
@@ -510,6 +513,19 @@ export interface Dependencies {
    * `routes/public-subscription.ts`'s `WATCH_REFUSED_BODY`.
    */
   resolveWatchToken: ResolveWatchToken | undefined;
+  /**
+   * Phase 4's image storage (Task 2). Never `undefined` and never `null` —
+   * mirrors `messaging`, not `payments`/`email`/`streamingProvider`: unlike
+   * those three, a box with no bucket configured does not degrade a feature,
+   * it refuses to start at all (see `selectMediaStorage`'s own docstring for
+   * why an API that accepts uploads and silently keeps them in memory is
+   * worse than one that never came up). Exposed for the same reason
+   * `messaging` is: a test must be able to prove what a given environment
+   * actually wired, and Task 4's upload path needs to assert bytes really
+   * reached the SAME adapter `bootstrap()` selected, not a fake the test
+   * constructed itself.
+   */
+  mediaStorage: MediaStoragePort;
 }
 
 /**
@@ -1240,6 +1256,115 @@ export function selectStreamingProvider(env: {
   return undefined;
 }
 
+/** The five env vars that make up media storage configuration, for error text. */
+const MEDIA_STORAGE_ENV_VAR_NAMES = {
+  accessKeyId: "S3_ACCESS_KEY_ID",
+  secretAccessKey: "S3_SECRET_ACCESS_KEY",
+  bucket: "S3_BUCKET",
+  endpoint: "S3_ENDPOINT",
+  region: "S3_REGION",
+} as const;
+
+/**
+ * Chooses where image bytes live (Task 2 of Phase 4's images work).
+ *
+ * Same five-vars-together shape as `selectStreamingProvider` above — all set,
+ * or none, or it throws for being half-wired — but the ABSENT branch is
+ * deliberately `selectMessagingProviders`'s shape, not `selectStreamingProvider`'s
+ * or `selectPaymentProvider`'s:
+ *
+ *   1. All five set -> `S3MediaStorageAdapter`, in EVERY environment. Real
+ *      bytes go to a real bucket.
+ *   2. PARTIAL configuration (one to four set) throws in EVERY environment,
+ *      same reasoning as every other half-configured guard in this file: an
+ *      access key with no bucket is never intentional.
+ *   3. ABSENT configuration selects `FakeMediaStorageAdapter` ONLY when
+ *      `NODE_ENV` is in `RELAXED_NODE_ENVS` — the fake keeps bytes in a `Map`
+ *      instead of a bucket.
+ *   4. ABSENT configuration OUTSIDE the allowlist THROWS — it does NOT
+ *      degrade the way `selectStreamingProvider`/`selectEmailProvider`/
+ *      `selectPaymentProvider` do. This is the deliberate asymmetry: a
+ *      disabled co-builder or a hidden "go live" button costs a creator a
+ *      feature they can see is missing, but an upload endpoint that stays
+ *      UP and silently keeps every image in process memory looks like it
+ *      worked, loses every byte on the next restart or deploy, and gives
+ *      nobody any signal that anything is wrong until a member reports a
+ *      broken image. An API that refuses to start is a better failure than
+ *      an API that quietly eats uploads — the same call `selectMessagingProviders`
+ *      makes for an invite nobody can be told about.
+ */
+export function selectMediaStorage(env: {
+  accessKeyId: string | undefined;
+  secretAccessKey: string | undefined;
+  bucket: string | undefined;
+  endpoint: string | undefined;
+  region: string | undefined;
+  nodeEnv: string | undefined;
+}): MediaStoragePort {
+  const values = {
+    accessKeyId: presentOrUndefined(env.accessKeyId),
+    secretAccessKey: presentOrUndefined(env.secretAccessKey),
+    bucket: presentOrUndefined(env.bucket),
+    endpoint: presentOrUndefined(env.endpoint),
+    region: presentOrUndefined(env.region),
+  };
+  const entries = Object.entries(values) as [keyof typeof values, string | undefined][];
+  const setCount = entries.filter(([, value]) => value !== undefined).length;
+
+  if (setCount === entries.length) {
+    logProviderChoice(
+      env.nodeEnv,
+      `[bootstrap] media storage: S3MediaStorageAdapter (bucket ${values.bucket} at ` +
+        `${values.endpoint}) — uploads are REAL`
+    );
+    return new S3MediaStorageAdapter({
+      accessKeyId: values.accessKeyId as string,
+      secretAccessKey: values.secretAccessKey as string,
+      bucket: values.bucket as string,
+      endpoint: values.endpoint as string,
+      region: values.region as string,
+    });
+  }
+
+  if (setCount > 0) {
+    const present = entries
+      .filter(([, value]) => value !== undefined)
+      .map(([key]) => MEDIA_STORAGE_ENV_VAR_NAMES[key]);
+    const missing = entries
+      .filter(([, value]) => value === undefined)
+      .map(([key]) => MEDIA_STORAGE_ENV_VAR_NAMES[key]);
+    throw new Error(
+      `Media storage is half-configured: ${present.join(", ")} set but ${missing.join(", ")} not. ` +
+        "Set S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_BUCKET, S3_ENDPOINT and S3_REGION " +
+        "together or not at all — see apps/api/.env.example. Refusing to start rather than boot " +
+        "with media storage half-wired."
+    );
+  }
+
+  if (isRelaxedNodeEnv(env.nodeEnv)) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] media storage: FakeMediaStorageAdapter — uploads are kept IN MEMORY and " +
+        "vanish on restart (S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_BUCKET/S3_ENDPOINT/" +
+        "S3_REGION not all set, and NODE_ENV is development/test). Set all five to store real " +
+        "images."
+    );
+    return new FakeMediaStorageAdapter();
+  }
+
+  // BLOCK BOOT — see this function's own docstring, case 4, for why this is
+  // deliberately NOT the same shape as selectStreamingProvider/selectEmailProvider
+  // returning a disabled value instead.
+  throw new Error(
+    "S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_BUCKET/S3_ENDPOINT/S3_REGION are not set, and " +
+      `NODE_ENV is ${describeNodeEnv(env.nodeEnv)}. FakeMediaStorageAdapter is permitted ONLY ` +
+      `when NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}: it keeps uploaded bytes in a Map ` +
+      "that vanishes on restart, so a box running it outside development/test would accept " +
+      "uploads and silently drop every one of them — worse than refusing to start. Set all " +
+      "five S3_* env vars — see apps/api/.env.example — or set NODE_ENV=development."
+  );
+}
+
 /**
  * The token `resolveCallbackToken` hands back under `NODE_ENV=test`, and the
  * one value it refuses to accept anywhere else. It is committed to this
@@ -1811,6 +1936,21 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
+  // Phase 4's image storage (Task 2). Positioned here, right after messaging,
+  // because it shares messaging's block-boot shape (see `selectMediaStorage`'s
+  // own docstring) rather than payments'/email's/streaming's disabled-instead
+  // shape — both guards refuse to let this process come up looking like it
+  // works while quietly failing the thing a paying member or a posting user
+  // is relying on.
+  const mediaStorage: MediaStoragePort = selectMediaStorage({
+    accessKeyId: process.env.S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
+    bucket: process.env.S3_BUCKET,
+    endpoint: process.env.S3_ENDPOINT,
+    region: process.env.S3_REGION,
+    nodeEnv: process.env.NODE_ENV,
+  });
+
   // Task 5's password reset, and `registerUser`'s existing-email notice.
   // Constructed HERE, not up with `userRepository`/`authenticateUser` above,
   // because both need `messaging.notifier` (just resolved) and `email`/
@@ -2058,5 +2198,6 @@ export function bootstrap(): Dependencies {
     resolveWatchToken,
     mediamtxWebhookSecret,
     handleStreamLifecycle,
+    mediaStorage,
   };
 }

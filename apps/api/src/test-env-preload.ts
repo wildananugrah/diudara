@@ -134,6 +134,19 @@ for (const key of [
   "FONNTE_API_TOKEN",
   "XENDIT_SECRET_KEY",
   "XENDIT_SPLIT_RULE_ID",
+  // Task 2 (images): the same hole, pre-emptively closed this time. A real
+  // bucket's credentials in `apps/api/.env` would make `selectMediaStorage`
+  // hand every bare `bootstrap()` a REAL `S3MediaStorageAdapter` — and unlike
+  // Telegram/Fonnte/Xendit above, that adapter is untested against a live
+  // bucket on purpose (no credentials exist anywhere in this repository's
+  // history to test one against — see `s3-media-storage.adapter.ts`), so a
+  // developer's local bucket becomes reachable-but-unverified by the suite
+  // instead of merely unused.
+  "S3_ACCESS_KEY_ID",
+  "S3_SECRET_ACCESS_KEY",
+  "S3_BUCKET",
+  "S3_ENDPOINT",
+  "S3_REGION",
 ]) {
   delete process.env[key];
 }
