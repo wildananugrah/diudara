@@ -516,6 +516,102 @@ describe("ProfilePage — resets per-post state when the viewed profile changes"
     expect(screen.queryAllByText("Hapus kiriman ini?").length).toBe(0);
     expect(calls.filter((call) => call.init?.method === "DELETE").length).toBe(0);
   });
+
+  /**
+   * Fix round 2, N1. The `setEditing(null)` half of the reset effect
+   * (`ProfilePage.tsx:106`) had no test of its own — deleting just that line
+   * left the whole file at 25 pass / 0 fail. Measured harm: sign in as
+   * wildan, open Edit on wildan's post, navigate to budi's profile, tap
+   * whatever "Simpan" is on screen — a `PATCH /users/posts/p1` goes out
+   * while budi's profile is on screen, saving text that has nothing to do
+   * with what's rendered.
+   *
+   * **Assert on the recorded requests, not the DOM alone.** A DOM check for
+   * "no Simpan button" passes under this mutation too: `handleSaveEdit`'s
+   * own success path calls `setEditing(null)` regardless of the reset
+   * effect, so clicking the surviving "Simpan" succeeds and only THEN hides
+   * the composer. The PATCH already happened by the time the DOM looks
+   * clean.
+   */
+  it("drops an open edit composer, so 'Simpan' cannot PATCH a post from the last profile", async () => {
+    setUserSession("jwt-abc", USER); // handle "wildan"
+    const calls: { url: string; init?: RequestInit }[] = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (init?.method === "PATCH") {
+        return jsonResponse({
+          id: "p1",
+          body: "Kiriman wildan",
+          createdAt: "2026-08-18T00:00:00.000Z",
+          editedAt: "2026-08-18T01:00:00.000Z",
+          author: { handle: "wildan", displayName: "Wildan" },
+        });
+      }
+      if (url.includes("/wildan/posts")) {
+        return jsonResponse({ posts: [makePost("p1", "Kiriman wildan", "wildan")], nextCursor: null });
+      }
+      if (url.includes("/budi/posts")) {
+        return jsonResponse({ posts: [makePost("p2", "Kiriman budi", "budi")], nextCursor: null });
+      }
+      if (url.includes("by-handle/budi")) return jsonResponse(profileBody({ handle: "budi", displayName: "Budi" }));
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan" }));
+    }) as unknown as typeof fetch;
+
+    renderWithNav("/@wildan");
+
+    await screen.findByText("Kiriman wildan");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    // Guard: the composer actually opened before we navigate away from it.
+    expect(screen.getByRole("button", { name: "Simpan" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("link", { name: "Ke Budi" }));
+    await screen.findByText("Kiriman budi");
+
+    // Not just a DOM check (see docstring above): click whatever "Simpan" is
+    // on screen now, if anything, and prove no PATCH was ever issued as a
+    // result — the real-world consequence, not an implementation detail of
+    // what happens to be visible a moment later.
+    const stillThere = screen.queryByRole("button", { name: "Simpan" });
+    if (stillThere !== null) fireEvent.click(stillThere);
+
+    expect(calls.filter((call) => call.init?.method === "PATCH").length).toBe(0);
+  });
+
+  /**
+   * Fix round 2, N1 (smaller half). The `setDeleteError(null)` line in the
+   * same reset effect was also unpinned. Lower stakes than the PATCH above —
+   * no request fires as a result — but a failure banner about a post on the
+   * LAST profile has no business surviving onto this one.
+   */
+  it("drops a delete-error banner from the last profile too", async () => {
+    setUserSession("jwt-abc", USER); // handle "wildan"
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") return jsonResponse({ error: "internal server error" }, 500);
+      if (url.includes("/wildan/posts")) {
+        return jsonResponse({ posts: [makePost("p1", "Kiriman wildan", "wildan")], nextCursor: null });
+      }
+      if (url.includes("/budi/posts")) {
+        return jsonResponse({ posts: [makePost("p2", "Kiriman budi", "budi")], nextCursor: null });
+      }
+      if (url.includes("by-handle/budi")) return jsonResponse(profileBody({ handle: "budi", displayName: "Budi" }));
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan" }));
+    }) as unknown as typeof fetch;
+
+    renderWithNav("/@wildan");
+
+    await screen.findByText("Kiriman wildan");
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ya, hapus" }));
+    // Guard: the failure actually happened before we navigate away from it.
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("link", { name: "Ke Budi" }));
+    await screen.findByText("Kiriman budi");
+
+    expect(screen.queryAllByRole("alert").length).toBe(0);
+  });
 });
 
 /**

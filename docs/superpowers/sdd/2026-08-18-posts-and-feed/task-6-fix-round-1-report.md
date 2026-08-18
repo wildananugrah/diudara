@@ -315,5 +315,139 @@ $ bun run typecheck   (repo root)
 No route was added (`App.tsx`/`App.test.tsx` untouched), and `apps/web/src/dashboard/` was never
 opened.
 
-**Commit:** see `git log -1` after this report is written — conventional-commit subject
+**Commit:** `3b71073` — conventional-commit subject
 `fix(web): reset stale per-post state, wire Edit, and pin the posts request on a profile`.
+
+---
+
+# Fix round 2
+
+**Base:** `3b71073`. **File changed:** `apps/web/src/user/ProfilePage.test.tsx` only — the round-1
+production fix at `ProfilePage.tsx:103-107` was already correct; only the test coverage was missing.
+
+## N1 — the `setEditing(null)` half of the reset effect was unpinned
+
+A scoped re-review of the round-1 diff verified findings 1–7 addressed by independent mutation
+(including the `key={editing.id}` line disclosed in round 1, pinned three ways). One open finding:
+`ProfilePage.tsx:106`'s `setEditing(null)` — required by item 1 itself ("a reset effect keyed on
+`handle`, clearing `pendingDelete`, `deleteError` — and `editing` once you add it in item 2") — had no
+test exercising it. Deleting that single line left `ProfilePage.test.tsx` at 25 pass / 0 fail. The
+re-reviewer's throwaway probe measured the harm: sign in as wildan, open Edit on wildan's post,
+navigate to budi's profile, tap the surviving "Simpan" — a `PATCH /users/posts/p1` fires while budi's
+profile is on screen.
+
+**Added two tests** to the existing `"ProfilePage — resets per-post state when the viewed profile
+changes"` describe block, right after the item-1 delete test:
+
+1. `ProfilePage.test.tsx:527` — `"drops an open edit composer, so 'Simpan' cannot PATCH a post from
+   the last profile"`. Opens Edit on wildan's own post, navigates via `renderWithNav`'s `<Link>` to
+   `/@budi`, waits for budi's post to render, clicks whatever "Simpan" is still on screen (guarded —
+   only if `queryByRole` finds one), and asserts on the **recorded request list**:
+   `calls.filter((call) => call.init?.method === "PATCH").length` must be `0`. Deliberately does
+   **not** rely on a DOM check for "Simpan absent" as the discriminating assertion — as the docstring
+   at `:522-534` explains, `handleSaveEdit`'s own success path calls `setEditing(null)` regardless of
+   the reset effect, so under the mutation the click still succeeds, the PATCH still fires, and the
+   composer still disappears a moment later. A DOM-only assertion would have passed under this exact
+   mutation, which is precisely the failure mode the coordinator flagged.
+2. `ProfilePage.test.tsx:594` — `"drops a delete-error banner from the last profile too"`, covering the
+   `setDeleteError(null)` half. Triggers a failed delete on wildan's own post (producing the `role="alert"`
+   banner), navigates to budi's profile, and asserts `screen.queryAllByRole("alert").length` is `0`.
+   This one IS a DOM assertion — appropriate here since a stale error string is a purely visual leftover
+   with no request of its own to check.
+
+**Reachability check (both tests):** each test has one guard assertion before the meaningful one (the
+"Simpan" button exists right after opening Edit; the `role="alert"` exists right after the failed
+delete). Both guards execute and pass under BOTH mutations below — confirmed empirically: each failing
+run below reports `2 expect() calls` (not `0` or `1`), meaning the guard assertion ran and passed, and
+the failure landed on the intended, later assertion, not a masked earlier one.
+
+**Both tests green before any mutation:**
+```
+$ bun test src/user/ProfilePage.test.tsx -t "drops an open edit composer|drops a delete-error banner"
+ 2 pass
+ 25 filtered out
+ 0 fail
+ 4 expect() calls
+Ran 2 tests across 1 file. [1138.00ms]
+```
+
+**Mutation 1 — deleted `setEditing(null)` from the reset effect** (`ProfilePage.tsx:106`), leaving
+`setPendingDelete(null)` and `setDeleteError(null)` in place:
+```
+$ bun test src/user/ProfilePage.test.tsx -t "drops an open edit composer"
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/home/wildandev/repo/diudara/apps/web/src/user/ProfilePage.test.tsx:577:74)
+(fail) ProfilePage — resets per-post state when the viewed profile changes > drops an open edit
+composer, so 'Simpan' cannot PATCH a post from the last profile [261.06ms]
+ 0 pass / 1 fail
+ 2 expect() calls
+```
+The `Received: 1` is a real `PATCH /users/posts/p1`, fired while budi's posts are on screen — the
+exact defect the re-reviewer measured.
+
+**Mutation 2 — restored `setEditing(null)`, deleted `setDeleteError(null)`** (`ProfilePage.tsx:105`),
+tested independently:
+```
+$ bun test src/user/ProfilePage.test.tsx -t "drops a delete-error banner"
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/home/wildandev/repo/diudara/apps/web/src/user/ProfilePage.test.tsx:613:51)
+(fail) ProfilePage — resets per-post state when the viewed profile changes > drops a delete-error
+banner from the last profile too [281.36ms]
+ 0 pass / 1 fail
+ 2 expect() calls
+```
+
+**Both lines restored; full file green:**
+```
+$ bun test src/user/ProfilePage.test.tsx
+ 27 pass
+ 0 fail
+ 66 expect() calls
+Ran 27 tests across 1 file. [2.23s]
+```
+(25 baseline + 2 new tests.)
+
+**Confirmed untouched, per the "do NOT do" list:** `confirmDelete`'s
+`if (editing?.id === id) setEditing(null);` at `ProfilePage.tsx:132` — left exactly as it was, still
+deferred to the whole-branch review. No shared hook extracted. The existing item-1 test's assertion
+order (`ProfilePage.test.tsx:516-517`, "delete confirmation" test) was not touched.
+
+## Final verification (round 2)
+
+No stray `bun test` processes before the run (`ps aux | grep "bun test"` — empty).
+
+```
+$ bun run test   (repo root)
+@diudara/shared test:  82 pass / 0 fail  — Ran 82 tests across 4 files. [109ms]
+@diudara/worker test:  38 pass / 0 fail  — Ran 38 tests across 3 files. [159ms]
+@diudara/web test:    636 pass / 0 fail  — Ran 636 tests across 44 files. [17.44s]
+@diudara/api test:   2036 pass / 0 fail  — Ran 2036 tests across 139 files. [210.42s]
+```
+Total: **2792 pass / 0 fail** (82 + 38 + 636 + 2036) — exactly 2 more than the round-1-final baseline
+of 2790, matching the 2 new tests added. No `(fail)` lines anywhere in the raw output (grepped
+directly against the saved file, not piped through `tail`), including none of the known `apps/api`
+clock-vs-`now()` flakes.
+
+```
+$ bun run typecheck   (repo root)
+@diudara/shared typecheck: Exited with code 0
+@diudara/worker typecheck: Exited with code 0
+@diudara/web typecheck: Exited with code 0
+@diudara/api typecheck: Exited with code 0
+```
+
+`git status --short` before commit showed only the one intended file:
+```
+ M apps/web/src/user/ProfilePage.test.tsx
+```
+
+**Commit:** see `git log -1` after this report is written — conventional-commit subject
+`test(web): pin the setEditing/setDeleteError halves of ProfilePage's per-profile reset effect`.
