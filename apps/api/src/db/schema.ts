@@ -889,3 +889,38 @@ export const posts = pgTable(
     index("post_author_created_idx").on(table.authorId, table.createdAt.desc()),
   ]
 );
+
+export const postMedia = pgTable(
+  "post_media",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // The uploader. Kept even after the post claims the row: an edit has to
+    // check that the media it is being handed belongs to the editor, and the
+    // post it currently sits on is not the answer to that question.
+    ownerId: uuid("owner_id")
+      .notNull()
+      .references(() => appUsers.id),
+    // NULLABLE, and this is the whole two-step upload in one column. A row
+    // exists from the moment bytes land, before any post does, and is CLAIMED
+    // when the post is created or edited. A null here is an orphan and the
+    // worker's sweep collects it (spec §8).
+    postId: uuid("post_id").references(() => posts.id),
+    // 0-based, and only meaningful once claimed. The order the client sent.
+    position: integer("position").notNull().default(0),
+    // Of the FULL image after re-encoding, not of what was uploaded. PostCard
+    // reserves space from these so the feed does not reflow as images land.
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // The post's own images, in order. Covers the read on every feed row.
+    index("post_media_post_position_idx").on(table.postId, table.position),
+    // The sweep: unclaimed rows, oldest first. PARTIAL, so claimed rows — which
+    // are the overwhelming majority — never enter this index at all.
+    index("post_media_unclaimed_idx")
+      .on(table.createdAt)
+      .where(sql`${table.postId} is null`),
+  ]
+);
