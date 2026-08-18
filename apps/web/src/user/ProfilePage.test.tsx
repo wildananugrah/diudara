@@ -545,6 +545,11 @@ describe("ProfilePage — resets per-post state when the viewed profile changes"
           body: "Kiriman wildan",
           createdAt: "2026-08-18T00:00:00.000Z",
           editedAt: "2026-08-18T01:00:00.000Z",
+          // Required and never absent on the wire — see `PostView.media`'s
+          // own docstring. This mock predates Task 9, which is the first
+          // thing to actually READ `post.media` on every render; without
+          // this the field arrives `undefined` here and `PostCard` throws.
+          media: [],
           author: { handle: "wildan", displayName: "Wildan" },
         });
       }
@@ -657,6 +662,8 @@ describe("ProfilePage — editing your own post (Task 6, fix round 1 item 2)", (
           body: "Sudah diedit",
           createdAt: "2026-08-18T00:00:00.000Z",
           editedAt: "2026-08-18T01:00:00.000Z",
+          // See the twin mock above — required on the wire, never absent.
+          media: [],
           author: { handle: "wildan", displayName: "Wildan" },
         });
       }

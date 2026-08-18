@@ -113,6 +113,138 @@ describe("PostCard", () => {
 });
 
 /**
+ * One media entry as the wire sends it — `{ id, width, height }`, mirroring
+ * `MediaView` in `apiClient.ts` exactly (no URL: the card derives the
+ * thumbnail path itself, from the id).
+ */
+function mediaEntry(id: string, width: number, height: number) {
+  return { id, width, height };
+}
+
+/**
+ * **No `<img>` node ever reaches an assertion in this file.** Every image
+ * below has `alt=""` (spec §12 — no alt text in this phase), which gives it
+ * the implicit ARIA role "presentation" and drops it OUT of the "img" role,
+ * so `screen.getByRole("img")` cannot even find it. The only correct way to
+ * inspect these images is `container.querySelectorAll("img")`, and even then
+ * only ATTRIBUTES read off the nodes — via `.getAttribute(...)` — ever reach
+ * `expect()`. A bare element handed to a failing matcher hangs the runner:
+ * see `no-hanging-dom-assertions.test.ts` and `BerandaPage.test.tsx`'s
+ * `isNode`.
+ */
+describe("PostCard — the media slot (Task 9, spec §7/§12)", () => {
+  it("renders no media block at all when the post has no images", () => {
+    const { container } = renderCard({ post: { ...POST, media: [] } });
+
+    expect(container.querySelectorAll("img").length).toBe(0);
+    expect(container.querySelectorAll(".post-card-media").length).toBe(0);
+  });
+
+  it("renders one image from the THUMBNAIL endpoint, never the full-size one", () => {
+    const { container } = renderCard({
+      post: { ...POST, media: [mediaEntry("m1", 800, 600)] },
+    });
+
+    const srcs = [...container.querySelectorAll("img")].map((img) => img.getAttribute("src"));
+    expect(srcs).toEqual(["/users/media/m1/thumb"]);
+  });
+
+  it("renders three images, one per media entry, in the given order", () => {
+    const { container } = renderCard({
+      post: {
+        ...POST,
+        media: [mediaEntry("m1", 800, 600), mediaEntry("m2", 400, 400), mediaEntry("m3", 200, 900)],
+      },
+    });
+
+    const srcs = [...container.querySelectorAll("img")].map((img) => img.getAttribute("src"));
+    expect(srcs).toEqual(["/users/media/m1/thumb", "/users/media/m2/thumb", "/users/media/m3/thumb"]);
+  });
+
+  it("renders five images, one per media entry, in the given order", () => {
+    const { container } = renderCard({
+      post: {
+        ...POST,
+        media: [
+          mediaEntry("m1", 800, 600),
+          mediaEntry("m2", 400, 400),
+          mediaEntry("m3", 200, 900),
+          mediaEntry("m4", 1000, 500),
+          mediaEntry("m5", 300, 300),
+        ],
+      },
+    });
+
+    const srcs = [...container.querySelectorAll("img")].map((img) => img.getAttribute("src"));
+    expect(srcs).toEqual([
+      "/users/media/m1/thumb",
+      "/users/media/m2/thumb",
+      "/users/media/m3/thumb",
+      "/users/media/m4/thumb",
+      "/users/media/m5/thumb",
+    ]);
+  });
+
+  it("sets width and height attributes from EACH entry's own size — the row reserves its own space, not a shared guess", () => {
+    const { container } = renderCard({
+      post: {
+        ...POST,
+        media: [mediaEntry("m1", 800, 600), mediaEntry("m2", 400, 900)],
+      },
+    });
+
+    const dims = [...container.querySelectorAll("img")].map((img) => [
+      img.getAttribute("width"),
+      img.getAttribute("height"),
+    ]);
+    expect(dims).toEqual([
+      ["800", "600"],
+      ["400", "900"],
+    ]);
+  });
+
+  it('gives every image alt="" — no alt text in this phase (spec §12), never text borrowed from the body', () => {
+    const { container } = renderCard({
+      post: {
+        ...POST,
+        media: [mediaEntry("m1", 800, 600), mediaEntry("m2", 400, 400), mediaEntry("m3", 200, 900)],
+      },
+    });
+
+    const alts = [...container.querySelectorAll("img")].map((img) => img.getAttribute("alt"));
+    expect(alts).toEqual(["", "", ""]);
+  });
+
+  it("marks the media wrapper with how many images it holds, as a styling hook for the 1/3/5 layouts", () => {
+    const { container } = renderCard({
+      post: {
+        ...POST,
+        media: [mediaEntry("m1", 800, 600), mediaEntry("m2", 400, 400), mediaEntry("m3", 200, 900)],
+      },
+    });
+
+    const wrapper = container.querySelector(".post-card-media");
+    expect(wrapper?.getAttribute("data-count")).toBe("3");
+  });
+
+  it("places the media slot between the body and the owner actions, as the brief specifies", () => {
+    const { container } = renderCard({
+      isOwn: true,
+      post: { ...POST, media: [mediaEntry("m1", 800, 600)] },
+    });
+
+    const html = container.innerHTML;
+    const bodyIndex = html.indexOf("Halo semua!");
+    const mediaIndex = html.indexOf("/users/media/m1/thumb");
+    const actionsIndex = html.indexOf(">Edit<");
+
+    expect(bodyIndex).toBeGreaterThan(-1);
+    expect(mediaIndex).toBeGreaterThan(bodyIndex);
+    expect(actionsIndex).toBeGreaterThan(mediaIndex);
+  });
+});
+
+/**
  * Same technique as `no-raw-server-errors.test.ts`'s `stripComments`: a
  * literal scan for a string this file's OWN documentation is expected to
  * discuss (this docstring explains why the field is absent, which means it

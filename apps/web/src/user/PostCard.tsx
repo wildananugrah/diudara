@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import type { PostView } from "./apiClient";
+import { mediaThumbUrl, type PostView } from "./apiClient";
 import { formatRelativeTime } from "./relativeTime";
 
 export interface PostCardProps {
@@ -67,6 +67,36 @@ export default function PostCard({ post, isOwn, now, onEdit, onDeleteRequested }
           signed-up user. white-space: pre-wrap in styles.css preserves line
           breaks from this plain text node without parsing anything as markup. */}
       <p className="post-card-body">{post.body}</p>
+
+      {/* The feed loads THUMBNAILS only (`GET /users/media/:id/thumb`) — never
+          the full-size image (task 9 brief; spec §5, §9): every byte is
+          proxied through the API, and a feed of twenty posts pulling
+          full-size images would be brutal on Indonesian mobile data.
+          `data-count` is a pure styling hook (styles.css) for the 1/3/5-image
+          layouts; it carries no behaviour of its own. */}
+      {post.media.length > 0 ? (
+        <div className="post-card-media" data-count={post.media.length}>
+          {post.media.map((image) => (
+            <img
+              key={image.id}
+              src={mediaThumbUrl(image.id)}
+              // From the media entry, not measured in the browser — this is
+              // the whole reason `width`/`height` are columns on `post_media`
+              // (spec §4): the row reserves its space before the byte arrives,
+              // so the feed does not reflow under a reader's thumb as images
+              // land.
+              width={image.width}
+              height={image.height}
+              // No alt text in this phase (spec §12). Inventing one from the
+              // body would be worse than none — a screen reader would read the
+              // caption twice — so this is empty on purpose, which marks the
+              // image as decorative: the meaning is already in the text beside
+              // it.
+              alt=""
+            />
+          ))}
+        </div>
+      ) : null}
 
       {isOwn ? (
         <div className="post-card-actions">

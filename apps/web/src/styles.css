@@ -1144,6 +1144,72 @@ tbody tr:last-child td {
   margin-top: 8px;
 }
 
+/* ---------------------------------------------------------------
+   Task 9: the media slot (images design spec §7/§12). Lives inside
+   `.user-page`/`.beranda-page`, whose container is capped at 36rem
+   (576px) at EVERY viewport width — see the `.user-page` rule above —
+   so this grid does not need its own 390px/1440px breakpoints: the
+   same fluid layout renders sensibly at both, just with more
+   surrounding whitespace on a wide screen.
+
+   One image keeps its OWN aspect ratio (from the `width`/`height`
+   attributes `PostCard.tsx` sets from the media entry) rather than
+   being cropped to a tile — a single photo is the post's whole
+   picture, not a handle for it. Two or more images are cropped to
+   square tiles, exactly like the composer's own `.media-strip-preview`
+   above: a mosaic of tiles reads as a set, not as several unrelated
+   crops.
+
+   `data-count` is written by `PostCard.tsx` and is a pure styling
+   hook — it does not exist in the API's `MediaView` and carries no
+   behaviour. Three and five are given their own mosaic (one large +
+   two stacked; two wide + three narrow) because a plain uniform grid
+   left five images with a lopsided gap in the last row. Two and four
+   are even counts and need nothing beyond the plain 2-column grid.
+   --------------------------------------------------------------- */
+.post-card-media {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  margin-top: 8px;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.post-card-media img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  background: var(--line);
+}
+
+.post-card-media[data-count="1"] img {
+  aspect-ratio: auto;
+}
+
+.post-card-media[data-count="2"],
+.post-card-media[data-count="3"],
+.post-card-media[data-count="4"] {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.post-card-media[data-count="3"] img:first-child {
+  grid-row: span 2;
+}
+
+.post-card-media[data-count="5"] {
+  grid-template-columns: repeat(6, 1fr);
+}
+
+.post-card-media[data-count="5"] img:nth-child(-n + 2) {
+  grid-column: span 3;
+}
+
+.post-card-media[data-count="5"] img:nth-child(n + 3) {
+  grid-column: span 2;
+}
+
 /* Task 4: PostFeed. `.post-feed` itself needs no layout of its own — each
    `.post-card` already draws its own `border-bottom` and vertical padding,
    so the list reads correctly as a plain stack of block children. */
