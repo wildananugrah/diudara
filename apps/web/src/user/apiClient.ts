@@ -467,7 +467,15 @@ export function getOwnProfile(): Promise<OwnUserProfile> {
  * clears the dead token, which is the correct outcome.
  */
 export async function repairSplitSession(): Promise<void> {
-  if (!isUserSignedIn() || getSessionUser() !== null) return;
+  if (getSessionUser() !== null) return;
+  // No separate `isUserSignedIn()` check here on purpose (fix round 1's
+  // ruling): that function IS `getUserToken() !== null`, and this line reads
+  // the token directly one line later anyway — a second copy of the same
+  // check was dead weight that also made a prescribed mutation test
+  // unfalsifiable (see the Task 7 report's fix-round-1 section). This
+  // `token === null` return is the one and only signed-in check, and it is
+  // load-bearing: it is what lets `setUserSession` below take a `string`
+  // rather than `string | null`.
   const token = getUserToken();
   if (token === null) return;
   try {

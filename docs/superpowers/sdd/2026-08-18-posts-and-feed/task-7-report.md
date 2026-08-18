@@ -378,3 +378,260 @@ e2b3a44 fix(web): repair a split session at the cause
 4 files changed, 224 insertions(+), 14 deletions(-):
 `apps/web/src/App.test.tsx`, `apps/web/src/App.tsx`,
 `apps/web/src/user/apiClient.test.ts`, `apps/web/src/user/apiClient.ts`.
+
+---
+
+# Fix round 1
+
+An independent reviewer ran nine mutations against the round-1 work. Seven went red on the right
+assertion, it reproduced the disclosed red-phase reconstruction byte-for-byte, and it confirmed the
+`isUserSignedIn()` no-op analysis and the decision to widen that mutation were both correct. The
+`repairSplitSession` unit tests were called "unusually solid." The defect was not in that code — it
+was in what none of those tests looked at: the screen.
+
+## IMPORTANT 1 — the repair fixed `localStorage` but never repaired the SCREEN
+
+**Root cause.** `repairSplitSession` → `setUserSession` → `notify()`. The three `getSessionUser()`
+consumers (`FollowButton.tsx:99`, `ProfilePage.tsx:67`, `BerandaPage.tsx:61`) are plain,
+unsubscribed, render-time reads — `notify()` only wakes `useSyncExternalStore` subscribers, and the
+only ones in this app snapshot `isUserSignedIn()`/`getUserToken()` (`AppShell`, the composer's "Kirim"
+button), values that do **not** change across the repair: the token was already present in the split
+state. So the repaired storage sat there, correct, while every already-mounted component kept
+whatever `getSessionUser()` answered on its last render — which for a component mounted before the
+repair landed is `null`. Whether the visible symptom went away was therefore a pure race against
+`ProfilePage`'s own `/users/by-handle/...` fetch, and React's child-before-parent effect ordering
+loses that race by default (children's effects run before their parent's).
+
+### Step 1 — the failing test, against the pre-fix implementation
+
+Added to `apps/web/src/App.test.tsx`, inside the existing `describe("App — repairs a split session
+once, above the router (Task 7)", ...)` block: a `setBrowserPath(path)` helper (using
+`(globalThis as any).happyDOM.setURL(...)`, happy-dom's own escape hatch for setting `window.location`
+without navigating) so the test could render the **real** `<App />` — not a parallel harness
+component that could silently drift from it — pointed at `/@wildan`. `window.history.pushState` does
+not work for this: a relative URL silently no-ops against happy-dom's default `about:blank` location,
+and an absolute one throws `SecurityError` (origin `null` vs `http://localhost`) — both measured
+before landing on `happyDOM.setURL`. An `afterEach` in the same describe block resets the path back to
+`"/"`, since happy-dom's window is one process-wide instance shared by the whole `bun test`
+invocation, not just this file.
+
+The new test:
+
+```ts
+it("removes the stale Ikuti button once the repair lands, even when /users/me resolves AFTER the profile fetch", async () => {
+  localStorage.setItem(USER_TOKEN_STORAGE_KEY, "jwt-abc");
+  setBrowserPath("/@wildan");
+
+  let resolveMe: (() => void) | null = null;
+  const meGate = new Promise<void>((resolve) => { resolveMe = resolve; });
+
+  global.fetch = mock(async (url: string) => {
+    if (url.startsWith("/users/by-handle/")) {
+      return jsonResponse({ handle: "wildan", displayName: "Wildan", bio: null,
+        createdAt: "2026-01-01T00:00:00.000Z", followerCount: 0, followingCount: 0, viewerFollows: false });
+    }
+    if (url.startsWith("/users/wildan/posts")) {
+      return jsonResponse({ posts: [], nextCursor: null });
+    }
+    if (url === "/users/me") {
+      await meGate; // deliberately resolves AFTER the profile fetch — the losing half of the race
+      return jsonResponse({ handle: "wildan", displayName: "Wildan", bio: null,
+        createdAt: "2026-01-01T00:00:00.000Z", email: "wildan@example.com", whatsappNumber: null });
+    }
+    throw new Error(`unexpected fetch in this test: ${url}`);
+  }) as unknown as typeof fetch;
+
+  render(<App />);
+
+  // Guard: the stale render happens first — this IS the Phase-2 bug, reproduced.
+  expect(await screen.findByRole("button", { name: "Ikuti" })).toBeTruthy();
+
+  resolveMe!();
+
+  await waitFor(() => {
+    expect(screen.queryByRole("button", { name: "Ikuti" }) === null).toBe(true);
+  });
+});
+```
+
+Deliberately deterministic, not timing-based: `/users/me` is gated on a promise the test controls
+directly, and the guard assertion (`findByRole("button", { name: "Ikuti" })` succeeding) is checked
+*before* the real assertion, so if the guard itself ever fails, the test is understood to not be
+exercising the race it claims to.
+
+**Red, against the pre-fix `App.tsx`:**
+
+```
+(fail) App — repairs a split session once, above the router (Task 7) > removes the stale Ikuti button once the repair lands, even when /users/me resolves AFTER the profile fetch [1140.43ms]
+ 0 pass
+ 25 filtered out
+ 1 fail
+ 22 expect() calls
+```
+
+The `waitFor` timed out with the "Ikuti" button still in the DOM — the stale render never repaints,
+confirming the reviewer's diagnosis exactly: storage is repaired, the screen is not.
+
+### Step 2 — the fix
+
+`apps/web/src/App.tsx`:
+
+```tsx
+export default function App() {
+  const [, setRepaired] = useState(0);
+  useEffect(() => {
+    void repairSplitSession().then(() => setRepaired((n) => n + 1));
+  }, []);
+
+  return (
+    <BrowserRouter>
+      <AppRoutes />
+    </BrowserRouter>
+  );
+}
+```
+
+One call site, same as before — `setRepaired` bumps state once the repair's promise settles (success
+or already-a-no-op; the `.then` only runs after `repairSplitSession`'s own `try`/`catch` has already
+resolved it either way), forcing exactly one extra render pass of the whole tree with the corrected
+session already in storage. Still fixed at the cause: no consumer screen was touched, and no new
+subscription was added to `FollowButton`/`ProfilePage`/`BerandaPage`.
+
+Re-ran the new test: green. Also discovered and fixed an `act()` warning this introduced in the
+adjacent "triggers no /users/me request when there is no session at all" test — `repairSplitSession`'s
+`.then` still fires a state update as a microtask even in the no-token path (function returns
+immediately, but the returned promise still resolves and its `.then` still runs), so that test's
+`render` + wait is now wrapped in `await act(async () => { ... })` instead of a bare `render` +
+`setTimeout`. No other test needed this; the other two in the block either don't hit the no-op path
+or already await through `waitFor`, which wraps in `act` itself.
+
+## Also fixed (items 2–4)
+
+**Item 2 — pinned `displayName`/`email` in the rebuild.** Added to the "rebuilds the account blob..."
+test in `apiClient.test.ts`:
+
+```ts
+expect(session!.displayName).toBe("Wildan");
+expect(session!.email).toBe("wildan@example.com");
+```
+
+The mocked `/users/me` response already used `displayName: "Wildan"` (differs from `handle: "wildan"`
+in case) and `email: "wildan@example.com"` (differs entirely), specifically so a same-value mutation
+cannot hide behind a coincidental match.
+
+**Item 3 — direct id-less-blob test.** Added `"also accepts a stored blob with no id key at all"` to
+the `session storage` describe block in `apiClient.test.ts`: writes
+`{ handle, displayName, email }` (no `id`) straight into `localStorage` by hand — not through
+`setUserSession`/`repairSplitSession`, both of which were already exercised elsewhere — and asserts
+`getSessionUser()` returns it. This is `repairSplitSession`'s own rebuilt shape, pinned directly.
+
+**Item 4 — StrictMode caveat, docstring only.** Added a paragraph to the "triggers exactly one
+/users/me request..." test in `App.test.tsx` noting that "exactly one" holds because the test renders
+`<App />` directly rather than through `main.tsx`'s `<StrictMode>` wrapper, which double-invokes
+effects in development (harmless here since `repairSplitSession`'s `getSessionUser() !== null` guard
+makes the second call a no-op, but worth naming as a property of the test's harness rather than of
+`repairSplitSession` itself). No code change.
+
+## RULING — simplify the redundant guard
+
+`apps/web/src/user/apiClient.ts`, `repairSplitSession`:
+
+```diff
+-  if (!isUserSignedIn() || getSessionUser() !== null) return;
++  if (getSessionUser() !== null) return;
++  // No separate `isUserSignedIn()` check here on purpose ...
+   const token = getUserToken();
+   if (token === null) return;
+```
+
+Dropped `!isUserSignedIn() ||`; kept `token === null` and added a comment explaining the token read
+IS the signed-in check, so a future reader does not re-add the clause the previous round's mutation
+testing showed was dead weight.
+
+## Mutation testing (fix round 1)
+
+All four mutations applied to the fixed implementation, one at a time, each reverted immediately
+after confirming red and diffed byte-for-byte against a saved-aside copy of the fixed files
+(`/tmp/apiClient.fix1.ts`, `/tmp/App.fix1.tsx`) to confirm exact restoration.
+
+**Mutation D — revert the `.then(setRepaired)` wiring** (drop back to `void repairSplitSession();`
+with no state bump):
+
+```
+ 25 pass
+ 1 fail
+(fail) App — repairs a split session once, above the router (Task 7) > removes the stale Ikuti button once the repair lands, even when /users/me resolves AFTER the profile fetch
+```
+
+Only the new race test goes red — cleanly isolated, no collateral damage to the other 25
+`App.test.tsx` tests. Restored; `diff` against the saved copy empty.
+
+**Mutation E — remove the remaining `token === null` guard** (the ruling's own claim, re-verified
+independently rather than taken on faith):
+
+```
+$ bun test src/user/apiClient.test.ts -t "repairSplitSession"
+(fail) repairSplitSession > does nothing when there is no token at all
+ 3 pass / 1 fail
+
+$ bun test src/App.test.tsx -t "Task 7"
+(fail) App — repairs a split session once, above the router (Task 7) > triggers no /users/me request when there is no session at all
+ 2 pass / 1 fail
+```
+
+Exactly two tests go red, one in each file — confirms the guard is load-bearing and the ruling's
+claim is correct. Restored; `diff` against the saved copy empty.
+
+**Mutation F — item 2's target** (`{ handle: me.handle, displayName: me.handle, email: me.handle }`):
+
+```
+(fail) repairSplitSession > rebuilds the account blob when a token is present and the account is missing
+error: expect(received).toBe(expected)
+Expected: "Wildan"
+Received: "wildan"
+```
+
+Goes red on exactly the assertion added for this. Restored; `diff` against the saved copy empty.
+
+After each restoration, `bun test src/user/apiClient.test.ts src/App.test.tsx` was re-run and
+confirmed green (88 pass, 0 fail) before moving to the next mutation.
+
+## Final verification (fix round 1)
+
+```
+$ bun run typecheck   (repo root)
+@diudara/shared typecheck: Exited with code 0
+@diudara/worker typecheck: Exited with code 0
+@diudara/web typecheck: Exited with code 0
+@diudara/api typecheck: Exited with code 0
+```
+
+Run in the FOREGROUND per the coordinator's explicit instruction (the previous round's background
+waiter had stalled — two `pgrep -f` waiters were each matching the other's own command line, so
+neither could exit), captured to a file, then read from the file:
+
+```
+$ bun run test > .../task7-fix1.txt 2>&1; echo "EXIT: $?"
+EXIT: 0
+
+@diudara/shared test:  82 pass / 0 fail — Ran 82 tests across 4 files. [87.00ms]
+@diudara/worker test:  38 pass / 0 fail — Ran 38 tests across 3 files. [150.00ms]
+@diudara/web test:    645 pass / 0 fail — Ran 645 tests across 44 files. [18.00s]
+@diudara/api test:   2036 pass / 0 fail — Ran 2036 tests across 139 files. [204.27s]
+```
+
+Total: 2801 pass, 0 fail (baseline for this round was 2799; +2 new tests: the DOM race test in
+`App.test.tsx` and the id-less-blob test in `apiClient.test.ts`; item 2's and item 4's changes added
+assertions/docstring to existing tests rather than new tests). `grep -c "(fail)"` on the full log
+returns `0` — no known `apps/api` flakes fired on this run.
+
+`git status --short` before commit showed exactly the same four files as round 1:
+`apps/web/src/App.test.tsx`, `apps/web/src/App.tsx`, `apps/web/src/user/apiClient.test.ts`,
+`apps/web/src/user/apiClient.ts`. No route was added; `App.test.tsx`'s shell-partition `toEqual([...])`
+arrays are untouched.
+
+## Commit (fix round 1)
+
+```
+<filled in after commit>
+```

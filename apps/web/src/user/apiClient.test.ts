@@ -191,6 +191,28 @@ describe("session storage", () => {
 
     expect(getSessionUser()).toEqual(SESSION_USER);
   });
+
+  /**
+   * Fix round 1, item 3. The test above pins that an id-CARRYING blob still
+   * parses; every other test in this file that stores a session goes through
+   * `setUserSession(token, USER)`, and `USER` always carries an `id` (it has
+   * to, so it also exercises the test above) — so nothing directly pinned
+   * that `SessionUser`/`getSessionUser` accept a blob with NO `id` key at
+   * all, which is `repairSplitSession`'s own rebuilt shape
+   * (`{ handle, displayName, email }`, no `id`). This writes exactly that
+   * shape by hand, without going through `repairSplitSession` or
+   * `setUserSession`, so Step 1 is pinned directly rather than only via the
+   * repair path.
+   */
+  it("also accepts a stored blob with no id key at all", () => {
+    localStorage.setItem(USER_TOKEN_STORAGE_KEY, "jwt-abc");
+    localStorage.setItem(
+      "diudara.user.account",
+      JSON.stringify({ handle: "wildan", displayName: "Wildan", email: "wildan@example.com" })
+    );
+
+    expect(getSessionUser()).toEqual(SESSION_USER);
+  });
 });
 
 /**
@@ -375,6 +397,15 @@ describe("repairSplitSession", () => {
     const session = getSessionUser();
     expect(session !== null).toBe(true);
     expect(session!.handle).toBe("wildan");
+    // Fix round 1, item 2: the reviewer measured that sourcing all three
+    // fields off `me.handle` (`{ handle: me.handle, displayName: me.handle,
+    // email: me.handle }`) survived every test that existed before this one
+    // was added — `displayName` ("Wildan") and `email`
+    // ("wildan@example.com") both differ from `handle` ("wildan") in the
+    // mocked response above specifically so a same-value mutation cannot
+    // hide behind them matching by coincidence.
+    expect(session!.displayName).toBe("Wildan");
+    expect(session!.email).toBe("wildan@example.com");
     expect(getUserToken()).toBe("jwt-abc");
   });
 

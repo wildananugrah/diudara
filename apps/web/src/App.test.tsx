@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { Children, isValidElement, type ReactNode } from "react";
 import App, { AppRoutes } from "./App";
@@ -29,6 +29,32 @@ function renderAt(path: string) {
     <MemoryRouter initialEntries={[path]}>
       <AppRoutes />
     </MemoryRouter>
+  );
+}
+
+/**
+ * Task 7 fix round 1. `App` (unlike every other test in this file) renders
+ * its OWN `<BrowserRouter>`, which reads `window.location` — happy-dom's
+ * default is `about:blank` (`window.location.pathname` is literally the
+ * string `"blank"`), which matches no route at all, not even the catch-all.
+ * `window.history.pushState` cannot fix this: a relative URL silently no-ops
+ * against `about:blank`'s location, and an absolute one throws
+ * `SecurityError` (origin `null` vs `http://localhost`) — both measured.
+ *
+ * `happyDOM.setURL` is happy-dom's own escape hatch for exactly this ("sets
+ * the URL without navigating the browser"), and it is used here — rendering
+ * the REAL `App`, not a parallel harness component — precisely because a
+ * harness that mirrors `App`'s effect can silently stop matching production
+ * the moment `App` changes and the harness does not.
+ *
+ * Reset after every test in the describe block below: happy-dom's window is
+ * ONE instance shared by every test in this `bun test` invocation (not just
+ * this file), so a location left on `/@wildan` would otherwise leak into
+ * whatever runs next.
+ */
+function setBrowserPath(path: string): void {
+  (globalThis as unknown as { happyDOM: { setURL: (url: string) => void } }).happyDOM.setURL(
+    `http://localhost${path}`
   );
 }
 
@@ -290,6 +316,14 @@ describe("routing — the app shell", () => {
  * NOT wrapped in another one.
  */
 describe("App — repairs a split session once, above the router (Task 7)", () => {
+  afterEach(() => {
+    // See `setBrowserPath`'s own docstring: happy-dom's window (and
+    // therefore its location) is shared process-wide, so a path set by the
+    // race-condition test below must not leak into whatever test — in this
+    // file or another — runs next.
+    setBrowserPath("/");
+  });
+
   it("triggers exactly one /users/me request when the session is split", async () => {
     localStorage.setItem(USER_TOKEN_STORAGE_KEY, "jwt-abc");
     const calls: string[] = [];
@@ -309,6 +343,13 @@ describe("App — repairs a split session once, above the router (Task 7)", () =
 
     await waitFor(() => expect(calls.length).toBe(1));
     expect(calls[0]).toBe("/users/me");
+    // Holds only because this test renders `<App />` directly, not through
+    // `main.tsx`'s `<StrictMode>` wrapper. StrictMode double-invokes effects
+    // in development, so a real dev session issues TWO `/users/me` requests
+    // here — harmless (`repairSplitSession` is idempotent: the second call's
+    // `getSessionUser() !== null` guard bails immediately) but worth naming,
+    // since "exactly one" is a property of this test's harness, not of
+    // `repairSplitSession` itself.
   });
 
   it("triggers no /users/me request when there is no session at all", async () => {
@@ -318,14 +359,95 @@ describe("App — repairs a split session once, above the router (Task 7)", () =
       return jsonResponse({});
     }) as unknown as typeof fetch;
 
+    // Wrapped in `act`: `repairSplitSession` returns before ever awaiting
+    // when there is no token, but its `.then(() => setRepaired(...))` (fix
+    // round 1) still fires as a microtask once the promise settles — inside
+    // `act` so that update isn't reported outside React's control, rather
+    // than because it needs to be observed here.
+    await act(async () => {
+      render(<App />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(calls.length).toBe(0);
+  });
+
+  /**
+   * Fix round 1, IMPORTANT 1. `repairSplitSession` fixing `localStorage` was
+   * never the whole job: the three `getSessionUser()` consumers
+   * (`FollowButton.tsx`, `ProfilePage.tsx`, `BerandaPage.tsx`) are plain,
+   * unsubscribed render-time reads, and the only `useSyncExternalStore`
+   * subscribers snapshot `isUserSignedIn()`/`getUserToken()` — values that do
+   * NOT change across the repair, since the token was already present. So
+   * `notify()` firing was not enough to make React re-render anything, and
+   * whether the stale "Ikuti" disappeared was a pure race against
+   * `ProfilePage`'s own `/users/by-handle/...` fetch — which React's
+   * child-before-parent effect ordering loses BY DEFAULT.
+   *
+   * This is the slow-`/users/me` half of that race — the reviewer's
+   * measured-broken case — not the fast half the first test above already
+   * covers well enough by other means. `/users/me` is gated on a promise
+   * this test controls directly, so the ordering is deterministic rather
+   * than timing-dependent: the profile and its posts resolve FIRST, the
+   * stale "Ikuti" is confirmed on screen, and only then is `/users/me`
+   * allowed to resolve.
+   */
+  it("removes the stale Ikuti button once the repair lands, even when /users/me resolves AFTER the profile fetch", async () => {
+    localStorage.setItem(USER_TOKEN_STORAGE_KEY, "jwt-abc");
+    setBrowserPath("/@wildan");
+
+    let resolveMe: (() => void) | null = null;
+    const meGate = new Promise<void>((resolve) => {
+      resolveMe = resolve;
+    });
+
+    global.fetch = mock(async (url: string) => {
+      if (url.startsWith("/users/by-handle/")) {
+        return jsonResponse({
+          handle: "wildan",
+          displayName: "Wildan",
+          bio: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          followerCount: 0,
+          followingCount: 0,
+          viewerFollows: false,
+        });
+      }
+      if (url.startsWith("/users/wildan/posts")) {
+        return jsonResponse({ posts: [], nextCursor: null });
+      }
+      if (url === "/users/me") {
+        // Deliberately resolves AFTER the caller awaits `meGate` below — the
+        // losing half of the race.
+        await meGate;
+        return jsonResponse({
+          handle: "wildan",
+          displayName: "Wildan",
+          bio: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          email: "wildan@example.com",
+          whatsappNumber: null,
+        });
+      }
+      throw new Error(`unexpected fetch in this test: ${url}`);
+    }) as unknown as typeof fetch;
+
     render(<App />);
 
-    // `repairSplitSession` returns before ever awaiting when there is no
-    // token, but this still crosses at least one microtask inside the async
-    // function — waiting a tick is proof enough that the effect, if it were
-    // going to call fetch, already would have.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(calls.length).toBe(0);
+    // Guard: the stale render happens first — this IS the Phase-2 bug,
+    // reproduced. If this assertion itself ever fails, the test below it is
+    // not exercising the race it claims to.
+    expect(await screen.findByRole("button", { name: "Ikuti" })).toBeTruthy();
+
+    // Let /users/me resolve now that the profile has already rendered.
+    resolveMe!();
+
+    // The real assertion: the repair landing must force a re-render, so the
+    // now-stale "Ikuti" (this IS your own profile) disappears without a
+    // page reload.
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Ikuti" }) === null).toBe(true);
+    });
   });
 });
 

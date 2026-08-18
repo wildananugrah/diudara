@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import LandingPage from "./pages/LandingPage";
 import NotFoundPage from "./pages/NotFoundPage";
@@ -165,10 +165,27 @@ export function AppRoutes() {
  * the two surfaces where the bad state is visible sit on opposite sides of
  * the `AppShell` boundary. See `repairSplitSession`'s own docstring for why
  * this fixes the CAUSE rather than patching each screen.
+ *
+ * Fix round 1, IMPORTANT 1: fixing `localStorage` was not the whole job.
+ * `getSessionUser()`'s three consumers (`FollowButton`, `ProfilePage`,
+ * `BerandaPage`) are plain, unsubscribed, render-time reads — they only ever
+ * see the corrected session on a render that happens to occur AFTER the
+ * repair resolves, and nothing forced one: `notify()` only wakes
+ * `useSyncExternalStore` subscribers, and the only ones in this app snapshot
+ * `isUserSignedIn()`/`getUserToken()`, values the repair does not change
+ * (the token was already present in the split state). So whether the stale
+ * "Ikuti" on your own profile disappeared was a pure race against
+ * `ProfilePage`'s own fetch — one React's child-before-parent effect
+ * ordering loses by default. `setRepaired` bumps state HERE, at the same one
+ * call site, once the repair's promise settles, so the whole tree gets
+ * exactly one extra render pass with the corrected session already in
+ * storage — still fixed at the cause, not by subscribing three separate
+ * screens to session changes.
  */
 export default function App() {
+  const [, setRepaired] = useState(0);
   useEffect(() => {
-    void repairSplitSession();
+    void repairSplitSession().then(() => setRepaired((n) => n + 1));
   }, []);
 
   return (
