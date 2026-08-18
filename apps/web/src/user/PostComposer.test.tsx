@@ -1049,6 +1049,34 @@ describe("PostComposer — local previews are freed", () => {
     expect(seen.revoked).toEqual(seen.created);
   });
 
+  /**
+   * Self-review, and a real bug this caught: the unmount cleanup used to
+   * capture `objectUrls.current` at MOUNT time, while `releasePreview`
+   * REPLACES that array (`.filter(...)`) rather than mutating it. So every
+   * preview created after the first removal lived in an array the cleanup had
+   * never seen, and leaked. The sequence below — attach, remove, attach again,
+   * leave — is the shortest one that reaches it.
+   */
+  it("frees a preview created AFTER an earlier one was removed", async () => {
+    const seen = await watchingObjectUrls(async () => {
+      mockSuccessfulUploads();
+      const { unmount } = render(
+        <PostComposer submitLabel="Kirim" onSubmit={async () => {}} />
+      );
+
+      choose("satu.jpg");
+      await uploadsSettled();
+      fireEvent.click(screen.getByRole("button", { name: "Hapus foto 1" }));
+      choose("dua.jpg");
+      await uploadsSettled();
+      unmount();
+    });
+
+    expect(seen.created.length).toBe(2);
+    // Both, and the second one is what regressed.
+    expect([...new Set(seen.revoked)].sort()).toEqual([...seen.created].sort());
+  });
+
   it("frees what is left when the composer goes away — Batal, or leaving the page", async () => {
     const seen = await watchingObjectUrls(async () => {
       mockSuccessfulUploads();

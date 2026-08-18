@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type Ref } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+  type Ref,
+} from "react";
 import { MAX_POST_BODY_LENGTH } from "@diudara/shared";
 import { describeRequestFailure } from "./errorCopy";
 import MediaStrip, { type MediaStripItem } from "./MediaStrip";
@@ -165,9 +173,14 @@ export default function PostComposer({
   const objectUrls = useRef<string[]>([]);
 
   useEffect(() => {
-    const urls = objectUrls.current;
     return () => {
-      for (const url of urls) URL.revokeObjectURL(url);
+      // Read at CLEANUP time, not at mount: `releasePreview` replaces this
+      // array rather than mutating it, so a copy taken on mount would miss
+      // every preview created after the first removal — measured, and pinned
+      // by "frees a preview created AFTER an earlier one was removed". The ref
+      // OBJECT is stable for the life of the component, which is what makes
+      // reading it here safe.
+      for (const url of objectUrls.current) URL.revokeObjectURL(url);
     };
   }, []);
 
@@ -249,9 +262,9 @@ export default function PostComposer({
     }));
     setImages((current) => [...current, ...added]);
     for (const image of added) {
-      // `image.file` is the file this row was built from — non-null by
-      // construction, unlike a seeded row's.
-      void runUpload(image.key, image.file as File);
+      // Non-null by construction here, unlike a seeded row's `file` — every
+      // row in `added` was just built from one.
+      if (image.file !== null) void runUpload(image.key, image.file);
     }
   }
 
