@@ -573,10 +573,31 @@ at 390px), and both pages now sharing one hook.
 
 ## Parked findings — at close of Phase 3
 
-- **Reserved handles — being done now**, as the next piece of work after this ledger entry. Exactly
-  five registerable collisions: `posts`, `feed`, `signup`, `login`, `explore`. `me`, `by-handle` and
-  `password-reset` are already impossible under `^[a-z0-9_]{3,30}$`. 0 rows in `app_user` and nothing
-  deployed, so there is nothing to grandfather.
+- **Reserved handles — DONE.** `RESERVED_HANDLES` in `domain/handle.ts`, enforced in `RegisterUser`
+  before any repository call, as a **409** — the same status a taken handle raises, because
+  `SignupPage` already renders that as "Handle ini sudah digunakan. Coba handle lain." in Bahasa, so
+  the person gets a true and actionable sentence with no web change at all. The five were re-derived
+  from the running app's own routing table rather than trusted from this ledger, and confirmed:
+  `explore`, `feed`, `login`, `posts`, `signup`.
+
+  Two things worth carrying forward:
+
+  - **The web needed nothing.** Profile URLs are `/@handle` (`App.tsx` routes `/:handleParam` and
+    `ProfilePage` 404s a param without the `@`), so a handle can never shadow `/beranda` or `/masuk`.
+    Checked rather than assumed — it was the obvious place for a second, drifting denylist to be
+    needed, and it is not.
+  - **The change silently disarmed Task 2's C1 pin, and the full suite is what caught it.** That test
+    registers a user *named* `posts` to prove `userRoutes` is mounted before `postRoutes`; with the
+    handle reserved its setup 404'd. Deleting or weakening it would have unpinned the only test that
+    fails when the mount order is swapped. It now plants the handle straight into the column, past
+    the registration door, because reserving a handle shuts one door and the router is a separate
+    layer — a denylist can fall behind a newly added literal route, and rows can arrive by import or
+    support fix. Verified after the rewrite: swapping the two `app.route("/users", ...)` lines still
+    fails exactly that one test.
+
+  The guard in `users.test.ts` re-derives the collision set from `app.routes` and fails if a new
+  literal `/users/*` route escapes the list — subset, not equality, so reserving MORE later (a
+  product decision like `admin`) stays free.
 - **`ProfilePage.test.tsx` was never updated for I2.** The scroll/focus behaviour is covered only
   through Beranda. Both pages render the same shared components so coverage is not zero, but the
   profile path itself is unasserted. Cheapest real gap left in this phase.

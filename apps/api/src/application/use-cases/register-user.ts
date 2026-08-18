@@ -1,5 +1,5 @@
 import { normalizeEmail } from "../../domain/creator";
-import { isValidHandle, normalizeHandle } from "../../domain/handle";
+import { isReservedHandle, isValidHandle, normalizeHandle } from "../../domain/handle";
 import { UniqueRule, UniqueViolationError, ValidationError } from "../errors";
 import type { ClockPort } from "../ports/clock.port";
 import type { EmailProviderPort } from "../ports/email-provider.port";
@@ -122,6 +122,20 @@ export class RegisterUser {
         "handle must be 3-30 lowercase letters, digits or underscores"
       );
     }
+    // Reserved handles shadow a literal `/users/*` route — see
+    // `RESERVED_HANDLES`. Rejected BEFORE any repository call, since this
+    // needs no database and there is nothing to disclose: which handles are
+    // reserved is a property of the routing table, not of who has signed up.
+    //
+    // A 409, deliberately, and the same one a taken handle raises. From the
+    // person's side the fact is identical — this handle is not available,
+    // choose another — and `SignupPage` already says exactly that in Bahasa
+    // for a 409. The `message` differs so a log or a test can tell the two
+    // apart; nothing user-facing reads it (see `errorCopy.ts`).
+    if (isReservedHandle(handle)) {
+      throw new UniqueViolationError(UniqueRule.userHandle, "handle is reserved");
+    }
+
     const email = normalizeEmail(input.email);
 
     // MUST run before the email check below — see the class docstring for

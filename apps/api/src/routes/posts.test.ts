@@ -2,6 +2,9 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { resetDatabase } from "../db/test-helpers";
+import { db } from "../db/client";
+import { appUsers } from "../db/schema";
+import { eq } from "drizzle-orm";
 
 beforeEach(resetDatabase);
 
@@ -38,6 +41,28 @@ async function tokenForValidUser(a = app(), overrides: Partial<typeof VALID> = {
   });
   const body = await res.json();
   return body.token as string;
+}
+
+/**
+ * A user holding a handle that `RegisterUser` now REFUSES.
+ *
+ * Signs up under a legal handle and rewrites the column afterwards, so only
+ * the registration-time rule is bypassed — the row, the password hash and the
+ * token are all the real thing, and the token is keyed on the user's id, so
+ * renaming does not invalidate it.
+ *
+ * This exists because the routing test below must keep testing ROUTING. See
+ * its docstring for why reserving the handle does not retire it.
+ */
+async function tokenForUserHoldingReservedHandle(
+  a: ReturnType<typeof app>,
+  handle: string,
+  email: string
+) {
+  const placeholder = `held_${handle}`;
+  const token = await tokenForValidUser(a, { handle: placeholder, email });
+  await db.update(appUsers).set({ handle }).where(eq(appUsers.handle, placeholder));
+  return token;
 }
 
 async function createPost(a: ReturnType<typeof app>, token: string, body: string) {
@@ -427,9 +452,8 @@ describe("DELETE /users/posts/:id", () => {
  * shapes that never collided in either mount order, so it could never go red
  * from a real `app.ts` regression. It also claimed (in both the test and a
  * code comment) that no route in either router shares a literal shape with a
- * route in the other, which is false: nothing reserves a handle
- * (`domain/handle.ts`'s pattern is `/^[a-z0-9_]{3,30}$/`, no denylist), so a
- * user can register the handle "posts" — and a path like
+ * route in the other, which is false: a user could hold the handle "posts" —
+ * and a path like
  * `/users/by-handle/posts` then matches BOTH `userRoutes`' literal
  * `/by-handle/:handle` (handle="posts") AND `postRoutes`' literal
  * `/:handle/posts` (handle="by-handle"); `/users/posts/follow` matches BOTH
@@ -442,11 +466,23 @@ describe("DELETE /users/posts/:id", () => {
  * who can never view their own `/by-handle/:handle` profile and can never
  * unfollow through `DELETE /:handle/follow`. This test proves that against
  * the real, exported app rather than assuming it.
+ *
+ * **`RESERVED_HANDLES` does not retire this test, and the handle is now
+ * planted rather than registered.** Reserving the five colliding handles shuts
+ * the registration door; it does not make the router correct. The two are
+ * independent layers and this one is the one that decides what a request
+ * RESOLVES to: the denylist can fall behind a newly added literal route (the
+ * guard in `users.test.ts` catches that, but only after someone runs it), and
+ * a row can reach `app_user` by a path that never passes `RegisterUser` at all
+ * — an import, a support fix, a future admin tool. If the mount order were
+ * swapped, every one of those users would be silently unreachable. So the
+ * handle is written straight to the column here, and the routing property
+ * stays pinned exactly as it was.
  */
 describe("two routers on one prefix: userRoutes must be mounted before postRoutes", () => {
   it("a handle equal to postRoutes' own literal segment ('posts') does not shadow userRoutes' by-handle lookup or follow/unfollow", async () => {
     const a = app();
-    await tokenForValidUser(a, { handle: "posts", email: "posts@example.com" });
+    await tokenForUserHoldingReservedHandle(a, "posts", "posts@example.com");
     const otherToken = await tokenForValidUser(a, { handle: "lain", email: "lain@example.com" });
 
     // Must resolve userRoutes' GET /by-handle/:handle with handle="posts" —

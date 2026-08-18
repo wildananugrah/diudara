@@ -11,6 +11,7 @@ import { BunPasswordHasher } from "../infrastructure/auth/bun-password.hasher";
 import { RegisterUser } from "../application/use-cases/register-user";
 import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import { clientIp } from "./users";
+import { isReservedHandle, isValidHandle } from "../domain/handle";
 
 beforeEach(resetDatabase);
 
@@ -125,6 +126,78 @@ describe("POST /users/signup", () => {
     await signup(VALID);
     const res = await signup({ ...VALID, handle: "wildan", email: "someoneelse@example.com" });
     expect(res.status).toBe(409);
+  });
+
+  /**
+   * **Reserved handles.** `/users` mounts literal segments — `/users/feed`,
+   * `/users/signup` — beside the parameterised `/users/:handle/follow` and
+   * `/users/:handle/posts`. Registering one of those literals as a handle gives
+   * that account a permanently unreachable profile and makes it followable but
+   * never unfollowable. Task 2's review fixed the mount-order half of this
+   * (C1) and parked the rest.
+   *
+   * 409 rather than 400: `SignupPage.describe()` already turns a 409 into
+   * "Handle ini sudah digunakan. Coba handle lain." — true from where the
+   * person is standing, in Bahasa, and actionable, with no web change. A 400
+   * from a use case carries no `fieldErrors`, so it would show a vaguer
+   * sentence than the one this already produces.
+   */
+  it("rejects each reserved handle with 409, and none of them creates an account", async () => {
+    for (const handle of ["posts", "feed", "signup", "login", "explore"]) {
+      const res = await signup({ ...VALID, handle, email: `${handle}@example.com` });
+      expect({ handle, status: res.status }).toEqual({ handle, status: 409 });
+
+      // The email must be untouched too — a reserved handle rejected AFTER the
+      // insert would leave a row behind and burn the address. Proven by the
+      // address still being free for a real signup, not by reading the table.
+      const rescue = await signup({
+        ...VALID,
+        handle: `real_${handle}`,
+        email: `${handle}@example.com`,
+      });
+      expect(rescue.status).toBe(201);
+    }
+  });
+
+  it("normalises before deciding: @Posts and  FEED  are reserved too", async () => {
+    const withAt = await signup({ ...VALID, handle: "@Posts", email: "a@example.com" });
+    expect(withAt.status).toBe(409);
+
+    const padded = await signup({ ...VALID, handle: "  FEED  ", email: "b@example.com" });
+    expect(padded.status).toBe(409);
+  });
+
+  it("a handle that merely CONTAINS a reserved word still registers", async () => {
+    const res = await signup({ ...VALID, handle: "postscript", email: "c@example.com" });
+    expect(res.status).toBe(201);
+  });
+
+  /**
+   * **The guard that keeps `RESERVED_HANDLES` honest.** It re-derives the
+   * collision set from the app's OWN routing table rather than from a second
+   * hand-written list, so `app.route("/users", ...)` gaining `/users/trending`
+   * tomorrow fails here instead of stranding whoever registered `trending`.
+   *
+   * Subset, not equality: reserving MORE than the routes require is safe
+   * (a future product decision might reserve `admin`), reserving less is the
+   * bug. `isValidHandle` is the filter because a segment nobody can register
+   * — `me`, `by-handle`, `password-reset` — needs no protecting.
+   */
+  it("every literal /users segment a handle could shadow is in RESERVED_HANDLES", () => {
+    const shadowable = new Set<string>();
+    for (const route of app().routes) {
+      if (!route.path.startsWith("/users/")) continue;
+      const segment = route.path.slice("/users/".length).split("/")[0];
+      if (segment === undefined || segment.startsWith(":")) continue;
+      if (isValidHandle(segment)) shadowable.add(segment);
+    }
+
+    // A POSITIVE control: if this ever reads zero segments the assertion below
+    // passes vacuously and the guard silently stops guarding.
+    expect(shadowable.size).toBeGreaterThanOrEqual(5);
+
+    const unprotected = [...shadowable].filter((segment) => !isReservedHandle(segment)).sort();
+    expect(unprotected).toEqual([]);
   });
 
   it("REGRESSION (critical): a taken handle 409s even when the request's email is ALSO already registered", async () => {
