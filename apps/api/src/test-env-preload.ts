@@ -112,6 +112,28 @@ for (const key of [
   "MEDIAMTX_WHIP_BASE_URL",
   "MEDIAMTX_WEBHOOK_SECRET",
   "STREAM_TOKEN_SECRET",
+  // THE SAME HOLE, for the provider credentials that select a REAL OUTBOUND
+  // ADAPTER. The five above were deleted when streaming put real values in
+  // `apps/api/.env`; the four below went on being read, and a developer whose
+  // `.env` drives a local Telegram bot got a suite where `selectMessagingProviders`
+  // returns TelegramBotAdapter + FonnteWhatsAppAdapter — the branch whose own
+  // startup line says "real invites will be issued and real messages sent"
+  // (bootstrap.ts). `bootstrap.ts` states the invariant plainly ("the whole suite
+  // depends on the fake adapter") and nothing enforced it.
+  //
+  // Measured on such a box: 13 failures across `worker-bootstrap.test.ts`,
+  // `routes/communities.test.ts` and the channel-access lifecycle, every one of
+  // them a test asserting the fake was selected. The failures are the harmless
+  // half — the same configuration lets a bare `bootstrap()` in any test file hold
+  // a live bot token and a live WhatsApp token.
+  //
+  // `XENDIT_CALLBACK_TOKEN` is deliberately NOT in this list: it authenticates
+  // INBOUND webhooks and selects no adapter, so deleting it would newly exercise
+  // the payments-disabled branch rather than close a hazard.
+  "TELEGRAM_BOT_TOKEN",
+  "FONNTE_API_TOKEN",
+  "XENDIT_SECRET_KEY",
+  "XENDIT_SPLIT_RULE_ID",
 ]) {
   delete process.env[key];
 }

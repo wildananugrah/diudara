@@ -663,7 +663,16 @@ describe("GET /users/:handle/followers and GET /users/:handle/following", () => 
     expect(res.status).toBe(200);
     const rows = await res.json();
     expect(rows).toHaveLength(50);
-  });
+    // EXPLICIT TIMEOUT, because this test signs up 61 real users and every
+    // signup pays for an argon2id hash — deliberately expensive, and the one
+    // cost here that scales with the box rather than with the code. Measured at
+    // ~224ms per hash on a slower machine, which puts the 61 of them alone over
+    // Bun's 5000ms default and made this the only red in the whole suite there.
+    // The assertion above is unchanged; only the wall-clock allowance moved, and
+    // 30s is still far under anything a real regression in this endpoint would
+    // need. Seeding the users directly would be faster but would stop exercising
+    // the real HTTP signup path these tokens come from.
+  }, 30_000);
 
   it("rejects an out-of-range ?limit= with 400", async () => {
     const a = app();
