@@ -99,9 +99,12 @@ export default defineConfig({
       // against — but a bare string prefix would still be one character
       // away from accidentally matching a future `/users-something` SPA
       // route, and the regex costs nothing to make it precise now. No
-      // `bypass`: every one of these paths is reached only by `fetch()` from
-      // the pages in `apps/web/src/user/`, never by a browser navigation —
-      // the same reasoning the dashboard's own paths above rely on.
+      // `bypass`, and note that "these are only ever `fetch()`ed" stopped being
+      // true in Phase 4: `GET /users/media/:id/thumb` arrives as an `<img
+      // src>`, which is a browser navigation-ish subresource load, not a
+      // `fetch`. Harmless — this entry declares no `bypass` for that rule to
+      // interact with — but the reasoning below it is what a future `bypass`
+      // would be written against, so it says what is actually true.
       "^/users/": "http://localhost:3000",
     },
   },

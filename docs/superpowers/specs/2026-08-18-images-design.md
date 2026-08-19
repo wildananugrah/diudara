@@ -252,8 +252,28 @@ privacy behaviour and should be tested as one, not left as a side effect of the 
 - The file's **actual header** decides its type, never the client's `Content-Type`.
 - Accepted: JPEG, PNG, WebP. Rejected: everything else, HEIC named specifically in the copy.
 - Maximum 10 MB per file, rejected before it is read into memory.
+  - **How that is enforced, precisely** (added by the final whole-branch review, which found
+    the route buffering the whole body and only then measuring it): Hono's `bodyLimit` sits on
+    `POST /users/media` ahead of `c.req.formData()` and refuses on the declared
+    `Content-Length`, so a grossly oversized body is never buffered. Its ceiling is 10 MB plus a
+    small multipart-envelope allowance, so a file only just over the limit is still buffered and
+    refused by the use case — which is what produces the Bahasa sentence naming the limit rather
+    than a bare 413. In production the proxy refuses first; see **`client_max_body_size`** below.
+- **Maximum 40 megapixels per file**, refused at the header read, before a single pixel is
+  decoded. The byte cap does not bound this at all: a 446 KB PNG can hold 144 megapixels, and
+  measured before this bound existed, one took the API to 1.4 GB of resident memory — an
+  OOM kill available to any signed-up account for the cost of a small upload.
+- **The reverse proxy must allow a body larger than 10 MB.** nginx's default
+  `client_max_body_size` is **1 MB** and an ordinary phone photo is 2–5 MB, so a box left on the
+  default refuses nearly every real upload with a 413 the API never sees. The production nginx
+  config is not in this repository; the required setting is documented in CONTRIBUTING.md's
+  "Deployment" section and is a step on the phase's gate checklist.
 - Full image: max 1600px on the long edge, WebP. Thumbnail: 600px, WebP.
 - An image smaller than the target is not upscaled.
+- **Every refusal on this route carries a machine-readable `code`** beside its human `error`
+  (`UPLOAD_ERROR_CODE` in `packages/shared`), and the web client chooses its sentence from that
+  code rather than from the bare status. Inferring the reason from "it was a 400" was correct
+  only while there were three of them; the pixel bound made it wrong.
 
 ## 11. Testing
 
@@ -286,5 +306,15 @@ particular ways:
 - No cropping, rotation or filters.
 - Images are editable after posting (§5.2), but not reorderable in this phase and not restorable
   once removed (§8).
+- **Deleting a post does not retract its photos.** §8 says deletion leaves the media rows and
+  objects untouched, and the delivery routes read only the media row — so anyone who already has
+  a media id can still fetch the image after the post that showed it is gone. Consistent with the
+  lifecycle §8 describes, and worth stating plainly here rather than leaving a reader to infer it.
+- The orphan sweep removes a row's bytes before its row, and re-reads the row immediately before
+  doing so. A post that claims a row in the instant between that re-read and the object removal
+  keeps its row (the delete is conditional) but loses its bytes, and the sweep says so in the
+  log. Closing that last instant needs the objects removed after the row, which trades a
+  vanishingly rare loud failure for a permanent byte leak on any storage error — deliberately not
+  taken in this phase.
 - Gating is Phase 6. Everything here is public; the design is what makes gating a change to two
   handlers rather than a rebuild.

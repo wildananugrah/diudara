@@ -925,6 +925,50 @@ than one creator reports "my network blocks UDP" right after a deploy, treat thi
 a missed nginx location, a missed firewall layer, a missed public IP — as the first suspect,
 not their network.
 
+### Pre-deploy checklist: photo uploads (`client_max_body_size`)
+
+**The production nginx configuration does not live in this repository.** The only nginx
+artifact here is `infra/nginx/live-hls.conf.template`, and it is a *fragment* — four
+`location` blocks for `/live/`, `/whip/` and the internal auth subrequest, meant to be
+pasted into the real server block on the VPS. The server block itself, with the SPA root and
+the `/users/` and `/c/` proxies, exists only on that box and is edited by hand. So the
+setting below cannot be shipped by `git pull`; somebody has to type it on the server.
+
+**One line, on the box, in the server block that proxies `/users/`:**
+
+```nginx
+client_max_body_size 12m;
+```
+
+**Skip it and photo uploads are broken for everybody, in a way nothing in this repo can
+catch.** nginx's default `client_max_body_size` is **1 MB**. The API accepts 10 MB and an
+ordinary phone photo is 2–5 MB, so nginx refuses the request with its own **413** HTML error
+page and `apps/api` never sees it — no log line here, nothing in `pm2 logs`, and the
+person's screen says the photo was too big without anybody on this side knowing a request
+was made. `12m` rather than `10m` on purpose: the multipart envelope (boundaries, the field
+name, the filename) rides on top of the file's own bytes, and `client_max_body_size`
+measures the whole body, so a ceiling equal to the file limit refuses files that are exactly
+at it.
+
+Put it on the `location /users/` block, or on the `server` block if you would rather one
+number covered everything — either is fine; what matters is that the value applies to
+`POST /users/media`. Then `nginx -t` and reload.
+
+**Verify it from outside, not from the box**, because `vite`'s dev proxy on :5173 goes
+straight to the API and never involves nginx at all — the gate checklist's browser pass
+cannot see this:
+
+```bash
+# 2 MB of zeros through the PUBLIC origin. 413 means the proxy is still on its default.
+head -c 2000000 /dev/zero > /tmp/2mb.bin
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://YOUR-ORIGIN/users/media \
+  -H "Authorization: Bearer <a real user token>" -F "file=@/tmp/2mb.bin"
+# 400 (bytes are not an image) = the body reached the API. 413 = nginx is still refusing.
+```
+
+A `400` here is the SUCCESS case: the body got through and `apps/api` refused it on its
+contents. A `413` is the failure this step exists to prevent.
+
 ### The secrets boundary
 
 A credential that reaches a real external service — a Xendit key, a Telegram bot token, an

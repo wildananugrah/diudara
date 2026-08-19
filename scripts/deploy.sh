@@ -112,11 +112,26 @@ echo "==> db migrate"
 echo "==> build web"
 (cd apps/web && bun run build)
 
-echo "==> deploy web build to $WEB_DIST_TARGET"
-sudo mkdir -p "$WEB_DIST_TARGET"
-sudo rm -rf "${WEB_DIST_TARGET:?}"/*
-sudo cp -r apps/web/dist/* "$WEB_DIST_TARGET/"
-sudo chown -R "$(id -un):www-data" "$(dirname "$WEB_DIST_TARGET")"
+# THE API RELOADS BEFORE THE NEW BUNDLE IS PUBLISHED, AND THE ORDER IS THE POINT.
+#
+# Whichever way round these two go, there is a window where one side of the app
+# is the previous release. The two windows are not equally bad:
+#
+#   bundle first (what this script used to do) — the OLD api serves a NEW bundle.
+#     Every response is missing whatever the new bundle expects. For the images
+#     phase that means `PostView.media` absent, which `PostCard` guards, but ALSO
+#     an edit composer seeded with an empty strip whose save then sends
+#     `mediaIds: []` — STRIPPING every photo from the post being edited. That is
+#     not a blank screen for a minute, it is data loss that outlives the deploy.
+#     Rolling back re-creates exactly this pairing, on a database that by then
+#     holds real media rows.
+#
+#   api first (what this does) — the NEW api serves an OLD bundle. Inert: Zod
+#     strips request keys the old client does not send, and the old client never
+#     reads response keys it has not heard of.
+#
+# The build above stays where it is so a build failure still stops the deploy
+# before anything on the box has been touched.
 
 echo "==> (re)start api + worker under pm2"
 pm2 startOrReload ecosystem.config.cjs --update-env
@@ -177,6 +192,12 @@ if [ -z "$api_healthy" ]; then
   echo "section." >&2
   exit 1
 fi
+
+echo "==> deploy web build to $WEB_DIST_TARGET"
+sudo mkdir -p "$WEB_DIST_TARGET"
+sudo rm -rf "${WEB_DIST_TARGET:?}"/*
+sudo cp -r apps/web/dist/* "$WEB_DIST_TARGET/"
+sudo chown -R "$(id -un):www-data" "$(dirname "$WEB_DIST_TARGET")"
 
 echo "==> done"
 pm2 list

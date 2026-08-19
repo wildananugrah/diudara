@@ -687,6 +687,41 @@ describe("media on posts", () => {
     expect(post.media[0].height).toBeGreaterThan(0);
   });
 
+  /**
+   * **The same closed projection, on the three responses nothing was asserting.**
+   * Final whole-branch review, Minor 2: mutation-testing `toMediaView` reddened
+   * exactly three tests — the view's own, `ListFeed`'s, and the create response
+   * — while `GET /users/feed`, `GET /users/:handle/posts` and the `PATCH`
+   * response asserted nothing about the key set at all. Safe today because
+   * every one of them funnels through `toPostView`, and blind to a decoration
+   * added at the route layer, which is precisely the shape a bucket key would
+   * arrive in.
+   */
+  it("keeps the projection closed on the feed, a profile's posts, and a PATCH", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const id = await uploadFixture(a, token);
+    const created = await (await createPost(a, token, "satu foto", [id])).json();
+
+    const patched = await (
+      await a.request(`/users/posts/${created.id}`, {
+        method: "PATCH",
+        headers: { ...authed(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "satu foto, diedit", mediaIds: [id] }),
+      })
+    ).json();
+    const feed = await (await a.request("/users/feed?tab=untuk-anda")).json();
+    const profile = await (await a.request(`/users/${VALID.handle}/posts`)).json();
+
+    const POST_KEYS = ["author", "body", "createdAt", "editedAt", "id", "media"];
+    const MEDIA_KEYS = ["height", "id", "width"];
+    for (const post of [patched, feed.posts[0], profile.posts[0]]) {
+      expect(Object.keys(post).sort()).toEqual(POST_KEYS);
+      expect(post.media).toHaveLength(1);
+      expect(Object.keys(post.media[0]).sort()).toEqual(MEDIA_KEYS);
+    }
+  });
+
   it("refuses media that belongs to someone else — 400, and no post is created", async () => {
     const a = app();
     const token = await tokenForValidUser(a, {});

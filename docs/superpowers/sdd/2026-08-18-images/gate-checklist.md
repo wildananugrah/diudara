@@ -59,6 +59,11 @@ cd apps/web
 bun run vite --config vite.gate.config.ts
 ```
 
+**`vite.gate.config.ts` is UNTRACKED and exists only on the project owner's machine** — it is
+the Phase 3 gate's own config, pointing the proxy at port **3004** rather than the documented
+default of 3000. Carried forward here because that is still where this box's API listens. On any
+other machine, use `bun run dev` and whatever port `apps/api/.env` sets.
+
 Open <http://localhost:5173>, sign in, go to `/beranda`.
 
 ---
@@ -145,7 +150,12 @@ Post with 1, then 3, then 5 images. Look at both **390px** and **1440px**.
 - ✅ **The feed does not jump as images load.** Cards reserve their space from the stored width and
   height — if you see the page shift under your thumb while scrolling, that has regressed.
 
-The CSS was written without a browser. This step is where it is actually judged.
+The CSS was written without a browser, and the final whole-branch review then MEASURED it in one:
+every image was rendering at the stored full-image height (a five-image post occupied 3,204px of a
+390px screen instead of 324), and the obvious one-line fix made a single image reserve zero height
+instead. Both are fixed and re-measured. **What to look for now, precisely:** a single portrait
+photo should be about 4:3 to 3:4 of the card's width — not a square, and not a full-screen column.
+Two or more should be square tiles. And nothing should move when the bytes land.
 
 ## 7. Editing
 
@@ -167,17 +177,47 @@ Sign out and open a profile with photos.
 
 ## 9. The deploy window — **the finding most likely to bite you**
 
-`scripts/deploy.sh` copies the web bundle into nginx **before** it reloads the API. `media` is new on
-both sides, so for up to a minute a new bundle can talk to an old API that does not send the field.
+`scripts/deploy.sh` now **reloads the API before it publishes the web bundle** — the final
+whole-branch review's fix. The window is still real, but it now pairs a NEW api with an OLD bundle,
+which is inert: Zod strips request keys the old client does not send, and the old client never reads
+`media`. The dangerous pairing was the other way round, and it was worse than a white screen: a NEW bundle against an OLD api seeds the edit composer with an empty strip, and
+saving then sends `mediaIds: []`, **stripping every photo from the post being edited**. That is what
+the reorder removes, and it is the shape a ROLLBACK would otherwise reproduce.
 
-A guard now makes that render a post without images rather than a blank page. **After you deploy,
-load `/beranda` immediately** — during the window, not after it.
+`PostCard`'s `?? []` guard stays, and so does this check. **After you deploy, load `/beranda`
+immediately** — during the window, not after it.
 
 - ✅ The feed renders, even if some posts briefly show no images.
 - ❌ **A white screen.** The guard has regressed, and everyone loading the site mid-deploy sees it.
 
-The deeper fix — reloading the API *before* swapping the bundle — is recorded for the whole-branch
-review and not done here.
+## 9a. The pixel bomb, and the proxy — **added by the final whole-branch review**
+
+Two refusals that did not exist when this checklist was written. Both are one upload each.
+
+**A tiny file with an enormous picture inside it.** Make one and try to post it:
+
+```bash
+cd apps/api
+bun -e 'import sharp from "sharp"; \
+  const b = await sharp({create:{width:9000,height:5000,channels:3,background:{r:0,g:0,b:0}}}) \
+    .png().toBuffer(); await Bun.write("/tmp/bomb.png", b); console.log(b.length, "bytes");'
+```
+
+- ✅ It is about **5 KB**, far under the 10 MB cap, and the composer still refuses it with
+  **"Resolusi foto terlalu besar (maksimal 40 megapiksel)…"** — not "format tidak didukung", and not
+  a spinner that never finishes.
+- ❌ If it uploads successfully, the pixel bound has regressed and the API can be OOM-killed on
+  demand by anybody with an account.
+
+**A real photo through the real proxy** — this one only means anything on the VPS, not on
+localhost, because `vite`'s dev proxy never involves nginx. See CONTRIBUTING.md's
+"Pre-deploy checklist: photo uploads (`client_max_body_size`)". Post a 2–5 MB phone photo through
+the public origin.
+
+- ✅ It uploads.
+- ❌ **"Foto terlalu besar. Pilih foto berukuran di bawah 10 MB."** on a 3 MB photo means nginx is
+  still on its 1 MB default and the request never reached the API. Add `client_max_body_size 12m;`
+  and reload nginx.
 
 ## 10. Nothing else broke
 
@@ -189,18 +229,25 @@ review and not done here.
 
 ## Cleanup
 
+**"Media rows go with the account" was FALSE** — final whole-branch review, Minor 8. Migration
+`0023` declares both of `post_media`'s foreign keys `ON DELETE no action`, as does `post.author_id`,
+so a bare `DELETE FROM app_user` errors on a foreign-key violation and deletes nothing. Delete the
+children first, in this order:
+
 ```sql
-DELETE FROM app_user WHERE handle = 'uji_coba';
+DELETE FROM post_media WHERE owner_id = (SELECT id FROM app_user WHERE handle = 'uji_coba');
+DELETE FROM post       WHERE author_id = (SELECT id FROM app_user WHERE handle = 'uji_coba');
+DELETE FROM app_user   WHERE handle = 'uji_coba';
 ```
 
-Media rows go with the account. **Objects in the bucket do not** — the sweep only collects *unclaimed*
-media, and anything attached to a deleted post stays. Remove test objects from the Biznet console by
-hand if you care about the space.
+**Objects in the bucket do not go with any of it** — the sweep only collects *unclaimed* media, and
+anything attached to a post stays. Remove test objects from the Biznet console by hand if you care
+about the space.
 
 ---
 
 ## If something fails
 
-Note the **step number**, what you saw, and the browser width. Steps 1, 2, 3, 4 and 9 are the ones
+Note the **step number**, what you saw, and the browser width. Steps 1, 2, 3, 4, 9 and 9a are the ones
 testing behaviour that has never run outside a test process — a failure there is expected information,
 not a surprise. Steps 5 through 8 are pinned by tests, so a failure there means something regressed.

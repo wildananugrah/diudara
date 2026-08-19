@@ -17,8 +17,9 @@ export type MediaUploadStatus = "uploading" | "ready" | "failed";
  * handle for "remove THIS one".
  *
  * `error` is a finished Bahasa sentence. The composer builds it through
- * `describeRequestFailure`, so a server's raw `{ error }` string can never
- * reach a screen through here (see `src/test/no-raw-server-errors.test.ts`).
+ * `describeUploadFailure` (`PostComposer.tsx`), so a server's raw `{ error }`
+ * string can never reach a screen through here (see
+ * `src/test/no-raw-server-errors.test.ts`).
  */
 export interface MediaStripItem {
   key: string;
