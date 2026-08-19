@@ -1145,7 +1145,8 @@ tbody tr:last-child td {
 }
 
 /* ---------------------------------------------------------------
-   Task 9: the media slot (images design spec §7/§12). Lives inside
+   Task 9: the media slot (images design spec §2 — the media slot itself, and
+   thumbnails named as Phase 4's job, are both §2). Lives inside
    `.user-page`/`.beranda-page`, whose container is capped at 36rem
    (576px) at EVERY viewport width — see the `.user-page` rule above —
    so this grid does not need its own 390px/1440px breakpoints: the
@@ -1176,16 +1177,37 @@ tbody tr:last-child td {
   overflow: hidden;
 }
 
+/* `height: auto` IS LOAD-BEARING AND MUST NOT BE REMOVED — final whole-branch
+   review, Critical 1, measured in headless Chrome rather than reasoned about.
+   `PostCard.tsx` writes `width`/`height` ATTRIBUTES on every `<img>`; those are
+   presentational hints for the CSS `width` and `height` properties. Overriding
+   only `width` left the height hint standing, so every box rendered at the
+   stored FULL image's pixel height — a five-image post measured 390x3204 on a
+   390px phone instead of 390x324 — and, both axes then being definite, the
+   `aspect-ratio` that used to sit in this rule never applied to anything at
+   all.
+
+   THE SQUARE IS SCOPED TO THE MULTI-IMAGE CASE, not declared here and undone
+   for `[data-count="1"]`. That undoing (`aspect-ratio: auto`) discarded the
+   ratio the UA derives from the same two attributes, so a single image — the
+   most common post shape — reserved ZERO height until its byte arrived
+   (measured: 390x20 before load, 390x520 after), which is precisely the reflow
+   `post_media.width`/`.height` exist to prevent (spec §4). Leaving
+   `aspect-ratio` unset for one image lets the attribute-derived ratio stand.
+
+   Measured after this change, images 1200x1600, container 390px, BEFORE the
+   bytes load and after — identical, i.e. nothing reflows:
+   count=1 390x520, count=2 tiles 193x193, count=3 390x390, count=5 390x324. */
 .post-card-media img {
   display: block;
   width: 100%;
-  aspect-ratio: 1 / 1;
+  height: auto;
   object-fit: cover;
   background: var(--line);
 }
 
-.post-card-media[data-count="1"] img {
-  aspect-ratio: auto;
+.post-card-media:not([data-count="1"]) img {
+  aspect-ratio: 1 / 1;
 }
 
 .post-card-media[data-count="2"],

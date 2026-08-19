@@ -73,8 +73,8 @@ export default function PostCard({ post, isOwn, now, onEdit, onDeleteRequested }
       <p className="post-card-body">{post.body}</p>
 
       {/* The feed loads THUMBNAILS only (`GET /users/media/:id/thumb`) — never
-          the full-size image (spec §5.1: delivery proxies, thumbnails named
-          as Phase 4's job; the media slot itself is §3): every byte is
+          the full-size image (spec §5.1 is why delivery PROXIES; the media
+          slot itself and "thumbnails are Phase 4's job" are both §2): every byte is
           proxied through the API, and a feed of twenty posts pulling
           full-size images would be brutal on Indonesian mobile data.
           `data-count` is a pure styling hook (styles.css) for the 1/3/5-image
