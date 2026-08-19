@@ -8,3 +8,10 @@ dist
 # SDD scratch: briefs, reports, reviews, diffs. The durable record goes to
 # docs/superpowers/sdd/ at the end of a phase, as Phase 3 did.
 .superpowers/
+
+# Gate screenshots and scratch. They land here during a browser gate, and an
+# untracked file on the deploy box trips deploy.sh:34, which refuses to pull
+# over anything git can see. Some also carry console screenshots with real
+# credentials in them.
+docs/tests/
+docs/image.png
