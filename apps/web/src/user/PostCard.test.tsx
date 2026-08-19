@@ -132,12 +132,44 @@ function mediaEntry(id: string, width: number, height: number) {
  * see `no-hanging-dom-assertions.test.ts` and `BerandaPage.test.tsx`'s
  * `isNode`.
  */
-describe("PostCard — the media slot (Task 9, spec §7/§12)", () => {
+describe("PostCard — the media slot (Task 9, spec §3, §4, §5.1, §12)", () => {
   it("renders no media block at all when the post has no images", () => {
     const { container } = renderCard({ post: { ...POST, media: [] } });
 
     expect(container.querySelectorAll("img").length).toBe(0);
     expect(container.querySelectorAll(".post-card-media").length).toBe(0);
+  });
+
+  /**
+   * **Fix round 1, Important.** `deploy.sh` copies the new web bundle into
+   * nginx's serving directory BEFORE it reloads the api process, and
+   * `apiFetch` does no runtime shape validation (`res.json() as T`). For the
+   * several seconds that window is open, this bundle — which reads
+   * `post.media` on every render — can be talking to the STILL-RUNNING old
+   * api, whose response has no `media` field at all (it predates Task 7).
+   * `PostView.media`'s own docstring says the field is required and never
+   * absent, which is true of a healthy api and false of this window, so the
+   * component must survive the response actually being wrong rather than
+   * trust the type. There is no error boundary anywhere in this app: a throw
+   * here during that window is not "a post renders without its photos", it
+   * is a blank `/beranda` and a blank profile page for every visitor.
+   *
+   * The cast is deliberate: this object lies about `PostView` on purpose,
+   * the same way the real skewed response does.
+   */
+  it("renders without throwing when `media` is missing from the response entirely (version-skew deploy window)", () => {
+    const skewed = {
+      id: POST.id,
+      body: POST.body,
+      createdAt: POST.createdAt,
+      editedAt: POST.editedAt,
+      author: POST.author,
+    } as unknown as PostView;
+
+    const { container } = renderCard({ post: skewed });
+
+    expect(container.querySelectorAll(".post-card-media").length).toBe(0);
+    expect(container.querySelectorAll("img").length).toBe(0);
   });
 
   it("renders one image from the THUMBNAIL endpoint, never the full-size one", () => {
