@@ -3,9 +3,12 @@ import {
   createScheduledPassLoops,
   DEFAULT_RENEWAL_INTERVAL_MS,
   formatChurnPassLine,
+  formatOrphanSweepLine,
   formatPassFailure,
   formatRenewalPassLine,
+  ORPHAN_SWEEP_WINDOW_MS,
   resolveRenewalIntervalMs,
+  SweepOrphanMedia,
 } from "./scheduled-passes";
 
 /**
@@ -31,8 +34,14 @@ const NOTHING_HAPPENED_CHURN = {
   skippedRevocation: 0,
 };
 
+const NOTHING_HAPPENED_SWEEP = {
+  considered: 0,
+  deleted: 0,
+  failed: 0,
+};
+
 /** Counts, an optional stage-free label, `=` and spaces. Nothing else may appear. */
-const COUNTS_ONLY = /^\[(renewals|churn)\] (?:[a-z_]+=\d+ ?)+$/;
+const COUNTS_ONLY = /^\[(renewals|churn|media)\] (?:[a-z_]+=\d+ ?)+$/;
 
 describe("formatRenewalPassLine", () => {
   it("says nothing when the pass had nothing to do", () => {
@@ -102,6 +111,28 @@ describe("formatChurnPassLine", () => {
   });
 });
 
+describe("formatOrphanSweepLine", () => {
+  it("says nothing when the pass had nothing to do", () => {
+    expect(formatOrphanSweepLine(NOTHING_HAPPENED_SWEEP)).toBeNull();
+  });
+
+  it("reports every count when the pass did something", () => {
+    const line = formatOrphanSweepLine({ considered: 5, deleted: 3, failed: 2 });
+
+    expect(line).toBe("[media] considered=5 deleted=3 failed=2");
+  });
+
+  it("speaks up when every row in the pass failed to sweep", () => {
+    // `considered>0, deleted=0` is the shape of a pass finding orphans and failing
+    // to collect them — the exact silent-failure mode this task exists to prevent.
+    expect(formatOrphanSweepLine({ considered: 2, deleted: 0, failed: 2 })).toContain("failed=2");
+  });
+
+  it("emits counts and nothing else", () => {
+    expect(formatOrphanSweepLine({ considered: 1, deleted: 1, failed: 0 })).toMatch(COUNTS_ONLY);
+  });
+});
+
 describe("formatPassFailure", () => {
   it("drops the bound parameters of a failed query", () => {
     // Exactly what Phase 4 found in the worker's log: drizzle formats a query
@@ -141,6 +172,166 @@ describe("formatPassFailure", () => {
 
     expect(line).not.toContain("6281234567890");
     expect(line).toContain("non-Error");
+  });
+
+  it("is wired for the media sweep's own tag", () => {
+    const line = formatPassFailure("media", new Error("bucket unreachable"));
+
+    expect(line.startsWith("[media] pass failed: ")).toBe(true);
+  });
+});
+
+describe("ORPHAN_SWEEP_WINDOW_MS", () => {
+  it("is 24 hours — spec §8's generous window, a person may leave a composer open for an hour", () => {
+    expect(ORPHAN_SWEEP_WINDOW_MS).toBe(24 * 60 * 60_000);
+  });
+});
+
+/**
+ * In-memory `OrphanMediaRepository`, for `SweepOrphanMedia`'s own tests — no database,
+ * so these run at unit-test speed. `listUnclaimedBefore` re-implements the same two
+ * conditions the partial index enforces for real (`post_id is null`, `created_at <
+ * cutoff`), which is what lets "claimed is never touched" and "the window boundary"
+ * be pinned here without touching `DrizzleMediaRepository` at all — that repository's
+ * own test (`drizzle-media.repository.test.ts`) already pins the SQL side.
+ */
+class FakeOrphanMediaRepository {
+  private readonly rows = new Map<string, { postId: string | null; createdAt: Date }>();
+  readonly deletedIds: string[] = [];
+
+  seed(id: string, postId: string | null, createdAt: Date): void {
+    this.rows.set(id, { postId, createdAt });
+  }
+
+  async listUnclaimedBefore(cutoff: Date, limit: number): Promise<{ id: string }[]> {
+    return [...this.rows.entries()]
+      .filter(([, row]) => row.postId === null && row.createdAt.getTime() < cutoff.getTime())
+      .sort((a, b) => a[1].createdAt.getTime() - b[1].createdAt.getTime())
+      .slice(0, limit)
+      .map(([id]) => ({ id }));
+  }
+
+  async deleteById(id: string): Promise<void> {
+    this.rows.delete(id);
+    this.deletedIds.push(id);
+  }
+}
+
+/** In-memory `OrphanMediaStorage` that can be told to fail on specific ids. */
+class FakeOrphanMediaStorage {
+  readonly removedIds: string[] = [];
+  readonly failFor = new Set<string>();
+
+  async remove(id: string): Promise<void> {
+    if (this.failFor.has(id)) {
+      // The real adapter throws an AggregateError on a genuine failure (expired
+      // credentials, a 403, a network partition) — see s3-media-storage.adapter.ts.
+      throw new AggregateError([new Error("403 Forbidden")], `remove(${id}) failed`);
+    }
+    this.removedIds.push(id);
+  }
+}
+
+describe("SweepOrphanMedia", () => {
+  const NOW = new Date("2026-08-18T12:00:00.000Z");
+  const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 60 * 60_000);
+
+  it("sweeps an unclaimed row past the window: the OBJECTS are removed before the ROW", async () => {
+    const media = new FakeOrphanMediaRepository();
+    const storage = new FakeOrphanMediaStorage();
+    media.seed("m1", null, hoursAgo(25));
+
+    // Wraps both fakes to record the ORDER calls actually happen in — the pin the
+    // brief asks for: a test that fails if the order flips.
+    const events: string[] = [];
+    const removeSpy = storage.remove.bind(storage);
+    storage.remove = async (id) => {
+      events.push(`remove:${id}`);
+      await removeSpy(id);
+    };
+    const deleteSpy = media.deleteById.bind(media);
+    media.deleteById = async (id) => {
+      events.push(`delete:${id}`);
+      await deleteSpy(id);
+    };
+
+    const sweep = new SweepOrphanMedia(media, storage, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(events).toEqual(["remove:m1", "delete:m1"]);
+    expect(result).toEqual({ considered: 1, deleted: 1, failed: 0 });
+  });
+
+  it("leaves an unclaimed row that is newer than the window untouched", async () => {
+    const media = new FakeOrphanMediaRepository();
+    const storage = new FakeOrphanMediaStorage();
+    media.seed("fresh", null, hoursAgo(1));
+
+    const sweep = new SweepOrphanMedia(media, storage, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(media.deletedIds).toEqual([]);
+    expect(storage.removedIds).toEqual([]);
+    expect(result).toEqual({ considered: 0, deleted: 0, failed: 0 });
+  });
+
+  it("never touches a claimed row, however old", async () => {
+    const media = new FakeOrphanMediaRepository();
+    const storage = new FakeOrphanMediaStorage();
+    media.seed("claimed", "post-1", hoursAgo(24 * 365));
+
+    const sweep = new SweepOrphanMedia(media, storage, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(media.deletedIds).toEqual([]);
+    expect(storage.removedIds).toEqual([]);
+    expect(result).toEqual({ considered: 0, deleted: 0, failed: 0 });
+  });
+
+  it("does not abort the pass when one row's storage removal fails, and that row survives for retry", async () => {
+    const media = new FakeOrphanMediaRepository();
+    const storage = new FakeOrphanMediaStorage();
+    media.seed("a", null, hoursAgo(48));
+    media.seed("b", null, hoursAgo(30));
+    media.seed("c", null, hoursAgo(25));
+    storage.failFor.add("b");
+
+    const errors: string[] = [];
+    const sweep = new SweepOrphanMedia(media, storage, {
+      now: () => NOW,
+      logError: (line) => errors.push(line),
+    });
+    const result = await sweep.execute();
+
+    expect(result).toEqual({ considered: 3, deleted: 2, failed: 1 });
+    expect(media.deletedIds.sort()).toEqual(["a", "c"]);
+    // THE row whose object removal failed was never handed to deleteById — the
+    // ordering pin holds on the failure path, not just the happy path.
+    expect(media.deletedIds).not.toContain("b");
+    // …and the failure is VISIBLE, not just absorbed into a count nobody reads.
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("b");
+  });
+
+  it("does not loop forever when every row in a page fails", async () => {
+    // batchSize matches the number of failing rows exactly, so without a
+    // no-progress guard the pass would re-fetch the identical page forever:
+    // neither row is ever deleted, so `listUnclaimedBefore` keeps returning both.
+    const media = new FakeOrphanMediaRepository();
+    const storage = new FakeOrphanMediaStorage();
+    media.seed("x", null, hoursAgo(48));
+    media.seed("y", null, hoursAgo(47));
+    storage.failFor.add("x");
+    storage.failFor.add("y");
+
+    const sweep = new SweepOrphanMedia(media, storage, {
+      now: () => NOW,
+      batchSize: 2,
+      logError: () => undefined,
+    });
+    const result = await sweep.execute();
+
+    expect(result).toEqual({ considered: 2, deleted: 0, failed: 2 });
   });
 });
 
@@ -195,17 +386,22 @@ describe("createScheduledPassLoops", () => {
   it("runs one pass of each type immediately, then waits out the interval", async () => {
     const processRenewals = fakePass({ ...NOTHING_HAPPENED_RENEWAL, reminded: 1 });
     const processChurn = fakePass({ ...NOTHING_HAPPENED_CHURN, churned: 1 });
+    const processOrphanSweep = fakePass({ ...NOTHING_HAPPENED_SWEEP, deleted: 1 });
     const lines: string[] = [];
-    const { renewalLoop, churnLoop } = createScheduledPassLoops({
+    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
       processRenewals,
       processChurn,
+      processOrphanSweep,
       intervalMs: 60_000,
       log: (line) => lines.push(line),
     });
 
-    const running = Promise.all([renewalLoop.run(), churnLoop.run()]);
+    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
     await waitUntil(
-      () => processRenewals.state.calls > 0 && processChurn.state.calls > 0,
+      () =>
+        processRenewals.state.calls > 0 &&
+        processChurn.state.calls > 0 &&
+        processOrphanSweep.state.calls > 0,
       "the first pass of each type"
     );
     // Long enough that a 5s-ish interval — or no interval at all — would show up
@@ -213,9 +409,11 @@ describe("createScheduledPassLoops", () => {
     await Bun.sleep(25);
     expect(processRenewals.state.calls).toBe(1);
     expect(processChurn.state.calls).toBe(1);
+    expect(processOrphanSweep.state.calls).toBe(1);
 
     renewalLoop.stop();
     churnLoop.stop();
+    orphanSweepLoop.stop();
     const finished = await Promise.race([
       running.then(() => "stopped"),
       Bun.sleep(2_000).then(() => "still sleeping in the interval"),
@@ -225,36 +423,71 @@ describe("createScheduledPassLoops", () => {
     expect(lines).toEqual([
       "[renewals] considered=0 reminded=1 already_reminded=0 skipped=0 past_due=0",
       "[churn] considered=0 churned=1 already_churned=0 revocations_queued=0 skipped_revocation=0",
+      "[media] considered=0 deleted=1 failed=0",
     ]);
   });
 
-  it("keeps running after a pass throws, and keeps the OTHER pass running too", async () => {
+  it("keeps running after a pass throws, and keeps the OTHER passes running too", async () => {
     // The rows are still in the database and the next pass is their retry. An
     // unhandled rejection here would take the whole worker down — including the
     // outbox loop that delivers what payments already bought.
     const processRenewals = fakePass(NOTHING_HAPPENED_RENEWAL);
     processRenewals.state.throwOnCall = 1;
     const processChurn = fakePass(NOTHING_HAPPENED_CHURN);
+    const processOrphanSweep = fakePass(NOTHING_HAPPENED_SWEEP);
     const errors: string[] = [];
-    const { renewalLoop, churnLoop } = createScheduledPassLoops({
+    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
       processRenewals,
       processChurn,
+      processOrphanSweep,
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
     });
 
-    const running = Promise.all([renewalLoop.run(), churnLoop.run()]);
+    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
     await waitUntil(
-      () => processRenewals.state.calls >= 3 && processChurn.state.calls >= 3,
-      "both passes to keep going after the throw"
+      () =>
+        processRenewals.state.calls >= 3 &&
+        processChurn.state.calls >= 3 &&
+        processOrphanSweep.state.calls >= 3,
+      "all three passes to keep going after the throw"
     );
     renewalLoop.stop();
     churnLoop.stop();
+    orphanSweepLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain("[renewals] pass failed: database was briefly unreachable");
+  });
+
+  it("keeps running after the orphan sweep pass itself throws, and keeps the other passes running too", async () => {
+    // A per-ROW storage failure is handled inside `SweepOrphanMedia` and never
+    // reaches here (see its own describe block) — this is the backstop for
+    // something the pass-level query itself cannot survive, e.g. the database
+    // being briefly unreachable, the same case the renewal/churn loops handle.
+    const processOrphanSweep = fakePass(NOTHING_HAPPENED_SWEEP);
+    processOrphanSweep.state.throwOnCall = 1;
+    const errors: string[] = [];
+    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
+      processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
+      processChurn: fakePass(NOTHING_HAPPENED_CHURN),
+      processOrphanSweep,
+      intervalMs: 1,
+      log: () => undefined,
+      logError: (line) => errors.push(line),
+    });
+
+    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
+    await waitUntil(() => processOrphanSweep.state.calls >= 3, "the sweep to keep going after the throw");
+    renewalLoop.stop();
+    churnLoop.stop();
+    orphanSweepLoop.stop();
+    await running;
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("[media] pass failed: database was briefly unreachable");
   });
 
   it("never overlaps two passes of the same type", async () => {
@@ -274,17 +507,19 @@ describe("createScheduledPassLoops", () => {
         return NOTHING_HAPPENED_RENEWAL;
       },
     };
-    const { renewalLoop, churnLoop } = createScheduledPassLoops({
+    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
       processRenewals: slowRenewals,
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
+      processOrphanSweep: fakePass(NOTHING_HAPPENED_SWEEP),
       intervalMs: 1,
       log: () => undefined,
     });
 
-    const running = Promise.all([renewalLoop.run(), churnLoop.run()]);
+    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
     await waitUntil(() => calls >= 3, "three renewal passes");
     renewalLoop.stop();
     churnLoop.stop();
+    orphanSweepLoop.stop();
     await running;
 
     expect(maxInFlight).toBe(1);
