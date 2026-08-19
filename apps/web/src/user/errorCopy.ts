@@ -65,3 +65,86 @@ export function describeRequestFailure(err: unknown): string {
   // trying again.
   return "Permintaan tidak dapat diproses. Coba lagi.";
 }
+
+/**
+ * Named once and used by two branches — the byte cap and the proxy's 413 are
+ * the same problem to the person holding the phone. The limit is written as
+ * "10 MB" rather than interpolated from `MAX_UPLOAD_BYTES`: this file is
+ * asserted against literals, and a sentence assembled from the constant it
+ * describes cannot redden when that constant moves.
+ */
+const TOO_LARGE = "Foto terlalu besar. Pilih foto berukuran di bawah 10 MB.";
+
+/**
+ * **A failed PHOTO UPLOAD, which needs one distinction the general sentence
+ * cannot make.**
+ *
+ * Fix round 1, Important 1. `describeRequestFailure` answers every 4xx with
+ * "Permintaan tidak dapat diproses. Coba lagi." — deliberately vague, and right
+ * for the routes it was written for. It is wrong here, because the upload
+ * failures an Indonesian phone actually produces are all refusals that a retry
+ * cannot fix — the person has to do something different:
+ *
+ * | failure | what the person must do |
+ * |---|---|
+ * | over the size limit | pick a smaller photo — refused LOCALLY first, and by nginx's `client_max_body_size` or the API's `bodyLimit` as a 413 |
+ * | too many PIXELS | a small file holding an enormous picture — downscale it |
+ * | **HEIC** (every iPhone's default) | export or re-save as JPG |
+ *
+ * Telling somebody with an iPhone photo to "coba lagi" sends them round a loop
+ * that cannot terminate, and spec §9 already names HEIC as the first thing this
+ * phase will have to revisit — an undiagnosable failure is the worst possible
+ * state for it to be in when that happens.
+ *
+ * **THE SHAPE IS NOW READ, NOT INFERRED.** This used to reason "a 400 from
+ * `POST /users/media` can only be an unsupported format", which was true while
+ * that route had exactly three 400s and two of them were unreachable. The final
+ * whole-branch review's pixel bound is a fourth, and a proxy's 413 a fifth
+ * failure mode — so the inference would have told somebody whose photo is
+ * merely too high-resolution that iPhone HEIC is unsupported, which is worse
+ * than vague. The API now sends a machine-readable `code`
+ * (`UPLOAD_ERROR_CODE` in `@diudara/shared`) and this function branches on it,
+ * falling back to the general sentence whenever there is no code to read.
+ *
+ * Nothing is read off `err.message` — see
+ * `src/test/no-raw-server-errors.test.ts`, and note that the API's own sentence
+ * here is BAHASA, which makes this the easiest place in the codebase to justify
+ * printing the wire's text. The rule is not "English is banned"; it is that a
+ * screen never prints what the wire sent. A `code` is not the wire's text: it
+ * is never displayed, only matched.
+ *
+ * Every other shape — 401, 429, 5xx, a dropped connection — is delegated
+ * unchanged, because for those "coba lagi" is genuinely the right advice.
+ */
+export function describeUploadFailure(err: unknown): string {
+  if (!(err instanceof UserApiError)) return describeRequestFailure(err);
+
+  // 413 FIRST, and it is matched on the STATUS because the most likely sender
+  // of one is not this API. nginx's default `client_max_body_size` is 1 MB
+  // against an API that accepts 10 and a phone camera that produces 2–5, so on
+  // a box whose proxy has not been configured the request is refused by the
+  // proxy, with its own HTML error page: no `code`, not even JSON. The API's
+  // own `bodyLimit` answers 413 for the same reason, so one branch serves both.
+  if (err.status === 413) return TOO_LARGE;
+
+  switch (err.code) {
+    case "media_too_large":
+      return TOO_LARGE;
+    case "media_too_many_pixels":
+      // NOT the same sentence as the byte cap. The person satisfied that one —
+      // their file is small; it is the picture inside it that is enormous — and
+      // telling them to "pick a smaller file" would send them looking for a
+      // property their file already has.
+      return "Resolusi foto terlalu besar. Perkecil ukuran foto lalu unggah ulang.";
+    case "media_unsupported_format":
+      // Names the formats that DO work rather than only the one that does not:
+      // mirrors the API's own reasoning in `domain/image.ts`, whose message says
+      // "Gunakan JPG, PNG, atau WebP" for the same reason.
+      return "Format ini tidak didukung. Gunakan JPG, PNG, atau WebP — foto iPhone (HEIC) belum didukung.";
+    default:
+      // Includes `media_missing_file`, which no client of this API can provoke,
+      // and — importantly — every UNLABELLED 4xx. Guessing here is what this
+      // rewrite removed: vague is honest, confidently wrong is not.
+      return describeRequestFailure(err);
+  }
+}

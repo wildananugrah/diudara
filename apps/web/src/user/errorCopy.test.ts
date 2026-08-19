@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { describeRequestFailure } from "./errorCopy";
+import { describeRequestFailure, describeUploadFailure } from "./errorCopy";
 import { SESSION_EXPIRED_MESSAGE, UserApiError } from "./apiClient";
 
 /**
@@ -101,6 +101,138 @@ describe("describeRequestFailure", () => {
     const samples = [
       describeRequestFailure(new TypeError("Failed to fetch")),
       ...[400, 401, 404, 429, 500].map((s) => describeRequestFailure(new UserApiError("x", s))),
+    ];
+
+    for (const copy of samples) {
+      expect(`${copy} -> english:${english.test(copy)}`).toBe(`${copy} -> english:false`);
+      expect(copy.endsWith(".")).toBe(true);
+    }
+  });
+});
+
+/**
+ * Fix round 1, Important 1. `describeRequestFailure` collapses EVERY 4xx into
+ * "Permintaan tidak dapat diproses. Coba lagi." — which is unactionable for the
+ * two upload failures an Indonesian phone actually produces: a photo over the
+ * size limit, and **HEIC**, the default format of every iPhone camera. Both are
+ * plain 400s, so both were told to try again, and retrying cannot fix either.
+ *
+ * The size case is refused locally before any request (see `PostComposer`'s
+ * `attachFiles`), so a 400 that reaches HERE is the bytes not being a supported
+ * image. The sentence is chosen by the SHAPE of the failure — status 400 from
+ * the upload route — and is authored here, never lifted off the wire, which is
+ * exactly what `src/test/no-raw-server-errors.test.ts` requires.
+ */
+describe("describeUploadFailure", () => {
+  it("names the format problem, and names HEIC — the case a phone actually hits", () => {
+    expect(
+      describeUploadFailure(
+        new UserApiError(
+          "Format foto tidak didukung. Gunakan JPG, PNG, atau WebP.",
+          400,
+          {},
+          "media_unsupported_format"
+        )
+      )
+    ).toBe("Format ini tidak didukung. Gunakan JPG, PNG, atau WebP — foto iPhone (HEIC) belum didukung.");
+  });
+
+  it("does not lift the server's own sentence, even when the server's sentence is Bahasa too", () => {
+    // The API answers Bahasa here, which makes this the easiest place in the
+    // codebase to justify rendering `err.message`. The rule is not "English is
+    // banned", it is that a screen never prints what the wire sent.
+    const answered = describeUploadFailure(
+      new UserApiError(
+        "Format foto tidak didukung. Gunakan JPG, PNG, atau WebP.",
+        400,
+        {},
+        "media_unsupported_format"
+      )
+    );
+    expect(answered.includes("Format foto tidak didukung")).toBe(false);
+  });
+
+  /**
+   * **The reason is READ off the wire now, not inferred from the status.**
+   * Final whole-branch review: while `POST /users/media` had exactly three 400s
+   * and two of them were unreachable, "any 400 here is a format problem" was
+   * true. The pixel bound is a fourth, and telling somebody whose photo is
+   * simply too high-resolution that iPhone HEIC is unsupported is confidently
+   * wrong rather than merely vague.
+   *
+   * The codes are LITERALS here, as they are on the API side — they are a wire
+   * contract, and a rename that changed what travels must redden something.
+   */
+  it("tells somebody with a 45-megapixel photo what is actually wrong", () => {
+    expect(
+      describeUploadFailure(new UserApiError("x", 400, {}, "media_too_many_pixels"))
+    ).toBe("Resolusi foto terlalu besar. Perkecil ukuran foto lalu unggah ulang.");
+  });
+
+  it("tells somebody with an over-size file to pick a smaller one", () => {
+    expect(describeUploadFailure(new UserApiError("x", 400, {}, "media_too_large"))).toBe(
+      "Foto terlalu besar. Pilih foto berukuran di bawah 10 MB."
+    );
+  });
+
+  /**
+   * **THE 413 NOBODY ENUMERATED.** nginx's default `client_max_body_size` is
+   * 1 MB and an ordinary phone photo is 2–5 MB, so on a box whose proxy has not
+   * been configured (see CONTRIBUTING.md's "Deployment") the request never
+   * reaches the API at all: nginx answers 413 with its own HTML error page,
+   * which carries no `code` and is not even JSON. Before this branch that
+   * became "Permintaan tidak dapat diproses. Coba lagi." — the retry-forever
+   * loop this module exists to kill, reintroduced through a status code.
+   *
+   * The API answers 413 too, from `bodyLimit`, for the same reason — so one
+   * branch covers both.
+   */
+  it("answers a 413 with something actionable, whoever sent it", () => {
+    expect(describeUploadFailure(new UserApiError("permintaan gagal (413)", 413))).toBe(
+      "Foto terlalu besar. Pilih foto berukuran di bawah 10 MB."
+    );
+  });
+
+  it("does not guess when a 400 arrives with no code at all", () => {
+    // An older API in a deploy skew, or a refusal nobody has labelled yet.
+    // Vague is the honest answer; a confidently wrong one is not.
+    expect(describeUploadFailure(new UserApiError("x", 400))).toBe(
+      "Permintaan tidak dapat diproses. Coba lagi."
+    );
+  });
+
+  it("delegates a 500 to describeRequestFailure — an upload CAN be retried after one", () => {
+    expect(describeUploadFailure(new UserApiError("internal server error", 500))).toBe(
+      "Server sedang bermasalah. Coba lagi sebentar lagi."
+    );
+  });
+
+  it("delegates a network failure", () => {
+    expect(describeUploadFailure(new TypeError("Failed to fetch"))).toBe(
+      "Tidak dapat menghubungi server. Coba lagi."
+    );
+  });
+
+  it("delegates a 401 to the session sentence", () => {
+    expect(describeUploadFailure(new UserApiError("invalid or expired token", 401))).toBe(
+      SESSION_EXPIRED_MESSAGE
+    );
+  });
+
+  it("delegates a 429 rather than claiming it is a format problem", () => {
+    expect(describeUploadFailure(new UserApiError("too many requests", 429))).toBe(
+      "Terlalu banyak permintaan. Coba lagi sebentar lagi."
+    );
+  });
+
+  it("answers in Bahasa on every branch", () => {
+    const english = /\b(the|server error|not found|failed|invalid|request|please|try again)\b/i;
+    const samples = [
+      describeUploadFailure(new TypeError("Failed to fetch")),
+      ...[400, 401, 404, 413, 429, 500].map((s) => describeUploadFailure(new UserApiError("x", s))),
+      ...["media_missing_file", "media_too_large", "media_too_many_pixels", "media_unsupported_format"].map(
+        (code) => describeUploadFailure(new UserApiError("x", 400, {}, code))
+      ),
     ];
 
     for (const copy of samples) {

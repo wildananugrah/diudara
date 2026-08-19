@@ -41,6 +41,21 @@ git pull --ff-only origin main
 echo "==> bun install"
 bun install
 
+# sharp (apps/api/src/domain/image.ts) is this project's only native
+# dependency — everything else here is pure TypeScript. `bun install` above
+# can succeed while the prebuilt binary it downloaded still doesn't load on
+# THIS box (wrong libc, missing shared lib, architecture mismatch — see
+# sharp's own install docs). Left unchecked, that failure surfaces the moment
+# a real person uploads their first photo, as an opaque 500 nobody on this
+# box is watching for. Catching it here, synchronously, in the one place an
+# operator running a real redeploy IS watching — same reasoning as the
+# postgres and api health polls below.
+echo "==> verifying sharp (the only native dependency)"
+if ! (cd apps/api && bun -e 'import("sharp").then(s => s.default.versions)') >/dev/null 2>&1; then
+  echo "sharp failed to load — images cannot be processed on this box. Deploy stopped." >&2
+  exit 1
+fi
+
 echo "==> postgres up"
 docker compose -f infra/docker-compose.yml up -d
 echo -n "waiting for postgres to be healthy"
@@ -97,11 +112,26 @@ echo "==> db migrate"
 echo "==> build web"
 (cd apps/web && bun run build)
 
-echo "==> deploy web build to $WEB_DIST_TARGET"
-sudo mkdir -p "$WEB_DIST_TARGET"
-sudo rm -rf "${WEB_DIST_TARGET:?}"/*
-sudo cp -r apps/web/dist/* "$WEB_DIST_TARGET/"
-sudo chown -R "$(id -un):www-data" "$(dirname "$WEB_DIST_TARGET")"
+# THE API RELOADS BEFORE THE NEW BUNDLE IS PUBLISHED, AND THE ORDER IS THE POINT.
+#
+# Whichever way round these two go, there is a window where one side of the app
+# is the previous release. The two windows are not equally bad:
+#
+#   bundle first (what this script used to do) — the OLD api serves a NEW bundle.
+#     Every response is missing whatever the new bundle expects. For the images
+#     phase that means `PostView.media` absent, which `PostCard` guards, but ALSO
+#     an edit composer seeded with an empty strip whose save then sends
+#     `mediaIds: []` — STRIPPING every photo from the post being edited. That is
+#     not a blank screen for a minute, it is data loss that outlives the deploy.
+#     Rolling back re-creates exactly this pairing, on a database that by then
+#     holds real media rows.
+#
+#   api first (what this does) — the NEW api serves an OLD bundle. Inert: Zod
+#     strips request keys the old client does not send, and the old client never
+#     reads response keys it has not heard of.
+#
+# The build above stays where it is so a build failure still stops the deploy
+# before anything on the box has been touched.
 
 echo "==> (re)start api + worker under pm2"
 pm2 startOrReload ecosystem.config.cjs --update-env
@@ -162,6 +192,12 @@ if [ -z "$api_healthy" ]; then
   echo "section." >&2
   exit 1
 fi
+
+echo "==> deploy web build to $WEB_DIST_TARGET"
+sudo mkdir -p "$WEB_DIST_TARGET"
+sudo rm -rf "${WEB_DIST_TARGET:?}"/*
+sudo cp -r apps/web/dist/* "$WEB_DIST_TARGET/"
+sudo chown -R "$(id -un):www-data" "$(dirname "$WEB_DIST_TARGET")"
 
 echo "==> done"
 pm2 list

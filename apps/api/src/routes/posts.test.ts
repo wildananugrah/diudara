@@ -5,6 +5,7 @@ import { resetDatabase } from "../db/test-helpers";
 import { db } from "../db/client";
 import { appUsers } from "../db/schema";
 import { eq } from "drizzle-orm";
+import { DrizzleMediaRepository } from "../infrastructure/repositories/drizzle-media.repository";
 
 beforeEach(resetDatabase);
 
@@ -65,12 +66,64 @@ async function tokenForUserHoldingReservedHandle(
   return token;
 }
 
-async function createPost(a: ReturnType<typeof app>, token: string, body: string) {
+async function createPost(
+  a: ReturnType<typeof app>,
+  token: string,
+  body: string,
+  mediaIds?: string[]
+) {
   return a.request("/users/posts", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authed(token) },
-    body: JSON.stringify({ body }),
+    // `mediaIds` is OMITTED, not sent as undefined, when the caller passes
+    // nothing — an absent key is what a text-only client sends, and PATCH
+    // treats absent and empty differently (see its own tests below).
+    body: JSON.stringify(mediaIds === undefined ? { body } : { body, mediaIds }),
   });
+}
+
+async function patchPost(
+  a: ReturnType<typeof app>,
+  token: string,
+  id: string,
+  payload: { body: string; mediaIds?: string[] }
+) {
+  return a.request(`/users/posts/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authed(token) },
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Uploads `small.png` through the real `POST /users/media` and returns the new
+ * media id. Written locally rather than imported from `media.test.ts` — no
+ * test file in this codebase imports helpers from another.
+ */
+async function uploadFixture(a: ReturnType<typeof app>, token: string): Promise<string> {
+  const bytes = await Bun.file(`${import.meta.dir}/../test-support/fixtures/small.png`).bytes();
+  const form = new FormData();
+  form.append("file", new Blob([bytes], { type: "image/png" }), "small.png");
+
+  const res = await a.request("/users/media", {
+    method: "POST",
+    headers: authed(token),
+    body: form,
+  });
+  expect(res.status).toBe(201);
+  return (await res.json()).id as string;
+}
+
+/**
+ * A repository over the SAME database the app is using. Route tests build the
+ * app through `bootstrap()`, which constructs its own storage adapter and its
+ * own repositories that no test holds a handle on — the database is the one
+ * place both sides meet, so it is where "the row survived, unclaimed" is
+ * asserted. The bytes-survive half of that rule lives in
+ * `write-post.test.ts`, where the fake storage adapter can be injected.
+ */
+function mediaRepo() {
+  return new DrizzleMediaRepository(db);
 }
 
 describe("POST /users/posts", () => {
@@ -91,7 +144,15 @@ describe("POST /users/posts", () => {
     expect(res.status).toBe(201);
 
     const body = await res.json();
-    expect(Object.keys(body).sort()).toEqual(["author", "body", "createdAt", "editedAt", "id"]);
+    expect(Object.keys(body).sort()).toEqual([
+      "author",
+      "body",
+      "createdAt",
+      "editedAt",
+      "id",
+      "media",
+    ]);
+    expect(body.media).toEqual([]);
     expect(Object.keys(body.author).sort()).toEqual(["displayName", "handle"]);
     expect(body.body).toBe("halo dunia");
     expect(body.editedAt === null).toBe(true);
@@ -509,5 +570,432 @@ describe("two routers on one prefix: userRoutes must be mounted before postRoute
     });
     expect(unfollow.status).toBe(200);
     expect(await unfollow.json()).toEqual({ following: false });
+  });
+});
+
+/**
+ * Phase 4, Task 6 — spec §5.2, §5.3, §8 and §11.
+ *
+ * `mediaIds` is the COMPLETE desired list on both verbs, never a delta: the
+ * client sends the images the post should hold when the request finishes, in
+ * order.
+ */
+/**
+ * Six syntactically-valid uuids, none of which need to exist, for asserting
+ * the REFUSAL MESSAGE only: `.max()` on `mediaIds` runs inside
+ * `validate(postBodySchema)` and reports one issue per parse regardless of
+ * what the ids are, so a too-long array 400s with the schema's message
+ * before ownership is ever checked.
+ */
+const SIX_MEDIA_IDS = Array.from(
+  { length: 6 },
+  (_, i) => `aaaaaaaa-0000-4000-8000-00000000000${i}`
+);
+
+/** Uploads `n` real, owned, unclaimed media ids — see its own callers for why real ids matter here. */
+async function uploadFixtures(a: ReturnType<typeof app>, token: string, n: number): Promise<string[]> {
+  const ids: string[] = [];
+  for (let i = 0; i < n; i++) ids.push(await uploadFixture(a, token));
+  return ids;
+}
+
+describe("Task 7: MAX_POST_IMAGES", () => {
+  /**
+   * Six ids that are ALL real, owned by the caller, and unclaimed — so
+   * nothing but the count itself can produce a 400 here. Fake/unowned ids
+   * would already 400 on ownership grounds even with no cap at all, which
+   * would make this test pass for the wrong reason (measured: it does,
+   * against `SIX_MEDIA_IDS` below, before the cap existed).
+   */
+  it("POST /users/posts: a post carrying more than the maximum images is a 400 — LITERAL 6 over a default limit of 5", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const sixOwnedIds = await uploadFixtures(a, token, 6);
+
+    const res = await createPost(a, token, "banyak foto", sixOwnedIds);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("POST /users/posts: the refusal names the limit, in Bahasa — LITERAL 5", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await createPost(a, token, "banyak foto", SIX_MEDIA_IDS);
+
+    expect((await res.json()).error).toContain("maksimal 5 foto");
+  });
+
+  /**
+   * Task 6 wired `mediaIds` into `PATCH` too, and the brief is explicit: an
+   * edit that can add a sixth image while create refuses one would be the
+   * obvious hole. Same schema, same route-level `.max()`, so this must 400
+   * the same way create does — never reaching `editPost`. Real, owned,
+   * unclaimed ids again, for the same reason as the create test above.
+   */
+  it("PATCH /users/posts/:id: an edit carrying more than the maximum images is ALSO a 400", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const id = await uploadFixture(a, token);
+    const post = await (await createPost(a, token, "halo", [id])).json();
+    const sixOwnedIds = await uploadFixtures(a, token, 6);
+
+    const res = await patchPost(a, token, post.id, { body: "halo lagi", mediaIds: sixOwnedIds });
+
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("media on posts", () => {
+  it("attaches media to a new post, in the order given", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const first = await uploadFixture(a, token);
+    const second = await uploadFixture(a, token);
+
+    const res = await createPost(a, token, "dua foto", [second, first]);
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.media.map((image: { id: string }) => image.id)).toEqual([second, first]);
+  });
+
+  /**
+   * The projection is closed on BOTH levels. A media entry carrying a bucket
+   * key, a URL, `ownerId` or `postId` would hand a client either a path into
+   * storage or a fact about who uploaded what.
+   */
+  it("keeps the projection closed — the post's keys and each image's keys", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const id = await uploadFixture(a, token);
+
+    const post = await (await createPost(a, token, "satu foto", [id])).json();
+
+    expect(Object.keys(post).sort()).toEqual([
+      "author",
+      "body",
+      "createdAt",
+      "editedAt",
+      "id",
+      "media",
+    ]);
+    expect(post.media).toHaveLength(1);
+    expect(Object.keys(post.media[0]).sort()).toEqual(["height", "id", "width"]);
+    expect(post.media[0].id).toBe(id);
+    expect(post.media[0].width).toBeGreaterThan(0);
+    expect(post.media[0].height).toBeGreaterThan(0);
+  });
+
+  /**
+   * **The same closed projection, on the three responses nothing was asserting.**
+   * Final whole-branch review, Minor 2: mutation-testing `toMediaView` reddened
+   * exactly three tests — the view's own, `ListFeed`'s, and the create response
+   * — while `GET /users/feed`, `GET /users/:handle/posts` and the `PATCH`
+   * response asserted nothing about the key set at all. Safe today because
+   * every one of them funnels through `toPostView`, and blind to a decoration
+   * added at the route layer, which is precisely the shape a bucket key would
+   * arrive in.
+   */
+  it("keeps the projection closed on the feed, a profile's posts, and a PATCH", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const id = await uploadFixture(a, token);
+    const created = await (await createPost(a, token, "satu foto", [id])).json();
+
+    const patched = await (
+      await a.request(`/users/posts/${created.id}`, {
+        method: "PATCH",
+        headers: { ...authed(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "satu foto, diedit", mediaIds: [id] }),
+      })
+    ).json();
+    const feed = await (await a.request("/users/feed?tab=untuk-anda")).json();
+    const profile = await (await a.request(`/users/${VALID.handle}/posts`)).json();
+
+    const POST_KEYS = ["author", "body", "createdAt", "editedAt", "id", "media"];
+    const MEDIA_KEYS = ["height", "id", "width"];
+    for (const post of [patched, feed.posts[0], profile.posts[0]]) {
+      expect(Object.keys(post).sort()).toEqual(POST_KEYS);
+      expect(post.media).toHaveLength(1);
+      expect(Object.keys(post.media[0]).sort()).toEqual(MEDIA_KEYS);
+    }
+  });
+
+  it("refuses media that belongs to someone else — 400, and no post is created", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a, {});
+    const otherToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    const theirs = await uploadFixture(a, otherToken);
+
+    const res = await createPost(a, token, "halo", [theirs]);
+
+    expect(res.status).toBe(400);
+    const feed = await (await a.request("/users/feed?tab=untuk-anda")).json();
+    expect(feed.posts).toHaveLength(0);
+  });
+
+  it("refuses a media id that has never existed — 400", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await createPost(a, token, "halo", ["aaaaaaaa-0000-4000-8000-000000000000"]);
+
+    expect(res.status).toBe(400);
+  });
+
+  /**
+   * Review round 1, M2. An UNKNOWN id and SOMEONE ELSE'S id must come back
+   * byte-identical, and nothing but this test defends that. Media ids are
+   * handed out only to their uploader, so a distinct "foto tidak ditemukan"
+   * would let anyone probe whether a uuid is a real image — an existence
+   * oracle for other people's uploads, which is the defect class Phase 2's
+   * review already found in signup, where a taken handle's 409 revealed
+   * whether the accompanying email was registered.
+   *
+   * The two messages are asserted verbatim, per this repo's rule (never
+   * against the constant they are checked against), and then against each
+   * other — splitting them reddens this test by name rather than passing
+   * quietly.
+   */
+  it("an unknown media id and someone else's return the SAME message — no existence oracle", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a, {});
+    const otherToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    const theirs = await uploadFixture(a, otherToken);
+
+    const unknown = await createPost(a, token, "halo", [
+      "aaaaaaaa-0000-4000-8000-000000000000",
+    ]);
+    const notMine = await createPost(a, token, "halo", [theirs]);
+
+    expect(unknown.status).toBe(400);
+    expect(notMine.status).toBe(400);
+    const unknownBody = await unknown.json();
+    const notMineBody = await notMine.json();
+    expect(unknownBody.error).toBe("foto tidak ditemukan atau bukan milik Anda");
+    expect(notMineBody.error).toBe("foto tidak ditemukan atau bukan milik Anda");
+    expect(unknownBody.error).toBe(notMineBody.error);
+  });
+
+  /**
+   * The other two refusals are distinguishable on purpose — an id that is
+   * yours but already on another post, and the same id twice, are both things
+   * the composer can put right, so their copy says what happened. Asserted
+   * verbatim, and asserted as DIFFERENT from the not-yours message above, so
+   * collapsing all three into one generic string is a red test too.
+   */
+  it("says something different, in Bahasa, when the photo is on another post or listed twice", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const id = await uploadFixture(a, token);
+    await createPost(a, token, "kiriman pertama", [id]);
+    const spare = await uploadFixture(a, token);
+
+    const taken = await createPost(a, token, "kiriman kedua", [id]);
+    const duplicated = await createPost(a, token, "kiriman ketiga", [spare, spare]);
+
+    expect(taken.status).toBe(400);
+    expect(duplicated.status).toBe(400);
+    expect((await taken.json()).error).toBe("foto sudah dipakai kiriman lain");
+    expect((await duplicated.json()).error).toBe("foto yang sama tidak boleh dipakai dua kali");
+  });
+
+  it("refuses media already claimed by a DIFFERENT post — 400", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const id = await uploadFixture(a, token);
+    await createPost(a, token, "kiriman pertama", [id]);
+
+    const res = await createPost(a, token, "kiriman kedua", [id]);
+
+    expect(res.status).toBe(400);
+  });
+
+  /**
+   * The ONE clause that separates PATCH from POST (§5.2). Without it every
+   * edit would reject its own images.
+   */
+  it("an edit may keep the post's OWN existing media", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const id = await uploadFixture(a, token);
+    const post = await (await createPost(a, token, "halo", [id])).json();
+
+    const res = await patchPost(a, token, post.id, { body: "halo lagi", mediaIds: [id] });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.media.map((image: { id: string }) => image.id)).toEqual([id]);
+    expect(body.body).toBe("halo lagi");
+  });
+
+  it("an edit may add an image alongside the one already there", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const first = await uploadFixture(a, token);
+    const second = await uploadFixture(a, token);
+    const post = await (await createPost(a, token, "halo", [first])).json();
+
+    const res = await patchPost(a, token, post.id, {
+      body: "halo",
+      mediaIds: [first, second],
+    });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).media.map((image: { id: string }) => image.id)).toEqual([
+      first,
+      second,
+    ]);
+  });
+
+  /**
+   * §8: removal sets `post_id` back to null and the worker's sweep collects
+   * the row later. Asserting only that the post no longer shows the image
+   * would pass just as well against an implementation that deleted the bytes
+   * on the spot, so the row's own state is what is checked — through a
+   * repository over the same database, since the app's instances are not
+   * reachable from here.
+   */
+  it("removing an image UNCLAIMS it rather than deleting it", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const first = await uploadFixture(a, token);
+    const second = await uploadFixture(a, token);
+    const post = await (await createPost(a, token, "dua foto", [first, second])).json();
+
+    const res = await patchPost(a, token, post.id, { body: "dua foto", mediaIds: [first] });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).media.map((image: { id: string }) => image.id)).toEqual([first]);
+    expect(await mediaRepo().findById(second)).toMatchObject({ postId: null });
+    expect(await mediaRepo().findById(first)).toMatchObject({ postId: post.id });
+  });
+
+  it("an explicit empty mediaIds strips every image, unclaiming each row", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const id = await uploadFixture(a, token);
+    const post = await (await createPost(a, token, "halo", [id])).json();
+
+    const res = await patchPost(a, token, post.id, { body: "halo", mediaIds: [] });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).media).toEqual([]);
+    expect(await mediaRepo().findById(id)).toMatchObject({ postId: null });
+  });
+
+  /**
+   * An OMITTED `mediaIds` says nothing about images — it is a text-only edit,
+   * which is exactly what every PATCH in this file above sends. It must not
+   * silently strip the post's photos.
+   */
+  it("a PATCH without mediaIds leaves the post's images alone", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const id = await uploadFixture(a, token);
+    const post = await (await createPost(a, token, "halo", [id])).json();
+
+    const res = await patchPost(a, token, post.id, { body: "teks baru saja" });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.body).toBe("teks baru saja");
+    expect(body.media.map((image: { id: string }) => image.id)).toEqual([id]);
+  });
+
+  /** §5.3: what a reader saw is not what they would see now. */
+  it("an image-only change still sets editedAt", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const first = await uploadFixture(a, token);
+    const second = await uploadFixture(a, token);
+    const post = await (await createPost(a, token, "halo", [first])).json();
+    expect(post.editedAt === null).toBe(true);
+
+    const res = await patchPost(a, token, post.id, { body: "halo", mediaIds: [second] });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.body).toBe("halo");
+    expect(body.editedAt === null).toBe(false);
+  });
+
+  /**
+   * Task 1's review left this deferred: nothing exercised `claim()` across two
+   * posts, so a widened `WHERE` on its release step could unclaim ANOTHER
+   * post's media with the suite still green. Both posts belong to the same
+   * author here, so the only thing standing between them is the release
+   * clause's `post_id = $1` — no ownership check would catch a bug in it.
+   */
+  it("editing one post never disturbs another post's media", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const [a1, a2, b1, b2] = [
+      await uploadFixture(a, token),
+      await uploadFixture(a, token),
+      await uploadFixture(a, token),
+      await uploadFixture(a, token),
+    ];
+    const postA = await (await createPost(a, token, "kiriman A", [a1, a2])).json();
+    const postB = await (await createPost(a, token, "kiriman B", [b1, b2])).json();
+
+    const res = await patchPost(a, token, postA.id, { body: "kiriman A", mediaIds: [a1] });
+    expect(res.status).toBe(200);
+
+    const repo = mediaRepo();
+    expect((await repo.listForPost(postB.id)).map((row) => row.id)).toEqual([b1, b2]);
+    expect(await repo.findById(a2)).toMatchObject({ postId: null });
+
+    const authorPage = await (await a.request("/users/wildan/posts")).json();
+    const shown = authorPage.posts.find((p: { id: string }) => p.id === postB.id);
+    expect(shown.media.map((image: { id: string }) => image.id)).toEqual([b1, b2]);
+  });
+
+  /**
+   * §11: an edit must be proven not to STEAL — specifically not from another
+   * person's post. The refusal and the victim's post being untouched are both
+   * asserted, because a check that rejected the request after already
+   * unclaiming would satisfy only the first.
+   */
+  it("an edit cannot steal media out of another PERSON'S post", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a, {});
+    const rinaToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    const hers = await uploadFixture(a, rinaToken);
+    const herPost = await (await createPost(a, rinaToken, "foto rina", [hers])).json();
+    const mine = await (await createPost(a, token, "kiriman saya")).json();
+
+    const res = await patchPost(a, token, mine.id, { body: "kiriman saya", mediaIds: [hers] });
+
+    expect(res.status).toBe(400);
+    expect(await mediaRepo().findById(hers)).toMatchObject({ postId: herPost.id });
+    const rinaPage = await (await a.request("/users/rina/posts")).json();
+    expect(rinaPage.posts[0].media.map((image: { id: string }) => image.id)).toEqual([hers]);
+  });
+
+  it("media reach the feed too, each post with its own images in order", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const [first, second, third] = [
+      await uploadFixture(a, token),
+      await uploadFixture(a, token),
+      await uploadFixture(a, token),
+    ];
+    const withImages = await (await createPost(a, token, "berfoto", [second, first])).json();
+    const withoutImages = await (await createPost(a, token, "tanpa foto")).json();
+    const withOne = await (await createPost(a, token, "satu foto", [third])).json();
+
+    const feed = await (await a.request("/users/feed?tab=untuk-anda")).json();
+
+    const byId = new Map(
+      feed.posts.map((post: { id: string; media: { id: string }[] }) => [
+        post.id,
+        post.media.map((image) => image.id),
+      ])
+    );
+    expect(byId.get(withImages.id)).toEqual([second, first]);
+    expect(byId.get(withoutImages.id)).toEqual([]);
+    expect(byId.get(withOne.id)).toEqual([third]);
   });
 });

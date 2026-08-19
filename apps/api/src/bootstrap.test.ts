@@ -10,9 +10,11 @@ import {
   resolveAiFakeBehaviour,
   resolveAppBaseUrl,
   resolveCallbackToken,
+  resolveMaxPostImages,
   resolveTelegramWebhookSecret,
   selectAiProvider,
   selectEmailProvider,
+  selectMediaStorage,
   selectMessagingProviders,
   selectPaymentProvider,
   selectStreamingProvider,
@@ -20,6 +22,8 @@ import {
   TEST_TELEGRAM_WEBHOOK_SECRET,
   type Dependencies,
 } from "./bootstrap";
+import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-storage.adapter";
+import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage.adapter";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
 import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
@@ -84,6 +88,8 @@ import type { UserRepositoryPort } from "./application/ports/user-repository.por
 import type { FollowRepositoryPort } from "./application/ports/follow-repository.port";
 import type { PostRepositoryPort } from "./application/ports/post-repository.port";
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
+import type { MediaRepositoryPort } from "./application/ports/media-repository.port";
+import { UploadMedia } from "./application/use-cases/upload-media";
 import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
@@ -122,6 +128,41 @@ import type { PaymentProviderPort } from "./application/ports/payment-provider.p
  * a plain object literal without a cast, so the fakes below construct real
  * instances of those classes wrapping hand-written fake ports instead.
  */
+/**
+ * Task 5's delivery routes need `mediaRepository` on `Dependencies` in
+ * addition to `uploadMedia`, and Task 6's post use cases take it as a
+ * constructor argument. No test that builds a `Dependencies` by hand below
+ * calls any of it — every use of this fake is here purely to satisfy a shape —
+ * so one shared fake, reused at every call site, is enough; unlike
+ * `fakeCreatorRepository` below it needs no per-test state.
+ */
+const fakeMediaRepository: MediaRepositoryPort = {
+  async create(): Promise<never> {
+    throw new Error("not used");
+  },
+  async findById() {
+    return null;
+  },
+  async findManyByIds() {
+    return [];
+  },
+  async claim(_postId: string, ids: string[]) {
+    return ids.length;
+  },
+  async listForPost() {
+    return [];
+  },
+  async listForPosts() {
+    return [];
+  },
+  async listUnclaimedBefore() {
+    return [];
+  },
+  async deleteIfUnclaimed() {
+    return false;
+  },
+};
+
 const fakeTokenIssuer: TokenIssuerPort = {
   async issue() {
     return "fake.token.value";
@@ -674,11 +715,16 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
-      createPost: new CreatePost(fakePostRepository),
-      editPost: new EditPost(fakePostRepository),
+      createPost: new CreatePost(fakePostRepository, fakeMediaRepository),
+      maxPostImages: 5,
+      editPost: new EditPost(fakePostRepository, fakeMediaRepository),
       deletePost: new DeletePost(fakePostRepository),
-      listFeed: new ListFeed(fakePostRepository),
-      listUserPosts: new ListUserPosts(fakeUserRepository, fakePostRepository),
+      listFeed: new ListFeed(fakePostRepository, fakeMediaRepository),
+      listUserPosts: new ListUserPosts(
+        fakeUserRepository,
+        fakePostRepository,
+        fakeMediaRepository
+      ),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,
@@ -801,6 +847,19 @@ describe("Dependencies (composition root contract)", () => {
       handleStreamLifecycle: undefined,
       // Task 8's `GET /c/watch/:token`. Same undefined-ness reasoning as `authoriseStream`.
       resolveWatchToken: undefined,
+      // Phase 4's image storage. Never undefined/null in a real Dependencies —
+      // see `mediaStorage`'s own field docstring — so this needs a real fake,
+      // unlike the streaming fields just above.
+      mediaStorage: new FakeMediaStorageAdapter(),
+      // Task 4's upload endpoint. Never undefined/null either — mirrors
+      // `mediaStorage` just above. Neither of these two tests calls
+      // `uploadMedia.execute`, so its repository fake (the module-level
+      // `fakeMediaRepository`) never needs to do anything but satisfy the
+      // port's shape.
+      uploadMedia: new UploadMedia(fakeMediaRepository, new FakeMediaStorageAdapter()),
+      // Task 5's delivery routes. Same fake as `uploadMedia` above — neither
+      // test calls `mediaRepository.findById` either.
+      mediaRepository: fakeMediaRepository,
     };
 
     const created = await deps.creatorRepository.create({
@@ -873,11 +932,16 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
-      createPost: new CreatePost(fakePostRepository),
-      editPost: new EditPost(fakePostRepository),
+      createPost: new CreatePost(fakePostRepository, fakeMediaRepository),
+      maxPostImages: 5,
+      editPost: new EditPost(fakePostRepository, fakeMediaRepository),
       deletePost: new DeletePost(fakePostRepository),
-      listFeed: new ListFeed(fakePostRepository),
-      listUserPosts: new ListUserPosts(fakeUserRepository, fakePostRepository),
+      listFeed: new ListFeed(fakePostRepository, fakeMediaRepository),
+      listUserPosts: new ListUserPosts(
+        fakeUserRepository,
+        fakePostRepository,
+        fakeMediaRepository
+      ),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
         fakePasswordResetRepository,
@@ -1000,6 +1064,19 @@ describe("Dependencies (composition root contract)", () => {
       handleStreamLifecycle: undefined,
       // Task 8's `GET /c/watch/:token`. Same undefined-ness reasoning as `authoriseStream`.
       resolveWatchToken: undefined,
+      // Phase 4's image storage. Never undefined/null in a real Dependencies —
+      // see `mediaStorage`'s own field docstring — so this needs a real fake,
+      // unlike the streaming fields just above.
+      mediaStorage: new FakeMediaStorageAdapter(),
+      // Task 4's upload endpoint. Never undefined/null either — mirrors
+      // `mediaStorage` just above. Neither of these two tests calls
+      // `uploadMedia.execute`, so its repository fake (the module-level
+      // `fakeMediaRepository`) never needs to do anything but satisfy the
+      // port's shape.
+      uploadMedia: new UploadMedia(fakeMediaRepository, new FakeMediaStorageAdapter()),
+      // Task 5's delivery routes. Same fake as `uploadMedia` above — neither
+      // test calls `mediaRepository.findById` either.
+      mediaRepository: fakeMediaRepository,
     };
 
     const res = await createApp(deps).request("/health");
@@ -1282,6 +1359,36 @@ describe(".env.example", () => {
     // a compromise of the other (watch-token.ts's own docstring).
     expect(example).toContain("JWT_SECRET");
   });
+
+  /**
+   * Same shape as the streaming test above, for Task 2's five S3 variables —
+   * except the file must ALSO say what makes this pair unlike every other one
+   * in the file: absence block-boots outside the allowlist rather than
+   * degrading, so a reader relying on this file alone must be told that too.
+   */
+  it("documents the five S3 variables as commented placeholders, set together or not at all, and names Biznet Gio NEO", () => {
+    const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
+    const lines = example.split("\n");
+
+    for (const name of [
+      "S3_ACCESS_KEY_ID",
+      "S3_SECRET_ACCESS_KEY",
+      "S3_BUCKET",
+      "S3_ENDPOINT",
+      "S3_REGION",
+    ]) {
+      const line = lines.find((l) => l.trim().startsWith(`# ${name}=`));
+      expect(line).toBeDefined();
+      expect(line!.trim()).toBe(`# ${name}=`);
+      expect(lines.some((l) => l.startsWith(`${name}=`))).toBe(false);
+    }
+
+    expect(example).toContain("FakeMediaStorageAdapter");
+    expect(example).toContain("Biznet Gio NEO");
+    for (const nodeEnv of [...RELAXED_NODE_ENVS]) {
+      expect(example).toContain(nodeEnv);
+    }
+  });
 });
 
 /**
@@ -1563,6 +1670,7 @@ describe("bootstrap() payment provider selection", () => {
           TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
           TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
+          ...REAL_S3_CONFIG,
         },
         () => {
           captureConsoleLog(() => {
@@ -1609,6 +1717,23 @@ const NO_XENDIT = { secretKey: undefined, splitRuleId: undefined };
  * be accepted in production on the strength of nothing.
  */
 const REAL_CALLBACK_TOKEN = `xnd_${"R".repeat(40)}`;
+
+/**
+ * A fully-configured, syntactically valid S3 setup — no real bucket exists at
+ * this endpoint. `selectMediaStorage` now block-boots `NODE_ENV=production`
+ * with no S3 vars set (Task 2, images), so every test in this file that
+ * simulates a production box to isolate some OTHER provider's own disabled
+ * path (payments/email/AI/streaming) must supply this too, or `bootstrap()`
+ * throws on media storage before it ever reaches the guard under test — same
+ * reasoning as `TELEGRAM_WEBHOOK_SECRET` joining those same blocks in Task 7b.
+ */
+const REAL_S3_CONFIG = {
+  S3_ACCESS_KEY_ID: "test-s3-access-key",
+  S3_SECRET_ACCESS_KEY: "test-s3-secret-key",
+  S3_BUCKET: "test-bucket",
+  S3_ENDPOINT: "https://s3.test.example.com",
+  S3_REGION: "id-jkt-1",
+};
 
 describe("resolveCallbackToken", () => {
   it("uses a configured token as-is", () => {
@@ -1891,6 +2016,7 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
           TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
+          ...REAL_S3_CONFIG,
         },
         () => {
           captureConsoleLog(() => {
@@ -1918,6 +2044,7 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
           TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
+          ...REAL_S3_CONFIG,
         },
         () => {
           captureConsoleLog(() => {
@@ -2290,6 +2417,7 @@ describe("bootstrap() email provider selection", () => {
           TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
           TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
+          ...REAL_S3_CONFIG,
         },
         () => {
           captureConsoleLog(() => {
@@ -2823,6 +2951,55 @@ describe("resolveAiDailyMessageLimit", () => {
   });
 });
 
+describe("resolveMaxPostImages", () => {
+  it("defaults to 5 when MAX_POST_IMAGES is unset", () => {
+    expect(resolveMaxPostImages(undefined)).toBe(5);
+  });
+
+  it("treats an empty or whitespace-only value as unset", () => {
+    expect(resolveMaxPostImages("")).toBe(5);
+    expect(resolveMaxPostImages("   ")).toBe(5);
+  });
+
+  it("uses a configured whole number of at least 1", () => {
+    expect(resolveMaxPostImages("1")).toBe(1);
+    expect(resolveMaxPostImages("10")).toBe(10);
+  });
+
+  it("refuses a malformed value loudly rather than becoming NaN", () => {
+    expect(() => resolveMaxPostImages("banyak")).toThrow(/MAX_POST_IMAGES must be a whole number/);
+    expect(() => resolveMaxPostImages("0")).toThrow(/MAX_POST_IMAGES must be a whole number/);
+    expect(() => resolveMaxPostImages("-2")).toThrow(/MAX_POST_IMAGES must be a whole number/);
+    expect(() => resolveMaxPostImages("1.5")).toThrow(/MAX_POST_IMAGES must be a whole number/);
+  });
+});
+
+describe("bootstrap() MAX_POST_IMAGES wiring", () => {
+  it("exposes deps.maxPostImages, defaulting to 5", () => {
+    withJwtSecret("x".repeat(32), () => {
+      const deps = bootstrap();
+      expect(deps.maxPostImages).toBe(5);
+    });
+  });
+
+  it("wires a configured MAX_POST_IMAGES through to deps.maxPostImages", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ MAX_POST_IMAGES: "3" }, () => {
+        const deps = bootstrap();
+        expect(deps.maxPostImages).toBe(3);
+      });
+    });
+  });
+
+  it("fails closed on an invalid MAX_POST_IMAGES rather than silently keeping the default", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv({ MAX_POST_IMAGES: "not-a-number" }, () => {
+        expect(() => bootstrap()).toThrow(/MAX_POST_IMAGES must be a whole number/);
+      });
+    });
+  });
+});
+
 describe("bootstrap() AI provider wiring", () => {
   it("wires a SendAiMessage and a FakeAiAdapter under NODE_ENV=test with no OpenRouter config", () => {
     withJwtSecret("x".repeat(32), () => {
@@ -2909,6 +3086,7 @@ describe("bootstrap() AI provider wiring", () => {
           OPENROUTER_API_KEY: undefined,
           OPENROUTER_MODEL: undefined,
           AI_DAILY_MESSAGE_LIMIT: "fifty",
+          ...REAL_S3_CONFIG,
         },
         () => {
           captureConsoleLog(() => {
@@ -3174,6 +3352,7 @@ describe("bootstrap() streaming provider wiring", () => {
           TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
           TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
+          ...REAL_S3_CONFIG,
         },
         () => {
           captureConsoleLog(() => {
@@ -3186,5 +3365,190 @@ describe("bootstrap() streaming provider wiring", () => {
         }
       );
     });
+  });
+});
+
+describe("bootstrap() media storage selection", () => {
+  // Mirrors "refuses to boot a production process with no messaging tokens"
+  // above, not the streaming/AI/email "boots ... disabled" tests: media
+  // storage is the SECOND feature (after messaging) that refuses to start
+  // rather than degrade — see `selectMediaStorage`'s own docstring.
+  it("refuses to boot a production process with no S3 configuration", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "production",
+          APP_BASE_URL: "http://localhost:5173",
+          XENDIT_SECRET_KEY: "sk_live_x",
+          XENDIT_SPLIT_RULE_ID: "splitrule_1",
+          XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
+          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+          FONNTE_API_TOKEN: "real-fonnte-token",
+          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
+          S3_ACCESS_KEY_ID: undefined,
+          S3_SECRET_ACCESS_KEY: undefined,
+          S3_BUCKET: undefined,
+          S3_ENDPOINT: undefined,
+          S3_REGION: undefined,
+        },
+        () => {
+          captureConsoleLog(() => {
+            expect(() => bootstrap()).toThrow(/S3_ACCESS_KEY_ID.*permitted ONLY/s);
+          });
+        }
+      );
+    });
+  });
+
+  it("wires FakeMediaStorageAdapter into Dependencies under NODE_ENV=test", () => {
+    const deps = bootstrap();
+    expect(deps.mediaStorage).toBeInstanceOf(FakeMediaStorageAdapter);
+  });
+
+  it("wires S3MediaStorageAdapter into Dependencies once all five S3 vars are set", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(REAL_S3_CONFIG, () => {
+        captureConsoleLog(() => {
+          expect(bootstrap().mediaStorage).toBeInstanceOf(S3MediaStorageAdapter);
+        });
+      });
+    });
+  });
+});
+
+const FULL_S3_CONFIG = {
+  accessKeyId: "test-s3-access-key",
+  secretAccessKey: "test-s3-secret-key",
+  bucket: "test-bucket",
+  endpoint: "https://s3.test.example.com",
+  region: "id-jkt-1",
+};
+
+describe("selectMediaStorage", () => {
+  it("selects S3MediaStorageAdapter when all five env vars are set", () => {
+    captureConsoleLog(() => {
+      const storage = selectMediaStorage({ ...FULL_S3_CONFIG, nodeEnv: "test" });
+      expect(storage).toBeInstanceOf(S3MediaStorageAdapter);
+    });
+  });
+
+  // Mirrors selectStreamingProvider's own "still selects ... regardless of
+  // NODE_ENV when fully configured": real infrastructure an operator
+  // deliberately configured must work in production, and must not be
+  // defeated by a NODE_ENV that is merely unrecognised.
+  it("still selects S3MediaStorageAdapter regardless of NODE_ENV when fully configured", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [undefined, "staging", "prod", "production", "Development"]) {
+        expect(selectMediaStorage({ ...FULL_S3_CONFIG, nodeEnv })).toBeInstanceOf(
+          S3MediaStorageAdapter
+        );
+      }
+    });
+  });
+
+  it("selects FakeMediaStorageAdapter when all five env vars are unset in development or test", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [...RELAXED_NODE_ENVS]) {
+        expect(
+          selectMediaStorage({
+            accessKeyId: undefined,
+            secretAccessKey: undefined,
+            bucket: undefined,
+            endpoint: undefined,
+            region: undefined,
+            nodeEnv,
+          })
+        ).toBeInstanceOf(FakeMediaStorageAdapter);
+      }
+    });
+  });
+
+  /**
+   * THE GUARD THAT MATTERS MOST for this selector (hard constraint, Task 2's
+   * brief): unlike every other absence-tolerant provider in this file, a
+   * missing bucket here must BLOCK BOOT — an API that accepts uploads and
+   * silently keeps them in a Map that vanishes on restart is worse than one
+   * that refuses to start. Same allowlist-not-denylist shape as
+   * `selectMessagingProviders`'s own "refuses to start for ANY nodeEnv
+   * outside the allowlist" test, for the same Phase-3-shaped reason
+   * (RELAXED_NODE_ENVS's own docstring): "production", a plausible
+   * misspelling, and unset must all throw, never silently disable.
+   */
+  it("refuses to start for ANY nodeEnv outside the allowlist, including unset", () => {
+    for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "dev", "", "production"]) {
+      expect(() =>
+        selectMediaStorage({
+          accessKeyId: undefined,
+          secretAccessKey: undefined,
+          bucket: undefined,
+          endpoint: undefined,
+          region: undefined,
+          nodeEnv,
+        })
+      ).toThrow(/permitted ONLY/);
+    }
+  });
+
+  it("refuses to start on PARTIAL configuration in EVERY environment", () => {
+    for (const nodeEnv of ["test", "development", "production", undefined]) {
+      for (const missingKey of Object.keys(FULL_S3_CONFIG) as Array<keyof typeof FULL_S3_CONFIG>) {
+        const partial = { ...FULL_S3_CONFIG, [missingKey]: undefined, nodeEnv };
+        expect(() => selectMediaStorage(partial)).toThrow(/half-configured/);
+      }
+    }
+  });
+
+  it("names which variables are set and which are missing", () => {
+    expect(() =>
+      selectMediaStorage({ ...FULL_S3_CONFIG, region: undefined, nodeEnv: "test" })
+    ).toThrow(/S3_ACCESS_KEY_ID.*S3_REGION not/s);
+  });
+
+  it("treats a blank value as unset rather than as configuration", () => {
+    captureConsoleLog(() => {
+      const storage = selectMediaStorage({
+        accessKeyId: "   ",
+        secretAccessKey: "",
+        bucket: undefined,
+        endpoint: undefined,
+        region: undefined,
+        nodeEnv: "test",
+      });
+      expect(storage).toBeInstanceOf(FakeMediaStorageAdapter);
+    });
+  });
+
+  it("keeps the credentials out of the startup log line", () => {
+    const lines = captureConsoleLog(() => {
+      selectMediaStorage({ ...FULL_S3_CONFIG, accessKeyId: "AKIA-secret", nodeEnv: "development" });
+    });
+
+    const printed = lines.join("\n");
+    expect(printed).not.toContain("AKIA-secret");
+    expect(printed).not.toContain(FULL_S3_CONFIG.secretAccessKey);
+  });
+
+  it("stays silent under NODE_ENV=test and speaks up everywhere else, for both the real and the fake branch", () => {
+    const quietReal = captureConsoleLog(() => {
+      selectMediaStorage({ ...FULL_S3_CONFIG, nodeEnv: "test" });
+    });
+    expect(quietReal).toEqual([]);
+
+    const loudReal = captureConsoleLog(() => {
+      selectMediaStorage({ ...FULL_S3_CONFIG, nodeEnv: "development" });
+    });
+    expect(loudReal.length).toBeGreaterThan(0);
+
+    const quietFake = captureConsoleLog(() => {
+      selectMediaStorage({
+        accessKeyId: undefined,
+        secretAccessKey: undefined,
+        bucket: undefined,
+        endpoint: undefined,
+        region: undefined,
+        nodeEnv: "test",
+      });
+    });
+    expect(quietFake).toEqual([]);
   });
 });

@@ -47,6 +47,28 @@ import {
 const apiRoot = dirname(import.meta.dir);
 const envPath = join(apiRoot, ".env");
 
+/**
+ * Set unconditionally, once, before ANY test file in this workspace loads —
+ * and never touched by an individual test's `withEnv`/`withJwtSecret`
+ * helpers, so it survives even blocks that override `NODE_ENV` to simulate
+ * a production box (`bootstrap.test.ts`'s "boots a production process with
+ * X disabled" tests, and their siblings in `routes/*.test.ts`).
+ *
+ * `S3MediaStorageAdapter`'s `put`/`get`/`remove` (Task 2 review, I2) each
+ * refuse to run while this is set — several of those "production-
+ * simulating" blocks fully configure `S3_*` with a placeholder endpoint
+ * purely to get PAST `selectMediaStorage`'s block-boot guard while testing
+ * some UNRELATED provider's own disabled path; none of them mean to reach a
+ * real bucket, and none of them call a method on the adapter they
+ * incidentally construct. Without this guard, a FUTURE route test added
+ * against one of those same apps (Task 4 adds media routes) would make a
+ * real, slow, DNS-dependent outbound network call from the suite the moment
+ * it called `deps.mediaStorage.put`/`get`/`remove` — exactly the hazard
+ * "no network calls in tests, ever" exists to rule out, and the kind of
+ * thing a comment alone does not stop a busy engineer from reintroducing.
+ */
+process.env.DIUDARA_BUN_TEST_RUN = "1";
+
 if (!process.env.DATABASE_URL) {
   if (existsSync(envPath)) {
     for (const line of readFileSync(envPath, "utf8").split("\n")) {
@@ -134,6 +156,19 @@ for (const key of [
   "FONNTE_API_TOKEN",
   "XENDIT_SECRET_KEY",
   "XENDIT_SPLIT_RULE_ID",
+  // Task 2 (images): the same hole, pre-emptively closed this time. A real
+  // bucket's credentials in `apps/api/.env` would make `selectMediaStorage`
+  // hand every bare `bootstrap()` a REAL `S3MediaStorageAdapter` — and unlike
+  // Telegram/Fonnte/Xendit above, that adapter is untested against a live
+  // bucket on purpose (no credentials exist anywhere in this repository's
+  // history to test one against — see `s3-media-storage.adapter.ts`), so a
+  // developer's local bucket becomes reachable-but-unverified by the suite
+  // instead of merely unused.
+  "S3_ACCESS_KEY_ID",
+  "S3_SECRET_ACCESS_KEY",
+  "S3_BUCKET",
+  "S3_ENDPOINT",
+  "S3_REGION",
 ]) {
   delete process.env[key];
 }

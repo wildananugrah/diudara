@@ -60,6 +60,15 @@ const PAYMENTS_DISABLED_ENV = {
   TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
   FONNTE_API_TOKEN: "real-fonnte-token",
   TELEGRAM_WEBHOOK_SECRET: "tg_" + "S".repeat(40),
+  // Task 2 (images): selectMediaStorage now block-boots NODE_ENV=production
+  // with no S3 vars set — same reasoning as the messaging tokens just above,
+  // fully configured here so this test stays isolated to the payments
+  // dimension instead of failing on an unrelated guard.
+  S3_ACCESS_KEY_ID: "test-s3-access-key",
+  S3_SECRET_ACCESS_KEY: "test-s3-secret-key",
+  S3_BUCKET: "test-bucket",
+  S3_ENDPOINT: "https://s3.test.example.com",
+  S3_REGION: "id-jkt-1",
 };
 
 describe("POST /communities", () => {

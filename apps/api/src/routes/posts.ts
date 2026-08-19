@@ -29,9 +29,44 @@ const MAX_FEED_PAGE_SIZE = 50;
  * reaches `requireBody` and gets ITS Indonesian message rather than a raw
  * English Zod one at this layer.
  */
-const postBodySchema = z.object({
-  body: z.string().trim().max(MAX_POST_BODY_LENGTH),
-});
+/**
+ * Task 7 of images. `maxPostImages` is `bootstrap()`'s resolved
+ * `MAX_POST_IMAGES` (default 5) — a runtime env var rather than a shared
+ * constant (images design spec §6), which is exactly why this schema is now
+ * built PER CALL instead of once at module load: it must read whatever this
+ * process actually resolved, not a value baked in before `postRoutes` ever
+ * saw its deps.
+ *
+ * Enforced on BOTH `POST` and `PATCH` — this one schema is shared by both
+ * routes below, so an edit cannot add a sixth image while create refuses
+ * one. The message is Bahasa and names the limit: a refusal for too many
+ * images is a `ValidationError`, and every `ValidationError` a person can
+ * hit on this router speaks Bahasa (`NotFoundError` is the only exception
+ * in this codebase, and stays English everywhere).
+ */
+function buildPostBodySchema(maxPostImages: number) {
+  return z.object({
+    body: z.string().trim().max(MAX_POST_BODY_LENGTH),
+    /**
+     * The COMPLETE desired list of images, in order — not a delta (spec §5.2).
+     * `.optional()` is load-bearing on PATCH: an OMITTED `mediaIds` is a
+     * text-only edit that leaves the post's images alone, while an explicit `[]`
+     * removes them all. Zod strips unknown keys, so the two are distinguishable
+     * here only because the field is declared.
+     *
+     * Ownership — mine, and unclaimed or already this post's — is `write-post.ts`'s
+     * to decide; this layer only says the ids are shaped like ids AND that there
+     * are not too many of them. A non-uuid would otherwise reach a uuid column
+     * and 500, the same defect `:id` params were fixed for; an over-the-cap
+     * array would otherwise reach `requireAttachable` and be accepted in full,
+     * since Task 6 deliberately left the cap for this task to add.
+     */
+    mediaIds: z
+      .array(z.string().uuid())
+      .max(maxPostImages, `maksimal ${maxPostImages} foto per kiriman`)
+      .optional(),
+  });
+}
 
 const postIdParams = z.object({ id: uuidParam });
 
@@ -71,15 +106,31 @@ function parseBefore(raw: string | undefined): KeysetCursor | null {
 export function postRoutes(
   deps: Pick<
     Dependencies,
-    "userTokenIssuer" | "userRepository" | "createPost" | "editPost" | "deletePost" | "listFeed" | "listUserPosts"
+    | "userTokenIssuer"
+    | "userRepository"
+    | "createPost"
+    | "editPost"
+    | "deletePost"
+    | "listFeed"
+    | "listUserPosts"
+    | "maxPostImages"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
   const requireAuth = requireUserAuth(deps.userTokenIssuer, deps.userRepository);
+  // Built ONCE per router instance from THIS process's resolved
+  // `maxPostImages`, then shared by both `POST` and `PATCH` below — see
+  // `buildPostBodySchema`'s own docstring for why it is a function rather
+  // than the module-level constant it used to be.
+  const postBodySchema = buildPostBodySchema(deps.maxPostImages);
 
   app.post("/posts", requireAuth, validate(postBodySchema), async (c) => {
-    const input = c.get("validated") as { body: string };
-    const view = await deps.createPost.execute({ authorId: c.get("userId"), body: input.body });
+    const input = c.get("validated") as { body: string; mediaIds?: string[] };
+    const view = await deps.createPost.execute({
+      authorId: c.get("userId"),
+      body: input.body,
+      mediaIds: input.mediaIds,
+    });
     return c.json(view, 201);
   });
 
@@ -96,11 +147,12 @@ export function postRoutes(
     validateParams(postIdParams),
     validate(postBodySchema),
     async (c) => {
-      const input = c.get("validated") as { body: string };
+      const input = c.get("validated") as { body: string; mediaIds?: string[] };
       const view = await deps.editPost.execute({
         editorId: c.get("userId"),
         postId: c.req.param("id"),
         body: input.body,
+        mediaIds: input.mediaIds,
       });
       return c.json(view);
     }

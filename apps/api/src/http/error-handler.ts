@@ -14,7 +14,12 @@ export function errorHandler(err: Error, c: Context): Response {
       return c.json({ error: err.message, resetAt: err.resetAt }, err.status);
     }
     // No cast needed: AppError.status is typed as Hono's ContentfulStatusCode.
-    return c.json({ error: err.message }, err.status);
+    // `code` is spread in only when there IS one — see `AppError.code`. A body
+    // that never carried the key does not start carrying `undefined`.
+    return c.json(
+      err.code === undefined ? { error: err.message } : { error: err.message, code: err.code },
+      err.status
+    );
   }
 
   // Hono itself (and its built-ins like bodyLimit / basicAuth) throws

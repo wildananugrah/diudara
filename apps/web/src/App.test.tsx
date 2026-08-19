@@ -341,8 +341,14 @@ describe("App — repairs a split session once, above the router (Task 7)", () =
 
     render(<App />);
 
-    await waitFor(() => expect(calls.length).toBe(1));
-    expect(calls[0]).toBe("/users/me");
+    // The WHOLE call list, sorted — not a filtered count. Fix round 1, Minor 3:
+    // filtering dropped the "and nothing else" half of this assertion, which is
+    // exactly the half that notices a new fetch being added to the boot effect.
+    // Both requests are issued synchronously by that one effect, so the total is
+    // deterministic; sorted because their completion order is not the point.
+    // Strings, so a failure prints two short arrays.
+    await waitFor(() => expect(calls.length).toBe(2));
+    expect([...calls].sort()).toEqual(["/users/limits", "/users/me"]);
     // Holds only because this test renders `<App />` directly, not through
     // `main.tsx`'s `<StrictMode>` wrapper. StrictMode double-invokes effects
     // in development, so a real dev session issues TWO `/users/me` requests
@@ -369,7 +375,34 @@ describe("App — repairs a split session once, above the router (Task 7)", () =
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(calls.length).toBe(0);
+    // No `/users/me` — there is no session to repair — and the boot effect's
+    // other request, and nothing else. Fix round 1, Minor 3: this used to assert
+    // "this page load makes no requests at all", which was the assertion that
+    // would have caught `/users/limits` being added.
+    expect(calls).toEqual(["/users/limits"]);
+  });
+
+  /**
+   * Task 8, spec §6. The web is a static build and cannot read the API's
+   * `MAX_POST_IMAGES`, so the app asks for it ONCE here, at boot, above the
+   * router — the composer then reads the answer from a store rather than
+   * fetching it per mount. Asked with no session too: the route is public, and
+   * a visitor who signs in on this page load must not be left with a composer
+   * running on the fallback.
+   */
+  it("asks GET /users/limits once at boot, session or no session", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({ maxPostImages: 5 });
+    }) as unknown as typeof fetch;
+
+    await act(async () => {
+      render(<App />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(calls.filter((url) => url === "/users/limits").length).toBe(1);
   });
 
   /**

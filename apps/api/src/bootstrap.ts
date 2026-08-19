@@ -16,6 +16,8 @@ import { ExploreUsers } from "./application/use-cases/explore-users";
 import { DrizzleFollowRepository } from "./infrastructure/repositories/drizzle-follow.repository";
 import { DrizzlePostRepository } from "./infrastructure/repositories/drizzle-post.repository";
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
+import { DrizzleMediaRepository } from "./infrastructure/repositories/drizzle-media.repository";
+import { UploadMedia } from "./application/use-cases/upload-media";
 import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
@@ -79,7 +81,11 @@ import { ScheduleLiveSession, ListLiveSessions } from "./application/use-cases/s
 import { AuthoriseStream } from "./application/use-cases/authorise-stream";
 import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lifecycle";
 import { ResolveWatchToken } from "./application/use-cases/resolve-watch-token";
+import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-storage.adapter";
+import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage.adapter";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
+import type { MediaStoragePort } from "./application/ports/media-storage.port";
+import type { MediaRepositoryPort } from "./application/ports/media-repository.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
@@ -198,6 +204,19 @@ export interface Dependencies {
    * `/users/:handle/posts`) do not.
    */
   createPost: CreatePost;
+  /**
+   * Task 7 of images: the resolved `MAX_POST_IMAGES`, defaulting to 5 —
+   * see `resolveMaxPostImages`'s own docstring for why it is a runtime env
+   * var rather than a shared constant. `postRoutes` reads this to build the
+   * `.max()` on `mediaIds` for BOTH `POST /users/posts` and
+   * `PATCH /users/posts/:id`, and `GET /users/limits` (mounted by
+   * `userRoutes`) reports it verbatim so the web — a static nginx build that
+   * cannot read this process's env — can learn it too (images design spec
+   * §6). Exposed here, rather than only closed over inside `postRoutes`, for
+   * the same reason every other resolved value on this interface is: a test
+   * must be able to prove what a given environment actually wired.
+   */
+  maxPostImages: number;
   /** `PATCH /users/posts/:id`. 403s a post that is not the caller's own, 404s a missing or already-deleted one. */
   editPost: EditPost;
   /** `DELETE /users/posts/:id`. Idempotent — deleting an already-deleted post is not an error. */
@@ -510,6 +529,35 @@ export interface Dependencies {
    * `routes/public-subscription.ts`'s `WATCH_REFUSED_BODY`.
    */
   resolveWatchToken: ResolveWatchToken | undefined;
+  /**
+   * Phase 4's image storage (Task 2). Never `undefined` and never `null` —
+   * mirrors `messaging`, not `payments`/`email`/`streamingProvider`: unlike
+   * those three, a box with no bucket configured does not degrade a feature,
+   * it refuses to start at all (see `selectMediaStorage`'s own docstring for
+   * why an API that accepts uploads and silently keeps them in memory is
+   * worse than one that never came up). Exposed for the same reason
+   * `messaging` is: a test must be able to prove what a given environment
+   * actually wired, and Task 4's upload path needs to assert bytes really
+   * reached the SAME adapter `bootstrap()` selected, not a fake the test
+   * constructed itself.
+   */
+  mediaStorage: MediaStoragePort;
+  /**
+   * Task 4's `POST /users/media`. Writes both re-encoded variants to
+   * `mediaStorage` and inserts the unclaimed row — see `UploadMedia`'s own
+   * docstring for the ordering between those two writes and why it matters.
+   */
+  uploadMedia: UploadMedia;
+  /**
+   * Task 5's delivery routes (`GET /users/media/:id` and `/thumb`) need the
+   * row — `findById` — to 404 an id that is well-formed but unknown, and
+   * later to give Phase 6's entitlement check something to read ownership
+   * and tier from before any bytes leave `mediaStorage`. Exposed as its own
+   * field rather than only wired into `uploadMedia`, because that use case
+   * is write-only; the SAME instance backs both, constructed once in this
+   * function.
+   */
+  mediaRepository: MediaRepositoryPort;
 }
 
 /**
@@ -1087,6 +1135,49 @@ export function resolveAiDailyMessageLimit(env: { value: string | undefined }): 
 }
 
 /**
+ * The most images a single post may carry. Task 6 built `mediaIds` on both
+ * create and edit but deliberately left the cap unenforced; this is it.
+ *
+ * A RUNTIME env var rather than a shared constant (images design spec §6) —
+ * the owner's tradeoff, taken knowingly: the web is a static nginx build and
+ * cannot read an API-side env var, so `GET /users/limits` exists for it to
+ * learn this number instead of importing it.
+ */
+export const DEFAULT_MAX_POST_IMAGES = 5;
+
+/**
+ * Parses `MAX_POST_IMAGES`. Unlike `resolveAiDailyMessageLimit` above, this
+ * takes the raw string directly rather than `{ value }` — there is only ever
+ * one thing to resolve here, and `postRoutes`/`bootstrap()` both call it with
+ * exactly `process.env.MAX_POST_IMAGES`.
+ *
+ * Same fail-closed shape as `resolveAiDailyMessageLimit` and for the same
+ * reason: `Number("abc")` is `NaN`, and a cap silently coerced to `NaN` would
+ * make every `mediaIds.length <= NaN` comparison false — "reject every post
+ * with an image", not "no cap" — the opposite of what an operator
+ * fat-fingering this value would expect. Called UNCONDITIONALLY in
+ * `bootstrap()`, not gated behind a feature flag the way
+ * `resolveAiDailyMessageLimit` is gated behind `aiProvider`: posting is a
+ * core feature on every box, so a malformed value here must fail boot on
+ * every box, not just some.
+ */
+export function resolveMaxPostImages(value: string | undefined): number {
+  const raw = presentOrUndefined(value);
+  if (raw === undefined) {
+    return DEFAULT_MAX_POST_IMAGES;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(
+      `MAX_POST_IMAGES must be a whole number of at least 1 (got "${raw}"). Unset it to ` +
+        `use the default of ${DEFAULT_MAX_POST_IMAGES}.`
+    );
+  }
+  return parsed;
+}
+
+/**
  * Minimum `MEDIAMTX_WEBHOOK_SECRET`/`STREAM_TOKEN_SECRET` length, the same
  * floor as `JWT_SECRET`/`XENDIT_CALLBACK_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`
  * above and for the same reason: `MEDIAMTX_WEBHOOK_SECRET` is the ONLY
@@ -1238,6 +1329,115 @@ export function selectStreamingProvider(env: {
       "creator's streaming UI stays hidden. Set all five env vars to enable it."
   );
   return undefined;
+}
+
+/** The five env vars that make up media storage configuration, for error text. */
+const MEDIA_STORAGE_ENV_VAR_NAMES = {
+  accessKeyId: "S3_ACCESS_KEY_ID",
+  secretAccessKey: "S3_SECRET_ACCESS_KEY",
+  bucket: "S3_BUCKET",
+  endpoint: "S3_ENDPOINT",
+  region: "S3_REGION",
+} as const;
+
+/**
+ * Chooses where image bytes live (Task 2 of Phase 4's images work).
+ *
+ * Same five-vars-together shape as `selectStreamingProvider` above — all set,
+ * or none, or it throws for being half-wired — but the ABSENT branch is
+ * deliberately `selectMessagingProviders`'s shape, not `selectStreamingProvider`'s
+ * or `selectPaymentProvider`'s:
+ *
+ *   1. All five set -> `S3MediaStorageAdapter`, in EVERY environment. Real
+ *      bytes go to a real bucket.
+ *   2. PARTIAL configuration (one to four set) throws in EVERY environment,
+ *      same reasoning as every other half-configured guard in this file: an
+ *      access key with no bucket is never intentional.
+ *   3. ABSENT configuration selects `FakeMediaStorageAdapter` ONLY when
+ *      `NODE_ENV` is in `RELAXED_NODE_ENVS` — the fake keeps bytes in a `Map`
+ *      instead of a bucket.
+ *   4. ABSENT configuration OUTSIDE the allowlist THROWS — it does NOT
+ *      degrade the way `selectStreamingProvider`/`selectEmailProvider`/
+ *      `selectPaymentProvider` do. This is the deliberate asymmetry: a
+ *      disabled co-builder or a hidden "go live" button costs a creator a
+ *      feature they can see is missing, but an upload endpoint that stays
+ *      UP and silently keeps every image in process memory looks like it
+ *      worked, loses every byte on the next restart or deploy, and gives
+ *      nobody any signal that anything is wrong until a member reports a
+ *      broken image. An API that refuses to start is a better failure than
+ *      an API that quietly eats uploads — the same call `selectMessagingProviders`
+ *      makes for an invite nobody can be told about.
+ */
+export function selectMediaStorage(env: {
+  accessKeyId: string | undefined;
+  secretAccessKey: string | undefined;
+  bucket: string | undefined;
+  endpoint: string | undefined;
+  region: string | undefined;
+  nodeEnv: string | undefined;
+}): MediaStoragePort {
+  const values = {
+    accessKeyId: presentOrUndefined(env.accessKeyId),
+    secretAccessKey: presentOrUndefined(env.secretAccessKey),
+    bucket: presentOrUndefined(env.bucket),
+    endpoint: presentOrUndefined(env.endpoint),
+    region: presentOrUndefined(env.region),
+  };
+  const entries = Object.entries(values) as [keyof typeof values, string | undefined][];
+  const setCount = entries.filter(([, value]) => value !== undefined).length;
+
+  if (setCount === entries.length) {
+    logProviderChoice(
+      env.nodeEnv,
+      `[bootstrap] media storage: S3MediaStorageAdapter (bucket ${values.bucket} at ` +
+        `${values.endpoint}) — uploads are REAL`
+    );
+    return new S3MediaStorageAdapter({
+      accessKeyId: values.accessKeyId as string,
+      secretAccessKey: values.secretAccessKey as string,
+      bucket: values.bucket as string,
+      endpoint: values.endpoint as string,
+      region: values.region as string,
+    });
+  }
+
+  if (setCount > 0) {
+    const present = entries
+      .filter(([, value]) => value !== undefined)
+      .map(([key]) => MEDIA_STORAGE_ENV_VAR_NAMES[key]);
+    const missing = entries
+      .filter(([, value]) => value === undefined)
+      .map(([key]) => MEDIA_STORAGE_ENV_VAR_NAMES[key]);
+    throw new Error(
+      `Media storage is half-configured: ${present.join(", ")} set but ${missing.join(", ")} not. ` +
+        "Set S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_BUCKET, S3_ENDPOINT and S3_REGION " +
+        "together or not at all — see apps/api/.env.example. Refusing to start rather than boot " +
+        "with media storage half-wired."
+    );
+  }
+
+  if (isRelaxedNodeEnv(env.nodeEnv)) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] media storage: FakeMediaStorageAdapter — uploads are kept IN MEMORY and " +
+        "vanish on restart (S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_BUCKET/S3_ENDPOINT/" +
+        "S3_REGION not all set, and NODE_ENV is development/test). Set all five to store real " +
+        "images."
+    );
+    return new FakeMediaStorageAdapter();
+  }
+
+  // BLOCK BOOT — see this function's own docstring, case 4, for why this is
+  // deliberately NOT the same shape as selectStreamingProvider/selectEmailProvider
+  // returning a disabled value instead.
+  throw new Error(
+    "S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_BUCKET/S3_ENDPOINT/S3_REGION are not set, and " +
+      `NODE_ENV is ${describeNodeEnv(env.nodeEnv)}. FakeMediaStorageAdapter is permitted ONLY ` +
+      `when NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}: it keeps uploaded bytes in a Map ` +
+      "that vanishes on restart, so a box running it outside development/test would accept " +
+      "uploads and silently drop every one of them — worse than refusing to start. Set all " +
+      "five S3_* env vars — see apps/api/.env.example — or set NODE_ENV=development."
+  );
 }
 
 /**
@@ -1606,12 +1806,25 @@ export function bootstrap(): Dependencies {
 
   // Task 2 of posts-and-feed. One repository, five use cases — mirrors
   // `followRepository`'s shape just above.
+  //
+  // Phase 4 Task 6: four of the five now also take `mediaRepository`, because
+  // a post carries its images (`media` on every post view), a create or edit
+  // claims them, and an edit unclaims what it dropped. It is constructed HERE
+  // rather than beside `uploadMedia` further down — it needs nothing but `db`,
+  // and these use cases are built before media storage is even selected.
+  const mediaRepository = new DrizzleMediaRepository(db);
   const postRepository = new DrizzlePostRepository(db);
-  const createPost = new CreatePost(postRepository);
-  const editPost = new EditPost(postRepository);
+  // Task 7 of images: resolved UNCONDITIONALLY, unlike
+  // `resolveAiDailyMessageLimit` (gated behind `aiProvider` further below) —
+  // posting is a core feature on every box, so a malformed `MAX_POST_IMAGES`
+  // must fail boot everywhere, not just where some optional feature happens
+  // to be enabled.
+  const maxPostImages = resolveMaxPostImages(process.env.MAX_POST_IMAGES);
+  const createPost = new CreatePost(postRepository, mediaRepository);
+  const editPost = new EditPost(postRepository, mediaRepository);
   const deletePost = new DeletePost(postRepository);
-  const listFeed = new ListFeed(postRepository);
-  const listUserPosts = new ListUserPosts(userRepository, postRepository);
+  const listFeed = new ListFeed(postRepository, mediaRepository);
+  const listUserPosts = new ListUserPosts(userRepository, postRepository, mediaRepository);
 
   const communityRepository = new DrizzleCommunityRepository(db);
   const listCommunities = new ListCommunities(communityRepository);
@@ -1810,6 +2023,27 @@ export function bootstrap(): Dependencies {
     fonnteApiToken: process.env.FONNTE_API_TOKEN,
     nodeEnv: process.env.NODE_ENV,
   });
+
+  // Phase 4's image storage (Task 2). Positioned here, right after messaging,
+  // because it shares messaging's block-boot shape (see `selectMediaStorage`'s
+  // own docstring) rather than payments'/email's/streaming's disabled-instead
+  // shape — both guards refuse to let this process come up looking like it
+  // works while quietly failing the thing a paying member or a posting user
+  // is relying on.
+  const mediaStorage: MediaStoragePort = selectMediaStorage({
+    accessKeyId: process.env.S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
+    bucket: process.env.S3_BUCKET,
+    endpoint: process.env.S3_ENDPOINT,
+    region: process.env.S3_REGION,
+    nodeEnv: process.env.NODE_ENV,
+  });
+
+  // Task 4's `POST /users/media`. `mediaRepository` itself is constructed up
+  // with `postRepository` (Task 6 needs it there); this is where it meets
+  // `mediaStorage`, the use case's other dependency. The SAME instance backs
+  // Task 5's delivery routes, which look a row up by id.
+  const uploadMedia = new UploadMedia(mediaRepository, mediaStorage);
 
   // Task 5's password reset, and `registerUser`'s existing-email notice.
   // Constructed HERE, not up with `userRepository`/`authenticateUser` above,
@@ -2012,6 +2246,7 @@ export function bootstrap(): Dependencies {
     listFollows,
     exploreUsers,
     createPost,
+    maxPostImages,
     editPost,
     deletePost,
     listFeed,
@@ -2058,5 +2293,8 @@ export function bootstrap(): Dependencies {
     resolveWatchToken,
     mediamtxWebhookSecret,
     handleStreamLifecycle,
+    mediaStorage,
+    uploadMedia,
+    mediaRepository,
   };
 }

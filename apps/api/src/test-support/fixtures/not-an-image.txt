@@ -1,0 +1,4 @@
+This is a plain text file with a .txt extension.
+It is used to verify that processUpload sniffs the actual file header rather
+than trusting the filename or any client-supplied Content-Type. Renaming this
+file to .jpg would not make it a JPEG.

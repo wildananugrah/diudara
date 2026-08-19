@@ -5,3 +5,6 @@ node_modules
 dist
 .env
 .DS_Store
+# SDD scratch: briefs, reports, reviews, diffs. The durable record goes to
+# docs/superpowers/sdd/ at the end of a phase, as Phase 3 did.
+.superpowers/

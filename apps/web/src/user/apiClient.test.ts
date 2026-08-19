@@ -10,6 +10,7 @@ import {
   editPost,
   exploreUsers,
   followUser,
+  getMaxPostImages,
   getOwnProfile,
   getProfileByHandle,
   getSessionUser,
@@ -19,9 +20,14 @@ import {
   listFollowers,
   listFollowing,
   listUserPosts,
+  loadPostImageLimit,
   login,
+  mediaThumbUrl,
   repairSplitSession,
   requestPasswordReset,
+  resetPostImageLimitForTesting,
+  subscribeToPostImageLimit,
+  uploadMedia,
   SESSION_EXPIRED_MESSAGE,
   SessionStorageError,
   setUserSession,
@@ -1013,6 +1019,7 @@ const POST_VIEW = {
   body: "Halo",
   createdAt: "2026-08-18T00:00:00.000Z",
   editedAt: null,
+  media: [],
   author: { handle: "wildan", displayName: "Wildan" },
 };
 
@@ -1186,5 +1193,210 @@ describe("apiClient — posts and the feed (Task 4)", () => {
 
     expect(calls[0]!.url).toBe("/users/posts/post-1");
     expect(calls[0]!.init.method).toBe("DELETE");
+  });
+});
+
+/**
+ * Task 8 — the web learns about media. Three separate things live here:
+ * the upload itself (`POST /users/media`, multipart), the advisory limit
+ * (`GET /users/limits` plus the store the composer reads it from), and
+ * `mediaIds` on create/edit.
+ *
+ * Every number below is a LITERAL. `FALLBACK_MAX_POST_IMAGES` is never read
+ * into an assertion: a test that asserts against the same constant the
+ * production code reads moves in lockstep with a regression to it.
+ */
+describe("apiClient — uploading one photo (Task 8)", () => {
+  it("POSTs the file to /users/media as multipart, under the field name the route reads", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ id: "media-1", width: 800, height: 600 }, 201);
+    }) as unknown as typeof fetch;
+
+    const result = await uploadMedia(new File(["bytes"], "foto.jpg", { type: "image/jpeg" }));
+
+    expect(calls[0]!.url).toBe("/users/media");
+    expect(calls[0]!.init.method).toBe("POST");
+    const sent = calls[0]!.init.body as FormData;
+    expect(sent instanceof FormData).toBe(true);
+    // `routes/media.ts` reads `form.get("file")` and 400s anything else.
+    expect((sent.get("file") as File).name).toBe("foto.jpg");
+    expect(result).toEqual({ id: "media-1", width: 800, height: 600 });
+  });
+
+  it("sends the Bearer token but NO Content-Type — the multipart boundary is the browser's to set", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ init: RequestInit }> = [];
+    global.fetch = mock(async (_url: string, init: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse({ id: "media-1", width: 1, height: 1 }, 201);
+    }) as unknown as typeof fetch;
+
+    await uploadMedia(new File(["bytes"], "foto.jpg", { type: "image/jpeg" }));
+
+    const headers = new Headers(calls[0]!.init.headers);
+    expect(headers.get("Authorization")).toBe("Bearer jwt-abc");
+    // `authorizedHeaders` sets `application/json` for any body that is not a
+    // FormData. Setting it here would strip the boundary `fetch` generates and
+    // `c.req.formData()` would parse nothing at all.
+    expect(headers.get("Content-Type")).toBeNull();
+  });
+
+  it("surfaces the API's refusal as a UserApiError, so errorCopy can shape it", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "Ukuran foto maksimal 8 MB." }, 400)
+    ) as unknown as typeof fetch;
+
+    const failure = await uploadMedia(new File(["bytes"], "besar.jpg")).catch((err: unknown) => err);
+
+    expect(failure instanceof UserApiError).toBe(true);
+    expect((failure as UserApiError).status).toBe(400);
+  });
+
+  it("derives the thumbnail path from the id alone — there is no URL on the wire", () => {
+    expect(mediaThumbUrl("media-1")).toBe("/users/media/media-1/thumb");
+    expect(mediaThumbUrl("a/b")).toBe("/users/media/a%2Fb/thumb");
+  });
+});
+
+describe("apiClient — the advisory image limit (Task 8, spec §6)", () => {
+  afterEach(() => {
+    resetPostImageLimitForTesting();
+  });
+
+  it("starts at the built-in default of 5 before anything is fetched", () => {
+    expect(getMaxPostImages()).toBe(5);
+  });
+
+  it("GETs /users/limits and adopts the server's number", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse({ maxPostImages: 3 });
+    }) as unknown as typeof fetch;
+
+    await loadPostImageLimit();
+
+    expect(calls[0]).toBe("/users/limits");
+    expect(getMaxPostImages()).toBe(3);
+  });
+
+  it("notifies subscribers when the number changes, so a mounted composer sees it", async () => {
+    let notified = 0;
+    const unsubscribe = subscribeToPostImageLimit(() => {
+      notified += 1;
+    });
+    global.fetch = mock(async () => jsonResponse({ maxPostImages: 2 })) as unknown as typeof fetch;
+
+    await loadPostImageLimit();
+    unsubscribe();
+
+    expect(notified).toBe(1);
+    expect(getMaxPostImages()).toBe(2);
+  });
+
+  /**
+   * Spec §6, the whole point of this endpoint being advisory: "a composer that
+   * refuses to open because a config endpoint is down would be a worse product
+   * than one that occasionally offers a sixth photo and is told no."
+   */
+  it("keeps the built-in 5 and never rejects when the endpoint is down", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "internal server error" }, 500)
+    ) as unknown as typeof fetch;
+
+    await loadPostImageLimit();
+
+    expect(getMaxPostImages()).toBe(5);
+  });
+
+  it("keeps the built-in 5 when the network is gone entirely", async () => {
+    global.fetch = mock(async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+
+    await loadPostImageLimit();
+
+    expect(getMaxPostImages()).toBe(5);
+  });
+
+  /**
+   * A proxy error page, an older server, a `{ maxPostImages: "5" }` — anything
+   * that is not a whole number of at least 1 leaves the fallback alone. Without
+   * this the composer would end up with `NaN` or `0` as its cap and disable
+   * "Tambah foto" for ever, which is the exact failure mode §6 forbids.
+   */
+  it("keeps the built-in 5 when the answer is not a whole number of at least 1", async () => {
+    for (const nonsense of [{ maxPostImages: "3" }, { maxPostImages: 0 }, { maxPostImages: 2.5 }, {}]) {
+      global.fetch = mock(async () => jsonResponse(nonsense)) as unknown as typeof fetch;
+      await loadPostImageLimit();
+      expect(getMaxPostImages()).toBe(5);
+    }
+  });
+});
+
+describe("apiClient — mediaIds on create and edit (Task 8)", () => {
+  it("createPost sends mediaIds in the given order when there are images", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ init: RequestInit }> = [];
+    global.fetch = mock(async (_url: string, init: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse(POST_VIEW, 201);
+    }) as unknown as typeof fetch;
+
+    await createPost("Halo", ["media-2", "media-1"]);
+
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({
+      body: "Halo",
+      mediaIds: ["media-2", "media-1"],
+    });
+  });
+
+  it("createPost omits the key entirely when no list is given", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ init: RequestInit }> = [];
+    global.fetch = mock(async (_url: string, init: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse(POST_VIEW, 201);
+    }) as unknown as typeof fetch;
+
+    await createPost("Halo");
+
+    expect("mediaIds" in JSON.parse(String(calls[0]!.init.body))).toBe(false);
+  });
+
+  /**
+   * Spec §5.2: `mediaIds` is the COMPLETE desired list, not a delta, and on
+   * PATCH an explicit `[]` removes every image while an OMITTED key leaves them
+   * alone. The two must stay distinguishable on the wire, so an empty array has
+   * to be sent rather than treated as "nothing to say".
+   */
+  it("editPost sends an explicit empty list — removing every image is not the same as omitting the key", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ init: RequestInit }> = [];
+    global.fetch = mock(async (_url: string, init: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse(POST_VIEW);
+    }) as unknown as typeof fetch;
+
+    await editPost("post-1", "Diedit", []);
+
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ body: "Diedit", mediaIds: [] });
+  });
+
+  it("editPost omits the key when the caller has nothing to say about images", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ init: RequestInit }> = [];
+    global.fetch = mock(async (_url: string, init: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse(POST_VIEW);
+    }) as unknown as typeof fetch;
+
+    await editPost("post-1", "Diedit");
+
+    expect("mediaIds" in JSON.parse(String(calls[0]!.init.body))).toBe(false);
   });
 });

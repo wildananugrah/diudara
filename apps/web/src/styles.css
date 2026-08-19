@@ -1144,6 +1144,94 @@ tbody tr:last-child td {
   margin-top: 8px;
 }
 
+/* ---------------------------------------------------------------
+   Task 9: the media slot (images design spec §2 — the media slot itself, and
+   thumbnails named as Phase 4's job, are both §2). Lives inside
+   `.user-page`/`.beranda-page`, whose container is capped at 36rem
+   (576px) at EVERY viewport width — see the `.user-page` rule above —
+   so this grid does not need its own 390px/1440px breakpoints: the
+   same fluid layout renders sensibly at both, just with more
+   surrounding whitespace on a wide screen.
+
+   One image keeps its OWN aspect ratio (from the `width`/`height`
+   attributes `PostCard.tsx` sets from the media entry) rather than
+   being cropped to a tile — a single photo is the post's whole
+   picture, not a handle for it. Two or more images are cropped to
+   square tiles, exactly like the composer's own `.media-strip-preview`
+   above: a mosaic of tiles reads as a set, not as several unrelated
+   crops.
+
+   `data-count` is written by `PostCard.tsx` and is a pure styling
+   hook — it does not exist in the API's `MediaView` and carries no
+   behaviour. Three and five are given their own mosaic (one large +
+   two stacked; two wide + three narrow) because a plain uniform grid
+   left five images with a lopsided gap in the last row. Two and four
+   are even counts and need nothing beyond the plain 2-column grid.
+   --------------------------------------------------------------- */
+.post-card-media {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  margin-top: 8px;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* `height: auto` IS LOAD-BEARING AND MUST NOT BE REMOVED — final whole-branch
+   review, Critical 1, measured in headless Chrome rather than reasoned about.
+   `PostCard.tsx` writes `width`/`height` ATTRIBUTES on every `<img>`; those are
+   presentational hints for the CSS `width` and `height` properties. Overriding
+   only `width` left the height hint standing, so every box rendered at the
+   stored FULL image's pixel height — a five-image post measured 390x3204 on a
+   390px phone instead of 390x324 — and, both axes then being definite, the
+   `aspect-ratio` that used to sit in this rule never applied to anything at
+   all.
+
+   THE SQUARE IS SCOPED TO THE MULTI-IMAGE CASE, not declared here and undone
+   for `[data-count="1"]`. That undoing (`aspect-ratio: auto`) discarded the
+   ratio the UA derives from the same two attributes, so a single image — the
+   most common post shape — reserved ZERO height until its byte arrived
+   (measured: 390x20 before load, 390x520 after), which is precisely the reflow
+   `post_media.width`/`.height` exist to prevent (spec §4). Leaving
+   `aspect-ratio` unset for one image lets the attribute-derived ratio stand.
+
+   Measured after this change, images 1200x1600, container 390px, BEFORE the
+   bytes load and after — identical, i.e. nothing reflows:
+   count=1 390x520, count=2 tiles 193x193, count=3 390x390, count=5 390x324. */
+.post-card-media img {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: cover;
+  background: var(--line);
+}
+
+.post-card-media:not([data-count="1"]) img {
+  aspect-ratio: 1 / 1;
+}
+
+.post-card-media[data-count="2"],
+.post-card-media[data-count="3"],
+.post-card-media[data-count="4"] {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.post-card-media[data-count="3"] img:first-child {
+  grid-row: span 2;
+}
+
+.post-card-media[data-count="5"] {
+  grid-template-columns: repeat(6, 1fr);
+}
+
+.post-card-media[data-count="5"] img:nth-child(-n + 2) {
+  grid-column: span 3;
+}
+
+.post-card-media[data-count="5"] img:nth-child(n + 3) {
+  grid-column: span 2;
+}
+
 /* Task 4: PostFeed. `.post-feed` itself needs no layout of its own — each
    `.post-card` already draws its own `border-bottom` and vertical padding,
    so the list reads correctly as a plain stack of block children. */
@@ -1223,6 +1311,107 @@ tbody tr:last-child td {
 
 .post-composer-counter.over {
   color: var(--red);
+}
+
+/* --- The composer's media strip (Task 8, spec §7) ------------------------ */
+
+.media-strip {
+  margin-bottom: 8px;
+}
+
+.media-strip-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.media-strip-item {
+  position: relative;
+  width: 96px;
+}
+
+.media-strip-preview {
+  display: block;
+  width: 96px;
+  height: 96px;
+  /* Cropped to a square tile rather than letterboxed: the strip is a row of
+     handles for photos the author already recognises, not a viewer. The post
+     itself shows them whole. */
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.media-strip-item.uploading .media-strip-preview {
+  opacity: 0.5;
+}
+
+.media-strip-progress,
+.media-strip-error {
+  display: block;
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+}
+
+.media-strip-progress {
+  color: var(--ink-faint);
+}
+
+.media-strip-error {
+  color: var(--red);
+}
+
+/* A 28px tap target on the corner of the tile — the phone-first minimum this
+   app uses elsewhere, and inside the tile so the row stays one line tall. */
+.media-strip-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.media-strip-remove:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.media-strip-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Driven by the "Tambah foto" button beside it — see `MediaStrip.tsx`. A bare
+   file input reads as "Browse… no file selected" and cannot be styled. */
+.media-strip-picker {
+  display: none;
+}
+
+/* One sentence about what the last pick could not take. Red like every other
+   failure line in this app, and below the button that produced it. */
+.media-strip-notice {
+  color: var(--red);
+  font-size: 0.8125rem;
+  margin: 8px 0 0;
+}
+
+.media-strip-counter {
+  color: var(--ink-faint);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .post-composer-error {

@@ -82,6 +82,24 @@
 # alternative (MediaMTX's own per-session cache) is a real security gap —
 # but it is a genuine new coupling, not a free change.
 
+# NOT IN THIS FRAGMENT, BUT REQUIRED ON THE SAME SERVER BLOCK — the images
+# phase's final whole-branch review, Important 2. `POST /users/media`
+# accepts a 10 MB photo and an ordinary phone camera produces 2-5 MB, while
+# nginx's DEFAULT `client_max_body_size` is 1 MB. A box left on the default
+# refuses nearly every real upload with nginx's own 413 page, which
+# `apps/api` never sees and never logs. The one line —
+#
+#     client_max_body_size 12m;
+#
+# — belongs on the `location /users/` block (or the enclosing `server`)
+# that proxies this app's API, and that block is NOT in this repository:
+# this file is only the /live/, /whip/ and internal-auth locations. It is
+# written up as its own pre-deploy step in CONTRIBUTING.md ("Pre-deploy
+# checklist: photo uploads"), with a curl that verifies it through the
+# public origin. It is deliberately NOT declared here: a directive in the
+# wrong location block would apply to HLS segment requests and to nothing
+# that uploads anything.
+
 # FIX 3 (final whole-branch review, Important): "/webhooks/mediamtx/ is
 # never on the public surface" was, until this block existed, a claim
 # about what THIS file does not contain — never a guard against whatever

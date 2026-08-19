@@ -37,7 +37,9 @@ export function isValidHandle(normalised: string): boolean {
 export const RESERVED_HANDLES: ReadonlySet<string> = new Set([
   "explore",
   "feed",
+  "limits",
   "login",
+  "media",
   "posts",
   "signup",
 ]);
