@@ -1,12 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { ForbiddenError, NotFoundError, ValidationError } from "../errors";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../errors";
 import type { MediaRepositoryPort, MediaRow } from "../ports/media-repository.port";
 import type {
   PostOwnership,
   PostRepositoryPort,
   PostRow,
 } from "../ports/post-repository.port";
-import { FakeMediaStorageAdapter } from "../../infrastructure/storage/fake-media-storage.adapter";
 import { CreatePost, DeletePost, EditPost } from "./write-post";
 
 const POST_ID = "aaaaaaaa-0000-4000-8000-000000000000";
@@ -101,18 +100,23 @@ class FakeMedia implements MediaRepositoryPort {
   async findManyByIds(ids: string[]): Promise<MediaRow[]> {
     return this.rows.filter((row) => ids.includes(row.id));
   }
-  async claim(postId: string, ids: string[]): Promise<void> {
+  /** Returns the number actually claimed, exactly as the real repository does — a
+      row that has vanished since the ownership check is simply not counted. */
+  async claim(postId: string, ids: string[]): Promise<number> {
     this.claims.push({ postId, ids: [...ids] });
     for (const row of this.rows) {
       if (row.postId === postId) row.postId = null;
     }
+    let claimed = 0;
     ids.forEach((id, position) => {
       const row = this.rows.find((candidate) => candidate.id === id);
       if (row !== undefined) {
         row.postId = postId;
         row.position = position;
+        claimed += 1;
       }
     });
+    return claimed;
   }
   async listForPost(postId: string): Promise<MediaRow[]> {
     return this.rows
@@ -127,9 +131,12 @@ class FakeMedia implements MediaRepositoryPort {
   async listUnclaimedBefore(): Promise<MediaRow[]> {
     return [];
   }
-  async deleteById(id: string): Promise<void> {
+  async deleteIfUnclaimed(id: string): Promise<boolean> {
     this.deletes.push(id);
-    this.rows = this.rows.filter((row) => row.id !== id);
+    const row = this.rows.find((candidate) => candidate.id === id);
+    if (row === undefined || row.postId !== null) return false;
+    this.rows = this.rows.filter((candidate) => candidate.id !== id);
+    return true;
   }
 }
 
@@ -262,6 +269,40 @@ describe("CreatePost", () => {
       })
     ).rejects.toBeInstanceOf(ValidationError);
     expect(posts.created).toEqual([]);
+  });
+
+  /**
+   * **The sweep's race, made LOUD.** Final whole-branch review, Important 4:
+   * `requireAttachable` reads the rows, the orphan sweep deletes one of them a
+   * moment later, and `claim` — which used to return nothing — attached one
+   * fewer row than it was given and said nothing at all. The author got a post
+   * back holding fewer photos than they sent, with no error anywhere.
+   *
+   * A `ConflictError` and not silence: the request cannot be completed as
+   * asked, and the person can act on it (upload the photo again). The post row
+   * does already exist by this point — the honest cost of not making the write
+   * and the claim one unit of work, which is a separate, recorded decision.
+   */
+  it("refuses loudly when a claim attaches fewer rows than it was given", async () => {
+    const posts = new FakePosts();
+    const media = new FakeMedia();
+    media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR });
+    const seen = media.findManyByIds.bind(media);
+    // The sweep wins the race: the row is there for the ownership check and
+    // gone by the time `claim` runs.
+    media.findManyByIds = async (ids: string[]) => {
+      const rows = await seen(ids);
+      media.rows = media.rows.filter((row) => row.id !== FIRST_IMAGE);
+      return rows;
+    };
+
+    await expect(
+      new CreatePost(posts, media).execute({
+        authorId: AUTHOR,
+        body: "halo",
+        mediaIds: [FIRST_IMAGE],
+      })
+    ).rejects.toBeInstanceOf(ConflictError);
   });
 });
 
@@ -402,9 +443,17 @@ describe("EditPost", () => {
    * Spec §8 and §11: removal UNCLAIMS, it never deletes. Asserting only that
    * the image left the post would pass equally well against an implementation
    * that dropped the row and the objects on the spot — so the row's surviving
-   * `postId: null` and the bytes still sitting in storage are both asserted
-   * here, at the layer where the storage adapter can actually be injected and
-   * looked at. The route test asserts the database half of the same rule.
+   * `postId: null` and the fact that NOTHING was asked to delete are both
+   * asserted here.
+   *
+   * **The bytes are checked through `media.deletes`, not through a storage
+   * probe.** Final whole-branch review, Minor 7: this test used to build a
+   * `FakeMediaStorageAdapter`, put two objects in it and assert they were still
+   * there — two lines that cannot fail, because `EditPost` holds no storage
+   * port at all (read its constructor) and so could not have removed them under
+   * any implementation. `media.deletes` is the guard that can actually fail: it
+   * is the only route by which anything on this path could reach the bytes,
+   * since the sweep deletes objects only for rows this list hands it.
    */
   it("removing an image unclaims its row and leaves the bytes in storage", async () => {
     const posts = new FakePosts();
@@ -412,9 +461,6 @@ describe("EditPost", () => {
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID, position: 0 });
     media.seed({ id: SECOND_IMAGE, ownerId: AUTHOR, postId: POST_ID, position: 1 });
-    const storage = new FakeMediaStorageAdapter();
-    await storage.put(SECOND_IMAGE, "full", new Uint8Array([1, 2, 3]));
-    await storage.put(SECOND_IMAGE, "thumb", new Uint8Array([4, 5]));
 
     const view = await new EditPost(posts, media).execute({
       editorId: AUTHOR,
@@ -426,8 +472,28 @@ describe("EditPost", () => {
     expect(view.media.map((image) => image.id)).toEqual([FIRST_IMAGE]);
     expect(await media.findById(SECOND_IMAGE)).toMatchObject({ postId: null });
     expect(media.deletes).toEqual([]);
-    expect(await storage.get(SECOND_IMAGE, "full")).not.toBe(null);
-    expect(await storage.get(SECOND_IMAGE, "thumb")).not.toBe(null);
+  });
+
+  it("refuses loudly when an edit's claim attaches fewer rows than it was given", async () => {
+    const posts = new FakePosts();
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false };
+    const media = new FakeMedia();
+    media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR });
+    const seen = media.findManyByIds.bind(media);
+    media.findManyByIds = async (ids: string[]) => {
+      const rows = await seen(ids);
+      media.rows = media.rows.filter((row) => row.id !== FIRST_IMAGE);
+      return rows;
+    };
+
+    await expect(
+      new EditPost(posts, media).execute({
+        editorId: AUTHOR,
+        postId: POST_ID,
+        body: "halo",
+        mediaIds: [FIRST_IMAGE],
+      })
+    ).rejects.toBeInstanceOf(ConflictError);
   });
 });
 

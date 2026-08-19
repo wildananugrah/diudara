@@ -49,15 +49,23 @@ export class DrizzleMediaRepository implements MediaRepositoryPort {
    * no row is ever visible to another connection attached to two posts at
    * once, nor visible as unclaimed when it is really just being reordered.
    */
-  async claim(postId: string, ids: string[]): Promise<void> {
-    await this.db.transaction(async (tx) => {
+  async claim(postId: string, ids: string[]): Promise<number> {
+    return this.db.transaction(async (tx) => {
       await tx.update(postMedia).set({ postId: null }).where(eq(postMedia.postId, postId));
+      let claimed = 0;
       for (let position = 0; position < ids.length; position++) {
-        await tx
+        // `.returning({ id })` rather than a driver-specific rowcount: the
+        // length of what comes back IS the number of rows the statement
+        // touched, and it is the same shape on every executor this port is
+        // handed (a pool, a transaction, a test double).
+        const updated = await tx
           .update(postMedia)
           .set({ postId, position })
-          .where(eq(postMedia.id, ids[position]!));
+          .where(eq(postMedia.id, ids[position]!))
+          .returning({ id: postMedia.id });
+        claimed += updated.length;
       }
+      return claimed;
     });
   }
 
@@ -89,7 +97,16 @@ export class DrizzleMediaRepository implements MediaRepositoryPort {
       .limit(clampLimit(limit));
   }
 
-  async deleteById(id: string): Promise<void> {
-    await this.db.delete(postMedia).where(eq(postMedia.id, id));
+  /**
+   * `WHERE id = ? AND post_id IS NULL` — the guard the port describes, enforced
+   * in the DELETE itself rather than by a read-then-delete, which would be the
+   * very TOCTOU race this exists to close.
+   */
+  async deleteIfUnclaimed(id: string): Promise<boolean> {
+    const deleted = await this.db
+      .delete(postMedia)
+      .where(and(eq(postMedia.id, id), isNull(postMedia.postId)))
+      .returning({ id: postMedia.id });
+    return deleted.length > 0;
   }
 }

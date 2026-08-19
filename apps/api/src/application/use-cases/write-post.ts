@@ -1,5 +1,5 @@
 import { MAX_POST_BODY_LENGTH } from "@diudara/shared";
-import { ForbiddenError, NotFoundError, ValidationError } from "../errors";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../errors";
 import type { MediaRepositoryPort } from "../ports/media-repository.port";
 import type { PostRepositoryPort } from "../ports/post-repository.port";
 import { toPostView, type PostView } from "./post-views";
@@ -12,6 +12,27 @@ const NOT_YOURS_MESSAGE = "kiriman ini bukan milik Anda";
 const MEDIA_NOT_YOURS_MESSAGE = "foto tidak ditemukan atau bukan milik Anda";
 const MEDIA_TAKEN_MESSAGE = "foto sudah dipakai kiriman lain";
 const MEDIA_DUPLICATE_MESSAGE = "foto yang sama tidak boleh dipakai dua kali";
+const MEDIA_VANISHED_MESSAGE = "foto sudah tidak tersedia, silakan unggah ulang";
+
+/**
+ * **A claim that attached fewer rows than it was given has LOST A RACE, and it
+ * must not pass quietly.**
+ *
+ * Final whole-branch review, Important 4. `requireAttachable` reads the rows
+ * and then `claim` writes them; between those two the orphan sweep can delete a
+ * row it listed as unclaimed (a composer left open overnight, then used). Before
+ * this, `claim` returned nothing and the missing id was a silent no-op — the
+ * author's post came back with fewer photos than they sent, and nothing said so.
+ *
+ * A 409 rather than a 500 because the person can act on it: upload the photo
+ * again. The post row DOES already exist by the time this fires on create,
+ * which is the honest cost of the post write and the media claim not being one
+ * unit of work — a known, separately recorded decision, and a loud wrong-ish
+ * status is still strictly better than silent data loss.
+ */
+function requireFullyClaimed(claimed: number, ids: string[]): void {
+  if (claimed !== ids.length) throw new ConflictError(MEDIA_VANISHED_MESSAGE);
+}
 
 /**
  * Trims, then validates. In that order deliberately: a body of three spaces is
@@ -89,7 +110,7 @@ export class CreatePost {
     const row = await this.posts.create(input.authorId, body);
     if (mediaIds.length === 0) return toPostView(row, []);
 
-    await this.media.claim(row.id, mediaIds);
+    requireFullyClaimed(await this.media.claim(row.id, mediaIds), mediaIds);
     // Read back rather than echoing the ids: what the client gets is what a
     // reload would show, ordered by the `position` that was actually stored.
     return toPostView(row, await this.media.listForPost(row.id));
@@ -135,7 +156,9 @@ export class EditPost {
     // to say so.
     const row = await this.posts.updateBody(input.postId, body);
     if (row === null) throw new NotFoundError("post not found");
-    if (input.mediaIds !== undefined) await this.media.claim(input.postId, input.mediaIds);
+    if (input.mediaIds !== undefined) {
+      requireFullyClaimed(await this.media.claim(input.postId, input.mediaIds), input.mediaIds);
+    }
     return toPostView(row, await this.media.listForPost(input.postId));
   }
 

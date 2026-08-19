@@ -37,6 +37,7 @@ const NOTHING_HAPPENED_CHURN = {
 const NOTHING_HAPPENED_SWEEP = {
   considered: 0,
   deleted: 0,
+  skipped: 0,
   failed: 0,
 };
 
@@ -117,19 +118,23 @@ describe("formatOrphanSweepLine", () => {
   });
 
   it("reports every count when the pass did something", () => {
-    const line = formatOrphanSweepLine({ considered: 5, deleted: 3, failed: 2 });
+    const line = formatOrphanSweepLine({ considered: 6, deleted: 3, skipped: 1, failed: 2 });
 
-    expect(line).toBe("[media] considered=5 deleted=3 failed=2");
+    expect(line).toBe("[media] considered=6 deleted=3 skipped=1 failed=2");
   });
 
   it("speaks up when every row in the pass failed to sweep", () => {
     // `considered>0, deleted=0` is the shape of a pass finding orphans and failing
     // to collect them — the exact silent-failure mode this task exists to prevent.
-    expect(formatOrphanSweepLine({ considered: 2, deleted: 0, failed: 2 })).toContain("failed=2");
+    expect(formatOrphanSweepLine({ considered: 2, deleted: 0, skipped: 0, failed: 2 })).toContain(
+      "failed=2"
+    );
   });
 
   it("emits counts and nothing else", () => {
-    expect(formatOrphanSweepLine({ considered: 1, deleted: 1, failed: 0 })).toMatch(COUNTS_ONLY);
+    expect(formatOrphanSweepLine({ considered: 1, deleted: 1, skipped: 0, failed: 0 })).toMatch(
+      COUNTS_ONLY
+    );
   });
 });
 
@@ -196,7 +201,7 @@ describe("ORPHAN_SWEEP_WINDOW_MS", () => {
  * own test (`drizzle-media.repository.test.ts`) already pins the SQL side.
  */
 class FakeOrphanMediaRepository {
-  private readonly rows = new Map<string, { postId: string | null; createdAt: Date }>();
+  readonly rows = new Map<string, { postId: string | null; createdAt: Date }>();
   readonly deletedIds: string[] = [];
 
   seed(id: string, postId: string | null, createdAt: Date): void {
@@ -211,9 +216,23 @@ class FakeOrphanMediaRepository {
       .map(([id]) => ({ id }));
   }
 
-  async deleteById(id: string): Promise<void> {
+  /** Reads the row exactly as `DrizzleMediaRepository.findById` does — `null` when gone. */
+  async findById(id: string): Promise<{ postId: string | null } | null> {
+    return this.rows.get(id) ?? null;
+  }
+
+  async deleteIfUnclaimed(id: string): Promise<boolean> {
+    const row = this.rows.get(id);
+    if (row === undefined || row.postId !== null) return false;
     this.rows.delete(id);
     this.deletedIds.push(id);
+    return true;
+  }
+
+  /** The race, as a test can spell it: somebody's composer claims this row right now. */
+  claim(id: string, postId: string): void {
+    const row = this.rows.get(id);
+    if (row !== undefined) row.postId = postId;
   }
 }
 
@@ -249,17 +268,17 @@ describe("SweepOrphanMedia", () => {
       events.push(`remove:${id}`);
       await removeSpy(id);
     };
-    const deleteSpy = media.deleteById.bind(media);
-    media.deleteById = async (id) => {
+    const deleteSpy = media.deleteIfUnclaimed.bind(media);
+    media.deleteIfUnclaimed = async (id) => {
       events.push(`delete:${id}`);
-      await deleteSpy(id);
+      return deleteSpy(id);
     };
 
     const sweep = new SweepOrphanMedia(media, storage, { now: () => NOW });
     const result = await sweep.execute();
 
     expect(events).toEqual(["remove:m1", "delete:m1"]);
-    expect(result).toEqual({ considered: 1, deleted: 1, failed: 0 });
+    expect(result).toEqual({ considered: 1, deleted: 1, skipped: 0, failed: 0 });
   });
 
   it("leaves an unclaimed row that is newer than the window untouched", async () => {
@@ -272,7 +291,7 @@ describe("SweepOrphanMedia", () => {
 
     expect(media.deletedIds).toEqual([]);
     expect(storage.removedIds).toEqual([]);
-    expect(result).toEqual({ considered: 0, deleted: 0, failed: 0 });
+    expect(result).toEqual({ considered: 0, deleted: 0, skipped: 0, failed: 0 });
   });
 
   it("never touches a claimed row, however old", async () => {
@@ -285,7 +304,71 @@ describe("SweepOrphanMedia", () => {
 
     expect(media.deletedIds).toEqual([]);
     expect(storage.removedIds).toEqual([]);
-    expect(result).toEqual({ considered: 0, deleted: 0, failed: 0 });
+    expect(result).toEqual({ considered: 0, deleted: 0, skipped: 0, failed: 0 });
+  });
+
+  /**
+   * **THE RACE THIS SWEEP COULD LOSE, and the data it used to destroy.** Final
+   * whole-branch review, Important 4: `listUnclaimedBefore` returns a row, a
+   * composer that has been open overnight claims it onto a post a moment later,
+   * and the sweep — whose delete carried no guard — removed both the bytes and
+   * the row. The post silently held fewer photos than its author sent.
+   *
+   * The row is re-read immediately before the bytes go, so a claim that lands
+   * anywhere in the (long) window between the page listing and this row's turn
+   * costs nothing at all.
+   */
+  it("skips a row that has been claimed since the page was listed, bytes and row intact", async () => {
+    const media = new FakeOrphanMediaRepository();
+    const storage = new FakeOrphanMediaStorage();
+    media.seed("claimed-late", null, hoursAgo(48));
+    media.seed("really-orphaned", null, hoursAgo(47));
+
+    // The claim lands after the page is listed and before the row is swept —
+    // exactly the window the guard exists for.
+    const listSpy = media.listUnclaimedBefore.bind(media);
+    media.listUnclaimedBefore = async (cutoff, limit) => {
+      const page = await listSpy(cutoff, limit);
+      media.claim("claimed-late", "post-1");
+      return page;
+    };
+
+    const sweep = new SweepOrphanMedia(media, storage, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(storage.removedIds).toEqual(["really-orphaned"]);
+    expect(media.deletedIds).toEqual(["really-orphaned"]);
+    expect(result).toEqual({ considered: 2, deleted: 1, skipped: 1, failed: 0 });
+  });
+
+  /**
+   * The residual window — a claim landing between the re-read and the DELETE —
+   * cannot be closed without inverting the objects-before-row order this class
+   * is built on (see its docstring). What it CAN do is refuse to compound the
+   * loss and say so out loud, which is what the conditional delete buys.
+   */
+  it("refuses to delete a row claimed in the last instant, and says so out loud", async () => {
+    const media = new FakeOrphanMediaRepository();
+    const storage = new FakeOrphanMediaStorage();
+    media.seed("m1", null, hoursAgo(48));
+
+    const removeSpy = storage.remove.bind(storage);
+    storage.remove = async (id) => {
+      await removeSpy(id);
+      media.claim(id, "post-1");
+    };
+
+    const errors: string[] = [];
+    const sweep = new SweepOrphanMedia(media, storage, {
+      now: () => NOW,
+      logError: (line) => errors.push(line),
+    });
+    const result = await sweep.execute();
+
+    expect(media.deletedIds).toEqual([]);
+    expect(result).toEqual({ considered: 1, deleted: 0, skipped: 1, failed: 0 });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("m1");
   });
 
   it("does not abort the pass when one row's storage removal fails, and that row survives for retry", async () => {
@@ -303,7 +386,7 @@ describe("SweepOrphanMedia", () => {
     });
     const result = await sweep.execute();
 
-    expect(result).toEqual({ considered: 3, deleted: 2, failed: 1 });
+    expect(result).toEqual({ considered: 3, deleted: 2, skipped: 0, failed: 1 });
     expect(media.deletedIds.sort()).toEqual(["a", "c"]);
     // THE row whose object removal failed was never handed to deleteById — the
     // ordering pin holds on the failure path, not just the happy path.
@@ -331,7 +414,7 @@ describe("SweepOrphanMedia", () => {
     });
     const result = await sweep.execute();
 
-    expect(result).toEqual({ considered: 2, deleted: 0, failed: 2 });
+    expect(result).toEqual({ considered: 2, deleted: 0, skipped: 0, failed: 2 });
   });
 });
 
@@ -423,7 +506,7 @@ describe("createScheduledPassLoops", () => {
     expect(lines).toEqual([
       "[renewals] considered=0 reminded=1 already_reminded=0 skipped=0 past_due=0",
       "[churn] considered=0 churned=1 already_churned=0 revocations_queued=0 skipped_revocation=0",
-      "[media] considered=0 deleted=1 failed=0",
+      "[media] considered=0 deleted=1 skipped=0 failed=0",
     ]);
   });
 

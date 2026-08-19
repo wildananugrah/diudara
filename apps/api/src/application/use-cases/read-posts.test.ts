@@ -72,7 +72,9 @@ class FakeMedia implements MediaRepositoryPort {
   async findManyByIds(): Promise<MediaRow[]> {
     return [];
   }
-  async claim(): Promise<void> {}
+  async claim(_postId: string, ids: string[]): Promise<number> {
+    return ids.length;
+  }
   async listForPost(): Promise<MediaRow[]> {
     throw new Error("a feed must never look media up one post at a time");
   }
@@ -83,7 +85,9 @@ class FakeMedia implements MediaRepositoryPort {
   async listUnclaimedBefore(): Promise<MediaRow[]> {
     return [];
   }
-  async deleteById(): Promise<void> {}
+  async deleteIfUnclaimed(): Promise<boolean> {
+    return false;
+  }
 }
 
 function fakeMediaRow(overrides: Partial<MediaRow> & { id: string; postId: string }): MediaRow {

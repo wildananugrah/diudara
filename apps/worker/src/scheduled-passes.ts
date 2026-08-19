@@ -165,7 +165,10 @@ const DEFAULT_ORPHAN_SWEEP_BATCH_SIZE = 500;
 /** Just enough of `MediaRepositoryPort` for the sweep. Structural, like `RenewalPass`. */
 export interface OrphanMediaRepository {
   listUnclaimedBefore(cutoff: Date, limit: number): Promise<{ id: string }[]>;
-  deleteById(id: string): Promise<void>;
+  /** Re-read immediately before the bytes go — see `sweepOne`. `null` when the row is already gone. */
+  findById(id: string): Promise<{ postId: string | null } | null>;
+  /** Deletes ONLY while still unclaimed, answering whether it did. See the port's own docstring. */
+  deleteIfUnclaimed(id: string): Promise<boolean>;
 }
 
 /** Just enough of `MediaStoragePort` for the sweep. */
@@ -178,6 +181,14 @@ export interface OrphanSweepResult {
   considered: number;
   /** Rows whose objects AND row were both removed. */
   deleted: number;
+  /**
+   * Rows a POST claimed between the page listing and this row's turn, and which
+   * the sweep therefore left completely alone. Never a failure: it is the guard
+   * doing its job (final whole-branch review, Important 4), and an operator
+   * seeing a steady trickle here is seeing composers being left open overnight,
+   * not anything broken.
+   */
+  skipped: number;
   /** Rows whose object removal failed and were left in place, unclaimed, for the next pass to retry. */
   failed: number;
 }
@@ -236,7 +247,7 @@ export class SweepOrphanMedia {
 
   async execute(): Promise<OrphanSweepResult> {
     const cutoff = new Date(this.now().getTime() - this.windowMs);
-    const result: OrphanSweepResult = { considered: 0, deleted: 0, failed: 0 };
+    const result: OrphanSweepResult = { considered: 0, deleted: 0, skipped: 0, failed: 0 };
 
     // PAGED. A swept row leaves the result set (it is deleted), so this terminates the
     // same way `ProcessChurn`'s walk does — except a FAILED row does NOT leave the set,
@@ -247,11 +258,16 @@ export class SweepOrphanMedia {
       if (page.length === 0) break;
       result.considered += page.length;
 
-      const deletedBefore = result.deleted;
+      // Progress is deleted OR skipped: a page of rows that were all claimed
+      // since listing makes no deletions but does leave the result set (they
+      // are no longer unclaimed), so counting only deletions here would break
+      // out of a walk that was in fact progressing. Counting neither would
+      // loop forever on the rows that fail — which is what this guard is for.
+      const progressBefore = result.deleted + result.skipped;
       for (const row of page) {
         await this.sweepOne(row.id, result);
       }
-      if (result.deleted === deletedBefore) break;
+      if (result.deleted + result.skipped === progressBefore) break;
       if (page.length < this.batchSize) break;
     }
 
@@ -261,11 +277,38 @@ export class SweepOrphanMedia {
   /** One orphan row. Never throws — a per-row failure lands on `result.failed`, not on the pass. */
   private async sweepOne(id: string, result: OrphanSweepResult): Promise<void> {
     try {
+      // RE-READ BEFORE THE BYTES GO. `listUnclaimedBefore` produced this id at
+      // the top of a page that may hold 500 rows and take a while to work
+      // through; a post can claim any of them in the meantime (a composer left
+      // open overnight, then used), and until the final whole-branch review the
+      // sweep removed the bytes and the row anyway — the post silently ended up
+      // with fewer photos than its author sent. This turns a window as long as
+      // the pass into one as long as a single storage call.
+      const row = await this.media.findById(id);
+      if (row === null || row.postId !== null) {
+        result.skipped += 1;
+        return;
+      }
+
       // OBJECTS BEFORE THE ROW — see the class docstring for why the reverse order
       // leaks bytes permanently and this one does not.
       await this.storage.remove(id);
-      await this.media.deleteById(id);
-      result.deleted += 1;
+      // CONDITIONAL, and the boolean is not decoration. The re-read above cannot
+      // close the last instant between itself and this call; the `post_id IS
+      // NULL` guard inside the DELETE can, and does. `false` here means a post
+      // claimed the row while its bytes were being removed — the row is left
+      // exactly as the post expects, and the loss (the bytes) is said out loud
+      // rather than being counted as a clean deletion.
+      if (await this.media.deleteIfUnclaimed(id)) {
+        result.deleted += 1;
+        return;
+      }
+      result.skipped += 1;
+      this.logError(
+        `[media] media=${id} was claimed by a post while its objects were being removed — ` +
+          `the row was left in place and its bytes are GONE; the post now references media ` +
+          `that will 404`
+      );
     } catch (err) {
       result.failed += 1;
       this.logError(
@@ -278,10 +321,18 @@ export class SweepOrphanMedia {
 
 /** The orphan sweep's summary line, or `null` when there is nothing to say. Counts only, as above. */
 export function formatOrphanSweepLine(result: OrphanSweepResult): string | null {
-  if (result.considered === 0 && result.deleted === 0 && result.failed === 0) {
+  if (
+    result.considered === 0 &&
+    result.deleted === 0 &&
+    result.skipped === 0 &&
+    result.failed === 0
+  ) {
     return null;
   }
-  return `[media] considered=${result.considered} deleted=${result.deleted} failed=${result.failed}`;
+  return (
+    `[media] considered=${result.considered} deleted=${result.deleted} ` +
+    `skipped=${result.skipped} failed=${result.failed}`
+  );
 }
 
 /**

@@ -146,7 +146,9 @@ const fakeMediaRepository: MediaRepositoryPort = {
   async findManyByIds() {
     return [];
   },
-  async claim() {},
+  async claim(_postId: string, ids: string[]) {
+    return ids.length;
+  },
   async listForPost() {
     return [];
   },
@@ -156,7 +158,9 @@ const fakeMediaRepository: MediaRepositoryPort = {
   async listUnclaimedBefore() {
     return [];
   },
-  async deleteById() {},
+  async deleteIfUnclaimed() {
+    return false;
+  },
 };
 
 const fakeTokenIssuer: TokenIssuerPort = {
