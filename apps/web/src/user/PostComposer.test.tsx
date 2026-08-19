@@ -753,14 +753,24 @@ describe("PostComposer — a failed upload", () => {
   });
 
   /**
-   * Fix round 1, Important 1. A 400 from the upload route means the bytes are
-   * not a supported image — the size case never gets this far, being refused
-   * locally — so the person is told WHICH thing to change, and HEIC is named
-   * because it is what an iPhone hands over by default. "Coba lagi" alone sent
-   * them round a loop that retrying cannot break.
+   * Fix round 1, Important 1, and re-pinned by the final whole-branch review:
+   * the refusal now carries a machine-readable `code` and the copy branches on
+   * it rather than on the bare 400 (a 45-megapixel photo was about to be
+   * described as an unsupported iPhone format). The person is told WHICH thing
+   * to change, and HEIC is named because it is what an iPhone hands over by
+   * default. "Coba lagi" alone sent them round a loop that retrying cannot
+   * break.
    */
   it("says what is actually wrong on a format refusal, and never the server's own text", async () => {
-    mockFetch(() => jsonResponse({ error: "Format foto tidak didukung. Gunakan JPG, PNG, atau WebP." }, 400));
+    mockFetch(() =>
+      jsonResponse(
+        {
+          error: "Format foto tidak didukung. Gunakan JPG, PNG, atau WebP.",
+          code: "media_unsupported_format",
+        },
+        400
+      )
+    );
     renderComposer();
 
     choose("foto.heic");
@@ -774,6 +784,33 @@ describe("PostComposer — a failed upload", () => {
     // rendering `err.message`. The rule is that a screen never prints the wire's
     // sentence, whatever language it is in.
     expect(screen.queryAllByText(/Format foto tidak didukung/).length).toBe(0);
+  });
+
+  /**
+   * **The proxy's 413, end to end through the composer.** nginx's default
+   * `client_max_body_size` is 1 MB and a phone photo is 2–5, so on a box whose
+   * proxy has not been configured this is the failure EVERY real upload hits —
+   * and it arrives as an HTML error page, not JSON, carrying no code at all.
+   * Before the final whole-branch review it read "Coba lagi", which is the
+   * retry-forever loop this whole module exists to kill.
+   */
+  it("says a photo is too big when the PROXY refuses it, not 'coba lagi'", async () => {
+    mockFetch(
+      () =>
+        new Response("<html><head><title>413 Request Entity Too Large</title></head></html>", {
+          status: 413,
+          headers: { "Content-Type": "text/html" },
+        })
+    );
+    renderComposer();
+
+    choose("foto.jpg");
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toBe(
+        "Foto gagal diunggah. Foto terlalu besar. Pilih foto berukuran di bawah 10 MB."
+      );
+    });
   });
 });
 

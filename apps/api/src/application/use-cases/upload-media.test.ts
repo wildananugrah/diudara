@@ -6,7 +6,7 @@ import { resetDatabase } from "../../db/test-helpers";
 import { DrizzleMediaRepository } from "../../infrastructure/repositories/drizzle-media.repository";
 import { FakeMediaStorageAdapter } from "../../infrastructure/storage/fake-media-storage.adapter";
 import type { MediaObject, MediaStoragePort } from "../ports/media-storage.port";
-import { UnsupportedImageError, MAX_UPLOAD_BYTES } from "../../domain/image";
+import { UnsupportedImageError } from "../../domain/image";
 import { ValidationError } from "../errors";
 import { UploadMedia } from "./upload-media";
 
@@ -68,11 +68,18 @@ describe("UploadMedia", () => {
     const storage = new FakeMediaStorageAdapter();
     const media = new DrizzleMediaRepository(db);
     const useCase = new UploadMedia(media, storage);
-    const oversized = new Uint8Array(MAX_UPLOAD_BYTES + 1);
+    // The LITERAL 10 MB + 1, not `MAX_UPLOAD_BYTES + 1` — a test built from the
+    // constant it is checking moves with it and can never redden.
+    const oversized = new Uint8Array(10 * 1024 * 1024 + 1);
 
-    await expect(
-      useCase.execute({ ownerId: owner.id, bytes: oversized })
-    ).rejects.toBeInstanceOf(ValidationError);
+    const err = await useCase
+      .execute({ ownerId: owner.id, bytes: oversized })
+      .then(() => null, (e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ValidationError);
+    // The wire label the client branches on, as a literal — see
+    // `UPLOAD_ERROR_CODE` for why this is a contract rather than a detail.
+    expect((err as ValidationError).code).toBe("media_too_large");
     expect(storage.size).toBe(0);
   });
 

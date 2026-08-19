@@ -1,6 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import sharp from "sharp";
-import { processUpload, UnsupportedImageError, MAX_UPLOAD_BYTES } from "./image";
+import {
+  processUpload,
+  ImageRejectedError,
+  ImageTooManyPixelsError,
+  UnsupportedImageError,
+  MAX_UPLOAD_BYTES,
+  MAX_UPLOAD_PIXELS,
+} from "./image";
 
 const fixture = (name: string) => Bun.file(`${import.meta.dir}/../test-support/fixtures/${name}`).bytes();
 
@@ -104,5 +111,58 @@ describe("processUpload", () => {
 
   it("caps uploads at 10 MB", () => {
     expect(MAX_UPLOAD_BYTES).toBe(10 * 1024 * 1024);
+  });
+
+  it("caps uploads at 40 megapixels", () => {
+    expect(MAX_UPLOAD_PIXELS).toBe(40_000_000);
+  });
+
+  /**
+   * **A real 5.5 KB file that decodes to 45 MEGAPIXELS.** Final whole-branch
+   * review, Important 1: `MAX_UPLOAD_BYTES` bounds the wire, not the bitmap, so
+   * before this bound a 446 KB PNG made the API allocate 1.41 GB and any
+   * signed-up account could OOM-kill the single API process on demand.
+   *
+   * The fixture is REAL bytes, not a mock, for the same reason the EXIF test
+   * is: the thing under test is what sharp does with a header, and a mock would
+   * prove nothing about it. 9000x5000 = 45,000,000 pixels, just over the bound.
+   */
+  it("rejects an image with more pixels than the bound, however few bytes it is", async () => {
+    const bomb = await fixture("oversized-dimensions.png");
+    expect(bomb.byteLength).toBeLessThan(64 * 1024);
+
+    await expect(processUpload(bomb)).rejects.toBeInstanceOf(ImageTooManyPixelsError);
+  });
+
+  it("says what is wrong with an over-size image, in Bahasa, naming the limit", async () => {
+    await expect(processUpload(await fixture("oversized-dimensions.png"))).rejects.toThrow(
+      /40 megapiksel/
+    );
+  });
+
+  /** Both refusals travel with a machine-readable code — the client BRANCHES on it. */
+  it("carries a distinct code for each of the two refusals", async () => {
+    const tooBig = await processUpload(await fixture("oversized-dimensions.png")).catch(
+      (err: unknown) => err
+    );
+    const notAnImage = await processUpload(await fixture("not-an-image.txt")).catch(
+      (err: unknown) => err
+    );
+
+    expect((tooBig as ImageRejectedError).code).toBe("media_too_many_pixels");
+    expect((notAnImage as ImageRejectedError).code).toBe("media_unsupported_format");
+  });
+
+  it("accepts an image just under the pixel bound", async () => {
+    const wide = await sharp({
+      create: { width: 8000, height: 4000, channels: 3, background: { r: 1, g: 2, b: 3 } },
+    })
+      .png()
+      .toBuffer();
+
+    const result = await processUpload(new Uint8Array(wide));
+
+    expect(result.width).toBe(1600);
+    expect(result.height).toBe(800);
   });
 });

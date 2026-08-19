@@ -1,5 +1,6 @@
+import { MAX_UPLOAD_BYTES, UPLOAD_ERROR_CODE } from "@diudara/shared";
 import { ValidationError } from "../errors";
-import { MAX_UPLOAD_BYTES, processUpload } from "../../domain/image";
+import { processUpload } from "../../domain/image";
 import type { MediaRepositoryPort } from "../ports/media-repository.port";
 import type { MediaStoragePort } from "../ports/media-storage.port";
 
@@ -19,11 +20,12 @@ export class UploadMedia {
     // Checked BEFORE `processUpload` runs: an oversized upload must be
     // refused without ever being handed to sharp.
     if (input.bytes.byteLength > MAX_UPLOAD_BYTES) {
-      throw new ValidationError(TOO_LARGE_MESSAGE);
+      throw new ValidationError(TOO_LARGE_MESSAGE, UPLOAD_ERROR_CODE.tooLarge);
     }
 
-    // `UnsupportedImageError` propagates from here unchanged — the route is
-    // what turns it into a 400, this class never swallows it.
+    // `ImageRejectedError` (unsupported format, too many pixels) propagates
+    // from here unchanged — the route is what turns it into a 400 carrying the
+    // domain's own `code`, and this class never swallows it.
     const processed = await processUpload(input.bytes);
 
     // Generated HERE, not left to the row's own default, because both

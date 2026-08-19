@@ -1,7 +1,9 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
+import { MAX_UPLOAD_BYTES, UPLOAD_ERROR_CODE } from "@diudara/shared";
 import { NotFoundError, ValidationError } from "../application/errors";
-import { UnsupportedImageError } from "../domain/image";
+import { ImageRejectedError } from "../domain/image";
 import { uuidParam, validateParams } from "../http/validate";
 import {
   requireUserAuth,
@@ -10,6 +12,24 @@ import {
 import type { Dependencies } from "../bootstrap";
 
 const NO_FILE_MESSAGE = "berkas foto wajib disertakan";
+
+/**
+ * **Spec §10 says an over-size upload is "rejected before it is read into
+ * memory", and until the final whole-branch review nothing implemented that** —
+ * the handler called `c.req.formData()` and `file.arrayBuffer()`, buffering the
+ * whole body, and only then compared its length. `bodyLimit` is what makes the
+ * sentence true: it refuses on the declared `Content-Length` and, absent one,
+ * aborts the stream the moment it passes the ceiling.
+ *
+ * THE CEILING IS DELIBERATELY ABOVE `MAX_UPLOAD_BYTES`, not equal to it. A
+ * multipart envelope carries boundaries, a field name and a filename around the
+ * bytes, so a file of exactly the limit produces a body slightly over it — and
+ * a `bodyLimit` set to the file limit would answer that with a bare 413 instead
+ * of `UploadMedia`'s Bahasa sentence that names the limit in MB. This margin
+ * keeps the good refusal for a file just over the line, and leaves `bodyLimit`
+ * doing the one job it is here for: refusing a body nobody should ever buffer.
+ */
+const MULTIPART_ENVELOPE_ALLOWANCE = 64 * 1024;
 const NOT_FOUND_MESSAGE = "media not found";
 // English, not Bahasa — `NotFoundError` is English at every one of its
 // other ~54 call sites in this codebase (`"post not found"`,
@@ -55,29 +75,52 @@ export function mediaRoutes(
   const app = new Hono<{ Variables: UserAuthVariables }>();
   const requireAuth = requireUserAuth(deps.userTokenIssuer, deps.userRepository);
 
-  app.post("/media", requireAuth, async (c) => {
-    const form = await c.req.formData();
-    const file = form.get("file");
-    if (!(file instanceof File)) {
-      throw new ValidationError(NO_FILE_MESSAGE);
-    }
-    const bytes = new Uint8Array(await file.arrayBuffer());
-
-    // `UploadMedia` lets `UnsupportedImageError` (a plain `Error`, not an
-    // `AppError`) through unswallowed — only this route layer knows to turn
-    // it into the 400 `errorHandler` can render, reusing the SAME Bahasa
-    // message `processUpload` already carries rather than inventing a
-    // second one.
-    try {
-      const result = await deps.uploadMedia.execute({ ownerId: c.get("userId"), bytes });
-      return c.json(result, 201);
-    } catch (err) {
-      if (err instanceof UnsupportedImageError) {
-        throw new ValidationError(err.message);
+  app.post(
+    "/media",
+    // AUTH FIRST, deliberately: the body ceiling is a resource guard, and a
+    // stranger with no session should be turned away before this process
+    // reasons about their body at all. `bodyLimit` still runs ahead of the
+    // handler's own `formData()`, which is all §10 requires.
+    requireAuth,
+    bodyLimit({ maxSize: MAX_UPLOAD_BYTES + MULTIPART_ENVELOPE_ALLOWANCE }),
+    async (c) => {
+      let form: FormData;
+      try {
+        form = await c.req.formData();
+      } catch {
+        // A body that is not multipart at all (a JSON POST, a raw byte stream).
+        // Without this it reached `errorHandler` as an unhandled `TypeError`
+        // and became a 500 — a caller error answered as if the server broke.
+        throw new ValidationError(NO_FILE_MESSAGE, UPLOAD_ERROR_CODE.missingFile);
       }
-      throw err;
+      const file = form.get("file");
+      if (!(file instanceof File)) {
+        throw new ValidationError(NO_FILE_MESSAGE, UPLOAD_ERROR_CODE.missingFile);
+      }
+      const bytes = new Uint8Array(await file.arrayBuffer());
+
+      // `UploadMedia` lets `ImageRejectedError` (a plain `Error`, not an
+      // `AppError`) through unswallowed — only this route layer knows to turn
+      // it into the 400 `errorHandler` can render, reusing the SAME Bahasa
+      // message `processUpload` already carries rather than inventing a
+      // second one, AND carrying the domain's own `code` onto the wire.
+      //
+      // Matched on the BASE class, not on each subclass: a fifth refusal added
+      // in `domain/image.ts` then reaches the client correctly labelled without
+      // this route changing. The client's copy now branches on that code, so a
+      // refusal that arrived unlabelled would be described with the vaguest
+      // sentence in the module — which is exactly the failure this replaced.
+      try {
+        const result = await deps.uploadMedia.execute({ ownerId: c.get("userId"), bytes });
+        return c.json(result, 201);
+      } catch (err) {
+        if (err instanceof ImageRejectedError) {
+          throw new ValidationError(err.message, err.code);
+        }
+        throw err;
+      }
     }
-  });
+  );
 
   // Spec §5.1: "The API must never send the media URL to a non-member."
   // PHASE 6 GOES HERE, before `deps.mediaStorage.get` below — an

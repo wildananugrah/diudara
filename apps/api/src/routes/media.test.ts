@@ -102,6 +102,111 @@ describe("POST /users/media", () => {
 
     expect(res.status).toBe(400);
   });
+
+  /**
+   * **EVERY refusal this route can answer with carries a machine-readable
+   * `code`, and the client BRANCHES on it.**
+   *
+   * Final whole-branch review. The web's upload copy used to infer the reason
+   * from the bare status — "any 400 from this route is an unsupported format" —
+   * which held only while there were three 400s and two of them were
+   * unreachable. The pixel bound below is a fourth. Without a code, a 45
+   * MEGAPIXEL photo is described to its owner as "foto iPhone (HEIC) belum
+   * didukung", which is confidently wrong rather than merely vague.
+   *
+   * The codes are asserted as LITERALS, never as `UPLOAD_ERROR_CODE.x`, because
+   * they are a wire contract: renaming the constant must not be able to change
+   * what goes over the wire without reddening something.
+   */
+  it("labels an unsupported format with a machine-readable code", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const form = new FormData();
+    form.append("file", new Blob([await fixture("not-an-image.txt")], { type: "image/png" }), "x.png");
+
+    const res = await a.request("/users/media", {
+      method: "POST",
+      headers: authed(token),
+      body: form,
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("media_unsupported_format");
+  });
+
+  it("labels a missing file with its own code", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/media", {
+      method: "POST",
+      headers: authed(token),
+      body: new FormData(),
+    });
+
+    expect((await res.json()).code).toBe("media_missing_file");
+  });
+
+  /**
+   * A 5.5 KB file that decodes to 45 megapixels — see `image.test.ts` and
+   * `MAX_UPLOAD_PIXELS` for the measurements. Driven through the ROUTE, not
+   * just the domain, because the code and the status are what the client reads.
+   */
+  it("refuses a small file with enormous dimensions, with its own code", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const form = new FormData();
+    form.append(
+      "file",
+      new Blob([await fixture("oversized-dimensions.png")], { type: "image/png" }),
+      "big.png"
+    );
+
+    const res = await a.request("/users/media", {
+      method: "POST",
+      headers: authed(token),
+      body: form,
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe("media_too_many_pixels");
+    expect(body.error).toBe(
+      "Resolusi foto terlalu besar (maksimal 40 megapiksel). Perkecil ukuran foto lalu unggah ulang."
+    );
+  });
+
+  /**
+   * **Spec §10: "rejected before it is read into memory."** `bodyLimit` runs
+   * ahead of `c.req.formData()`, so an over-size body is refused off the
+   * Content-Length without the route ever buffering it. 413, not 400 — the same
+   * status the production nginx answers with for the same reason, which is what
+   * lets the client hold ONE branch for both (see `errorCopy.ts`).
+   */
+  it("answers 413 to a body far over the limit, without buffering it", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/media", {
+      method: "POST",
+      headers: { ...authed(token), "Content-Type": "application/octet-stream" },
+      // Never materialised: `bodyLimit` refuses on the declared length.
+      body: new Uint8Array(0),
+    });
+    expect(res.status).toBe(400);
+
+    const oversized = await a.request("/users/media", {
+      method: "POST",
+      headers: {
+        ...authed(token),
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(11 * 1024 * 1024),
+      },
+      body: new Uint8Array(0),
+    });
+
+    expect(oversized.status).toBe(413);
+  });
 });
 
 /**
@@ -126,7 +231,7 @@ describe("GET /users/media/:id and /thumb", () => {
   beforeEach(async () => {
     // `a`, `storage` and `mediaRepository` come from the SAME `bootstrap()`
     // call — Task 4's `POST /users/media` (behind `a`) and the fakes this
-    // block pokes at directly (`storage.remove`, `mediaRepository.deleteById`)
+    // block pokes at directly (`storage.remove`, `mediaRepository.deleteIfUnclaimed`)
     // must be the ones the app is actually wired to, not fakes the test built
     // itself.
     const deps = bootstrap();
@@ -262,14 +367,14 @@ describe("GET /users/media/:id and /thumb", () => {
   // nothing to check tier/ownership against.
   it("404s when the row has been deleted from the database but its bytes remain in storage (full route)", async () => {
     const id = await uploadFixture(a, token, "small.png");
-    await mediaRepository.deleteById(id);
+    await mediaRepository.deleteIfUnclaimed(id);
 
     expect((await a.request(`/users/media/${id}`)).status).toBe(404);
   });
 
   it("404s when the row has been deleted from the database but its bytes remain in storage (thumb route)", async () => {
     const id = await uploadFixture(a, token, "small.png");
-    await mediaRepository.deleteById(id);
+    await mediaRepository.deleteIfUnclaimed(id);
 
     expect((await a.request(`/users/media/${id}/thumb`)).status).toBe(404);
   });

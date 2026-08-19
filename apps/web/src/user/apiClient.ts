@@ -1,4 +1,5 @@
 import { ApiError } from "../api";
+import { MAX_UPLOAD_BYTES } from "@diudara/shared";
 
 /**
  * The personal-account session, plus every call to `/users/...`.
@@ -201,7 +202,21 @@ export class UserApiError extends ApiError {
   constructor(
     message: string,
     status: number,
-    readonly fieldErrors: Readonly<Record<string, string>> = {}
+    readonly fieldErrors: Readonly<Record<string, string>> = {},
+    /**
+     * **The API's own machine-readable label for this refusal, when it sent one
+     * — the thing to BRANCH on.**
+     *
+     * `POST /users/media` sends it (`UPLOAD_ERROR_CODE` in `@diudara/shared`)
+     * and `errorCopy.ts` is the only reader. Undefined everywhere else, and
+     * undefined for anything that is not JSON from this API at all — an nginx
+     * error page, a gateway timeout — which is exactly why a reader must treat
+     * an absent code as "no information", never as a default reason.
+     *
+     * It is a protocol token and is NEVER shown to anybody; the sentence a
+     * person reads is authored in `errorCopy.ts`, same as always.
+     */
+    readonly code?: string
   ) {
     super(message, status);
     this.name = "UserApiError";
@@ -229,16 +244,26 @@ export function parseFieldErrors(message: string): Record<string, string> {
   return fieldErrors;
 }
 
-/** The error handler always responds `{ error: "..." }` — see apps/api/src/http/error-handler.ts. */
+/** The error handler always responds `{ error: "..." }`, and `{ error, code }` where the route has a machine-readable reason — see apps/api/src/http/error-handler.ts. */
 async function readError(res: Response, fallback: string): Promise<UserApiError> {
   let message = fallback;
+  let code: string | undefined;
   try {
-    const body = (await res.json()) as { error?: unknown };
+    const body = (await res.json()) as { error?: unknown; code?: unknown };
     if (typeof body.error === "string" && body.error.length > 0) message = body.error;
+    // Carried through UNINTERPRETED. This function's job is to move the wire's
+    // fields onto the error; deciding what any of them mean is `errorCopy.ts`'s.
+    if (typeof body.code === "string" && body.code.length > 0) code = body.code;
   } catch {
-    // Not JSON (a proxy error page, an empty body) — keep the fallback.
+    // Not JSON (a proxy error page, an empty body) — keep the fallback, and
+    // leave `code` undefined. nginx's own 413 page lands here.
   }
-  return new UserApiError(message, res.status, res.status === 400 ? parseFieldErrors(message) : {});
+  return new UserApiError(
+    message,
+    res.status,
+    res.status === 400 ? parseFieldErrors(message) : {},
+    code
+  );
 }
 
 /** Message shown when the session is gone. Never mentions the token itself. */
@@ -661,24 +686,25 @@ export function uploadMedia(file: File): Promise<MediaView> {
 }
 
 /**
- * **The biggest photo the API will accept, mirrored here so a file that cannot
- * possibly succeed is refused before it is uploaded.**
+ * **The biggest photo the API will accept, re-exported here so a file that
+ * cannot possibly succeed is refused before it is uploaded.**
  *
- * Fix round 1, Important 1. This is the same 10 MB as `MAX_UPLOAD_BYTES` in
- * `apps/api/src/domain/image.ts`, copied rather than shared for the same reason
- * every other value in this file is (see the module docstring): the web is a
- * static build with no access to the API's modules. Unlike the image LIMIT
- * above, this one is not env-driven — it is a compile-time constant on both
- * sides — so the two can only drift by somebody editing one and not the other.
+ * **ONE DEFINITION, in `@diudara/shared` — this used to be a second literal.**
+ * The argument for copying it was that the two could only drift in a safe
+ * direction, and the final whole-branch review overturned the reasoning without
+ * touching the conclusion about drifting LOW: drifting HIGH is not safe. An
+ * oversized file would then reach the API, come back a 400, and the upload copy
+ * would have labelled it a format problem. `MAX_POST_BODY_LENGTH` was already
+ * the precedent — read by the composer, the route schema and the use case
+ * alike.
  *
  * **The server remains the authority.** `UploadMedia` checks the byte length
- * itself before sharp ever sees the bytes; this copy only saves a person on a
- * phone connection from spending a 12 MB upload to be told no. If it ever drifts
- * LOW, the cost is refusing a file the server would have taken, in Bahasa, with
- * the limit named — which is why the check lives beside the picker and not
- * anywhere a request could already be in flight.
+ * itself before sharp ever sees the bytes; this check only saves a person on a
+ * phone connection from spending a 12 MB upload to be told no, which is why it
+ * lives beside the picker and not anywhere a request could already be in
+ * flight.
  */
-export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+export { MAX_UPLOAD_BYTES };
 
 /** `GET /users/limits`'s response shape — one number today (spec §6). */
 export interface PostLimits {
@@ -803,9 +829,17 @@ export interface PostView {
   /**
    * The post's images, in `position` order. REQUIRED and `[]` on a post with
    * none, never absent — the API states that guarantee explicitly (`toPostView`
-   * takes `media` rather than defaulting it) and mirroring it here is what lets
-   * the edit composer seed itself with `post.media` and a card iterate it,
-   * neither of them writing `?? []` over a field the server always sends.
+   * takes `media` rather than defaulting it), and the type stays honest about
+   * what a healthy API returns.
+   *
+   * **Both readers DO write `?? []` over it anyway, and that is deliberate**
+   * (`PostCard.tsx`, `postOwnerActions.tsx`). The guarantee holds for this
+   * branch's API and not for the seconds of a deploy where one side is the
+   * previous release; a bare `.length` there is an uncaught render throw with
+   * no error boundary anywhere in this app. See `PostCard.tsx`'s own comment on
+   * the media slot for the full reasoning. This docstring used to claim neither
+   * reader guarded the field, which stopped being true in the same fix round
+   * that added the guards.
    */
   media: MediaView[];
 }

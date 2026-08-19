@@ -1,15 +1,32 @@
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 export class AppError extends Error {
-  constructor(message: string, readonly status: ContentfulStatusCode) {
+  /**
+   * **An optional MACHINE-READABLE reason, sent as `code` beside `error` and
+   * meant to be branched on rather than parsed out of the message.**
+   *
+   * Added by the final whole-branch review for `POST /users/media`, whose four
+   * distinct 400s were indistinguishable on the wire — so the web client
+   * inferred the reason from the bare status and described a 45-megapixel photo
+   * as an unsupported iPhone format. `message` stays the human sentence and
+   * `code` stays the protocol token; nothing ever shows a code to anybody.
+   *
+   * Undefined on every error that has no need for one, and `errorHandler` omits
+   * the key entirely then — an existing response body does not grow a `code:
+   * null` it never had.
+   */
+  readonly code?: string;
+
+  constructor(message: string, readonly status: ContentfulStatusCode, code?: string) {
     super(message);
     this.name = new.target.name;
+    this.code = code;
   }
 }
 
 export class ValidationError extends AppError {
-  constructor(message = "invalid request") {
-    super(message, 400);
+  constructor(message = "invalid request", code?: string) {
+    super(message, 400, code);
   }
 }
 
