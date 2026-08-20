@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "user_subscription_one_pending" ON "user_subscription" USING btree ("subscriber_id","owner_id") WHERE "user_subscription"."status" = 'pending';

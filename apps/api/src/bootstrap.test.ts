@@ -270,6 +270,9 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   async create() {
     throw new Error("not used");
   },
+  async claimPending() {
+    throw new Error("not used");
+  },
   async findById() {
     return null;
   },

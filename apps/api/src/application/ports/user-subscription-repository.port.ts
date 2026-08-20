@@ -31,6 +31,20 @@ export interface UserTransactionRow {
   createdAt: Date;
 }
 
+/** What `claimPending` hands back: the pair's pending subscription, and who put it there. */
+export interface PendingSubscriptionClaim {
+  subscription: UserSubscriptionRow;
+  /**
+   * True when THIS call inserted the row; false when another caller already
+   * held the pair's pending slot and this is THEIR row.
+   *
+   * A caller that reads `false` must NOT open an invoice: the holder either has
+   * one already (hand it back) or is opening one right now (tell the buyer to
+   * try again in a moment). That is the whole point of the claim.
+   */
+  created: boolean;
+}
+
 /** What `findPendingCheckout` hands back: enough to re-answer a second tap without the provider. */
 export interface PendingUserCheckout {
   subscriptionId: string;
@@ -41,11 +55,45 @@ export interface PendingUserCheckout {
 }
 
 export interface UserSubscriptionRepositoryPort {
+  /**
+   * Raw INSERT. Rejects — it does not return null — when the pair already holds
+   * a pending subscription, because `user_subscription_one_pending` is a
+   * database constraint and not an application rule. `claimPending` below is
+   * what production code calls; this stays for fixtures that want the row and
+   * nothing else.
+   */
   create(input: {
     subscriberId: string;
     tierId: string;
     ownerId: string;
   }): Promise<UserSubscriptionRow>;
+  /**
+   * CLAIMS this pair's one pending subscription slot, and reports whether this
+   * call is what filled it.
+   *
+   * THE ARBITER, and it has to be the INSERT rather than a read before it.
+   * `StartUserSubscription` used to check for a pending subscription and then
+   * create one, and a re-review fired two concurrent `POST /subscribe` calls at
+   * the real database: four runs serialised, the fifth produced two live
+   * invoices, two subscriptions and two transactions for the identical pair —
+   * one person charged twice for one membership, with no refund path anywhere
+   * in 5a. A double tap on a phone is concurrent, not sequential.
+   *
+   * So the loser of the race learns it lost from `user_subscription_one_pending`
+   * and is handed the WINNER's row with `created: false`, which routes it into
+   * the reuse path instead of a second invoice. Nothing here is decided by a
+   * read: this is the same conclusion Task 2's constraints and Task 3's
+   * claim-first sentinel each reached.
+   *
+   * Implementations MUST match the unique violation narrowly — SQLSTATE `23505`
+   * AND the constraint name — and rethrow anything else untouched. A blanket
+   * catch would swallow a real failure and answer as though a row existed.
+   */
+  claimPending(input: {
+    subscriberId: string;
+    tierId: string;
+    ownerId: string;
+  }): Promise<PendingSubscriptionClaim>;
   findById(id: string): Promise<UserSubscriptionRow | null>;
   /**
    * Flips `status` to `active` and sets `current_period_end`. Task 7's

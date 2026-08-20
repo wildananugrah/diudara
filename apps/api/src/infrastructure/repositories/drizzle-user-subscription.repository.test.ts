@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach } from "bun:test";
 import { db } from "../../db/client";
-import { appUsers } from "../../db/schema";
+import { appUsers, userSubscriptions } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
+import { ArrivalLatch } from "../../test-support/arrival-latch";
 import { DrizzleUserTierRepository } from "./drizzle-user-tier.repository";
 import { DrizzleUserSubscriptionRepository } from "./drizzle-user-subscription.repository";
 
@@ -348,6 +349,140 @@ describe("DrizzleUserSubscriptionRepository", () => {
     // Paid and active: `findActiveFor` is what refuses a second purchase now,
     // and a settled invoice must never be handed back to anybody.
     expect(await subs.findPendingCheckout(bob.id, alice.id)).toBe(null);
+  });
+
+  it("REFUSES a second PENDING subscription for the same pair at the DATABASE level", async () => {
+    // `user_subscription_one_pending`, the fix-round-2 index. Two pending
+    // subscriptions for one pair are two payable invoices for one membership.
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+
+    await expect(
+      subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id })
+    ).rejects.toThrow();
+  });
+
+  it("claimPending inserts the pair's pending subscription and reports it created one", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+
+    const claim = await subs.claimPending({
+      subscriberId: bob.id,
+      tierId: tier.id,
+      ownerId: alice.id,
+    });
+
+    expect(claim.created).toBe(true);
+    expect(claim.subscription.status).toBe("pending");
+    expect(claim.subscription.subscriberId).toBe(bob.id);
+    expect(claim.subscription.ownerId).toBe(alice.id);
+  });
+
+  it("claimPending hands back the EXISTING pending row rather than inserting a second one", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const first = await subs.claimPending({
+      subscriberId: bob.id,
+      tierId: tier.id,
+      ownerId: alice.id,
+    });
+
+    const second = await subs.claimPending({
+      subscriberId: bob.id,
+      tierId: tier.id,
+      ownerId: alice.id,
+    });
+
+    expect(second.created).toBe(false);
+    expect(second.subscription.id).toBe(first.subscription.id);
+  });
+
+  it("claimPending claims again once the previous pending subscription was cancelled", async () => {
+    // PARTIAL, so a released claim frees the slot — this is what keeps a failed
+    // provider call from wedging a buyer forever.
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const first = await subs.claimPending({
+      subscriberId: bob.id,
+      tierId: tier.id,
+      ownerId: alice.id,
+    });
+    await subs.cancel(first.subscription.id);
+
+    const second = await subs.claimPending({
+      subscriberId: bob.id,
+      tierId: tier.id,
+      ownerId: alice.id,
+    });
+
+    expect(second.created).toBe(true);
+    expect(second.subscription.id).not.toBe(first.subscription.id);
+  });
+
+  /**
+   * THE ARBITRATION ITSELF, against a real database — the same instrument and
+   * the same reasoning as `drizzle-user-payout.repository.test.ts`'s thirty-way
+   * claim race. The latch holds every caller until all of them have arrived, so
+   * they genuinely contend rather than hoping for an interleaving.
+   *
+   * THIRTY CONTENDERS, and the number is load-bearing for the reason Task 3
+   * recorded: a read-then-write serialises often enough at small N to look
+   * correct. This endpoint's own re-review measured TWO concurrent requests
+   * producing the defect in 1 run out of 5 — so at two contenders a broken
+   * implementation passes 80% of the time. Thirty is what the payout race
+   * settled on against this same database, and matching it keeps one number in
+   * the phase rather than two.
+   */
+  it("lets exactly ONE of thirty concurrent claims create the row", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const contenders = 30;
+    const latch = new ArrivalLatch(contenders);
+
+    const claims = await Promise.all(
+      Array.from({ length: contenders }, async () => {
+        await latch.arriveAndWait();
+        return subs.claimPending({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+      })
+    );
+
+    expect(claims.filter((c) => c.created)).toHaveLength(1);
+    expect(latch.arrived).toBe(contenders);
+    // And every loser was handed the winner's row, not a null and not a throw.
+    const ids = new Set(claims.map((c) => c.subscription.id));
+    expect(ids.size).toBe(1);
+    expect(await db.select().from(userSubscriptions)).toHaveLength(1);
   });
 
   it("REFUSES a subscription whose owner disagrees with its tier's owner", async () => {

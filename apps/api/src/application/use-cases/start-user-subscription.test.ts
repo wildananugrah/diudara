@@ -166,6 +166,17 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
   const subscriptions = seed.map((row) => ({ ...row }));
   const transactions: UserTransactionRow[] = [];
   const repository: UserSubscriptionRepositoryPort = {
+    /** Mirrors `user_subscription_one_pending`: one pending row per (subscriber, owner). */
+    async claimPending(input) {
+      const held = subscriptions.find(
+        (r) =>
+          r.subscriberId === input.subscriberId &&
+          r.ownerId === input.ownerId &&
+          r.status === "pending"
+      );
+      if (held) return { subscription: { ...held }, created: false };
+      return { subscription: await this.create(input), created: true };
+    },
     async create(input) {
       const row: UserSubscriptionRow = {
         id: `sub-${subscriptions.length + 1}`,
@@ -186,8 +197,11 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
     async activate() {
       throw new Error("StartUserSubscription must never activate a subscription — Task 7 does");
     },
-    async cancel() {
-      throw new Error("StartUserSubscription must never cancel a subscription");
+    async cancel(id) {
+      const row = subscriptions.find((r) => r.id === id);
+      if (!row) return null;
+      row.status = "cancelled";
+      return { ...row };
     },
     async findActiveFor(subscriberId, ownerId) {
       const row = subscriptions.find(
@@ -571,7 +585,7 @@ describe("StartUserSubscription — a second tap must not mint a second invoice"
     // invoice url. Nothing was charged and nothing is waiting to be paid, so
     // treating it as "a payment is in progress" would lock the buyer out of a
     // purchase for good — 5a has no way to clear a pending row.
-    const { useCase, payments, transactions } = build();
+    const { useCase, payments, subscriptions, transactions } = build();
     payments.failNextInvoice = true;
     await expect(buy(useCase)).rejects.toThrow("createInvoice failed");
 
@@ -580,6 +594,38 @@ describe("StartUserSubscription — a second tap must not mint a second invoice"
     expect(result.invoiceUrl).toBe("https://fake-checkout.local/fake-inv-1");
     expect(payments.invoices).toHaveLength(1);
     expect(transactions).toHaveLength(2);
+    // A fresh claim, because the failed attempt gave its own back.
+    expect(subscriptions).toHaveLength(2);
+    expect(subscriptions.map((r) => r.status)).toEqual(["cancelled", "pending"]);
+  });
+
+  it("REFUSES transiently, in Bahasa, while the winner of a double tap is still opening its invoice", async () => {
+    // The claim is held but no invoice exists yet — the winner is between its
+    // INSERT and its provider call. Milliseconds wide in production, and it must
+    // read as "wait a moment", never as a second invoice.
+    const { useCase, payments, subscriptions, transactions } = build({
+      subscriptions: [
+        {
+          id: "sub-inflight",
+          subscriberId: SUBSCRIBER_ID,
+          tierId: "tier-1",
+          ownerId: OWNER_ID,
+          status: "pending",
+          currentPeriodEnd: null,
+          createdAt: new Date("2026-08-20T00:00:00Z"),
+        },
+      ],
+    });
+
+    await expect(buy(useCase)).rejects.toThrow(
+      new ConflictError(
+        "Pembayaran Anda sedang disiapkan. Tunggu sebentar, lalu coba lagi — jangan " +
+          "menekan tombol berkali-kali agar Anda tidak ditagih dua kali."
+      )
+    );
+    expect(subscriptions).toHaveLength(1);
+    expect(transactions).toEqual([]);
+    expect(payments.invoices).toEqual([]);
   });
 });
 
@@ -596,9 +642,13 @@ describe("StartUserSubscription — the row exists before the provider is called
     await expect(buy(useCase)).rejects.toThrow("fake payment provider: createInvoice failed");
 
     expect(subscriptions).toHaveLength(1);
-    expect(subscriptions[0]!.status).toBe("pending");
     expect(transactions).toHaveLength(1);
     expect(transactions[0]!.status).toBe("pending");
+    // The subscription row is still there and still inspectable — that is what
+    // the ordering buys. Its CLAIM, though, has been released: a pending row
+    // holds this pair's only pending slot and nothing in 5a ever clears one, so
+    // leaving it would wedge this buyer out of this creator for good.
+    expect(subscriptions[0]!.status).toBe("cancelled");
     // No invoice was opened, so the transaction carries no gateway reference —
     // exactly the state Task 7 must treat as unverifiable rather than as paid.
     expect(transactions[0]!.gatewayReferenceId).toBeNull();

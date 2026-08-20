@@ -1014,6 +1014,28 @@ export const userSubscriptions = pgTable(
     uniqueIndex("user_subscription_one_active")
       .on(table.subscriberId, table.ownerId)
       .where(sql`${table.status} = 'active'`),
+    /**
+     * AND NOBODY HOLDS TWO PENDING ONES EITHER — the same shape, one step
+     * earlier, and the one that actually happens.
+     *
+     * Fix round 2. `StartUserSubscription` already refused a second checkout by
+     * READING for a pending one first, and a re-review fired two concurrent
+     * `POST /subscribe` calls at the real database: four runs serialised, the
+     * fifth produced two live invoices, two subscriptions and two transactions
+     * for the identical pair. A double tap on a phone is concurrent, not
+     * sequential, and an application-level read-then-write cannot win a race it
+     * does not arbitrate — the same conclusion Task 2's constraints and Task 3's
+     * claim-first sentinel each reached before it.
+     *
+     * So the INSERT is the claim: exactly one caller can hold a pair's pending
+     * slot, everybody else gets `23505` on this index and is routed into the
+     * reuse path instead of a second invoice. Partial, like the `active` one
+     * above, so a settled or cancelled subscription never blocks a later
+     * purchase.
+     */
+    uniqueIndex("user_subscription_one_pending")
+      .on(table.subscriberId, table.ownerId)
+      .where(sql`${table.status} = 'pending'`),
     index("user_subscription_owner_idx").on(table.ownerId),
   ]
 );

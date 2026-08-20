@@ -6,7 +6,11 @@ import type { UserRepositoryPort } from "../ports/user-repository.port";
 import type { UserTierRepositoryPort } from "../ports/user-tier-repository.port";
 import type { UserPayoutRepositoryPort } from "../ports/user-payout-repository.port";
 import type { UserSubscriptionRepositoryPort } from "../ports/user-subscription-repository.port";
-import type { PaymentProviderPort } from "../ports/payment-provider.port";
+import type {
+  CreateInvoiceInput,
+  CreateInvoiceResult,
+  PaymentProviderPort,
+} from "../ports/payment-provider.port";
 
 export interface StartUserSubscriptionResult {
   /** Where the browser is sent to pay. */
@@ -56,6 +60,16 @@ export interface StartUserSubscriptionResult {
  * `user_subscription_one_active` as a 500 with the provider retrying behind it,
  * and 5a has no refund path. So a pending checkout for this pair is handed BACK
  * rather than replaced. See `findPendingCheckout`.
+ *
+ * **AND THE DATABASE ARBITRATES THAT, NOT A READ.** The first version of this
+ * refusal read for a pending checkout and then created one, which two concurrent
+ * taps pass together: a re-review fired two simultaneous requests at the real
+ * database and got two live invoices, two subscriptions and two transactions for
+ * one pair in one run out of five. A double tap on a phone is CONCURRENT. So the
+ * INSERT is the claim — `user_subscription_one_pending` — and the loser is
+ * routed into the reuse path by the violation, never by a read. See
+ * `claimPending`, and `openInvoice` for why a failed provider call must give the
+ * claim back.
  *
  * The `external_id` is namespaced (`domain/user-payment.ts`): Xendit delivers ONE
  * webhook stream and the community handler resolves its own invoices by treating
@@ -158,41 +172,6 @@ export class StartUserSubscription {
       );
     }
 
-    // THE SECOND-TAP GUARD. `findActiveFor` above refuses a membership already
-    // PAID for; this refuses a second INVOICE for one already being paid.
-    // Without it, two taps opened two live invoices, and paying both charged the
-    // buyer twice for one membership — the second activation would then hit
-    // `user_subscription_one_active` as a 500 with the provider retrying behind
-    // it, and 5a has no refund path anywhere in it.
-    //
-    // Only a transaction that actually HAS an invoice url counts as pending, so
-    // an attempt whose provider call failed leaves the buyer free to try again
-    // (see `findPendingCheckout`'s own docstring — there is no way to clear a
-    // pending row in 5a, so a blocking read here would lock them out for good).
-    const pending = await this.subscriptions.findPendingCheckout(input.subscriberId, owner.id);
-    if (pending) {
-      if (pending.tierId !== tier.id) {
-        // A different tier cannot be sold while this invoice is live: opening
-        // one would be the second invoice this guard exists to prevent, and
-        // silently returning the OTHER tier's invoice would charge a price the
-        // buyer did not choose.
-        throw new ConflictError(
-          "Pembayaran keanggotaan untuk kreator ini sedang diproses. Selesaikan dulu " +
-            "pembayaran yang sudah dibuka, atau tunggu tagihannya kedaluwarsa sebelum " +
-            "memilih tingkatan lain."
-        );
-      }
-      // The same tier: hand back the invoice that already exists rather than a
-      // second one. Nothing is created, so this is the one path through this
-      // method that writes nothing at all.
-      return {
-        invoiceUrl: pending.invoiceUrl,
-        subscriptionId: pending.subscriptionId,
-        transactionId: pending.transactionId,
-        externalId: userSubscriptionExternalId(pending.transactionId),
-      };
-    }
-
     const subscriber = await this.users.findById(input.subscriberId);
     if (!subscriber) {
       // The caller authenticated as this id one middleware ago, so this is
@@ -201,15 +180,29 @@ export class StartUserSubscription {
     }
 
     // ---- Everything below this line changes state. Rows FIRST, provider last.
-    const subscription = await this.subscriptions.create({
+    //
+    // AND THE CLAIM IS FIRST OF ALL. `claimPending` INSERTS, and
+    // `user_subscription_one_pending` is what decides whether this caller or
+    // another one gets to open an invoice — never a read taken beforehand. Two
+    // concurrent taps used to pass a read-then-write check together and open two
+    // live invoices for one membership; measured on this endpoint, one run in
+    // five. See the port's own docstring.
+    const claim = await this.subscriptions.claimPending({
       subscriberId: input.subscriberId,
       tierId: tier.id,
       // DENORMALISED, and taken from the TIER's owner rather than from the
-      // handle lookup, so the value written is the one the composite foreign
-      // key checks. They are equal — the tier was just matched against
-      // `owner.id` — and taking it from here keeps them equal by construction.
+      // handle lookup, so the value written is the one the composite foreign key
+      // checks. They are equal — the tier was just matched against `owner.id` —
+      // and taking it from here keeps them equal by construction.
       ownerId: tier.ownerId,
     });
+    if (!claim.created) {
+      // Somebody else holds this pair's pending slot: the winner of a double
+      // tap, or an earlier tap of our own that is still being paid.
+      return this.resolveExistingCheckout(input.subscriberId, owner.id, tier.id);
+    }
+    const subscription = claim.subscription;
+
     const transaction = await this.subscriptions.createTransaction({
       userSubscriptionId: subscription.id,
       // OUR figure, read from the tier, never anything the client sent: it is
@@ -218,7 +211,7 @@ export class StartUserSubscription {
     });
 
     const externalId = userSubscriptionExternalId(transaction.id);
-    const invoice = await this.payments.createInvoice({
+    const invoice = await this.openInvoice(subscription.id, {
       externalId,
       amount: tier.priceAmount,
       description: `${owner.displayName} — ${tier.name}`,
@@ -269,6 +262,87 @@ export class StartUserSubscription {
       transactionId: transaction.id,
       externalId,
     };
+  }
+
+  /**
+   * What to answer a caller that did NOT win the pending claim.
+   *
+   * Reads the winner's invoice rather than opening a second one — the sequential
+   * double tap's reuse path, reached from the concurrent one. Three outcomes:
+   *
+   *  - the winner's invoice exists and is for the same tier: hand it back, which
+   *    is the ordinary "they tapped twice" case and creates nothing at all;
+   *  - it exists and is for a DIFFERENT tier: refuse, because opening one would
+   *    be the second invoice this whole mechanism prevents, and silently
+   *    returning the other one would charge a price the buyer did not choose;
+   *  - it does not exist YET: the winner is between its INSERT and its provider
+   *    call, a window of milliseconds. Refuse transiently and say so — a
+   *    provider call that FAILS releases the claim (see `openInvoice`), so this
+   *    state cannot outlive the attempt that created it and a second tap
+   *    resolves it.
+   */
+  private async resolveExistingCheckout(
+    subscriberId: string,
+    ownerId: string,
+    tierId: string
+  ): Promise<StartUserSubscriptionResult> {
+    const live = await this.subscriptions.findPendingCheckout(subscriberId, ownerId);
+    if (live !== null && live.tierId === tierId) {
+      return {
+        invoiceUrl: live.invoiceUrl,
+        subscriptionId: live.subscriptionId,
+        transactionId: live.transactionId,
+        externalId: userSubscriptionExternalId(live.transactionId),
+      };
+    }
+    if (live !== null) {
+      throw new ConflictError(
+        "Pembayaran keanggotaan untuk kreator ini sedang diproses. Selesaikan dulu " +
+          "pembayaran yang sudah dibuka, atau tunggu tagihannya kedaluwarsa sebelum " +
+          "memilih tingkatan lain."
+      );
+    }
+    throw new ConflictError(
+      "Pembayaran Anda sedang disiapkan. Tunggu sebentar, lalu coba lagi — jangan " +
+        "menekan tombol berkali-kali agar Anda tidak ditagih dua kali."
+    );
+  }
+
+  /**
+   * The provider call, plus the ONE thing that must happen when it fails:
+   * RELEASE THE CLAIM.
+   *
+   * The pending subscription is a claim on this pair's only pending slot, and
+   * nothing in 5a expires or clears one — there is no renewal pass, no cancel
+   * route and no operator path. So a provider failure that left the row
+   * `pending` would wedge this buyer out of this creator permanently, for a
+   * purchase nobody ever charged them for. Exactly the reasoning
+   * `ConnectUserPayout` records for `abandonXenditAccountProvisioning`, whose
+   * sentinel has the identical hazard.
+   *
+   * The transaction row is deliberately NOT touched: it stays, with a null
+   * gateway reference, as the inspectable record that this attempt happened —
+   * which is the whole reason the rows are written before the provider is
+   * called.
+   */
+  private async openInvoice(
+    subscriptionId: string,
+    input: CreateInvoiceInput
+  ): Promise<CreateInvoiceResult> {
+    try {
+      return await this.payments.createInvoice(input);
+    } catch (err) {
+      if ((await this.subscriptions.cancel(subscriptionId)) === null) {
+        // Ids only, never the payer's details. A claim that could not be
+        // released is a buyer who cannot try again, so it must be visible.
+        console.warn(
+          `[payments] could not release the pending claim on user subscription ` +
+            `${subscriptionId} after the provider call failed — this buyer cannot start ` +
+            "another checkout with this creator until the row is cleared by hand"
+        );
+      }
+      throw err;
+    }
   }
 
   /**

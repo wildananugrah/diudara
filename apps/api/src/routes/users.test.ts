@@ -2508,6 +2508,55 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
     expect(await db.select().from(userTransactions)).toHaveLength(1);
   });
 
+  /**
+   * THE CONCURRENT DOUBLE TAP — fix round 2, and the reason the sequential
+   * reuse test above was not enough. A re-review fired two simultaneous
+   * requests at this endpoint on stock `e71c156` and got two live invoices,
+   * two subscriptions and two transactions for one pair in one run out of five:
+   * the dedupe was a read followed by a write with nothing arbitrating it, and
+   * a double tap on a phone is concurrent, not sequential.
+   *
+   * TWENTY CONTENDERS. The number is part of the assertion, the lesson Task 3's
+   * payout race records: at TWO contenders the defect only showed in 1 run out
+   * of 5, so a broken implementation passes 80% of the time — measured here at
+   * twenty, the pre-fix code produced a second invoice in every single run (see
+   * the report). Real HTTP requests through the real router and the real
+   * database, so the interleaving is the product's, not a fake's.
+   */
+  it("TWENTY CONCURRENT TAPS open exactly ONE invoice, and nobody sees a 500", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { buyer, tier } = await seedOffer(a);
+    const contenders = 20;
+
+    const responses = await Promise.all(
+      Array.from({ length: contenders }, () =>
+        subscribe(a, buyer.token, "wildan", { tierId: tier.id })
+      )
+    );
+    const bodies = await Promise.all(responses.map((r) => r.json()));
+
+    // Two live invoices for one membership are two chargeable invoices, and 5a
+    // has no refund path anywhere in it.
+    expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(1);
+    expect(await db.select().from(userSubscriptions)).toHaveLength(1);
+    expect(await db.select().from(userTransactions)).toHaveLength(1);
+
+    // Every caller got either THE invoice or a clean Bahasa refusal — never a
+    // 500, and never a second invoice url.
+    const invoiceUrls = new Set<string>();
+    for (const [i, res] of responses.entries()) {
+      expect([201, 409]).toContain(res.status);
+      if (res.status === 201) {
+        invoiceUrls.add(bodies[i].invoiceUrl);
+      } else {
+        expect(bodies[i].error).toMatch(/^Pembayaran /);
+      }
+    }
+    expect(invoiceUrls.size).toBe(1);
+    expect([...invoiceUrls][0]).toBe("https://fake-checkout.local/fake-inv-1");
+  });
+
   it("503s in Bahasa on a box with no payment provider at all", async () => {
     // The route stays REGISTERED on such a box — unlike `/c/:slug/checkout`,
     // which is simply not mounted — so a buyer is told why instead of getting
@@ -2540,7 +2589,10 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
     expect(rows[0]).toMatchObject({
       subscriberId: buyer.userId,
       ownerId: owner.userId,
-      status: "pending",
+      // The row survives — that is what writing it first buys — but its CLAIM on
+      // this pair's pending slot is given back, because nothing in 5a clears a
+      // pending row and holding one would wedge this buyer out for good.
+      status: "cancelled",
     });
     const txns = await db.select().from(userTransactions);
     expect(txns).toHaveLength(1);
