@@ -133,11 +133,23 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     return row ?? null;
   }
 
-  async findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null> {
-    if (!UUID_PATTERN.test(subscriberId) || !UUID_PATTERN.test(ownerId)) {
-      return null;
-    }
-    const [row] = await this.db
+  /**
+   * THE query `findActiveFor` runs — pulled out and returned UN-AWAITED so a
+   * test can introspect the exact object the driver receives, via drizzle's
+   * synchronous `.toSQL()`. `findActiveFor` itself is `async` and used to
+   * build and await this inline, which left `is-member-of.test.ts`'s EXPLAIN
+   * test with nothing to hook into except a hand-copied literal string of the
+   * WHERE clause — a test that matched today but could not fail if this
+   * query's predicates ever changed. Now it can: the EXPLAIN test calls this
+   * method directly, exactly as `drizzle-post.repository.test.ts` calls
+   * `listGlobal`/`listByAuthor` un-awaited for the same reason.
+   *
+   * Not part of `UserSubscriptionRepositoryPort` — this is an implementation
+   * detail `findActiveFor` composes, not a capability the application layer
+   * is meant to reach for.
+   */
+  activeMembershipQuery(subscriberId: string, ownerId: string) {
+    return this.db
       .select()
       .from(userSubscriptions)
       .where(
@@ -148,6 +160,13 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         ),
       )
       .limit(1);
+  }
+
+  async findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null> {
+    if (!UUID_PATTERN.test(subscriberId) || !UUID_PATTERN.test(ownerId)) {
+      return null;
+    }
+    const [row] = await this.activeMembershipQuery(subscriberId, ownerId);
     return row ?? null;
   }
 

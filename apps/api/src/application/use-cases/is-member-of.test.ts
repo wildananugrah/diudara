@@ -80,6 +80,23 @@ describe("IsMemberOf", () => {
     expect(result).toBe(false);
   });
 
+  /**
+   * The Minor from Task 8's review: the spec's boundary is strict `>`, not
+   * `>=`. `current_period_end` landing on the SAME instant as `now()` must
+   * still read as expired — the period has ENDED at that instant, not one
+   * tick before it.
+   */
+  it("is false when current_period_end equals now exactly (strict >, not >=)", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const boundary = new Date(NOW.getTime());
+    await seedActiveSubscription(bob.id, alice.id, boundary);
+
+    const result = await buildUseCase(NOW).execute(bob.id, alice.id);
+
+    expect(result).toBe(false);
+  });
+
   it("is false for a pending subscription", async () => {
     const alice = await createUser("alice");
     const bob = await createUser("bob");
@@ -188,13 +205,19 @@ describe("the query isMemberOf issues", () => {
       sql`select id from app_user where handle = 'bulkmember1'`
     );
 
-    // The EXACT query `DrizzleUserSubscriptionRepository.findActiveFor`
-    // issues — see that method for the source this mirrors.
+    // THE REAL QUERY OBJECT `findActiveFor` awaits — `activeMembershipQuery`
+    // hands it back un-awaited so `.toSQL()` (drizzle's synchronous,
+    // non-executing introspection of its own query builder) can be called on
+    // it. A later edit to `findActiveFor`'s predicates changes what this
+    // returns, so it flows into the EXPLAIN below automatically — unlike a
+    // hand-copied literal, which would keep passing regardless.
+    const { sql: queryText, params } = subs
+      .activeMembershipQuery(subscriber!.id, owner!.id)
+      .toSQL();
+
     const plan = await pgClient.unsafe<{ "QUERY PLAN": string }[]>(
-      `explain select * from user_subscription
-       where subscriber_id = $1 and owner_id = $2 and status = 'active'
-       limit 1`,
-      [subscriber!.id, owner!.id]
+      `explain ${queryText}`,
+      params as never[]
     );
     const planText = plan.map((row) => row["QUERY PLAN"]).join("\n");
 
