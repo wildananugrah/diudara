@@ -85,9 +85,22 @@ export interface UserSubscriptionRepositoryPort {
    * read: this is the same conclusion Task 2's constraints and Task 3's
    * claim-first sentinel each reached.
    *
-   * Implementations MUST match the unique violation narrowly — SQLSTATE `23505`
-   * AND the constraint name — and rethrow anything else untouched. A blanket
-   * catch would swallow a real failure and answer as though a row existed.
+   * Implementations MUST arbitrate with `ON CONFLICT ... DO NOTHING` naming
+   * `user_subscription_one_pending`'s own partial predicate, NEVER a bare
+   * INSERT caught for a unique violation. A caught `23505` is clean on its own
+   * connection, and poison inside a transaction: Postgres has already aborted
+   * the transaction by the time the catch runs, so the read that follows — and
+   * everything the CALLER does afterwards in the same transaction — fails with
+   * "current transaction is aborted" instead of proceeding. Phase 5b's
+   * `UserPurchaseUnitOfWorkPort` calls this inside one, and the loser is
+   * emphatically not the last statement there: it goes on to read its winner's
+   * checkout. Identical reasoning, and identical wording, to
+   * `JoinRequestRepositoryPort.createPending`.
+   *
+   * Naming the conflict target keeps the arbitration narrow, which is what a
+   * constraint-name check used to buy: a conflict on any OTHER index of this
+   * table is a different bug and must still raise, never be answered as
+   * "somebody else is already paying".
    */
   claimPending(input: {
     subscriberId: string;

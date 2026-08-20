@@ -1,7 +1,6 @@
-import { and, desc, eq, isNotNull, isNull, lte } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { userSubscriptions, userTransactions } from "../../db/schema";
-import { uniqueViolationConstraint } from "./pg-errors";
 import type {
   PendingSubscriptionClaim,
   PendingUserCheckout,
@@ -21,14 +20,6 @@ import type {
  * of those is a 500 anybody can trigger at will. A miss must read as `null`,
  * which is exactly what "no such row" is.
  */
-/**
- * The partial unique index that arbitrates a double tap — see
- * `UserSubscriptionRepositoryPort.claimPending`. Matched by NAME so the catch
- * below cannot widen: a different unique violation on this table is a different
- * bug and must not be reported as "somebody else is already paying".
- */
-const PENDING_SUBSCRIPTION_CONSTRAINT = "user_subscription_one_pending";
-
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class DrizzleUserSubscriptionRepository implements UserSubscriptionRepositoryPort {
@@ -51,37 +42,68 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
   }
 
   /**
-   * The narrow catch. `uniqueViolationConstraint` returns the constraint name
-   * ONLY for SQLSTATE `23505` (see `pg-errors.ts` for the verified error shape),
-   * and only THIS name is turned into a claim result — every other error, unique
-   * or not, is rethrown untouched. A blanket catch here would report "somebody
-   * else holds the slot" for a connection failure.
+   * `ON CONFLICT ... DO NOTHING`, deliberately NOT a bare INSERT caught for
+   * `23505` — which is what this method did until Phase 5b, Task 2 put it
+   * inside a transaction.
    *
-   * NOT SAFE INSIDE AN ENCLOSING TRANSACTION, the same caveat
-   * `DrizzleFollowRepository.follow` and `DrizzleJoinRequestRepository` record:
-   * a unique violation aborts the surrounding transaction, so the SELECT below
-   * would fail too. Nothing calls this inside one.
+   * **A CAUGHT UNIQUE VIOLATION IS ONLY CLEAN WHEN IT IS THE LAST STATEMENT OF
+   * ITS TRANSACTION.** Postgres aborts the transaction the moment the violation
+   * is raised, so everything after the catch — starting with `findPending`
+   * below, which the catch itself needs — fails with `25P02`, "current
+   * transaction is aborted, commands ignored until end of transaction block".
+   * On the pool that never showed, because the implicit transaction was one
+   * statement wide. `StartUserSubscription` now retires a lapsed membership and
+   * claims this slot inside ONE transaction (see `UserPurchaseUnitOfWorkPort`),
+   * where the loser of a double tap is emphatically not the last statement: it
+   * goes on to read its winner's checkout. Measured before the fix — thirty
+   * concurrent taps, twenty-nine `25P02` five-hundreds.
+   *
+   * `DO NOTHING` never raises the error in the first place: the loser's INSERT
+   * is a no-op, `RETURNING` yields no row, and `created: false` is genuinely
+   * clean with the transaction intact. Exactly the conclusion, and exactly the
+   * fix, `JoinRequestRepositoryPort.createPending` records — see its docstring
+   * for the two failure modes of getting `target`/`where` wrong, only one of
+   * which is loud.
+   *
+   * `target` + `where` reproduce `user_subscription_one_pending`'s own partial
+   * predicate, and BOTH must be kept in step with the index in `db/schema.ts`.
+   * They also keep this narrow, which is what the old catch's constraint-name
+   * check bought: a conflict on any OTHER index of this table is a different
+   * bug and still raises rather than being reported as "somebody else is
+   * already paying".
    */
   async claimPending(input: {
     subscriberId: string;
     tierId: string;
     ownerId: string;
   }): Promise<PendingSubscriptionClaim> {
-    try {
-      return { subscription: await this.create(input), created: true };
-    } catch (err) {
-      if (uniqueViolationConstraint(err) !== PENDING_SUBSCRIPTION_CONSTRAINT) {
-        throw err;
-      }
-      const existing = await this.findPending(input.subscriberId, input.ownerId);
-      if (!existing) {
-        // The holder settled or released between the violation and this read.
-        // Rethrowing is the honest answer — the caller retries and claims it —
-        // rather than inventing a row for it to reuse.
-        throw err;
-      }
-      return { subscription: existing, created: false };
+    const [row] = await this.db
+      .insert(userSubscriptions)
+      .values({
+        subscriberId: input.subscriberId,
+        tierId: input.tierId,
+        ownerId: input.ownerId,
+      })
+      .onConflictDoNothing({
+        target: [userSubscriptions.subscriberId, userSubscriptions.ownerId],
+        where: sql`${userSubscriptions.status} = 'pending'`,
+      })
+      .returning();
+    if (row) {
+      return { subscription: row, created: true };
     }
+    const existing = await this.findPending(input.subscriberId, input.ownerId);
+    if (!existing) {
+      // The holder settled or released between the conflict and this read.
+      // Failing is the honest answer — the caller retries and claims it —
+      // rather than inventing a row for it to reuse.
+      throw new Error(
+        "DrizzleUserSubscriptionRepository.claimPending: the pending slot was refused " +
+          "but no pending subscription exists for this pair — it settled or was released " +
+          "in between; retry"
+      );
+    }
+    return { subscription: existing, created: false };
   }
 
   /** The pair's pending subscription, whatever its tier. Private: `claimPending` is the contract. */

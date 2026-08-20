@@ -64,6 +64,7 @@ import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter"
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
+import { DrizzleUserPurchaseUnitOfWork } from "./infrastructure/repositories/drizzle-user-purchase.unit-of-work";
 import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleAnalyticsRepository } from "./infrastructure/repositories/drizzle-analytics.repository";
@@ -2057,6 +2058,10 @@ export function bootstrap(): Dependencies {
         userTierRepository,
         userPayoutRepository,
         userSubscriptionRepository,
+        // Retiring a lapsed membership and claiming this pair's pending slot in
+        // ONE transaction — Phase 5b, Task 2. See `UserPurchaseUnitOfWorkPort`
+        // for the "neither active nor pending" state a split commit leaves.
+        new DrizzleUserPurchaseUnitOfWork(db),
         payments,
         // The SAME clock `isMemberOf` above reads, so the two cannot disagree
         // about whether a subscription's period has passed — the divergence

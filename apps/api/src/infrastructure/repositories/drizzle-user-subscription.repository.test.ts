@@ -494,20 +494,24 @@ describe("DrizzleUserSubscriptionRepository", () => {
   });
 
   /**
-   * THE CATCH IS NARROW, and this is the only way to show it: the double-fault
-   * insert cannot, because postgres raises the unique violation first (probed —
-   * an insert that breaks both `user_subscription_one_pending` and the tier
-   * foreign key reports `23505` on the index, never `23503`).
+   * A FAILED CLAIM IS NOT A LOST ONE. `claimPending` arbitrates with `ON
+   * CONFLICT DO NOTHING`, so there is no catch left to widen — but the shape
+   * that catch existed to prevent is still worth pinning: a dead connection
+   * must NOT be reported as `created: false` beside a pending row that
+   * genuinely exists, because the buyer would then be told to wait for an
+   * invoice nobody is opening.
    *
-   * So the failure is injected instead. A blanket catch would look at a pending
-   * row that genuinely exists, answer `created: false`, and report a dead
-   * connection as "somebody else is already paying" — the buyer would be told to
-   * wait for an invoice nobody is opening.
+   * The failure is injected rather than provoked: the double-fault insert
+   * cannot show this, because postgres raises the unique violation first
+   * (probed — an insert that breaks both `user_subscription_one_pending` and
+   * the tier foreign key reports `23505` on the index, never `23503`).
    */
-  it("rethrows an error that is NOT the pending-claim violation, even when a pending row exists", async () => {
+  it("propagates an error that is NOT the pending-claim conflict, even when a pending row exists", async () => {
     const boom = new Error("connection terminated unexpectedly");
     const stubbed = new DrizzleUserSubscriptionRepository({
-      insert: () => ({ values: () => ({ returning: () => Promise.reject(boom) }) }),
+      insert: () => ({
+        values: () => ({ onConflictDoNothing: () => ({ returning: () => Promise.reject(boom) }) }),
+      }),
       select: () => ({
         from: () => ({
           where: () => ({

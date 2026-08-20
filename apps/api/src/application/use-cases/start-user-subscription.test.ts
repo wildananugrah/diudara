@@ -14,6 +14,10 @@ import type {
   UserSubscriptionRow,
   UserTransactionRow,
 } from "../ports/user-subscription-repository.port";
+import type {
+  UserPurchaseRepositories,
+  UserPurchaseUnitOfWorkPort,
+} from "../ports/user-purchase-unit-of-work.port";
 
 /**
  * The sentinel as a LITERAL, never the imported constant — mirrors
@@ -168,6 +172,15 @@ function fakePayoutRepository(seed: UserPayoutAccount[]) {
 function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
   const subscriptions = seed.map((row) => ({ ...row }));
   const transactions: UserTransactionRow[] = [];
+  /**
+   * Every `retireExpired` call, in order, with the arguments it was given.
+   * Task 1's review let `retireExpired` skip uuid-shape validation on the
+   * condition that its call site resolve both ids through a prior lookup, so
+   * WHICH ids arrive here — and whether it is reached at all when they cannot
+   * be resolved — is part of this task's contract, not an implementation
+   * detail. A row-count assertion alone cannot see either.
+   */
+  const retireExpiredCalls: { subscriberId: string; ownerId: string; now: Date }[] = [];
   const repository: UserSubscriptionRepositoryPort = {
     /** Mirrors `user_subscription_one_pending`: one pending row per (subscriber, owner). */
     async claimPending(input) {
@@ -206,9 +219,14 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
       row.status = "cancelled";
       return { ...row };
     },
-    // Unused by `StartUserSubscription` today — Task 2 wires it into the
-    // purchase transaction. Present only so this fake satisfies the port.
+    /**
+     * Mirrors the conditional UPDATE: `status = 'active'` AND a period end that
+     * is non-null and has lapsed. `currentPeriodEnd === null` deliberately does
+     * NOT match — SQL's `NULL <= now` is not true either, and that is what
+     * leaves the "ended" refusal reachable for such a row.
+     */
     async retireExpired(subscriberId, ownerId, now) {
+      retireExpiredCalls.push({ subscriberId, ownerId, now });
       const row = subscriptions.find(
         (r) =>
           r.subscriberId === subscriberId &&
@@ -286,7 +304,7 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
       throw new Error("StartUserSubscription must never settle a transaction — Task 7 does");
     },
   };
-  return { repository, subscriptions, transactions };
+  return { repository, subscriptions, transactions, retireExpiredCalls };
 }
 
 /**
@@ -297,7 +315,7 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
  */
 function failOnce(
   repository: UserSubscriptionRepositoryPort,
-  method: "createTransaction" | "attachGatewayReference"
+  method: "createTransaction" | "attachGatewayReference" | "claimPending"
 ): void {
   const original = repository[method].bind(repository) as (...args: never[]) => unknown;
   let fired = false;
@@ -310,6 +328,30 @@ function failOnce(
   };
 }
 
+/**
+ * A fake unit of work that simply runs `work` against the fake it was built
+ * with — mirrors `FakeJoinRequestUnitOfWork` in `request-to-join.test.ts`
+ * exactly, including why `runCallCount` is here.
+ *
+ * This fake CANNOT see whether the retirement and the claim genuinely share a
+ * Postgres transaction; only `drizzle-user-purchase.unit-of-work.test.ts` can
+ * prove that, against the real adapter, and `users.test.ts` proves it through
+ * the route. What it CAN prove is that `StartUserSubscription` asks for exactly
+ * ONE unit of work per purchase rather than one per write — a refactor that
+ * retired in its own `run(...)` and claimed in a second would keep every other
+ * test in this file green, and only this counter would catch it.
+ */
+class FakeUserPurchaseUnitOfWork implements UserPurchaseUnitOfWorkPort {
+  runCallCount = 0;
+
+  constructor(private readonly repositories: UserPurchaseRepositories) {}
+
+  async run<T>(work: (repositories: UserPurchaseRepositories) => Promise<T>): Promise<T> {
+    this.runCallCount += 1;
+    return work(this.repositories);
+  }
+}
+
 /** The whole use case, wired to fakes, with every seed overridable per test. */
 function build(
   options: {
@@ -318,7 +360,7 @@ function build(
     payouts?: UserPayoutAccount[];
     subscriptions?: UserSubscriptionRow[];
     /** Simulates one dropped statement inside the claim → attach range (I2). */
-    failOnce?: "createTransaction" | "attachGatewayReference";
+    failOnce?: "createTransaction" | "attachGatewayReference" | "claimPending";
   } = {}
 ) {
   const users = options.users ?? [userRecord(), subscriberRecord()];
@@ -328,16 +370,18 @@ function build(
   if (options.failOnce) failOnce(store.repository, options.failOnce);
   const payments = new FakePaymentAdapter();
   const clock = new FixedClock(NOW);
+  const unitOfWork = new FakeUserPurchaseUnitOfWork({ subscriptions: store.repository });
   const useCase = new StartUserSubscription(
     fakeUserRepository(users),
     fakeTierRepository(tiers),
     fakePayoutRepository(payouts),
     store.repository,
+    unitOfWork,
     payments,
     clock,
     { appBaseUrl: APP_BASE_URL }
   );
-  return { useCase, payments, clock, ...store };
+  return { useCase, payments, clock, unitOfWork, ...store };
 }
 
 function buy(useCase: StartUserSubscription, overrides: Partial<Parameters<StartUserSubscription["execute"]>[0]> = {}) {
@@ -709,29 +753,31 @@ describe("StartUserSubscription — the row exists before the provider is called
 });
 
 /**
- * **THE STATE §9 GUARANTEES EVERY PAYING MEMBER REACHES**, and the sentence it
- * used to be answered with was false.
+ * **PHASE 5b, TASK 2 — THE STATE §9 GUARANTEED EVERY PAYING MEMBER REACHED,
+ * AND WHAT NOW HAPPENS WHEN THEY PRESS THE BUTTON AGAIN.**
  *
- * 5a has no renewal pass: nothing moves a subscription out of `active` when its
- * period ends, and there is no endpoint to renew one. So one billing cycle
- * after every purchase the row sits at `status = 'active'` with a past
- * `current_period_end`, `IsMemberOf` answers `false` (period-aware) and the
- * guard here still refuses (status-only, and it must — see the guard's own
- * comment). The refusal used to say "Anda sudah menjadi anggota aktif", which
- * is not true of somebody whose membership ended, and the web then advised a
- * reload that re-rendered the same button.
+ * 5a had no renewal path at all: nothing moved a subscription out of `active`
+ * when its period ended, so one billing cycle after every purchase the row sat
+ * at `status = 'active'` with a past `current_period_end` — holding
+ * `user_subscription_one_active`'s slot forever — and this use case refused the
+ * repeat purchase with a sentence explaining that renewal was not available.
+ * That sentence was true and the button was dead.
  *
- * The two cases stay two sentences. Both are literals here, and the last
- * assertion is what fails if they are ever collapsed back into one.
+ * 5b's renewal mechanism is *buy again*: there is no recurring charge anywhere
+ * in this system, so the only thing standing between a lapsed member and a
+ * second membership was that row. `retireExpired` moves it to `expired` inside
+ * the purchase itself, so a member whose period ended presses "Jadi anggota"
+ * and it works — in ONE request, with nothing to wait for.
+ *
+ * The `findActiveFor` guard below it is UNCHANGED and still status-only. That
+ * is the whole design: the lapsed row is retired BEFORE the guard reads, so the
+ * guard sees nothing and never has to learn about periods. Narrowing the guard
+ * to "active and still in period" instead is the fix that was explicitly ruled
+ * against in 5a — it lets a row that still holds the unique-index slot through
+ * to a purchase that then collides at activation time.
  */
-describe("StartUserSubscription — a LAPSED membership is refused with the truth", () => {
-  const LIVE = "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah " +
-    "masa aktif — jika Anda belum bisa melihat kontennya, hubungi kreator tersebut.";
-  const ENDED = "Keanggotaan Anda untuk kreator ini sudah berakhir, dan perpanjangan belum " +
-    "tersedia — jadi keanggotaan baru pun belum bisa dibeli. Hubungi kreator " +
-    "tersebut jika Anda masih memerlukan akses.";
-
-  /** An `active` row whose period ran out yesterday — §9's own end state. */
+describe("StartUserSubscription — a LAPSED membership is retired, and the purchase goes through", () => {
+  /** An `active` row whose period ran out yesterday — 5a's own end state. */
   function lapsedRow(): UserSubscriptionRow {
     return {
       id: "sub-lapsed",
@@ -744,67 +790,199 @@ describe("StartUserSubscription — a LAPSED membership is refused with the trut
     };
   }
 
-  it("tells a lapsed member their membership ENDED and that renewal is not available", async () => {
+  it("a member whose period has ENDED can buy again, in one request", async () => {
     const { useCase, payments, subscriptions, transactions } = build({
       subscriptions: [lapsedRow()],
     });
 
-    await expect(buy(useCase)).rejects.toThrow(new ConflictError(ENDED));
+    const result = await buy(useCase);
 
-    // Still refused, and still for free: the guard is untouched, only the
-    // sentence changed. Nothing was claimed, nothing was charged.
+    expect(result.invoiceUrl).toBe("https://fake-checkout.local/fake-inv-1");
+    // The old row RETIRED, and a new pending one claimed beside it — never two
+    // rows both claiming to be active, which `user_subscription_one_active`
+    // would refuse at activation time anyway.
+    expect(subscriptions).toHaveLength(2);
+    expect(subscriptions[0]!.id).toBe("sub-lapsed");
+    expect(subscriptions[0]!.status).toBe("expired");
+    expect(subscriptions[1]!.status).toBe("pending");
+    expect(transactions).toHaveLength(1);
+    expect(payments.invoices).toHaveLength(1);
+  });
+
+  it("leaves NOTHING active for the pair — the slot the old row held is free", async () => {
+    const { useCase, repository } = build({ subscriptions: [lapsedRow()] });
+
+    await buy(useCase);
+
+    // The read the guard itself makes, and the read `user_subscription_one_active`
+    // arbitrates on. If the old row were still `active` here, Task 7's webhook
+    // would hit the index instead of activating this purchase.
+    expect(await repository.findActiveFor(SUBSCRIBER_ID, OWNER_ID)).toBeNull();
+  });
+
+  /**
+   * ONE unit of work, not two. The retirement and the claim have to commit
+   * together: a retirement that committed alone and a claim that then failed
+   * would leave this person with neither an active membership nor a pending
+   * checkout. See `FakeUserPurchaseUnitOfWork` for what this counter can and
+   * cannot prove, and `drizzle-user-purchase.unit-of-work.test.ts` for the
+   * rollback itself against a real Postgres.
+   */
+  it("retires and claims inside ONE unit of work, not one per write", async () => {
+    const { useCase, unitOfWork } = build({ subscriptions: [lapsedRow()] });
+
+    await buy(useCase);
+
+    expect(unitOfWork.runCallCount).toBe(1);
+  });
+
+  it("THE BOUNDARY: a period ending exactly NOW is over, so the purchase goes through", async () => {
+    // `<=` in `retireExpired`, matching `IsMemberOf`'s strict `>` from the other
+    // side: an instant equal to `now` is NOT a member, so the row is retired and
+    // the purchase proceeds rather than being refused.
+    const { useCase, subscriptions } = build({
+      subscriptions: [{ ...lapsedRow(), currentPeriodEnd: NOW }],
+    });
+
+    await buy(useCase);
+
+    expect(subscriptions[0]!.status).toBe("expired");
+    expect(subscriptions[1]!.status).toBe("pending");
+  });
+
+  it("a member whose period is STILL RUNNING is still refused, in Bahasa, and NOTHING is retired", async () => {
+    const { useCase, payments, subscriptions, transactions } = build({
+      subscriptions: [{ ...lapsedRow(), currentPeriodEnd: new Date("2026-09-19T12:00:00.000Z") }],
+    });
+
+    await expect(buy(useCase)).rejects.toThrow(/sudah menjadi anggota aktif/);
+
+    // Retiring a LIVE membership would take away access somebody paid for.
     expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]!.status).toBe("active");
     expect(transactions).toEqual([]);
     expect(payments.invoices).toEqual([]);
   });
 
-  it("says something DIFFERENT to a member whose period has not run out", async () => {
-    const { useCase } = build({
-      subscriptions: [{ ...lapsedRow(), currentPeriodEnd: new Date("2026-09-19T12:00:00.000Z") }],
+  it("does not retire a lapsed membership to a DIFFERENT creator", async () => {
+    const { useCase, subscriptions } = build({
+      subscriptions: [
+        { ...lapsedRow(), id: "sub-elsewhere", ownerId: "another-owner", tierId: "tier-other" },
+      ],
     });
 
-    await expect(buy(useCase)).rejects.toThrow(new ConflictError(LIVE));
+    await buy(useCase);
+
+    // Buying from Wildan must not end this person's membership with somebody
+    // else. `retireExpired` is keyed on the pair, and the pair is what is
+    // passed to it.
+    expect(subscriptions[0]!.id).toBe("sub-elsewhere");
+    expect(subscriptions[0]!.status).toBe("active");
+    expect(subscriptions[1]!.status).toBe("pending");
   });
 
   /**
-   * THE PIN. If the two branches are ever collapsed back into one message —
-   * the exact defect the final review measured — one of these two literals
-   * stops matching, and this reddens whichever way round the collapse went.
+   * **THE IDS REACH `retireExpired` THROUGH RESOLVED ROWS, NEVER RAW INPUT.**
+   * Task 1's review allowed `retireExpired` to skip uuid-shape validation —
+   * matching `activate`/`cancel`'s precedent for internal callers — on the
+   * condition that its call site resolve both ids through a prior lookup. A raw
+   * route param reaching that query would degrade a malformed id into an
+   * unhandled 500 on a path a buyer reaches, instead of a clean refusal.
+   *
+   * So the owner id comes from the row `findByHandle` returned, and the
+   * subscriber id from the row `findById` returned — which is why that lookup
+   * moved ABOVE the retirement. This test is what fails if it moves back.
    */
-  it("the lapsed sentence and the already-active sentence are not the same sentence", async () => {
-    const lapsed = build({ subscriptions: [lapsedRow()] });
-    const live = build({
-      subscriptions: [{ ...lapsedRow(), currentPeriodEnd: new Date("2026-09-19T12:00:00.000Z") }],
+  it("passes `retireExpired` the ids off the ROWS it resolved, exactly once", async () => {
+    const { useCase, retireExpiredCalls } = build({ subscriptions: [lapsedRow()] });
+
+    await buy(useCase);
+
+    expect(retireExpiredCalls).toEqual([
+      { subscriberId: SUBSCRIBER_ID, ownerId: OWNER_ID, now: NOW },
+    ]);
+  });
+
+  it("refuses an unresolvable subscriber BEFORE `retireExpired` is reached at all", async () => {
+    const { useCase, subscriptions, retireExpiredCalls } = build({
+      subscriptions: [lapsedRow()],
     });
 
-    const forLapsed = await buy(lapsed.useCase).catch((err: unknown) => (err as Error).message);
+    await expect(buy(useCase, { subscriberId: "not-a-uuid" })).rejects.toThrow(
+      new NotFoundError("user not found")
+    );
+
+    // Never called, so the unshaped id never reaches the query — the clean
+    // refusal Task 1's review asked this call site to guarantee.
+    expect(retireExpiredCalls).toEqual([]);
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]!.status).toBe("active");
+  });
+});
+
+/**
+ * **THE ONE ROW `retireExpired` CANNOT MOVE, AND THE REFUSAL THAT STAYS FOR
+ * IT.** `retireExpired`'s predicate is `current_period_end <= now`, and SQL's
+ * `NULL <= now` is not true — so an `active` row with NO period end survives
+ * the retirement, reaches the guard, and is refused. `membershipStanding` calls
+ * it `lapsed`, so the sentence it gets is the "your membership has ended" one.
+ *
+ * Unreachable through `activate`, which always writes a period end. But if it
+ * ever happened the row would grant nothing while still holding
+ * `user_subscription_one_active`'s slot, which is exactly what "ended" means —
+ * and telling that person they are an active member would be the one answer
+ * that is definitely false.
+ *
+ * The two sentences stay two sentences. Both are literals here, and the last
+ * assertion is what fails if they are ever collapsed into one.
+ */
+describe("StartUserSubscription — an `active` row with no period end", () => {
+  const LIVE = "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah " +
+    "masa aktif — jika Anda belum bisa melihat kontennya, hubungi kreator tersebut.";
+  const ENDED = "Keanggotaan Anda untuk kreator ini sudah berakhir, dan perpanjangan belum " +
+    "tersedia — jadi keanggotaan baru pun belum bisa dibeli. Hubungi kreator " +
+    "tersebut jika Anda masih memerlukan akses.";
+
+  function nullPeriodRow(): UserSubscriptionRow {
+    return {
+      id: "sub-no-period",
+      subscriberId: SUBSCRIBER_ID,
+      tierId: "tier-1",
+      ownerId: OWNER_ID,
+      status: "active",
+      currentPeriodEnd: null,
+      createdAt: new Date("2026-07-19T12:00:00.000Z"),
+    };
+  }
+
+  it("is refused as ENDED, and is NOT retired — the date predicate cannot match null", async () => {
+    const { useCase, payments, subscriptions, transactions } = build({
+      subscriptions: [nullPeriodRow()],
+    });
+
+    await expect(buy(useCase)).rejects.toThrow(new ConflictError(ENDED));
+
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]!.status).toBe("active");
+    expect(transactions).toEqual([]);
+    expect(payments.invoices).toEqual([]);
+  });
+
+  it("the ended sentence and the already-active sentence are not the same sentence", async () => {
+    const ended = build({ subscriptions: [nullPeriodRow()] });
+    const live = build({
+      subscriptions: [{ ...nullPeriodRow(), currentPeriodEnd: new Date("2026-09-19T12:00:00.000Z") }],
+    });
+
+    const forEnded = await buy(ended.useCase).catch((err: unknown) => (err as Error).message);
     const forLive = await buy(live.useCase).catch((err: unknown) => (err as Error).message);
 
-    expect(forLapsed).toBe(ENDED);
+    expect(forEnded).toBe(ENDED);
     expect(forLive).toBe(LIVE);
-    expect(forLapsed).not.toBe(forLive);
+    expect(forEnded).not.toBe(forLive);
     // And neither of them invites a retry that cannot work.
-    expect(forLapsed).not.toContain("coba lagi");
-    expect(forLapsed).not.toContain("Muat ulang");
-  });
-
-  it("the BOUNDARY: a period ending exactly now has ended — `>` , not `>=`", async () => {
-    // `IsMemberOf` uses strict `>`, so an instant equal to `now` is NOT a
-    // member. This refusal reads the same comparison through
-    // `membershipStanding`, so the two cannot drift apart.
-    const { useCase } = build({ subscriptions: [{ ...lapsedRow(), currentPeriodEnd: NOW }] });
-
-    await expect(buy(useCase)).rejects.toThrow(new ConflictError(ENDED));
-  });
-
-  it("an `active` row with NO period end is treated as ended, never as a live membership", async () => {
-    // Unreachable through `activate`, which always writes a period end. If it
-    // ever happened the row would grant nothing while still blocking the
-    // purchase, which is what "ended" means — and claiming "you are an active
-    // member" would be the one answer that is definitely false.
-    const { useCase } = build({ subscriptions: [{ ...lapsedRow(), currentPeriodEnd: null }] });
-
-    await expect(buy(useCase)).rejects.toThrow(new ConflictError(ENDED));
+    expect(forEnded).not.toContain("coba lagi");
+    expect(forEnded).not.toContain("Muat ulang");
   });
 });
 

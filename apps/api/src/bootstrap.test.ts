@@ -114,6 +114,7 @@ import type { MessagingProviderPort } from "./application/ports/messaging-provid
 import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
 import type { EventRepositoryPort } from "./application/ports/event-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
+import type { UserPurchaseUnitOfWorkPort } from "./application/ports/user-purchase-unit-of-work.port";
 import type { JoinRequestRepositoryPort } from "./application/ports/join-request-repository.port";
 import type { JoinRequestUnitOfWorkPort } from "./application/ports/join-request-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
@@ -616,6 +617,13 @@ const fakeOutboxRepository: OutboxRepositoryPort = {
 };
 
 /** Runs the work inline — no real transaction is needed to satisfy the type. */
+/** Pass-through, like the others here: bootstrap wiring, not atomicity, is what this file pins. */
+const fakeUserPurchaseUnitOfWork: UserPurchaseUnitOfWorkPort = {
+  async run(work) {
+    return work({ subscriptions: fakeUserSubscriptionRepository });
+  },
+};
+
 const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
   async run(work) {
     return work({
@@ -855,6 +863,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeUserTierRepository,
         fakeUserPayoutRepository,
         fakeUserSubscriptionRepository,
+        fakeUserPurchaseUnitOfWork,
         fakePaymentProvider,
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
@@ -1094,6 +1103,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeUserTierRepository,
         fakeUserPayoutRepository,
         fakeUserSubscriptionRepository,
+        fakeUserPurchaseUnitOfWork,
         fakePaymentProvider,
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
