@@ -938,6 +938,43 @@ tbody tr:last-child td {
   margin-right: 4px;
 }
 
+/* Task 10 (memberships 5a): the offer on a public profile. Absent entirely
+   for a creator who sells nothing — there is no empty state to style. */
+.membership-offer {
+  margin-top: 24px;
+  text-align: left;
+}
+
+.membership-tiers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.membership-tier {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+.membership-tier p {
+  margin: 2px 0 0;
+}
+
+/* The signed-out visitor's route to Masuk is a link, not a button, so it needs
+   the button classes' own text treatment to sit level with one. */
+.membership-tier a.button-secondary {
+  text-decoration: none;
+  display: inline-block;
+}
+
 /* Task 5: Jelajah's search bar, and the follow-row list shared with it by
    FollowListPage (both screens render the same FollowListRow projection). */
 .jelajah-search {

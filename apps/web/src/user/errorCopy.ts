@@ -148,3 +148,44 @@ export function describeUploadFailure(err: unknown): string {
       return describeRequestFailure(err);
   }
 }
+
+/**
+ * **A failed "Jadi anggota", which needs one distinction the general sentence
+ * cannot make** — the same shape `describeUploadFailure` exists for, and for
+ * the same reason: a refusal a retry cannot fix must not be answered "coba
+ * lagi", because that sends a person round a loop that cannot terminate.
+ *
+ * `POST /users/:handle/subscribe` answers **409 for five different refusals**
+ * (`StartUserSubscription`): the viewer is the owner, the tier is no longer
+ * offered, the creator's payout account is not connected, the viewer already
+ * holds an ACTIVE membership to this creator, or a PENDING checkout for this
+ * pair is already open. Every one of them means "not now, and pressing again
+ * changes nothing"; none of them carries a machine-readable `code` on the
+ * wire, so there is nothing here to branch on more finely.
+ *
+ * **So the sentence names what a person can DO rather than guessing which of
+ * the five it was.** Reloading the profile is the honest remedy: it re-reads
+ * `membership.tiers`, so a withdrawn tier disappears from the offer and a
+ * creator who has since connected a payout account starts working. Guessing
+ * "you are already a member" would be confidently wrong four times out of
+ * five — and vague is honest where confidently wrong is not, which is the
+ * ruling `describeUploadFailure`'s own rewrite recorded.
+ *
+ * Note that this route's 409 body is itself Bahasa, which makes it the most
+ * tempting place in the app to print the wire's text. The rule is not
+ * "English is banned"; it is that a screen never prints what the wire sent —
+ * `src/test/no-raw-server-errors.test.ts`.
+ *
+ * Every other shape is delegated unchanged: for a 5xx, a 429, a dropped
+ * connection or an expired session, the general sentences are already right.
+ */
+export function describeSubscribeFailure(err: unknown): string {
+  if (err instanceof UserApiError && err.status === 409) {
+    return (
+      "Keanggotaan ini belum bisa dibeli sekarang — tingkatannya mungkin sudah ditutup, " +
+      "kreatornya belum siap menerima pembayaran, atau Anda masih punya keanggotaan atau " +
+      "tagihan yang aktif. Muat ulang halaman ini untuk melihat penawaran terbaru."
+    );
+  }
+  return describeRequestFailure(err);
+}

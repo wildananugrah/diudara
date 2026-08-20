@@ -19,6 +19,7 @@ import {
   getProfileByHandle,
   getSessionUser,
   getUserToken,
+  isOwnHandle,
   isUserSignedIn,
   listFeed,
   listFollowers,
@@ -38,6 +39,7 @@ import {
   setUserSession,
   subscribeToUserAuth,
   signup,
+  startSubscription,
   unfollowUser,
   updateOwnProfile,
   UserApiError,
@@ -1529,5 +1531,123 @@ describe("apiClient — payout and tiers (Task 9)", () => {
     await deactivateOwnTier("a/b c");
 
     expect(calls[0]!.url).toBe("/users/me/tiers/a%2Fb%20c");
+  });
+});
+
+/**
+ * Task 10 of Phase 5a — the buyer's half of the money path (spec §6).
+ */
+describe("apiClient — buying a membership (Task 10)", () => {
+  const INVOICE = {
+    invoiceUrl: "https://checkout.xendit.co/web/inv_1",
+    subscriptionId: "sub-1",
+    transactionId: "txn-1",
+    externalId: "usub_txn-1",
+  };
+
+  it("startSubscription POSTs the tier id to /users/:handle/subscribe with the bearer token", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse(INVOICE, 201);
+    }) as unknown as typeof fetch;
+
+    const started = await startSubscription("budi", "tier-1");
+
+    expect(calls[0]!.url).toBe("/users/budi/subscribe");
+    expect(calls[0]!.init?.method).toBe("POST");
+    // The BUYER is the session, never anything in the body — the route reads
+    // `c.get("userId")` and the body carries exactly one field.
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ tierId: "tier-1" });
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+    expect(started.invoiceUrl).toBe("https://checkout.xendit.co/web/inv_1");
+  });
+
+  it("startSubscription encodes the handle into the path", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      return jsonResponse(INVOICE, 201);
+    }) as unknown as typeof fetch;
+
+    await startSubscription("a/b c", "tier-1");
+
+    expect(calls[0]).toBe("/users/a%2Fb%20c/subscribe");
+  });
+
+  /**
+   * The STATUS has to survive, because it is the only thing `errorCopy.ts` can
+   * branch on: a 409 from this route is a refusal a retry cannot fix, and the
+   * sentence for it differs from every other failure's.
+   */
+  it("startSubscription rejects with the API's status intact", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "Anda sudah menjadi anggota aktif kreator ini." }, 409)
+    ) as unknown as typeof fetch;
+
+    const failure = await startSubscription("budi", "tier-1").catch((err: unknown) => err);
+
+    expect(failure instanceof UserApiError).toBe(true);
+    expect((failure as UserApiError).status).toBe(409);
+  });
+
+  it("getProfileByHandle carries the creator's offer through", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({
+        handle: "budi",
+        displayName: "Budi",
+        bio: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        followerCount: 0,
+        followingCount: 0,
+        viewerFollows: null,
+        membership: {
+          tiers: [{ id: "tier-1", name: "Anggota", priceAmount: 50000, billingCycle: "monthly" }],
+        },
+      })
+    ) as unknown as typeof fetch;
+
+    const profile = await getProfileByHandle("budi");
+
+    expect(profile.membership.tiers).toEqual([
+      { id: "tier-1", name: "Anggota", priceAmount: 50000, billingCycle: "monthly" },
+    ]);
+  });
+});
+
+/**
+ * ONE answer to "is this profile mine?", shared by `FollowButton` and
+ * `MembershipOffer` — both of which must render NOTHING on your own profile,
+ * and each of which used to be one asymmetric `.toLowerCase()` away from
+ * offering an action the server answers 409 to.
+ */
+describe("isOwnHandle", () => {
+  it("is false with no session at all", () => {
+    expect(isOwnHandle("wildan")).toBe(false);
+  });
+
+  it("is true for the signed-in user's own handle", () => {
+    setUserSession("jwt-abc", USER);
+    expect(isOwnHandle("wildan")).toBe(true);
+  });
+
+  it("is false for anybody else's handle", () => {
+    setUserSession("jwt-abc", USER);
+    expect(isOwnHandle("budi")).toBe(false);
+  });
+
+  it("normalises BOTH sides — case on either one, and a leading @ on the argument", () => {
+    setUserSession("jwt-abc", USER);
+    expect(isOwnHandle("WILDAN")).toBe(true);
+    expect(isOwnHandle("@wildan")).toBe(true);
+
+    // The SESSION side varied instead: a comparison that lowercased only the
+    // argument would still pass the two above (review round 2's Minor on
+    // `FollowButton`, kept here now that the comparison lives in one place).
+    setUserSession("jwt-abc", { ...USER, handle: "WILDAN" });
+    expect(isOwnHandle("wildan")).toBe(true);
   });
 });

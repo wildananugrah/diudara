@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { describeRequestFailure, describeUploadFailure } from "./errorCopy";
+import { describeRequestFailure, describeSubscribeFailure, describeUploadFailure } from "./errorCopy";
 import { SESSION_EXPIRED_MESSAGE, UserApiError } from "./apiClient";
 
 /**
@@ -239,5 +239,56 @@ describe("describeUploadFailure", () => {
       expect(`${copy} -> english:${english.test(copy)}`).toBe(`${copy} -> english:false`);
       expect(copy.endsWith(".")).toBe(true);
     }
+  });
+});
+
+/**
+ * Task 10 of Phase 5a. A failed "Jadi anggota" needs ONE distinction the
+ * general sentence cannot make, and it is the same distinction
+ * `describeUploadFailure` exists for: a refusal that a retry cannot fix must
+ * not be answered "coba lagi".
+ *
+ * `POST /users/:handle/subscribe` answers 409 for four different refusals —
+ * the viewer is the owner, the tier was withdrawn, the creator's payout
+ * account is not connected, or this buyer already holds an active membership
+ * or a live invoice — and carries no machine-readable `code` for any of them.
+ * So the sentence names what a person can DO (reload the profile and look at
+ * the offer again) rather than guessing which of the four it was.
+ */
+describe("describeSubscribeFailure", () => {
+  it("answers a 409 with a remedy that is not 'try again'", () => {
+    const server =
+      "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah masa aktif.";
+    expect(describeSubscribeFailure(new UserApiError(server, 409))).toBe(
+      "Keanggotaan ini belum bisa dibeli sekarang — tingkatannya mungkin sudah ditutup, " +
+        "kreatornya belum siap menerima pembayaran, atau Anda masih punya keanggotaan atau " +
+        "tagihan yang aktif. Muat ulang halaman ini untuk melihat penawaran terbaru."
+    );
+  });
+
+  it("never repeats what the server sent, even though this route's 409 is already Bahasa", () => {
+    const server =
+      "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah masa aktif.";
+    const copy = describeSubscribeFailure(new UserApiError(server, 409));
+
+    // The rule is not "English is banned"; it is that a screen never prints
+    // what the wire sent — see `no-raw-server-errors.test.ts`.
+    expect(copy.includes("Membayar lagi tidak menambah masa aktif")).toBe(false);
+  });
+
+  it("delegates every other shape unchanged — a 500", () => {
+    expect(describeSubscribeFailure(new UserApiError("internal server error", 500))).toBe(
+      "Server sedang bermasalah. Coba lagi sebentar lagi."
+    );
+  });
+
+  it("delegates a dropped connection, which is not a UserApiError at all", () => {
+    expect(describeSubscribeFailure(new TypeError("Failed to fetch"))).toBe(
+      "Tidak dapat menghubungi server. Coba lagi."
+    );
+  });
+
+  it("delegates the 401, whose message this codebase authored and which is already Bahasa", () => {
+    expect(describeSubscribeFailure(new UserApiError("ignored", 401))).toBe(SESSION_EXPIRED_MESSAGE);
   });
 });

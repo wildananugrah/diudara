@@ -10,6 +10,10 @@ import {
   type UserTier,
 } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
+// Moved to `tierCopy.ts` by Task 10, unchanged: the profile's offer renders
+// the same tiers this editor does, and the two screens naming one billing
+// cycle differently is a defect no test would notice.
+import { billingCycleLabel } from "./tierCopy";
 
 type PayoutLoad =
   | { status: "loading" }
@@ -20,23 +24,6 @@ type TiersLoad =
   | { status: "loading" }
   | { status: "error"; message: string }
   | { status: "ready"; tiers: UserTier[] };
-
-/**
- * `monthly` -> "per bulan". Unknown cycles pass through rather than being
- * hidden — `user_tier.billing_cycle` is a varchar precisely so 5b can add
- * values without a migration (spec §4), and a tier this app cannot name is
- * still a tier its owner must be able to see and withdraw.
- *
- * `dashboard/format.ts` has the same function over the OTHER tier table. Not
- * imported from there for the reason `apiClient.ts` gives about that whole
- * directory: it is a separate app for a separate account type and Phase 8
- * deletes it, so a member-facing screen that imported from it would have to be
- * rewritten then. 5a only ever writes `monthly`, so only that case is spelled
- * out here rather than copying a list this table cannot contain yet.
- */
-function billingCycleLabel(cycle: string): string {
-  return cycle === "monthly" ? "per bulan" : cycle;
-}
 
 /**
  * The typed price as an integer of rupiah, or `null` when it is not one.

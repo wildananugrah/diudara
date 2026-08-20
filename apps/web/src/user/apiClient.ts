@@ -113,6 +113,51 @@ export function getSessionUser(): SessionUser | null {
   }
 }
 
+/**
+ * Both sides of a handle comparison go through this — never just the one
+ * being passed in. Review round 2 measured the asymmetric version on
+ * `FollowButton`: applying `.toLowerCase()` to only one side survived every
+ * test whose session and target handles already matched in case.
+ *
+ * The leading `@` is a web URL convention only (`/@wildan`), stripped here so
+ * a caller holding the URL's own spelling compares equal to a caller holding
+ * the server's. Defensive today — every `PublicUserProfile.handle`,
+ * `FollowListRow.handle` and `getSessionUser().handle` is already
+ * server-normalised — and cheap enough to keep.
+ */
+function normalizeHandleForComparison(raw: string): string {
+  return raw.replace(/^@/, "").toLowerCase();
+}
+
+/**
+ * **Is this profile the signed-in viewer's own?** ONE answer, shared by every
+ * screen that must render nothing on your own profile.
+ *
+ * Two of them now: `FollowButton` (you cannot follow yourself — `FollowUser`
+ * answers 409 and `follow_no_self` forbids the row) and `MembershipOffer`
+ * (you cannot buy your own membership — `StartUserSubscription` answers 409
+ * and `user_subscription_no_self` forbids the row). Both refusals are
+ * invisible in the profile payload: the API deliberately emits no
+ * self-signal, so `viewerFollows` is plain `false` on your own profile and
+ * `membership.tiers` is your own offer, listed exactly as a stranger sees it.
+ * **Comparing handles is the only correct check**, and doing it in one place
+ * is what stops the second screen re-deriving it slightly differently — the
+ * failure mode this codebase has written up more than once.
+ *
+ * Read from `getSessionUser()`, the "who am I?" cache, NOT from
+ * `isUserSignedIn()`, which answers the different question "is there a
+ * token?" (see both of their docstrings). A token with no account cache is a
+ * session whose handle is unknown, and an unknown handle cannot be shown to
+ * be yours — so this answers `false` and the screen offers the action, which
+ * the server then refuses. That split state is repaired at the cause by
+ * `repairSplitSession` at startup rather than guessed at here.
+ */
+export function isOwnHandle(handle: string): boolean {
+  const session = getSessionUser();
+  if (session === null) return false;
+  return normalizeHandleForComparison(session.handle) === normalizeHandleForComparison(handle);
+}
+
 /** Bahasa Indonesia, because it is user-visible: `LoginPage` renders it. */
 export const SESSION_NOT_STORED_MESSAGE =
   "Sesi tidak dapat disimpan di peramban ini. Coba lagi atau aktifkan penyimpanan situs.";
@@ -443,6 +488,40 @@ export interface PublicUserProfile extends UserProfileCore {
   followerCount: number;
   followingCount: number;
   viewerFollows: boolean | null;
+  /**
+   * **What this creator sells** — Task 5 of memberships-5a widened the public
+   * profile by this one field (spec §6: "A profile shows the offer and a
+   * 'Jadi anggota' button").
+   *
+   * NOT optional, and the API guarantees that: `toMembershipView` answers
+   * `{ tiers: [] }` for a creator who has published nothing and for one whose
+   * payout account is not connected (both leave `listActiveByOwner` empty),
+   * rather than omitting the key. The web must never branch on `undefined`
+   * here — Phase 4 shipped a version of that mistake and it produced a white
+   * screen during a deploy.
+   */
+  membership: MembershipView;
+}
+
+/**
+ * One tier as a VISITOR sees it, mirroring the API's own `TierView`
+ * (`application/use-cases/tier-views.ts`) exactly: four fields and no more.
+ * `UserTier` above is the OWNER's management shape and carries three fields
+ * this one deliberately does not — `ownerId`, `isActive`, `createdAt` — so
+ * the two are separate interfaces rather than one widened by optionals. A
+ * public tier is never inactive: `listActiveByOwner` filters those out
+ * server-side, so there is no flag here for a screen to re-check.
+ */
+export interface TierView {
+  id: string;
+  name: string;
+  priceAmount: number;
+  billingCycle: string;
+}
+
+/** `membership` on `PublicUserProfile`. `tiers` is always present, possibly empty. */
+export interface MembershipView {
+  tiers: TierView[];
 }
 
 /**
@@ -1043,4 +1122,37 @@ export function deactivateOwnTier(tierId: string): Promise<UserTier> {
     method: "PATCH",
     body: JSON.stringify({ isActive: false }),
   });
+}
+
+/**
+ * **`POST /users/:handle/subscribe` — the moment money moves** (spec §6).
+ *
+ * The body carries the tier and NOTHING else: the buyer is the session, read
+ * server-side from the token (`c.get("userId")`), never sent from here. 201,
+ * because this creates a pending subscription and a pending transaction that
+ * outlive the response whether or not the buyer ever pays.
+ *
+ * `invoiceUrl` is where the browser goes next. The other three fields are
+ * returned by the route and typed here because they exist on the wire, not
+ * because a screen needs them — `MembershipOffer` reads only the url.
+ *
+ * A SECOND CALL FOR THE SAME PAIR DOES NOT MINT A SECOND INVOICE: the server
+ * hands back the pending checkout it already opened (`StartUserSubscription`
+ * claims the pending slot with an INSERT, so even two concurrent taps resolve
+ * to one invoice). That is the backstop, not the plan — the button disables
+ * itself while a request is in flight.
+ */
+export interface StartSubscriptionResult {
+  /** Where the browser is sent to pay. */
+  invoiceUrl: string;
+  subscriptionId: string;
+  transactionId: string;
+  externalId: string;
+}
+
+export function startSubscription(handle: string, tierId: string): Promise<StartSubscriptionResult> {
+  return apiFetch<StartSubscriptionResult>(
+    `/users/${encodeURIComponent(handle)}/subscribe`,
+    { method: "POST", body: JSON.stringify({ tierId }) }
+  );
 }
