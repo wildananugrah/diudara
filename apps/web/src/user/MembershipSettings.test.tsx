@@ -346,6 +346,23 @@ describe("MembershipSettings — a failure is a Bahasa sentence, never the serve
     expect(alert.textContent).not.toContain("internal server error");
   });
 
+  /**
+   * A payout status that could not be READ is still a reason the editor is
+   * shut, and leaving the "Tingkatan keanggotaan" heading standing over an
+   * empty space says nothing at all. It is also the one gate reason a person
+   * can act on themselves.
+   */
+  it("explains that the editor is shut because the payout status could not be read", async () => {
+    mockApi(() => jsonResponse({ error: "internal server error" }, 500));
+
+    render(<MembershipSettings />);
+    const reason = await screen.findByTestId("tier-editor-unavailable");
+
+    expect(reason.textContent).toContain("Muat ulang halaman ini");
+    expect(reason.textContent).not.toContain("internal server error");
+    expect(screen.queryAllByRole("button", { name: "Terbitkan tingkatan" }).length).toBe(0);
+  });
+
   it("shows Bahasa when connecting fails", async () => {
     mockApi((url, init) => {
       if (url === "/users/me/payout" && methodOf(init) === "POST") {

@@ -156,12 +156,13 @@ export default function MembershipSettings() {
       ) : null}
 
       <h3>Tingkatan keanggotaan</h3>
-      {payoutLoad.status === "ready" && !connected ? (
+      {connected ? (
+        <TierEditor />
+      ) : (
         <p className="hint" data-testid="tier-editor-unavailable">
-          {tierEditorUnavailableReason(payoutLoad.payout)}
+          {tierEditorUnavailableReason(payoutLoad)}
         </p>
-      ) : null}
-      {connected ? <TierEditor /> : null}
+      )}
     </section>
   );
 }
@@ -220,12 +221,27 @@ function PayoutState({
 
 /**
  * WHY the editor is shut, in the words that fit the state the person is
- * actually in. All three say that the money has nowhere to go — spec §5's own
- * reason — but only the one where connecting would help tells them to connect.
- * Telling somebody whose KYC is pending to "connect first" would send them to
- * press a button that provisions nothing and answers `provisioning` again.
+ * actually in. Every branch says that the money has nowhere to go — spec §5's
+ * own reason — but only the one where connecting would help tells them to
+ * connect. Telling somebody whose KYC is pending to "connect first" would send
+ * them to press a button that provisions nothing and answers `provisioning`
+ * again, and each press is a KYC entity at Xendit with no delete endpoint.
+ *
+ * The two NON-ready states get a sentence too, rather than the heading above
+ * standing over nothing: a payout status that could not be read is a reason
+ * the editor is shut, and it is one the person can act on by reloading.
  */
-function tierEditorUnavailableReason(payout: PayoutStatus): string {
+function tierEditorUnavailableReason(load: PayoutLoad): string {
+  if (load.status === "loading") {
+    return "Menunggu status akun pembayaran Anda.";
+  }
+  if (load.status === "error") {
+    return (
+      "Tingkatan keanggotaan belum bisa dibuat karena status akun pembayaran Anda tidak dapat " +
+      "dibaca. Muat ulang halaman ini."
+    );
+  }
+  const payout = load.payout;
   if (!payout.available) {
     return (
       "Tingkatan keanggotaan belum bisa dibuat karena pembayaran belum tersedia di server ini — " +
