@@ -27,6 +27,7 @@ import {
   follows,
   postMedia,
   posts,
+  userTiers,
 } from "./schema";
 
 /**
@@ -108,6 +109,9 @@ export async function resetDatabase() {
   await db.delete(postMedia);
   // post references app_user (author), so it must clear before app_user.
   await db.delete(posts);
+  // userTiers references app_user (owner) — Task 1 of Phase 5a — so it must
+  // clear before app_user too.
+  await db.delete(userTiers);
   // app_user is a fully independent identity table (Phase 9's pivot) — no FK
   // relationship to anything above it, so its position here is free.
   await db.delete(appUsers);

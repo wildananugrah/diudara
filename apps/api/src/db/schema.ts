@@ -924,3 +924,35 @@ export const postMedia = pgTable(
       .where(sql`${table.postId} is null`),
   ]
 );
+
+/**
+ * Task 1 of Phase 5a: a membership tier a user offers on their own profile —
+ * separate from, and unrelated to, `membership_tier` under `/dashboard/*`.
+ */
+export const userTiers = pgTable(
+  "user_tier",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ownerId: uuid("owner_id")
+      .notNull()
+      .references(() => appUsers.id),
+    name: varchar("name", { length: 128 }).notNull(),
+    // Integer rupiah, matching `membership_tier.price_amount`'s convention.
+    priceAmount: integer("price_amount").notNull(),
+    // varchar, not an enum, so 5b can add cycles without a migration — the same
+    // reasoning `subscription.status` records for `past_due`/`churned`.
+    billingCycle: varchar("billing_cycle", { length: 16 }).notNull(),
+    // A deactivated tier stops being offered. Existing subscriptions to it are
+    // unaffected — see the spec's §4.
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("user_tier_owner_idx").on(table.ownerId),
+    // Redundant on its own — `id` is already unique. It exists ONLY so
+    // `user_subscription` can carry a composite foreign key against
+    // (id, owner_id), which is what makes its denormalised `owner_id`
+    // impossible to falsify. Do not remove it as "duplicate".
+    uniqueIndex("user_tier_id_owner_unique").on(table.id, table.ownerId),
+  ]
+);
