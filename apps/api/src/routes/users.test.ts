@@ -1686,3 +1686,161 @@ describe("POST /users/signup — Task 5's existing-email notice", () => {
     expect(notifier.notifications[0].toWhatsappNumber).toBe("+6281234567890");
   });
 });
+
+/**
+ * Phase 5a Task 3. The one route pair that decides whether money can reach a
+ * user at all — Task 4 cannot publish a tier without it and Task 6 has nowhere
+ * to settle an invoice.
+ *
+ * `/users/me/payout` is TWO literal segments deep, and the first of them is
+ * `me`, which `HANDLE_PATTERN` (`^[a-z0-9_]{3,30}$`) already makes impossible to
+ * register at 2 characters. So `payout` is deliberately NOT added to
+ * `RESERVED_HANDLES`: the route-derived guard above reads only the FIRST segment
+ * after `/users/`, nothing here can shadow a profile, and reserving an ordinary
+ * Indonesian-usable word to prevent a collision that cannot occur would take it
+ * from users for nothing. `handle.ts` says the same about `me`/`by-handle`/
+ * `password-reset` already.
+ */
+describe("GET /users/me/payout and POST /users/me/payout", () => {
+  /** Signs up, logs in, and returns both the bearer token and the user's id. */
+  async function payoutUser(a: ReturnType<typeof app>, overrides: Partial<typeof VALID> = {}) {
+    const account = { ...VALID, ...overrides };
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(account),
+    });
+    const res = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: account.email, password: account.password }),
+    });
+    const body = (await res.json()) as { token: string; user: { id: string } };
+    return { token: body.token, userId: body.user.id };
+  }
+
+  function connect(a: ReturnType<typeof app>, token: string) {
+    return a.request("/users/me/payout", { method: "POST", headers: authed(token) });
+  }
+
+  it("rejects an unauthenticated read with 401", async () => {
+    expect((await app().request("/users/me/payout")).status).toBe(401);
+  });
+
+  it("rejects an unauthenticated connect with 401", async () => {
+    const res = await app().request("/users/me/payout", { method: "POST" });
+    expect(res.status).toBe(401);
+  });
+
+  it("reports neither connected nor provisioning for a user who has never connected", async () => {
+    const a = app();
+    const { token } = await payoutUser(a);
+
+    const res = await a.request("/users/me/payout", { headers: authed(token) });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ connected: false, provisioning: false, available: true });
+  });
+
+  it("connects on POST, and the GET agrees afterwards", async () => {
+    const a = app();
+    const { token } = await payoutUser(a);
+
+    const post = await connect(a, token);
+
+    expect(post.status).toBe(200);
+    expect(await post.json()).toEqual({ connected: true, provisioning: false, available: true });
+
+    const get = await a.request("/users/me/payout", { headers: authed(token) });
+    expect(await get.json()).toEqual({ connected: true, provisioning: false, available: true });
+  });
+
+  it("never puts the provider account id in the response body", async () => {
+    // The id belongs on the server side of `for_account_id` and nowhere else.
+    // The two booleans are everything a screen needs.
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { token, userId } = await payoutUser(a);
+
+    const post = await connect(a, token);
+
+    const accountId = (await deps.userPayoutRepository.findPayoutAccount(userId))
+      ?.xenditAccountId;
+    expect(accountId).toBeTruthy();
+    expect(await post.text()).not.toContain(accountId!);
+  });
+
+  it("is idempotent across a second POST — one provider account, not two", async () => {
+    // A user WILL press this twice on a slow connection. A Xendit MANAGED
+    // sub-account is a KYC entity with no delete endpoint, so a second one is
+    // permanent.
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { token, userId } = await payoutUser(a);
+
+    const first = await connect(a, token);
+    const second = await connect(a, token);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({
+      connected: true,
+      provisioning: false,
+      available: true,
+    });
+    const payments = deps.payments as unknown as { accounts: { accountId: string }[] };
+    expect(payments.accounts).toHaveLength(1);
+    expect((await deps.userPayoutRepository.findPayoutAccount(userId))?.xenditAccountId).toBe(
+      payments.accounts[0].accountId
+    );
+  });
+
+  it("reports provisioning while a claim is held, without calling the provider", async () => {
+    // Seeded through the repository, exactly as `payment-account.test.ts` does
+    // for creators: POSTing to reach this state would provision a real KYC
+    // entity in the real adapter, and there is no way to delete one.
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { token, userId } = await payoutUser(a);
+    expect(await deps.userPayoutRepository.beginXenditAccountProvisioning(userId)).toBe(true);
+
+    const res = await a.request("/users/me/payout", { headers: authed(token) });
+
+    expect(res.status).toBe(200);
+    // The column is NOT empty here — a truthiness check would call this
+    // connected and hand `for_account_id: "provisioning:in-progress"` to Xendit.
+    expect(await res.json()).toEqual({ connected: false, provisioning: true, available: true });
+  });
+
+  it("keeps one user's payout status independent of another's", async () => {
+    const a = app();
+    const mine = await payoutUser(a);
+    const stranger = await payoutUser(a, { handle: "rina", email: "rina@example.com" });
+
+    await connect(a, mine.token);
+
+    expect(await (await a.request("/users/me/payout", { headers: authed(mine.token) })).json())
+      .toEqual({ connected: true, provisioning: false, available: true });
+    expect(
+      await (await a.request("/users/me/payout", { headers: authed(stranger.token) })).json()
+    ).toEqual({ connected: false, provisioning: false, available: true });
+  });
+
+  it("says available: false and 503s the POST on a box with no payment provider", async () => {
+    // `connected: false, provisioning: false` otherwise means two different
+    // things — "you have not connected yet" and "this server cannot take
+    // payments at all" — and Task 4's publish screen has to tell them apart: the
+    // first is fixable by pressing a button, the second is not. Same gap the
+    // creator dashboard's `available` closed (payment-account.test.ts).
+    const deps = bootstrap();
+    const a = createApp({ ...deps, connectUserPayout: undefined });
+    const { token } = await payoutUser(a);
+
+    const get = await a.request("/users/me/payout", { headers: authed(token) });
+    expect(get.status).toBe(200);
+    expect(await get.json()).toEqual({ connected: false, provisioning: false, available: false });
+
+    const post = await connect(a, token);
+    expect(post.status).toBe(503);
+  });
+});

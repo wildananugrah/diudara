@@ -66,6 +66,8 @@ import {
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
+import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
+import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
@@ -85,6 +87,7 @@ import type {
   CreatorRepositoryPort,
 } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
+import type { UserPayoutRepositoryPort } from "./application/ports/user-payout-repository.port";
 import type { FollowRepositoryPort } from "./application/ports/follow-repository.port";
 import type { PostRepositoryPort } from "./application/ports/post-repository.port";
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
@@ -220,6 +223,22 @@ const fakeUserRepository: UserRepositoryPort = {
   },
   async mostFollowedPublic() {
     return [];
+  },
+};
+
+/** Phase 5a's payout column, faked the same shallow way every other repository here is — these tests are about `Dependencies` wiring, not payout behaviour. */
+const fakeUserPayoutRepository: UserPayoutRepositoryPort = {
+  async findPayoutAccount() {
+    return null;
+  },
+  async beginXenditAccountProvisioning() {
+    return false;
+  },
+  async finishXenditAccountProvisioning() {
+    return false;
+  },
+  async abandonXenditAccountProvisioning() {
+    return false;
   },
 };
 
@@ -696,6 +715,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeTokenIssuer
       ),
       userRepository: fakeUserRepository,
+      userPayoutRepository: fakeUserPayoutRepository,
       userTokenIssuer: fakeUserTokenIssuer,
       registerUser: new RegisterUser(
         fakeUserRepository,
@@ -750,6 +770,8 @@ describe("Dependencies (composition root contract)", () => {
       listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
       getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
+      connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
+      getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository
@@ -913,6 +935,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeTokenIssuer
       ),
       userRepository: fakeUserRepository,
+      userPayoutRepository: fakeUserPayoutRepository,
       userTokenIssuer: fakeUserTokenIssuer,
       registerUser: new RegisterUser(
         fakeUserRepository,
@@ -967,6 +990,8 @@ describe("Dependencies (composition root contract)", () => {
       listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
       getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
+      connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
+      getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository

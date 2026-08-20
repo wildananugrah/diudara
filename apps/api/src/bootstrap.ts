@@ -1,6 +1,7 @@
 import { db, sql } from "./db/client";
 import { DrizzleCreatorRepository } from "./infrastructure/repositories/drizzle-creator.repository";
 import { DrizzleUserRepository } from "./infrastructure/repositories/drizzle-user.repository";
+import { DrizzleUserPayoutRepository } from "./infrastructure/repositories/drizzle-user-payout.repository";
 import { DrizzleCommunityRepository } from "./infrastructure/repositories/drizzle-community.repository";
 import { BunPasswordHasher } from "./infrastructure/auth/bun-password.hasher";
 import { HonoJwtTokenIssuer } from "./infrastructure/auth/hono-jwt.token-issuer";
@@ -38,6 +39,8 @@ import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
+import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
+import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
@@ -88,6 +91,7 @@ import type { MediaStoragePort } from "./application/ports/media-storage.port";
 import type { MediaRepositoryPort } from "./application/ports/media-repository.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
+import type { UserPayoutRepositoryPort } from "./application/ports/user-payout-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -153,6 +157,15 @@ export interface Dependencies {
    * poking Drizzle directly.
    */
   userRepository: UserRepositoryPort;
+  /**
+   * Phase 5a's payout column on `app_user`, kept off `userRepository` so that
+   * `UserRecord` — which is projected straight into profile responses — never
+   * carries a provider account id. Exposed here for the same reason
+   * `creatorRepository` is: a test must be able to put the column into its
+   * claimed state WITHOUT going through the POST route, which in the real
+   * adapter provisions a KYC entity that has no delete endpoint.
+   */
+  userPayoutRepository: UserPayoutRepositoryPort;
   /**
    * Signs and verifies user-session tokens. A SEPARATE class from
    * `tokenIssuer` even though both share `JWT_SECRET` — see
@@ -281,6 +294,22 @@ export interface Dependencies {
    * without the model itself being aware payments are connected or not.
    */
   getPaymentAccountStatus: GetPaymentAccountStatus;
+  /**
+   * `POST /users/me/payout` (Phase 5a). `undefined` EXACTLY when `payments` is
+   * `null`, mirroring `createPaymentAccount` above: there is no
+   * `PaymentProviderPort` to construct it against on a box with payments
+   * disabled, and `routes/users.ts` answers 503 rather than crashing on a
+   * provider it was never handed.
+   */
+  connectUserPayout: ConnectUserPayout | undefined;
+  /**
+   * `GET /users/me/payout` (Phase 5a). NEVER undefined, unlike
+   * `connectUserPayout` above — a box with no payment provider still has to be
+   * able to answer "are you connected?" with `false`, or Task 4's publish screen
+   * cannot tell "press the button" apart from "this server cannot take payments
+   * at all". Read-only and safe on every page load; the POST route is not.
+   */
+  getUserPayoutStatus: GetUserPayoutStatus;
   getPublicCommunity: GetPublicCommunity;
   /**
    * `POST /c/:slug/checkout`. `undefined` EXACTLY when `payments` is `null` —
@@ -1783,6 +1812,9 @@ export function bootstrap(): Dependencies {
   // `HonoJwtUserTokenIssuer`'s own docstring for why the `typ` claim is what
   // keeps the two session kinds apart, not a second secret.
   const userRepository = new DrizzleUserRepository(db);
+  // Phase 5a. Its own repository over the same table — see the port's docstring
+  // for why the payout column is not on `userRepository`.
+  const userPayoutRepository = new DrizzleUserPayoutRepository(db);
   const userTokenIssuer = new HonoJwtUserTokenIssuer(jwtSecret);
   // `registerUser` is constructed further down, alongside Task 5's password
   // reset — see the comment there for why it needs to wait for `messaging`.
@@ -1874,6 +1906,14 @@ export function bootstrap(): Dependencies {
     ? new CreatePaymentAccount(creatorRepository, payments)
     : undefined;
   const getPaymentAccountStatus = new GetPaymentAccountStatus(creatorRepository);
+  // Phase 5a's parallel flow for `app_user`. `undefined` on the same condition
+  // `createPaymentAccount` is, and for the same reason; the STATUS reader below
+  // is always constructed, because a box with payments disabled must still be
+  // able to answer the question.
+  const connectUserPayout = payments
+    ? new ConnectUserPayout(userPayoutRepository, payments)
+    : undefined;
+  const getUserPayoutStatus = new GetUserPayoutStatus(userPayoutRepository);
   // After selectPaymentProvider on purpose — two reasons, one of them dated.
   //
   // STILL TRUE: `createCommunity`/`updateCommunity`/`createPaymentAccount` above
@@ -2237,6 +2277,7 @@ export function bootstrap(): Dependencies {
     registerCreator,
     authenticateCreator,
     userRepository,
+    userPayoutRepository,
     userTokenIssuer,
     registerUser,
     authenticateUser,
@@ -2264,6 +2305,8 @@ export function bootstrap(): Dependencies {
     listChannels,
     createPaymentAccount,
     getPaymentAccountStatus,
+    connectUserPayout,
+    getUserPayoutStatus,
     getPublicCommunity,
     startCheckout,
     requestToJoin,

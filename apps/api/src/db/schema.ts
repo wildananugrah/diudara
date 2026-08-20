@@ -40,6 +40,18 @@ export const appUsers = pgTable(
     // "a reset ends all sessions" possible at all, since a JWT is stateless
     // and cannot otherwise be revoked short of rotating JWT_SECRET.
     sessionEpoch: integer("session_epoch").notNull().default(0),
+    // Where THIS user's membership money settles (Phase 5a). Nullable, and it
+    // holds THREE states, not two — NULL, the `XENDIT_ACCOUNT_PROVISIONING`
+    // sentinel, and a real account id. `domain/payment-account.ts` owns all
+    // three and the predicates that tell them apart; read that file before
+    // touching this column, and never truthiness-check it: the sentinel is
+    // truthy, and a truthy read is what would send `for_account_id:
+    // "provisioning:in-progress"` to the provider.
+    //
+    // The same shape as `creator.xendit_account_id` below, deliberately
+    // separate from it: `creator` is the untouchable /dashboard/* identity, and
+    // an app_user is a different owner entirely.
+    xenditAccountId: varchar("xendit_account_id", { length: 255 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
 );

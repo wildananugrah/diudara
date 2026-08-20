@@ -1,0 +1,1 @@
+ALTER TABLE "app_user" ADD COLUMN "xendit_account_id" varchar(255);

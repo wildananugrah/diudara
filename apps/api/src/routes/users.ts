@@ -20,7 +20,7 @@ import {
   resolveViewerId,
   type UserAuthVariables,
 } from "../http/user-auth.middleware";
-import { ValidationError } from "../application/errors";
+import { ServiceUnavailableError, ValidationError } from "../application/errors";
 import { DEFAULT_FOLLOW_LIST_LIMIT } from "../application/use-cases/follow-user";
 import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import type { Dependencies } from "../bootstrap";
@@ -173,6 +173,8 @@ export function userRoutes(
     | "listFollows"
     | "exploreUsers"
     | "maxPostImages"
+    | "connectUserPayout"
+    | "getUserPayoutStatus"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -239,6 +241,59 @@ export function userRoutes(
     const patch = c.get("validated") as UpdateProfileInput;
     const updated = await deps.updateUserProfile.execute({ userId: c.get("userId"), patch });
     return c.json(updated);
+  });
+
+  /**
+   * Phase 5a Task 3. Whether money can reach THIS user yet — the switch every
+   * later task in the phase depends on: a tier cannot be published without it
+   * and an invoice has nowhere to settle.
+   *
+   * Both verbs answer with the same three booleans and NEVER the account id
+   * itself. The id belongs on the server side of `for_account_id`; a client has
+   * no use for it, and a value on the wire is a value that ends up pasted
+   * somewhere.
+   *
+   * `available` is a property of the SERVER, not of the user, which is why it is
+   * composed here rather than inside `GetUserPayoutStatus` — that use case reads
+   * one column and has no business knowing what `bootstrap()` wired. It is the
+   * exact same `connectUserPayout !== undefined` the POST below turns into a
+   * 503, so the two can never disagree. Without it, `connected: false,
+   * provisioning: false` means both "you have not connected yet" and "this
+   * server has no payment provider at all", and only the first is fixable by
+   * pressing a button. The creator dashboard shipped that ambiguity once
+   * (`routes/payment-account.ts`), so this one does not.
+   *
+   * `payout` is NOT in `RESERVED_HANDLES`, deliberately. The route-derived guard
+   * in `users.test.ts` reads only the FIRST segment after `/users/` — here that
+   * is `me`, which `HANDLE_PATTERN` already makes unregisterable at 2
+   * characters — so nothing under `/me/` can ever shadow a profile, and
+   * reserving an ordinary word to prevent a collision that cannot occur would
+   * take it from users for nothing. See `domain/handle.ts` on `me`/`by-handle`/
+   * `password-reset`, which are absent from that list for the same reason.
+   */
+  app.get<"/me/payout">("/me/payout", requireAuth, async (c) => {
+    const status = await deps.getUserPayoutStatus.execute(c.get("userId"));
+    return c.json({ ...status, available: deps.connectUserPayout !== undefined });
+  });
+
+  /**
+   * IDEMPOTENT, and 200 rather than 201 for that reason — the same contract as
+   * the follow routes below: the response is the RESULTING state, whether or not
+   * this call is what changed it. A user on a slow connection will press this
+   * twice, and a Xendit MANAGED sub-account is a KYC entity with NO delete
+   * endpoint, so the one outcome that must be impossible is a second account.
+   * `ConnectUserPayout` guarantees that by claiming the column BEFORE it calls
+   * the provider — read its docstring before changing anything here.
+   */
+  app.post<"/me/payout">("/me/payout", requireAuth, async (c) => {
+    // `undefined` EXACTLY when this box has no payment provider at all. Same
+    // 503, and the same wording, as `routes/payment-account.ts`: this box is
+    // fine, there is just nothing to connect an account to.
+    if (!deps.connectUserPayout) {
+      throw new ServiceUnavailableError("pembayaran belum dikonfigurasi di server ini.");
+    }
+    const status = await deps.connectUserPayout.execute(c.get("userId"));
+    return c.json({ ...status, available: true }, 200);
   });
 
   /**
