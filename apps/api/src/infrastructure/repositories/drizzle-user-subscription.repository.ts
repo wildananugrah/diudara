@@ -1,4 +1,4 @@
-import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, lte } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { userSubscriptions, userTransactions } from "../../db/schema";
 import { uniqueViolationConstraint } from "./pg-errors";
@@ -131,6 +131,42 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
       .where(eq(userSubscriptions.id, id))
       .returning();
     return row ?? null;
+  }
+
+  /**
+   * THE CONDITIONAL UPDATE — see the port's own docstring for why this must
+   * be the arbiter rather than a read followed by a write. `<=` on
+   * `current_period_end` matches `NOW` at the exact boundary, which is
+   * deliberate: a period that ends AT `now` is over, not still running.
+   */
+  async retireExpired(subscriberId: string, ownerId: string, now: Date): Promise<boolean> {
+    const rows = await this.db
+      .update(userSubscriptions)
+      .set({ status: "expired" })
+      .where(
+        and(
+          eq(userSubscriptions.subscriberId, subscriberId),
+          eq(userSubscriptions.ownerId, ownerId),
+          eq(userSubscriptions.status, "active"),
+          lte(userSubscriptions.currentPeriodEnd, now)
+        )
+      )
+      .returning({ id: userSubscriptions.id });
+    return rows.length > 0;
+  }
+
+  /**
+   * What Task 3's worker sweep pages through, retiring each row it gets back
+   * by calling `retireExpired` on it. Oldest period-end first, so a backlog
+   * drains in the order members actually lapsed.
+   */
+  async listExpiredActive(now: Date, limit: number): Promise<UserSubscriptionRow[]> {
+    return this.db
+      .select()
+      .from(userSubscriptions)
+      .where(and(eq(userSubscriptions.status, "active"), lte(userSubscriptions.currentPeriodEnd, now)))
+      .orderBy(userSubscriptions.currentPeriodEnd)
+      .limit(limit);
   }
 
   /**

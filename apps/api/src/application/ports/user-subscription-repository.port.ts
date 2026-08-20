@@ -107,6 +107,35 @@ export interface UserSubscriptionRepositoryPort {
    * the same (subscriber, owner) pair become active again later.
    */
   cancel(id: string): Promise<UserSubscriptionRow | null>;
+  /**
+   * Retires this pair's ACTIVE subscription once its period has lapsed —
+   * flips `status` to `expired`, which is what frees
+   * `user_subscription_one_active`'s slot for a fresh purchase.
+   *
+   * There is no recurring charge anywhere in this system — the Xendit
+   * adapter has exactly two operations and no tokenisation — so "renewal"
+   * means "buy again", and the only thing standing between a lapsed member
+   * and a second purchase is this row still holding the unique-index slot.
+   * Task 2 calls this inside the purchase transaction; Task 3 calls it from
+   * the worker sweep.
+   *
+   * THE ARBITER is a conditional UPDATE — `status = 'active' and
+   * current_period_end <= now` in the WHERE clause — not a read followed by
+   * a write. 5a reached the same conclusion three times over (its
+   * subscription constraints, its payout claim, its pending checkout): the
+   * read-then-write version passes its tests right up until two callers run
+   * concurrently.
+   *
+   * Returns whether a row actually moved: false when there is nothing active
+   * for the pair, or its period has not lapsed yet.
+   */
+  retireExpired(subscriberId: string, ownerId: string, now: Date): Promise<boolean>;
+  /**
+   * ACTIVE subscriptions whose period has already lapsed — what Task 3's
+   * worker sweep pages through, retiring each one by calling `retireExpired`
+   * on it in turn. `limit` bounds a single pass.
+   */
+  listExpiredActive(now: Date, limit: number): Promise<UserSubscriptionRow[]>;
   /** Task 8's membership check: is this subscriber an active member of this owner. */
   findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null>;
   createTransaction(input: {

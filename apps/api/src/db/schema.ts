@@ -992,7 +992,12 @@ export const userSubscriptions = pgTable(
     ownerId: uuid("owner_id")
       .notNull()
       .references(() => appUsers.id),
-    /** `pending` | `active` | `cancelled`. 5b adds `past_due` and `churned`. */
+    /**
+     * `pending` | `active` | `cancelled` | `expired`. Still a varchar rather
+     * than an enum, so `expired` — retirement's target status, see
+     * `DrizzleUserSubscriptionRepository.retireExpired` — needed no migration
+     * to add. 5b can still add `past_due` and `churned` later the same way.
+     */
     status: varchar("status", { length: 16 }).notNull().default("pending"),
     currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -30,6 +30,32 @@ async function createUser(handle: string) {
   return row!;
 }
 
+/**
+ * A fresh (subscriber, owner) pair with one ACTIVE subscription whose
+ * `current_period_end` is `periodEnd` — the starting shape `retireExpired`
+ * and `listExpiredActive` act on.
+ */
+async function seedActiveSubscription({ periodEnd }: { periodEnd: Date }) {
+  const alice = await createUser("alice");
+  const bob = await createUser("bob");
+  const tier = await tiers.create({
+    ownerId: alice.id,
+    name: "Anggota",
+    priceAmount: 50_000,
+    billingCycle: "monthly",
+  });
+  const created = await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+  await subs.activate(created.id, periodEnd);
+  return { subscriberId: bob.id, ownerId: alice.id, tierId: tier.id };
+}
+
+// Literal, not derived from the implementation — PAST and FUTURE straddle NOW
+// on either side of the `<=` boundary `retireExpired` and `listExpiredActive`
+// both use.
+const PAST = new Date("2026-01-01T00:00:00.000Z");
+const NOW = new Date("2026-08-21T00:00:00.000Z");
+const FUTURE = new Date("2027-01-01T00:00:00.000Z");
+
 describe("DrizzleUserSubscriptionRepository", () => {
   it("creates a pending subscription and returns the row", async () => {
     const alice = await createUser("alice");
@@ -585,5 +611,34 @@ describe("DrizzleUserSubscriptionRepository", () => {
     const activatedSecond = await subs.activate(second.id, new Date("2026-09-18T00:00:00.000Z"));
 
     expect(activatedSecond?.status).toBe("active");
+  });
+
+  it("retires an ACTIVE subscription whose period has passed, and frees the active slot", async () => {
+    const { subscriberId, ownerId, tierId } = await seedActiveSubscription({ periodEnd: PAST });
+
+    expect(await subs.retireExpired(subscriberId, ownerId, NOW)).toBe(true);
+
+    // The whole point: the partial unique index no longer holds the slot —
+    // a brand new subscription for the same pair can be created AND activated.
+    const fresh = await subs.create({ subscriberId, tierId, ownerId });
+    await subs.activate(fresh.id, FUTURE);
+    expect((await subs.findActiveFor(subscriberId, ownerId))?.id).toBe(fresh.id);
+  });
+
+  it("does NOT retire a subscription whose period is still running", async () => {
+    const { subscriberId, ownerId } = await seedActiveSubscription({ periodEnd: FUTURE });
+
+    expect(await subs.retireExpired(subscriberId, ownerId, NOW)).toBe(false);
+    expect(await subs.findActiveFor(subscriberId, ownerId)).not.toBe(null);
+  });
+
+  it("lists expired active subscriptions for the sweep, and excludes live ones", async () => {
+    const expired = await seedActiveSubscription({ periodEnd: PAST });
+    await seedActiveSubscription({ periodEnd: FUTURE });
+    const expiredRow = await subs.findActiveFor(expired.subscriberId, expired.ownerId);
+
+    const result = await subs.listExpiredActive(NOW, 10);
+
+    expect(result.map((row) => row.id)).toEqual([expiredRow!.id]);
   });
 });

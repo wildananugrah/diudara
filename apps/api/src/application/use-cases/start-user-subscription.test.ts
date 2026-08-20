@@ -206,6 +206,29 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
       row.status = "cancelled";
       return { ...row };
     },
+    // Unused by `StartUserSubscription` today — Task 2 wires it into the
+    // purchase transaction. Present only so this fake satisfies the port.
+    async retireExpired(subscriberId, ownerId, now) {
+      const row = subscriptions.find(
+        (r) =>
+          r.subscriberId === subscriberId &&
+          r.ownerId === ownerId &&
+          r.status === "active" &&
+          r.currentPeriodEnd !== null &&
+          r.currentPeriodEnd <= now
+      );
+      if (!row) return false;
+      row.status = "expired";
+      return true;
+    },
+    async listExpiredActive(now, limit) {
+      return subscriptions
+        .filter(
+          (r) => r.status === "active" && r.currentPeriodEnd !== null && r.currentPeriodEnd <= now
+        )
+        .slice(0, limit)
+        .map((r) => ({ ...r }));
+    },
     async findActiveFor(subscriberId, ownerId) {
       const row = subscriptions.find(
         (r) => r.subscriberId === subscriberId && r.ownerId === ownerId && r.status === "active"
