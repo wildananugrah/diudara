@@ -248,12 +248,13 @@ describe("describeUploadFailure", () => {
  * `describeUploadFailure` exists for: a refusal that a retry cannot fix must
  * not be answered "coba lagi".
  *
- * `POST /users/:handle/subscribe` answers 409 for four different refusals —
- * the viewer is the owner, the tier was withdrawn, the creator's payout
- * account is not connected, or this buyer already holds an active membership
- * or a live invoice — and carries no machine-readable `code` for any of them.
- * So the sentence names what a person can DO (reload the profile and look at
- * the offer again) rather than guessing which of the four it was.
+ * `POST /users/:handle/subscribe` answers 409 for SEVEN different refusals and
+ * carries no machine-readable `code` for any of them — see the function's own
+ * docstring for the list. Six cannot be fixed by pressing again and one can,
+ * so the sentence promises nothing about pressing again at all: it names the
+ * possibilities, including the one this phase cannot resolve (a membership
+ * that has ended, with no renewal until 5b), and points at the page rather
+ * than at the button.
  */
 describe("describeSubscribeFailure", () => {
   it("answers a 409 with a remedy that is not 'try again'", () => {
@@ -261,9 +262,30 @@ describe("describeSubscribeFailure", () => {
       "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah masa aktif.";
     expect(describeSubscribeFailure(new UserApiError(server, 409))).toBe(
       "Keanggotaan ini belum bisa dibeli sekarang — tingkatannya mungkin sudah ditutup, " +
-        "kreatornya belum siap menerima pembayaran, atau Anda masih punya keanggotaan atau " +
-        "tagihan yang aktif. Muat ulang halaman ini untuk melihat penawaran terbaru."
+        "kreatornya belum siap menerima pembayaran, pembayaran sebelumnya masih diproses, " +
+        "atau keanggotaan Anda sudah berakhir dan perpanjangan belum tersedia. Muat ulang " +
+        "halaman ini untuk melihat keadaan terbaru."
     );
+  });
+
+  /**
+   * **THE LOOP, PINNED SHUT.** The previous sentence advised reloading "untuk
+   * melihat penawaran terbaru" — the latest OFFER — which for a lapsed member
+   * is a promise that cannot come true: 5a has no renewal, the server refuses
+   * the purchase forever, and the reload re-rendered the same button. The
+   * final whole-branch review measured it happening to 100% of paying members
+   * one billing cycle after their purchase.
+   */
+  it("promises no fresh offer, and does not tell the buyer to press the button again", () => {
+    const copy = describeSubscribeFailure(new UserApiError("apa pun", 409));
+
+    expect(copy.includes("penawaran terbaru")).toBe(false);
+    expect(copy.includes("coba lagi")).toBe(false);
+    expect(copy.includes("Coba lagi")).toBe(false);
+    // ...and it DOES name the state this phase cannot resolve, rather than
+    // leaving a lapsed member to infer it from silence.
+    expect(copy.includes("sudah berakhir")).toBe(true);
+    expect(copy.includes("perpanjangan belum tersedia")).toBe(true);
   });
 
   it("never repeats what the server sent, even though this route's 409 is already Bahasa", () => {

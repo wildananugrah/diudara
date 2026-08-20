@@ -52,7 +52,7 @@ function profileBody(overrides: Record<string, unknown> = {}) {
     // branches on `undefined`. Every fixture here carries it for the same
     // reason: a fixture narrower than the wire is a page tested against a
     // response the API cannot send.
-    membership: { tiers: [], viewerIsMember: false },
+    membership: { tiers: [], viewerIsMember: false, viewerMembershipEnded: false },
     ...overrides,
   };
 }
@@ -873,6 +873,55 @@ describe("ProfilePage — the membership offer (Task 10)", () => {
     const panel = await screen.findByTestId("membership-member");
     expect(panel.textContent).toContain("Anda sudah menjadi anggota");
     expect(screen.queryAllByRole("button", { name: /Jadi anggota/ }).length).toBe(0);
+  });
+
+  /**
+   * The final whole-branch review's I1, wired: the profile also carries
+   * `membership.viewerMembershipEnded`, and this is the plumbing that reads
+   * it. Without it the page rendered a "Jadi anggota" button for somebody the
+   * server refuses permanently — 5a has no renewal, and §9 puts every paying
+   * member in this state one billing cycle after their purchase.
+   */
+  it("tells somebody whose membership ended that it ended, instead of offering the button", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts")
+        ? emptyPostsPage()
+        : jsonResponse(
+            profileBody({
+              membership: { tiers: [TIER], viewerIsMember: false, viewerMembershipEnded: true },
+            })
+          )
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+    await screen.findByText("Budi");
+
+    const panel = await screen.findByTestId("membership-ended");
+    expect(panel.textContent).toContain("sudah berakhir");
+    expect(screen.queryAllByRole("button", { name: /Jadi anggota/ }).length).toBe(0);
+    expect(screen.queryAllByTestId("membership-tier-tier-1").length).toBe(0);
+  });
+
+  /**
+   * DEPLOY SKEW for this field specifically. An API that predates it sends
+   * `membership` WITHOUT `viewerMembershipEnded`, and the default must be
+   * `false` — defaulting the other way would hide every creator's offer from
+   * every signed-in visitor on that deploy.
+   */
+  it("a membership field with no viewerMembershipEnded still shows the offer", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts")
+        ? emptyPostsPage()
+        : jsonResponse(profileBody({ membership: { tiers: [TIER], viewerIsMember: false } }))
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+    await screen.findByText("Budi");
+
+    expect(await screen.findByRole("button", { name: "Jadi anggota — Anggota" })).toBeTruthy();
+    expect(screen.queryAllByTestId("membership-ended").length).toBe(0);
   });
 });
 

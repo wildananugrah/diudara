@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { StartUserSubscription } from "./start-user-subscription";
 import { ConflictError, NotFoundError } from "../errors";
 import { FakePaymentAdapter } from "../../infrastructure/payments/fake-payment.adapter";
+import { FixedClock } from "../../infrastructure/clock/fixed.clock";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
 import type { UserTierRepositoryPort, UserTierRow } from "../ports/user-tier-repository.port";
 import type {
@@ -29,6 +30,8 @@ const OWNER_ID = "owner-1";
 const SUBSCRIBER_ID = "subscriber-1";
 const OWNER_ACCOUNT = "xnd-acct-real";
 const APP_BASE_URL = "https://diudara.test";
+/** The instant every test in this file runs at, as a LITERAL. */
+const NOW = new Date("2026-08-20T12:00:00.000Z");
 
 function userRecord(overrides: Partial<UserRecord> = {}): UserRecord {
   return {
@@ -263,6 +266,27 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
   return { repository, subscriptions, transactions };
 }
 
+/**
+ * Makes ONE named repository method reject exactly once, the way a dropped
+ * connection does — the failure the final review's I2 measured. The second
+ * call runs the real method, so a test can assert that the retry SUCCEEDS and
+ * not merely that the first attempt failed.
+ */
+function failOnce(
+  repository: UserSubscriptionRepositoryPort,
+  method: "createTransaction" | "attachGatewayReference"
+): void {
+  const original = repository[method].bind(repository) as (...args: never[]) => unknown;
+  let fired = false;
+  (repository as unknown as Record<string, unknown>)[method] = async (...args: never[]) => {
+    if (!fired) {
+      fired = true;
+      throw new Error(`simulated connection reset during ${method}`);
+    }
+    return original(...args);
+  };
+}
+
 /** The whole use case, wired to fakes, with every seed overridable per test. */
 function build(
   options: {
@@ -270,22 +294,27 @@ function build(
     tiers?: UserTierRow[];
     payouts?: UserPayoutAccount[];
     subscriptions?: UserSubscriptionRow[];
+    /** Simulates one dropped statement inside the claim → attach range (I2). */
+    failOnce?: "createTransaction" | "attachGatewayReference";
   } = {}
 ) {
   const users = options.users ?? [userRecord(), subscriberRecord()];
   const tiers = options.tiers ?? [tierRow()];
   const payouts = options.payouts ?? [payoutAccount()];
   const store = fakeSubscriptionRepository(options.subscriptions ?? []);
+  if (options.failOnce) failOnce(store.repository, options.failOnce);
   const payments = new FakePaymentAdapter();
+  const clock = new FixedClock(NOW);
   const useCase = new StartUserSubscription(
     fakeUserRepository(users),
     fakeTierRepository(tiers),
     fakePayoutRepository(payouts),
     store.repository,
     payments,
+    clock,
     { appBaseUrl: APP_BASE_URL }
   );
-  return { useCase, payments, ...store };
+  return { useCase, payments, clock, ...store };
 }
 
 function buy(useCase: StartUserSubscription, overrides: Partial<Parameters<StartUserSubscription["execute"]>[0]> = {}) {
@@ -653,5 +682,227 @@ describe("StartUserSubscription — the row exists before the provider is called
     // exactly the state Task 7 must treat as unverifiable rather than as paid.
     expect(transactions[0]!.gatewayReferenceId).toBeNull();
     expect(payments.invoices).toEqual([]);
+  });
+});
+
+/**
+ * **THE STATE §9 GUARANTEES EVERY PAYING MEMBER REACHES**, and the sentence it
+ * used to be answered with was false.
+ *
+ * 5a has no renewal pass: nothing moves a subscription out of `active` when its
+ * period ends, and there is no endpoint to renew one. So one billing cycle
+ * after every purchase the row sits at `status = 'active'` with a past
+ * `current_period_end`, `IsMemberOf` answers `false` (period-aware) and the
+ * guard here still refuses (status-only, and it must — see the guard's own
+ * comment). The refusal used to say "Anda sudah menjadi anggota aktif", which
+ * is not true of somebody whose membership ended, and the web then advised a
+ * reload that re-rendered the same button.
+ *
+ * The two cases stay two sentences. Both are literals here, and the last
+ * assertion is what fails if they are ever collapsed back into one.
+ */
+describe("StartUserSubscription — a LAPSED membership is refused with the truth", () => {
+  const LIVE = "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah " +
+    "masa aktif — jika Anda belum bisa melihat kontennya, hubungi kreator tersebut.";
+  const ENDED = "Keanggotaan Anda untuk kreator ini sudah berakhir, dan perpanjangan belum " +
+    "tersedia — jadi keanggotaan baru pun belum bisa dibeli. Hubungi kreator " +
+    "tersebut jika Anda masih memerlukan akses.";
+
+  /** An `active` row whose period ran out yesterday — §9's own end state. */
+  function lapsedRow(): UserSubscriptionRow {
+    return {
+      id: "sub-lapsed",
+      subscriberId: SUBSCRIBER_ID,
+      tierId: "tier-1",
+      ownerId: OWNER_ID,
+      status: "active",
+      currentPeriodEnd: new Date("2026-08-19T12:00:00.000Z"),
+      createdAt: new Date("2026-07-19T12:00:00.000Z"),
+    };
+  }
+
+  it("tells a lapsed member their membership ENDED and that renewal is not available", async () => {
+    const { useCase, payments, subscriptions, transactions } = build({
+      subscriptions: [lapsedRow()],
+    });
+
+    await expect(buy(useCase)).rejects.toThrow(new ConflictError(ENDED));
+
+    // Still refused, and still for free: the guard is untouched, only the
+    // sentence changed. Nothing was claimed, nothing was charged.
+    expect(subscriptions).toHaveLength(1);
+    expect(transactions).toEqual([]);
+    expect(payments.invoices).toEqual([]);
+  });
+
+  it("says something DIFFERENT to a member whose period has not run out", async () => {
+    const { useCase } = build({
+      subscriptions: [{ ...lapsedRow(), currentPeriodEnd: new Date("2026-09-19T12:00:00.000Z") }],
+    });
+
+    await expect(buy(useCase)).rejects.toThrow(new ConflictError(LIVE));
+  });
+
+  /**
+   * THE PIN. If the two branches are ever collapsed back into one message —
+   * the exact defect the final review measured — one of these two literals
+   * stops matching, and this reddens whichever way round the collapse went.
+   */
+  it("the lapsed sentence and the already-active sentence are not the same sentence", async () => {
+    const lapsed = build({ subscriptions: [lapsedRow()] });
+    const live = build({
+      subscriptions: [{ ...lapsedRow(), currentPeriodEnd: new Date("2026-09-19T12:00:00.000Z") }],
+    });
+
+    const forLapsed = await buy(lapsed.useCase).catch((err: unknown) => (err as Error).message);
+    const forLive = await buy(live.useCase).catch((err: unknown) => (err as Error).message);
+
+    expect(forLapsed).toBe(ENDED);
+    expect(forLive).toBe(LIVE);
+    expect(forLapsed).not.toBe(forLive);
+    // And neither of them invites a retry that cannot work.
+    expect(forLapsed).not.toContain("coba lagi");
+    expect(forLapsed).not.toContain("Muat ulang");
+  });
+
+  it("the BOUNDARY: a period ending exactly now has ended — `>` , not `>=`", async () => {
+    // `IsMemberOf` uses strict `>`, so an instant equal to `now` is NOT a
+    // member. This refusal reads the same comparison through
+    // `membershipStanding`, so the two cannot drift apart.
+    const { useCase } = build({ subscriptions: [{ ...lapsedRow(), currentPeriodEnd: NOW }] });
+
+    await expect(buy(useCase)).rejects.toThrow(new ConflictError(ENDED));
+  });
+
+  it("an `active` row with NO period end is treated as ended, never as a live membership", async () => {
+    // Unreachable through `activate`, which always writes a period end. If it
+    // ever happened the row would grant nothing while still blocking the
+    // purchase, which is what "ended" means — and claiming "you are an active
+    // member" would be the one answer that is definitely false.
+    const { useCase } = build({ subscriptions: [{ ...lapsedRow(), currentPeriodEnd: null }] });
+
+    await expect(buy(useCase)).rejects.toThrow(new ConflictError(ENDED));
+  });
+});
+
+/**
+ * **I2 — ONE FAILED STATEMENT MUST NOT WEDGE A BUYER OUT PERMANENTLY.**
+ *
+ * The pending claim is this pair's only pending slot and nothing in 5a clears
+ * one. Round 2 released it around `payments.createInvoice` alone; the final
+ * whole-branch review measured what the other two statements in that range do.
+ * On the real route, one simulated connection reset on `attachGatewayReference`
+ * gave attempt 1 a 500 with an invoice already open at the provider, attempts 2
+ * and 3 the transient 409 — "Tunggu sebentar, lalu coba lagi" — and
+ * `findPendingCheckout → null` forever. The message says temporary; the state
+ * was permanent.
+ *
+ * So: a failure at EACH statement between the claim and the reference, and each
+ * one must give the claim back and let the very next attempt succeed. The
+ * transient 409 is the tell — if it appears on the retry, the claim was not
+ * released.
+ */
+describe("StartUserSubscription — every statement between the claim and the invoice reference releases it", () => {
+  const TRANSIENT =
+    "Pembayaran Anda sedang disiapkan. Tunggu sebentar, lalu coba lagi — jangan " +
+    "menekan tombol berkali-kali agar Anda tidak ditagih dua kali.";
+
+  it("createTransaction: the claim is released, and the retry succeeds", async () => {
+    const { useCase, payments, subscriptions, transactions } = build({
+      failOnce: "createTransaction",
+    });
+
+    await expect(buy(useCase)).rejects.toThrow("simulated connection reset during createTransaction");
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]!.status).toBe("cancelled");
+    // Nothing reached the provider, so nothing is owed by anybody.
+    expect(payments.invoices).toEqual([]);
+
+    const retry = await buy(useCase);
+
+    expect(retry.invoiceUrl).toBe("https://fake-checkout.local/fake-inv-1");
+    expect(subscriptions.map((r) => r.status)).toEqual(["cancelled", "pending"]);
+    expect(transactions).toHaveLength(1);
+  });
+
+  it("createInvoice: the claim is released, and the retry succeeds", async () => {
+    // Round 2 already covered this one. It is here so the three statements are
+    // pinned as a RANGE rather than as one covered case beside two gaps.
+    const { useCase, payments, subscriptions, transactions } = build();
+    payments.failNextInvoice = true;
+
+    await expect(buy(useCase)).rejects.toThrow("createInvoice failed");
+    expect(subscriptions[0]!.status).toBe("cancelled");
+
+    const retry = await buy(useCase);
+
+    expect(retry.invoiceUrl).toBe("https://fake-checkout.local/fake-inv-1");
+    expect(subscriptions.map((r) => r.status)).toEqual(["cancelled", "pending"]);
+    expect(payments.invoices).toHaveLength(1);
+    expect(transactions).toHaveLength(2);
+  });
+
+  it("attachGatewayReference: the claim is released, and the retry succeeds", async () => {
+    // THE ONE THE REVIEW MEASURED. An invoice is already open at the provider
+    // when this fails, and the buyer would previously have been told to wait
+    // and try again — forever, because `findPendingCheckout` requires an
+    // invoice url the failed attempt never recorded.
+    const { useCase, payments, subscriptions, transactions } = build({
+      failOnce: "attachGatewayReference",
+    });
+
+    await expect(buy(useCase)).rejects.toThrow(
+      "simulated connection reset during attachGatewayReference"
+    );
+    expect(payments.invoices).toHaveLength(1);
+    expect(subscriptions[0]!.status).toBe("cancelled");
+    // The transaction row stays, with no gateway reference — the inspectable
+    // record the row-before-provider ordering exists to leave behind, and the
+    // state Task 7 must refuse to verify rather than settle.
+    expect(transactions[0]!.gatewayReferenceId).toBeNull();
+
+    const retry = await buy(useCase);
+
+    expect(retry.invoiceUrl).toBe("https://fake-checkout.local/fake-inv-2");
+    expect(subscriptions.map((r) => r.status)).toEqual(["cancelled", "pending"]);
+    expect(transactions).toHaveLength(2);
+    expect(transactions[1]!.gatewayReferenceId).not.toBeNull();
+  });
+
+  it("NONE of the three leaves the buyer stuck on the transient refusal", async () => {
+    // The measured symptom, asserted directly: attempts 2 and 3 used to be the
+    // "wait a moment" 409 for a state that never resolved.
+    for (const failure of ["createTransaction", "attachGatewayReference"] as const) {
+      const { useCase } = build({ failOnce: failure });
+      await expect(buy(useCase)).rejects.toThrow("simulated connection reset");
+
+      const second = await buy(useCase).catch((err: unknown) => (err as Error).message);
+
+      expect(second).not.toBe(TRANSIENT);
+    }
+  });
+
+  it("a release that itself fails does not replace the original error, and warns", async () => {
+    // `releaseClaim` is called from a catch. If it threw, the buyer would be
+    // wedged AND the reason for it would be lost — the one thing worse than
+    // the wedge.
+    const { useCase, repository } = build({ failOnce: "createTransaction" });
+    repository.cancel = async () => {
+      throw new Error("cancel also lost its connection");
+    };
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args.join(" "));
+
+    try {
+      await expect(buy(useCase)).rejects.toThrow(
+        "simulated connection reset during createTransaction"
+      );
+    } finally {
+      console.warn = realWarn;
+    }
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("could not release the pending claim");
   });
 });

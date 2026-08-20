@@ -2058,6 +2058,10 @@ export function bootstrap(): Dependencies {
         userPayoutRepository,
         userSubscriptionRepository,
         payments,
+        // The SAME clock `isMemberOf` above reads, so the two cannot disagree
+        // about whether a subscription's period has passed — the divergence
+        // between them is precisely what the final review's I1 was about.
+        clock,
         { appBaseUrl }
       )
     : undefined;

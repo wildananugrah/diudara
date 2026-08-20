@@ -1607,6 +1607,7 @@ describe("apiClient — buying a membership (Task 10)", () => {
         membership: {
           tiers: [{ id: "tier-1", name: "Anggota", priceAmount: 50000, billingCycle: "monthly" }],
           viewerIsMember: true,
+          viewerMembershipEnded: false,
         },
       })
     ) as unknown as typeof fetch;
@@ -1616,8 +1617,10 @@ describe("apiClient — buying a membership (Task 10)", () => {
     expect(profile.membership.tiers).toEqual([
       { id: "tier-1", name: "Anggota", priceAmount: 50000, billingCycle: "monthly" },
     ]);
-    // Task 10 fix round 1: the viewer's own half of the same field.
+    // Task 10 fix round 1: the viewer's own half of the same field, and the
+    // final review's second half of it — a live member has had nothing end.
     expect(profile.membership.viewerIsMember).toBe(true);
+    expect(profile.membership.viewerMembershipEnded).toBe(false);
   });
 });
 

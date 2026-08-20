@@ -42,10 +42,14 @@ describe("toMembershipView", () => {
   it("wraps tiers under `tiers`, mapped through toTierView, in the given order", () => {
     const view = toMembershipView(
       [tierRow({ id: "tier-1", name: "Perak" }), tierRow({ id: "tier-2", name: "Emas" })],
-      false
+      "none"
     );
 
-    expect(Object.keys(view).sort()).toEqual(["tiers", "viewerIsMember"]);
+    expect(Object.keys(view).sort()).toEqual([
+      "tiers",
+      "viewerIsMember",
+      "viewerMembershipEnded",
+    ]);
     expect(view.tiers).toEqual([
       { id: "tier-1", name: "Perak", priceAmount: 50_000, billingCycle: "monthly" },
       { id: "tier-2", name: "Emas", priceAmount: 50_000, billingCycle: "monthly" },
@@ -58,7 +62,7 @@ describe("toMembershipView", () => {
    * white-screen incident, referenced in Task 5's brief).
    */
   it("an owner with no active tiers gets an EMPTY array, not an omitted or undefined field", () => {
-    const view = toMembershipView([], false);
+    const view = toMembershipView([], "none");
 
     expect("tiers" in view).toBe(true);
     expect(view.tiers).toEqual([]);
@@ -67,18 +71,51 @@ describe("toMembershipView", () => {
   /**
    * Task 10 (spec §6): "an already-active member sees that they are a member
    * rather than a buy button", which the web can only do if the profile says
-   * so. The projection stays CLOSED — exactly `tiers` and `viewerIsMember`,
-   * nothing else: this endpoint is public, and the answer is about the caller,
-   * not about the creator being viewed.
+   * so. The projection stays CLOSED — exactly `tiers`, `viewerIsMember` and
+   * `viewerMembershipEnded`, nothing else: this endpoint is public, and both
+   * booleans are about the caller, not about the creator being viewed.
    */
-  it("carries viewerIsMember through, both ways, and adds nothing else to the projection", () => {
-    const member = toMembershipView([tierRow()], true);
+  it("carries the standing through as two booleans, and adds nothing else to the projection", () => {
+    const member = toMembershipView([tierRow()], "member");
     expect(member.viewerIsMember).toBe(true);
-    expect(Object.keys(member).sort()).toEqual(["tiers", "viewerIsMember"]);
+    expect(member.viewerMembershipEnded).toBe(false);
+    expect(Object.keys(member).sort()).toEqual([
+      "tiers",
+      "viewerIsMember",
+      "viewerMembershipEnded",
+    ]);
 
-    const stranger = toMembershipView([tierRow()], false);
+    const stranger = toMembershipView([tierRow()], "none");
     expect(stranger.viewerIsMember).toBe(false);
+    expect(stranger.viewerMembershipEnded).toBe(false);
     expect("viewerIsMember" in stranger).toBe(true);
+    expect("viewerMembershipEnded" in stranger).toBe(true);
+  });
+
+  /**
+   * **THE STATE §9 GUARANTEES**, and the one a single boolean could not
+   * express: not a member, and not free to buy either, because 5a has no
+   * renewal path and `StartUserSubscription`'s status-only guard refuses the
+   * purchase. The two booleans must be the OPPOSITE way round from a live
+   * member, and they must never both be true — the profile would then claim
+   * both things about the same person on the same page.
+   */
+  it("a LAPSED standing is not a member, and is not the same as a stranger", () => {
+    const lapsed = toMembershipView([tierRow()], "lapsed");
+
+    expect(lapsed.viewerIsMember).toBe(false);
+    expect(lapsed.viewerMembershipEnded).toBe(true);
+
+    const stranger = toMembershipView([tierRow()], "none");
+    expect(stranger.viewerMembershipEnded).toBe(false);
+    // The distinction, stated as the thing that must not collapse: these two
+    // people get different screens, and the boolean that separates them is
+    // this one.
+    expect(lapsed.viewerMembershipEnded).not.toBe(stranger.viewerMembershipEnded);
+
+    // Never both. `MembershipStanding` is one value, so this is structural
+    // rather than a rule a caller has to keep.
+    expect(lapsed.viewerIsMember && lapsed.viewerMembershipEnded).toBe(false);
   });
 
   /**
@@ -87,7 +124,7 @@ describe("toMembershipView", () => {
    * derived from the other.
    */
   it("an empty tier list and viewerIsMember: true are not contradictory", () => {
-    const view = toMembershipView([], true);
+    const view = toMembershipView([], "member");
 
     expect(view.tiers).toEqual([]);
     expect(view.viewerIsMember).toBe(true);

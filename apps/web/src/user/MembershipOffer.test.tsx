@@ -41,14 +41,24 @@ function MasukStub() {
   );
 }
 
-function renderOffer(tiers: TierView[], handle = "budi", viewerIsMember = false) {
+function renderOffer(
+  tiers: TierView[],
+  handle = "budi",
+  viewerIsMember = false,
+  viewerMembershipEnded = false
+) {
   return render(
     <MemoryRouter initialEntries={[`/@${handle}`]}>
       <Routes>
         <Route
           path="/:handleParam"
           element={
-            <MembershipOffer handle={handle} tiers={tiers} viewerIsMember={viewerIsMember} />
+            <MembershipOffer
+              handle={handle}
+              tiers={tiers}
+              viewerIsMember={viewerIsMember}
+              viewerMembershipEnded={viewerMembershipEnded}
+            />
           }
         />
         <Route path="/masuk" element={<MasukStub />} />
@@ -360,9 +370,11 @@ describe("MembershipOffer — a failure is a Bahasa sentence, never the server's
  * answer, from `IsMemberOf` — the same question Phase 6's paywall asks.
  *
  * §9 is why there is no renew affordance anywhere below: 5a has no renewal
- * pass, and a lapsed membership comes back as `viewerIsMember: false`, so that
- * person simply sees the offer again. That is the honest shape, and it needs no
- * button that has no endpoint.
+ * pass, and there is no endpoint behind such a button. What this file used to
+ * claim — that a lapsed member "simply sees the offer again", and that this was
+ * the honest shape — was measured false by the final whole-branch review: the
+ * server refuses that purchase permanently, so the offer was a button that
+ * could only 409. The lapsed case has its own describe block below.
  */
 describe("MembershipOffer — somebody who is already a member", () => {
   it("says they are a member, and offers no way to buy the same thing twice", () => {
@@ -424,5 +436,92 @@ describe("MembershipOffer — somebody who is already a member", () => {
 
     expect(screen.queryAllByTestId("membership-member").length).toBe(0);
     expect(screen.getByRole("link", { name: "Masuk untuk jadi anggota" })).toBeTruthy();
+  });
+});
+
+/**
+ * **THE FINAL WHOLE-BRANCH REVIEW'S I1.** §9 leaves every 5a membership
+ * `status = 'active'` with a past `current_period_end` forever, so
+ * `viewerIsMember` goes `false` one billing cycle after every purchase — and
+ * this file used to answer that by rendering the offer and a "Jadi anggota"
+ * button. `StartUserSubscription` refuses that purchase with a 409 (its guard
+ * reads the status alone, and must), the screen advised a reload, and the
+ * reload re-rendered the same button: a loop that cannot terminate, reached by
+ * 100% of paying members.
+ *
+ * `viewerMembershipEnded` is the server telling this screen which kind of
+ * "not a member" it is looking at.
+ */
+describe("MembershipOffer — somebody whose membership has ENDED", () => {
+  it("says the membership ended and that renewal is not available, with no way to buy", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([tier()], "budi", false, true);
+
+    const panel = screen.getByTestId("membership-ended");
+    expect(panel.textContent).toContain("sudah berakhir");
+    expect(panel.textContent).toContain("Perpanjangan belum tersedia");
+    // THE POINT: no button at all, so there is nothing to press and no loop to
+    // enter. Not a disabled button either — a disabled control still says "this
+    // is a thing you could do", and it is not.
+    expect(screen.queryAllByRole("button").length).toBe(0);
+    expect(screen.queryAllByTestId("membership-tier-tier-1").length).toBe(0);
+  });
+
+  /**
+   * The distinction that must not collapse: BOTH of these people are
+   * `viewerIsMember: false`, and only one of them may buy. If the lapsed
+   * branch is ever removed, this reddens with a "Jadi anggota" button standing
+   * in front of somebody the server will refuse.
+   */
+  it("a NON-member with the same viewerIsMember: false still gets the button", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([tier()], "budi", false, false);
+
+    expect(screen.getByRole("button", { name: "Jadi anggota — Anggota" })).toBeTruthy();
+    expect(screen.queryAllByTestId("membership-ended").length).toBe(0);
+  });
+
+  /** A live member is told they ARE one — never that theirs ended. */
+  it("a LIVE member is not shown the ended panel", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([tier()], "budi", true, false);
+
+    expect(screen.getByTestId("membership-member").textContent).toContain(
+      "Anda sudah menjadi anggota"
+    );
+    expect(screen.queryAllByTestId("membership-ended").length).toBe(0);
+  });
+
+  /**
+   * A creator who has since withdrawn every tier still owes this person the
+   * news — same reasoning as the member panel, which also sits ahead of the
+   * empty-tiers return.
+   */
+  it("still says so when the creator has withdrawn every tier", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([], "budi", false, true);
+
+    expect(screen.getByTestId("membership-ended").textContent).toContain("sudah berakhir");
+  });
+
+  /** Your own profile still renders NOTHING, ended flag or not. */
+  it("renders nothing at all on your own profile", () => {
+    setUserSession("jwt-abc", OWNER);
+    renderOffer([tier()], "budi", false, true);
+
+    expect(document.body.textContent).toBe("");
+  });
+
+  /**
+   * A signed-OUT visitor is never told a membership of theirs ended — the
+   * server answers `false` by construction, and this pins the client half the
+   * same way the member panel's is pinned.
+   */
+  it("a signed-out browser handed `true` still gets the Masuk link, not the ended panel", () => {
+    localStorage.clear();
+    renderOffer([tier()], "budi", false, true);
+
+    expect(screen.getByRole("link", { name: "Masuk untuk jadi anggota" })).toBeTruthy();
+    expect(screen.queryAllByTestId("membership-ended").length).toBe(0);
   });
 });

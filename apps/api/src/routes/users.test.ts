@@ -13,6 +13,8 @@ import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import { clientIp } from "./users";
 import { isReservedHandle, isValidHandle } from "../domain/handle";
 import { DrizzleUserSubscriptionRepository } from "../infrastructure/repositories/drizzle-user-subscription.repository";
+import { StartUserSubscription } from "../application/use-cases/start-user-subscription";
+import { SystemClock } from "../infrastructure/clock/system.clock";
 import type { FakePaymentAdapter } from "../infrastructure/payments/fake-payment.adapter";
 
 beforeEach(resetDatabase);
@@ -381,12 +383,16 @@ describe("GET /users/by-handle/:handle", () => {
     expect(body.followingCount).toBe(0);
     // No session sent — anonymous viewer. Must be `null`, not `false`.
     expect(body.viewerFollows).toBeNull();
-    // Task 10 widened `membership` by exactly ONE field, and this assertion
-    // is updated deliberately rather than loosened: `viewerIsMember` is
-    // `false` for a visitor with no session — NOT null, unlike
-    // `viewerFollows` right above it. See `MembershipView`'s own docstring
-    // for why the two neighbours disagree on purpose.
-    expect(body.membership).toEqual({ tiers: [], viewerIsMember: false });
+    // Task 10 widened `membership` by one field and the final review by a
+    // second, and this assertion is updated deliberately rather than loosened:
+    // BOTH viewer booleans are `false` for a visitor with no session — NOT
+    // null, unlike `viewerFollows` right above them. See `MembershipView`'s
+    // own docstring for why the neighbours disagree on purpose.
+    expect(body.membership).toEqual({
+      tiers: [],
+      viewerIsMember: false,
+      viewerMembershipEnded: false,
+    });
     expect(body.email).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain(VALID.email);
   });
@@ -509,7 +515,11 @@ describe("GET /users/by-handle/:handle — membership (Task 5)", () => {
 
     const body = await res.json();
     expect("membership" in body).toBe(true);
-    expect(body.membership).toEqual({ tiers: [], viewerIsMember: false });
+    expect(body.membership).toEqual({
+      tiers: [],
+      viewerIsMember: false,
+      viewerMembershipEnded: false,
+    });
   });
 
   it("lists a published tier with EXACTLY id/name/priceAmount/billingCycle — never ownerId, isActive or createdAt", async () => {
@@ -553,7 +563,7 @@ describe("GET /users/by-handle/:handle — membership (Task 5)", () => {
     expect(body.membership.tiers.map((t: { id: string }) => t.id)).toEqual([active.id]);
   });
 
-  it("membership itself is CLOSED — exactly tiers and viewerIsMember, nothing else", async () => {
+  it("membership itself is CLOSED — exactly tiers and the two viewer booleans, nothing else", async () => {
     const a = app();
     const { token } = await membershipUser(a);
     await connectPayout(a, token);
@@ -564,6 +574,7 @@ describe("GET /users/by-handle/:handle — membership (Task 5)", () => {
     expect(Object.keys((await res.json()).membership).sort()).toEqual([
       "tiers",
       "viewerIsMember",
+      "viewerMembershipEnded",
     ]);
   });
 
@@ -576,7 +587,11 @@ describe("GET /users/by-handle/:handle — membership (Task 5)", () => {
 
     const res = await a.request("/users/by-handle/rina");
     expect(res.status).toBe(200);
-    expect((await res.json()).membership).toEqual({ tiers: [], viewerIsMember: false });
+    expect((await res.json()).membership).toEqual({
+      tiers: [],
+      viewerIsMember: false,
+      viewerMembershipEnded: false,
+    });
   });
 });
 
@@ -673,6 +688,8 @@ describe("GET /users/by-handle/:handle — viewerIsMember (Task 10)", () => {
     ).json();
 
     expect(body.membership.viewerIsMember).toBe(true);
+    // A live member has NOT had a membership end. The pair is never both.
+    expect(body.membership.viewerMembershipEnded).toBe(false);
     // The offer is unchanged by who is asking — what a creator sells is not
     // viewer-specific. Only the web's rendering of it is.
     expect(body.membership.tiers).toHaveLength(1);
@@ -690,6 +707,9 @@ describe("GET /users/by-handle/:handle — viewerIsMember (Task 10)", () => {
     ).json();
 
     expect(body.membership.viewerIsMember).toBe(false);
+    // ...and NOT the lapsed answer: this person may buy, which is the whole
+    // distinction the second boolean carries.
+    expect(body.membership.viewerMembershipEnded).toBe(false);
   });
 
   /**
@@ -712,8 +732,15 @@ describe("GET /users/by-handle/:handle — viewerIsMember (Task 10)", () => {
     ).json();
 
     expect(body.membership.viewerIsMember).toBe(false);
-    // The offer is right there to buy again — 5a being honest about having no
-    // renewal rather than inventing one.
+    // AND the second boolean, which is what keeps that honest. 5a has no
+    // renewal path, and `POST /users/:handle/subscribe` refuses this person's
+    // purchase — its guard reads the status alone and must. A profile that
+    // reported only `viewerIsMember: false` would have the web render a "Jadi
+    // anggota" button whose only possible answer is a 409, forever. Final
+    // review, I1.
+    expect(body.membership.viewerMembershipEnded).toBe(true);
+    // The tiers are still listed: what the creator sells does not depend on
+    // who is looking. The WEB is what stops offering them.
     expect(body.membership.tiers).toHaveLength(1);
 
     // GUARD: the row really is in the state this test claims — still `active`,
@@ -2792,4 +2819,121 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
       gatewayReferenceId: null,
     });
   });
+
+  /**
+   * **I1, THROUGH HTTP.** §9 guarantees every paying member lapses one billing
+   * cycle after their purchase and that nothing renews them. The row stays
+   * `status = 'active'` with a past `current_period_end`, so `IsMemberOf` says
+   * "not a member" while THIS route's status-only guard still refuses — and it
+   * must, since letting a lapsed row past it collides with
+   * `user_subscription_one_active` at activation time.
+   *
+   * What was wrong was the sentence: it told that person they were already an
+   * active member, which is false, and the web then advised a reload that
+   * re-rendered the same button.
+   */
+  it("a LAPSED member is refused with a sentence about their membership ENDING, not about being active", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { buyer, tier } = await seedOffer(a);
+    const first = await (await subscribe(a, buyer.token, "wildan", { tierId: tier.id })).json();
+    const subscriptions = new DrizzleUserSubscriptionRepository(db);
+    // Task 7's webhook is what activates this in production; here it is the
+    // precondition. The period ends in 2020 — over, and nothing in 5a moves the
+    // status off `active`.
+    await subscriptions.activate(first.subscriptionId, new Date("2020-01-01T00:00:00Z"));
+
+    const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe(
+      "Keanggotaan Anda untuk kreator ini sudah berakhir, dan perpanjangan belum " +
+        "tersedia — jadi keanggotaan baru pun belum bisa dibeli. Hubungi kreator " +
+        "tersebut jika Anda masih memerlukan akses."
+    );
+    // GUARD: the row really is in the state this test claims — still `active`,
+    // period in the past — so a repository that had quietly expired it would not
+    // let this pass for the wrong reason.
+    const stored = await subscriptions.findById(first.subscriptionId);
+    expect(stored?.status).toBe("active");
+    expect(stored?.currentPeriodEnd?.getUTCFullYear()).toBe(2020);
+    // And the profile agrees, on the same database, in the same run: this is the
+    // divergence the final review measured, now answered the same way by both.
+    const profile = await (
+      await a.request("/users/by-handle/wildan", { headers: authed(buyer.token) })
+    ).json();
+    expect(profile.membership.viewerIsMember).toBe(false);
+    expect(profile.membership.viewerMembershipEnded).toBe(true);
+    // Nothing was created for the refused attempt.
+    expect(await db.select().from(userSubscriptions)).toHaveLength(1);
+    expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(1);
+  });
+
+  /**
+   * **I2, THROUGH HTTP AND AGAINST THE REAL DATABASE** — the reproduction the
+   * final whole-branch review ran, turned into a test.
+   *
+   * One simulated connection reset on a statement between the pending claim and
+   * the gateway reference used to give: attempt 1 a 500 with an invoice already
+   * open at the provider, attempts 2 and 3 a 409 saying "Tunggu sebentar, lalu
+   * coba lagi", and `findPendingCheckout → null` forever. The message said
+   * temporary; the state was permanent, because nothing in 5a clears a pending
+   * row and that row is this pair's only pending slot.
+   *
+   * The failure is injected on the repository INSTANCE the use case already
+   * holds, so no production logic is touched and the route is the real one.
+   */
+  it.each(["createTransaction", "attachGatewayReference"] as const)(
+    "a dropped %s releases the claim, and the very next attempt succeeds",
+    async (method) => {
+      const deps = bootstrap();
+      const a = createApp(deps);
+      const { buyer, tier } = await seedOffer(a);
+      // The REAL repository against the REAL database, with one statement made
+      // to reject once. Nothing in `src` is modified: the wrapper is here, and
+      // the use case behind the route is the production class wired to it.
+      const repository = new DrizzleUserSubscriptionRepository(db);
+      const original = repository[method].bind(repository) as (...args: never[]) => unknown;
+      let fired = false;
+      (repository as unknown as Record<string, unknown>)[method] = async (...args: never[]) => {
+        if (!fired) {
+          fired = true;
+          throw new Error("simulated connection reset");
+        }
+        return original(...args);
+      };
+      const wired = createApp({
+        ...deps,
+        startUserSubscription: new StartUserSubscription(
+          deps.userRepository,
+          deps.userTierRepository,
+          deps.userPayoutRepository,
+          repository,
+          deps.payments!,
+          new SystemClock(),
+          { appBaseUrl: "https://diudara.test" }
+        ),
+      });
+
+      const first = await subscribe(wired, buyer.token, "wildan", { tierId: tier.id });
+      expect(first.status).toBe(500);
+
+      const second = await subscribe(wired, buyer.token, "wildan", { tierId: tier.id });
+
+      // NOT a 409, and specifically not the transient one that used to be
+      // returned forever.
+      expect(second.status).toBe(201);
+      const body = await second.json();
+      expect(typeof body.invoiceUrl).toBe("string");
+      // The wedged row is `cancelled` rather than `pending`, so it holds
+      // nothing; the fresh claim is the one that owns the slot.
+      const rows = await db.select().from(userSubscriptions);
+      expect(rows.map((r) => r.status).sort()).toEqual(["cancelled", "pending"]);
+      // And the reuse path can SEE the new checkout, which is what
+      // `findPendingCheckout → null forever` meant it could not.
+      const third = await subscribe(wired, buyer.token, "wildan", { tierId: tier.id });
+      expect(third.status).toBe(201);
+      expect((await third.json()).invoiceUrl).toBe(body.invoiceUrl);
+    }
+  );
 });

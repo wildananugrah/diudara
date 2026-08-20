@@ -232,6 +232,11 @@ export default function ProfilePage() {
         // the safe half of it: a response that could not tell us whether this
         // viewer is a member must never end up CLAIMING that they are.
         viewerIsMember={profile.membership?.viewerIsMember ?? false}
+        // `?? false` again, and here the safe half is the OTHER direction:
+        // an API that predates this field says nothing about a lapsed
+        // membership, and defaulting to `true` would hide the offer from
+        // everybody on that deploy.
+        viewerMembershipEnded={profile.membership?.viewerMembershipEnded ?? false}
       />
 
       {/* The same `EditComposer` Beranda renders — keyed on `editing.id`

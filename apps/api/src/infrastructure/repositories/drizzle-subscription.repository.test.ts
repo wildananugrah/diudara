@@ -1142,6 +1142,27 @@ describe("DrizzleSubscriptionRepository.markPastDue", () => {
     expect(await repo.markPastDue("not-a-uuid", new Date())).toBe(false);
   });
 
+  /**
+   * FOUR CONTENDERS, AND THE NUMBER IS MEASURED RATHER THAN INHERITED.
+   *
+   * `markPastDue` is a CONDITIONAL UPDATE, not an insert arbitrated by a unique
+   * index — the same shape as `beginXenditAccountProvisioning`, where
+   * memberships-5a's review round 1 (F1) measured a four-contender latch staying
+   * green across 5 runs against the exact bug it existed to catch (check-then-act
+   * wins 1 contest of 4, but 27 of 30). That test was raised to 30. **And this
+   * one sits on the live renewal money path**, which is why the final
+   * whole-branch review would not leave it on an assumption.
+   *
+   * Measured, applying F1's own mutant — the conditional UPDATE replaced by a
+   * SELECT followed by an unconditional one, production code otherwise
+   * untouched: **this test failed 3 runs out of 3 at four contenders**, and the
+   * mutant was reverted and confirmed byte-identical.
+   *
+   * WHY IT HOLDS HERE AND NOT THERE: in this call path every contender's SELECT
+   * issues before any UPDATE returns, so all four genuinely observe `active`.
+   * That is a property of the surrounding awaits, not of the number — do not read
+   * "four is enough" as a general rule, and do not lower it here.
+   */
   it("lets exactly ONE of several concurrent passes make the transition", async () => {
     // Two overlapping passes both see an `active` row. The predicate is what decides,
     // so only one of them may report the transition — and only one may write a

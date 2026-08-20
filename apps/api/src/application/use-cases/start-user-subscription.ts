@@ -2,15 +2,13 @@ import { ConflictError, NotFoundError } from "../errors";
 import { normalizeHandle } from "../../domain/handle";
 import { isConnectedPaymentAccount } from "../../domain/payment-account";
 import { userSubscriptionExternalId } from "../../domain/user-payment";
+import { membershipStanding } from "./is-member-of";
+import type { ClockPort } from "../ports/clock.port";
 import type { UserRepositoryPort } from "../ports/user-repository.port";
 import type { UserTierRepositoryPort } from "../ports/user-tier-repository.port";
 import type { UserPayoutRepositoryPort } from "../ports/user-payout-repository.port";
 import type { UserSubscriptionRepositoryPort } from "../ports/user-subscription-repository.port";
-import type {
-  CreateInvoiceInput,
-  CreateInvoiceResult,
-  PaymentProviderPort,
-} from "../ports/payment-provider.port";
+import type { PaymentProviderPort } from "../ports/payment-provider.port";
 
 export interface StartUserSubscriptionResult {
   /** Where the browser is sent to pay. */
@@ -68,8 +66,8 @@ export interface StartUserSubscriptionResult {
  * one pair in one run out of five. A double tap on a phone is CONCURRENT. So the
  * INSERT is the claim — `user_subscription_one_pending` — and the loser is
  * routed into the reuse path by the violation, never by a read. See
- * `claimPending`, and `openInvoice` for why a failed provider call must give the
- * claim back.
+ * `claimPending`, and `releaseClaim` for why ANY failure between the claim and
+ * the invoice reference must give the claim back.
  *
  * The `external_id` is namespaced (`domain/user-payment.ts`): Xendit delivers ONE
  * webhook stream and the community handler resolves its own invoices by treating
@@ -87,6 +85,15 @@ export class StartUserSubscription {
     private readonly payouts: UserPayoutRepositoryPort,
     private readonly subscriptions: UserSubscriptionRepositoryPort,
     private readonly payments: PaymentProviderPort,
+    /**
+     * Only to word the refusal below, never to decide one. A lapsed
+     * subscription and a live one are refused identically — see the
+     * `findActiveFor` guard — but they are not the same news, and telling a
+     * lapsed member "you are already an active member" is simply false. Read
+     * through the port for the reason `ClockPort` exists: the answer changes
+     * at an instant, and an instant read inline is one no test can stand on.
+     */
+    private readonly clock: ClockPort,
     /**
      * `appBaseUrl` is the public origin of `apps/web`, with no trailing slash —
      * see `resolveAppBaseUrl` in bootstrap.ts. Configuration, not a port, which
@@ -164,11 +171,44 @@ export class StartUserSubscription {
     // the buyer has already paid for something they already hold. Refusing here
     // costs one indexed read and is the only place this can be refused for free.
     // The index stays the backstop for the genuine race this read cannot see.
+    //
+    // **STATUS-ONLY, AND IT MUST STAY STATUS-ONLY.** `findActiveFor` does not
+    // look at `current_period_end`, so it refuses a LAPSED row too — and
+    // narrowing it to "active and still in period" is the obvious fix that is
+    // the dangerous one: §9 leaves every lapsed subscription sitting at
+    // `status = 'active'` forever, so letting one past this guard puts the
+    // purchase on a collision course with `user_subscription_one_active` at
+    // activation time. That converts a button that refuses into money taken
+    // and no membership granted. Task 8's re-review established this; it is
+    // not up for rediscovery here.
     const existing = await this.subscriptions.findActiveFor(input.subscriberId, owner.id);
     if (existing) {
+      // **ONE REFUSAL, TWO DIFFERENT PIECES OF NEWS**, and the row itself is
+      // what says which. Both are a 409 and neither creates anything; the
+      // guard above is untouched. Only the sentence differs, because only the
+      // sentence was wrong.
+      //
+      // Measured by the final whole-branch review: one billing cycle after
+      // EVERY purchase, `IsMemberOf` (period-aware) answers `false` while this
+      // guard (status-only) answers "refused" — so the profile rendered the
+      // offer, this route answered "Anda sudah menjadi anggota aktif", which
+      // is FALSE for that person, and the web advised a reload that
+      // re-rendered the very same button. `MembershipView.viewerMembershipEnded`
+      // is what stops the button being offered at all; this is what the route
+      // says when one is pressed anyway, from a page that predates the answer.
+      //
+      // NOTHING HERE INVITES A RETRY. 5a has no renewal path — no pass moves a
+      // subscription out of `active` when its period ends, and there is no
+      // endpoint to renew one — so "try again" and "reload for a fresh offer"
+      // are both advice that cannot come true, which is the loop
+      // `describeUploadFailure`'s own rewrite exists to forbid.
       throw new ConflictError(
-        "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah " +
-          "masa aktif — jika Anda belum bisa melihat kontennya, hubungi kreator tersebut."
+        membershipStanding(existing, this.clock.now()) === "member"
+          ? "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah " +
+            "masa aktif — jika Anda belum bisa melihat kontennya, hubungi kreator tersebut."
+          : "Keanggotaan Anda untuk kreator ini sudah berakhir, dan perpanjangan belum " +
+            "tersedia — jadi keanggotaan baru pun belum bisa dibeli. Hubungi kreator " +
+            "tersebut jika Anda masih memerlukan akses."
       );
     }
 
@@ -203,65 +243,96 @@ export class StartUserSubscription {
     }
     const subscription = claim.subscription;
 
-    const transaction = await this.subscriptions.createTransaction({
-      userSubscriptionId: subscription.id,
-      // OUR figure, read from the tier, never anything the client sent: it is
-      // what Task 7's webhook compares the provider's claimed amount against.
-      amount: tier.priceAmount,
-    });
+    // ---- EVERYTHING FROM HERE TO THE RETURN IS GUARDED, not just the provider
+    // call.
+    //
+    // The claim above is this pair's ONLY pending slot and nothing in 5a ever
+    // clears one: no renewal pass, no cancel route, no operator path. So any
+    // statement in here that throws without giving the claim back wedges this
+    // buyer out of this creator PERMANENTLY — and invisibly, because
+    // `findPendingCheckout` requires a non-null invoice url (correctly: that
+    // predicate is what stops a failed provider call blocking the buyer), so
+    // the row exists for `claimPending` and does not exist for
+    // `resolveExistingCheckout`. Every later attempt then falls into the
+    // TRANSIENT branch and is told to wait and try again, which can never work.
+    //
+    // Round 2 released the claim around `payments.createInvoice` alone, and the
+    // final whole-branch review measured what the other two statements do:
+    // one simulated connection reset on `attachGatewayReference` gave attempt 1
+    // a 500 with an invoice already open at the provider, attempts 2 and 3 the
+    // transient 409, and `findPendingCheckout → null` forever. `createTransaction`
+    // is the same shape. Both write to the database, so both can fail the way a
+    // dropped connection fails; neither was covered.
+    //
+    // The residue is the one round 2 already accepted: a `cancelled` row and a
+    // possibly-orphaned invoice at the provider whose transaction carries no
+    // gateway reference, which `settleUserSubscription` fails CLOSED on. That is
+    // strictly better than a buyer who can never pay at all.
+    try {
+      const transaction = await this.subscriptions.createTransaction({
+        userSubscriptionId: subscription.id,
+        // OUR figure, read from the tier, never anything the client sent: it is
+        // what Task 7's webhook compares the provider's claimed amount against.
+        amount: tier.priceAmount,
+      });
 
-    const externalId = userSubscriptionExternalId(transaction.id);
-    const invoice = await this.openInvoice(subscription.id, {
-      externalId,
-      amount: tier.priceAmount,
-      description: `${owner.displayName} — ${tier.name}`,
-      payerName: subscriber.displayName,
-      // OMITTED, not empty, when this buyer has no number on file:
-      // `app_user.whatsapp_number` is nullable (signup takes an email alone),
-      // and absent is the documented "we do not have one" while `""` is a value
-      // that still has to pass the provider's format validation. See
-      // `CreateInvoiceInput.payerWhatsappNumber`.
-      ...(subscriber.whatsappNumber === null
-        ? {}
-        : { payerWhatsappNumber: subscriber.whatsappNumber }),
-      forAccountId,
-      successRedirectUrl: this.profileUrl(owner.handle),
-    });
+      const externalId = userSubscriptionExternalId(transaction.id);
+      const invoice = await this.payments.createInvoice({
+        externalId,
+        amount: tier.priceAmount,
+        description: `${owner.displayName} — ${tier.name}`,
+        payerName: subscriber.displayName,
+        // OMITTED, not empty, when this buyer has no number on file:
+        // `app_user.whatsapp_number` is nullable (signup takes an email alone),
+        // and absent is the documented "we do not have one" while `""` is a value
+        // that still has to pass the provider's format validation. See
+        // `CreateInvoiceInput.payerWhatsappNumber`.
+        ...(subscriber.whatsappNumber === null
+          ? {}
+          : { payerWhatsappNumber: subscriber.whatsappNumber }),
+        forAccountId,
+        successRedirectUrl: this.profileUrl(owner.handle),
+      });
 
-    // The webhook's ANCHOR, and the reason this is a second write rather than a
-    // field on `createTransaction`: the invoice id does not exist until the call
-    // above returns, and that call must not happen first. Without this,
-    // `provider_event_id` — derived from the delivered `body.id` — is checked
-    // against nothing, so anyone able to reach the webhook could mint a fresh
-    // event id at will and walk past the UNIQUE constraint. The community
-    // handler measured that hole: 12 concurrent deliveries with 12 distinct
-    // `body.id`s all returned 200 and all activated.
-    if (
-      !(await this.subscriptions.attachGatewayReference(
-        transaction.id,
-        invoice.invoiceId,
-        // Stored, not merely returned: it is what the second-tap guard above
-        // hands back, and a url we did not keep is a url we would have to mint
-        // a second invoice to reproduce.
-        invoice.invoiceUrl
-      ))
-    ) {
-      // Only reachable if the column was already set, which cannot happen for a
-      // row created two statements ago — so this is a bug, not a race, and
-      // swallowing it would leave a transaction the webhook must refuse to
-      // verify for the rest of its life.
-      throw new Error(
-        "StartUserSubscription: could not record the gateway reference for transaction " +
-          transaction.id
-      );
+      // The webhook's ANCHOR, and the reason this is a second write rather than a
+      // field on `createTransaction`: the invoice id does not exist until the call
+      // above returns, and that call must not happen first. Without this,
+      // `provider_event_id` — derived from the delivered `body.id` — is checked
+      // against nothing, so anyone able to reach the webhook could mint a fresh
+      // event id at will and walk past the UNIQUE constraint. The community
+      // handler measured that hole: 12 concurrent deliveries with 12 distinct
+      // `body.id`s all returned 200 and all activated.
+      if (
+        !(await this.subscriptions.attachGatewayReference(
+          transaction.id,
+          invoice.invoiceId,
+          // Stored, not merely returned: it is what the second-tap guard above
+          // hands back, and a url we did not keep is a url we would have to mint
+          // a second invoice to reproduce.
+          invoice.invoiceUrl
+        ))
+      ) {
+        // Only reachable if the column was already set, which cannot happen for a
+        // row created two statements ago — so this is a bug, not a race, and
+        // swallowing it would leave a transaction the webhook must refuse to
+        // verify for the rest of its life. Thrown INSIDE the guard, so the bug
+        // costs one failed purchase rather than one buyer.
+        throw new Error(
+          "StartUserSubscription: could not record the gateway reference for transaction " +
+            transaction.id
+        );
+      }
+
+      return {
+        invoiceUrl: invoice.invoiceUrl,
+        subscriptionId: subscription.id,
+        transactionId: transaction.id,
+        externalId,
+      };
+    } catch (err) {
+      await this.releaseClaim(subscription.id);
+      throw err;
     }
-
-    return {
-      invoiceUrl: invoice.invoiceUrl,
-      subscriptionId: subscription.id,
-      transactionId: transaction.id,
-      externalId,
-    };
   }
 
   /**
@@ -277,8 +348,8 @@ export class StartUserSubscription {
    *    returning the other one would charge a price the buyer did not choose;
    *  - it does not exist YET: the winner is between its INSERT and its provider
    *    call, a window of milliseconds. Refuse transiently and say so — a
-   *    provider call that FAILS releases the claim (see `openInvoice`), so this
-   *    state cannot outlive the attempt that created it and a second tap
+   *    checkout that FAILS anywhere releases the claim (see `releaseClaim`), so
+   *    this state cannot outlive the attempt that created it and a second tap
    *    resolves it.
    */
   private async resolveExistingCheckout(
@@ -309,40 +380,42 @@ export class StartUserSubscription {
   }
 
   /**
-   * The provider call, plus the ONE thing that must happen when it fails:
-   * RELEASE THE CLAIM.
+   * THE ONE THING THAT MUST HAPPEN WHEN ANY OF THAT FAILS: RELEASE THE CLAIM.
    *
    * The pending subscription is a claim on this pair's only pending slot, and
    * nothing in 5a expires or clears one — there is no renewal pass, no cancel
-   * route and no operator path. So a provider failure that left the row
-   * `pending` would wedge this buyer out of this creator permanently, for a
-   * purchase nobody ever charged them for. Exactly the reasoning
-   * `ConnectUserPayout` records for `abandonXenditAccountProvisioning`, whose
-   * sentinel has the identical hazard.
+   * route and no operator path. So a failure that left the row `pending` would
+   * wedge this buyer out of this creator permanently, for a purchase nobody
+   * ever charged them for. Exactly the reasoning `ConnectUserPayout` records
+   * for `abandonXenditAccountProvisioning`, whose sentinel has the identical
+   * hazard.
    *
    * The transaction row is deliberately NOT touched: it stays, with a null
    * gateway reference, as the inspectable record that this attempt happened —
    * which is the whole reason the rows are written before the provider is
    * called.
+   *
+   * IT NEVER THROWS. It is called from a `catch`, and a release that failed
+   * loudly would replace the real reason for the failure with its own — the
+   * buyer would be wedged AND nobody would know what wedged them. The original
+   * error is rethrown by the caller either way; this only makes sure the
+   * attempt is on the record.
    */
-  private async openInvoice(
-    subscriptionId: string,
-    input: CreateInvoiceInput
-  ): Promise<CreateInvoiceResult> {
+  private async releaseClaim(subscriptionId: string): Promise<void> {
     try {
-      return await this.payments.createInvoice(input);
-    } catch (err) {
-      if ((await this.subscriptions.cancel(subscriptionId)) === null) {
-        // Ids only, never the payer's details. A claim that could not be
-        // released is a buyer who cannot try again, so it must be visible.
-        console.warn(
-          `[payments] could not release the pending claim on user subscription ` +
-            `${subscriptionId} after the provider call failed — this buyer cannot start ` +
-            "another checkout with this creator until the row is cleared by hand"
-        );
-      }
-      throw err;
+      if ((await this.subscriptions.cancel(subscriptionId)) !== null) return;
+    } catch {
+      // Fall through to the same warning: "could not release" is the only fact
+      // that matters here, and it is the same fact whether the statement
+      // returned nothing or never returned at all.
     }
+    // Ids only, never the payer's details. A claim that could not be
+    // released is a buyer who cannot try again, so it must be visible.
+    console.warn(
+      `[payments] could not release the pending claim on user subscription ` +
+        `${subscriptionId} after the checkout failed — this buyer cannot start ` +
+        "another checkout with this creator until the row is cleared by hand"
+    );
   }
 
   /**

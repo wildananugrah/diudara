@@ -165,11 +165,29 @@ webhook arrive.
 
 ## Cleanup
 
+**Run these in this order.** `user_transaction.user_subscription_id` is a foreign key with
+`ON DELETE no action` (migration `0025`), and every buyer in step 4 has a transaction — so deleting
+the subscriptions first fails with `23503` and nothing is cleaned up at all. The transactions go
+first. The order was wrong until the final review caught it, and this block was verified end to end
+against a migrated database afterwards.
+
 ```sql
-DELETE FROM user_subscription WHERE subscriber_id IN (SELECT id FROM app_user WHERE handle LIKE 'uji_%');
+DELETE FROM user_transaction
+WHERE user_subscription_id IN (
+  SELECT id FROM user_subscription
+  WHERE subscriber_id IN (SELECT id FROM app_user WHERE handle LIKE 'uji_%')
+     OR owner_id IN (SELECT id FROM app_user WHERE handle LIKE 'uji_%')
+);
+DELETE FROM user_subscription
+WHERE subscriber_id IN (SELECT id FROM app_user WHERE handle LIKE 'uji_%')
+   OR owner_id IN (SELECT id FROM app_user WHERE handle LIKE 'uji_%');
 DELETE FROM user_tier WHERE owner_id IN (SELECT id FROM app_user WHERE handle LIKE 'uji_%');
 DELETE FROM app_user WHERE handle LIKE 'uji_%';
 ```
+
+Both `subscriber_id` and `owner_id` are matched, not just the buyer: a subscription is a row about
+TWO of your test accounts, and one still pointing at a `uji_%` owner would block the last statement
+on `user_subscription_owner_id_app_user_id_fk`.
 
 **Xendit sub-accounts created in step 1 cannot be deleted.** That is why step 0 says test mode.
 

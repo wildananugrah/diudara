@@ -261,6 +261,7 @@ describe("GetUserProfile.execute (public, by handle)", () => {
           { id: "tier-1", name: "Anggota", priceAmount: 50_000, billingCycle: "monthly" },
         ],
         viewerIsMember: false,
+        viewerMembershipEnded: false,
       },
     });
   });
@@ -379,7 +380,11 @@ describe("GetUserProfile.execute — membership (Task 5)", () => {
     const profile = await useCase.execute("wildan", null);
 
     expect("membership" in profile).toBe(true);
-    expect(profile.membership).toEqual({ tiers: [], viewerIsMember: false });
+    expect(profile.membership).toEqual({
+      tiers: [],
+      viewerIsMember: false,
+      viewerMembershipEnded: false,
+    });
   });
 
   it("fetches this owner's tiers in a SINGLE listActiveByOwner call, scoped to the profile's own id", async () => {
@@ -416,8 +421,11 @@ describe("GetUserProfile.execute — viewerIsMember (Task 10)", () => {
     const profile = await useCase.execute("wildan", null);
 
     expect(profile.membership.viewerIsMember).toBe(false);
-    // Its neighbour IS tri-state, deliberately — see the field's own
-    // docstring for why these two disagree.
+    // Both viewer booleans, and both `false` rather than `null`: an anonymous
+    // visitor holds no membership AND has had none end.
+    expect(profile.membership.viewerMembershipEnded).toBe(false);
+    // Their neighbour IS tri-state, deliberately — see the field's own
+    // docstring for why these disagree.
     expect(profile.viewerFollows).toBeNull();
   });
 
@@ -469,9 +477,45 @@ describe("GetUserProfile.execute — viewerIsMember (Task 10)", () => {
     const profile = await useCase.execute("wildan", "viewer-1");
 
     expect(profile.membership.viewerIsMember).toBe(false);
-    // ...and the offer is right there to buy again, which is 5a being honest
-    // about having no renewal rather than pretending to have one.
+    // ...and the SECOND boolean is what makes that honest rather than a lie by
+    // omission. `StartUserSubscription` refuses this person's purchase — its
+    // guard reads the status alone and must — so a profile that reported only
+    // `viewerIsMember: false` would have the web offer a button whose only
+    // possible answer is a 409, permanently. Final review, I1.
+    expect(profile.membership.viewerMembershipEnded).toBe(true);
     expect(profile.membership.tiers).toHaveLength(1);
+  });
+
+  /**
+   * The two `false` answers above are NOT the same answer, and this is what
+   * says so: a stranger may buy, a lapsed member may not. Collapsing them is
+   * exactly the defect the final review measured.
+   */
+  it("distinguishes a stranger from a lapsed member — both are non-members, only one may buy", async () => {
+    const table = [
+      { subscriberId: "lapsed-1", ownerId: "user-1", currentPeriodEnd: PAST },
+      { subscriberId: "member-1", ownerId: "user-1", currentPeriodEnd: FUTURE },
+    ];
+    const build = () =>
+      new GetUserProfile(
+        fakeRepository([record()]),
+        fakeFollowRepository({}),
+        fakeUserTierRepository([tierRow()]),
+        membershipCheck(table)
+      );
+
+    const stranger = await build().execute("wildan", "stranger-1");
+    const lapsed = await build().execute("wildan", "lapsed-1");
+    const member = await build().execute("wildan", "member-1");
+
+    expect(stranger.membership.viewerIsMember).toBe(false);
+    expect(stranger.membership.viewerMembershipEnded).toBe(false);
+
+    expect(lapsed.membership.viewerIsMember).toBe(false);
+    expect(lapsed.membership.viewerMembershipEnded).toBe(true);
+
+    expect(member.membership.viewerIsMember).toBe(true);
+    expect(member.membership.viewerMembershipEnded).toBe(false);
   });
 
   it("is false on your OWN profile — nobody is a member of themselves", async () => {

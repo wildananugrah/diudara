@@ -531,14 +531,29 @@ export interface TierView {
  * "no". See the API's own `MembershipView` docstring, which carries the same
  * reasoning on the other side of the wire.
  *
- * It comes from `IsMemberOf` — `status = 'active'` AND `current_period_end >
- * now` — so a LAPSED membership reads `false` and that person is offered the
- * tier again. 5a has no renewal (spec §9), and that is what being honest about
- * it looks like: no renew button, because there is no renew endpoint.
+ * `viewerIsMember` comes from `IsMemberOf` — `status = 'active'` AND
+ * `current_period_end > now` — so a LAPSED membership reads `false`. **That
+ * used to be the whole story here, and the story was wrong.** This docstring
+ * said such a person "is offered the tier again"; the final whole-branch review
+ * measured what happened when they took the offer up. `POST
+ * /users/:handle/subscribe` refuses them 409, because ITS guard reads the
+ * status alone and must — a lapsed row let past it collides with
+ * `user_subscription_one_active` at activation time, which is money taken and
+ * nothing granted. So the offer could never be completed, one billing cycle
+ * after every purchase, for every paying member.
+ *
+ * `viewerMembershipEnded` is the missing half: `true` for exactly that person.
+ * Not a member, and not free to buy either. 5a has no renewal (spec §9), and
+ * this is what being honest about it looks like — no renew button, because
+ * there is no renew endpoint, and no buy button either, because there is no
+ * purchase the server would accept.
+ *
+ * Never both `true`: the API projects them from one `MembershipStanding`.
  */
 export interface MembershipView {
   tiers: TierView[];
   viewerIsMember: boolean;
+  viewerMembershipEnded: boolean;
 }
 
 /**

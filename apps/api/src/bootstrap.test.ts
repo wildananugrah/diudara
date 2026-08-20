@@ -850,6 +850,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeUserPayoutRepository,
         fakeUserSubscriptionRepository,
         fakePaymentProvider,
+        fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
       getPublicCommunity: new GetPublicCommunity(
@@ -1088,6 +1089,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeUserPayoutRepository,
         fakeUserSubscriptionRepository,
         fakePaymentProvider,
+        fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
       getPublicCommunity: new GetPublicCommunity(

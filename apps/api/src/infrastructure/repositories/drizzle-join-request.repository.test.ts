@@ -193,6 +193,28 @@ describe("DrizzleJoinRequestRepository.decide", () => {
     expect(decided?.decidedAt?.toISOString()).toBe(decidedAt.toISOString());
   });
 
+  /**
+   * FOUR CONTENDERS, AND THE NUMBER IS MEASURED RATHER THAN INHERITED.
+   *
+   * `decide()` is `UPDATE … WHERE id = ? AND status = 'pending'` — a CONDITIONAL
+   * UPDATE, not an insert arbitrated by a unique index. That is structurally the
+   * same shape as `beginXenditAccountProvisioning`, where memberships-5a's review
+   * round 1 (F1) measured a four-contender latch staying green across 5 runs
+   * against the exact bug it existed to catch: check-then-act lets one winner
+   * through in 1 contest out of 4, which reads as correct, but in 27 of 30. That
+   * test was raised to 30.
+   *
+   * So this one was measured too, by the final whole-branch review, applying F1's
+   * own mutant — the conditional UPDATE replaced by a SELECT followed by an
+   * unconditional one, production code otherwise untouched. **This test failed
+   * 5 runs out of 5 at four contenders**, and the mutant was reverted and
+   * confirmed byte-identical.
+   *
+   * WHY IT HOLDS HERE AND NOT THERE: in this call path every contender's SELECT
+   * issues before any UPDATE returns, so all four genuinely observe `pending`.
+   * That is a property of the surrounding awaits, not of the number — do not read
+   * "four is enough" as a general rule, and do not lower it here.
+   */
   it("lets exactly ONE of several concurrent deciders win", async () => {
     // Two owners' browser tabs, or one owner double-clicking approve — the predicate
     // in the UPDATE, not a preceding read, is what has to decide this.
