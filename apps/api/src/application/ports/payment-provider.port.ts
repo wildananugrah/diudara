@@ -31,12 +31,38 @@ export interface CreateInvoiceResult {
   invoiceUrl: string;
 }
 
+export interface CreatePaymentAccountInput {
+  /**
+   * THE OWNER'S ID — `creator.id` OR `app_user.id`. The name is historical, from
+   * when creators were the only owner that could be paid, and it is now wrong:
+   * Phase 5a's `ConnectUserPayout` passes an `app_user.id` through this field for
+   * a user selling a membership on their own profile.
+   *
+   * Not renamed on purpose. `creator.xendit_account_id` and everything
+   * /dashboard/* reads are frozen, and a rename would edit
+   * `create-payment-account.ts` to no functional end. Naming the two owners here
+   * is the honest alternative — the field's name was previously its only
+   * documentation, and that documentation was false.
+   *
+   * INERT AT THE PROVIDER, but not unused. `XenditPaymentAdapter` never sends it
+   * — only `email` and `public_profile.business_name` cross the wire — while
+   * `FakePaymentAdapter` interpolates it into the `fake-acct-N-<id>` ids that
+   * every development box and every test then stores in a real column. So it
+   * does reach the database, just never Xendit.
+   *
+   * NEVER JOIN THIS TO `creator`. A lookup keyed on it will silently return
+   * nothing for half the owners that pass through here, and "no rows" is exactly
+   * the shape a missing creator has.
+   */
+  creatorId: string;
+  /** Becomes the provider account's own email. `app_user.email` is NOT NULL; `creator.email` is not. */
+  email: string;
+  /** Sent as the sub-account's `public_profile.business_name`. */
+  name: string;
+}
+
 export interface PaymentProviderPort {
-  createPaymentAccount(input: {
-    creatorId: string;
-    email: string;
-    name: string;
-  }): Promise<{ accountId: string }>;
+  createPaymentAccount(input: CreatePaymentAccountInput): Promise<{ accountId: string }>;
 
   createInvoice(input: CreateInvoiceInput): Promise<CreateInvoiceResult>;
 }

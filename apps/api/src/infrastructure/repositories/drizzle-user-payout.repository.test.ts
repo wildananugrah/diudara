@@ -109,28 +109,38 @@ describe("DrizzleUserPayoutRepository.beginXenditAccountProvisioning", () => {
   /**
    * THE ARBITRATION ITSELF, against a real database rather than an in-memory
    * fake: the conditional UPDATE — not any read before it — is what decides who
-   * claims the row. The latch holds all four callers until every one of them has
-   * arrived, so they genuinely contend (see `ArrivalLatch` for the three false
-   * passes a bare `Promise.all` produced in this project).
+   * claims the row. The latch holds every caller until all of them have arrived,
+   * so they genuinely contend (see `ArrivalLatch` for the three false passes a
+   * bare `Promise.all` produced in this project).
    *
    * If more than one call could return true, the use-case above it would call the
    * provider more than once, and each losing call would leave a permanently
    * orphaned Xendit MANAGED sub-account: they are KYC entities with no delete
    * endpoint.
+   *
+   * THIRTY CONTENDERS, NOT FOUR, and the number is load-bearing — review round 1,
+   * F1. This test was written with four and stayed green across five runs while
+   * the conditional UPDATE was replaced by a SELECT followed by an unconditional
+   * one, i.e. against the exact defect it exists to catch. Measured against this
+   * database: check-then-act lets exactly one winner through in 1 contest out of
+   * 4, which reads as correct, but in 27 out of 30. The correct implementation
+   * wins 1 of 30. Four contenders simply give the bug too many chances to get
+   * away with it; do not lower this number.
    */
-  it("lets exactly ONE of several concurrent claims win", async () => {
+  it("lets exactly ONE of thirty concurrent claims win", async () => {
     const created = await seedUser();
-    const latch = new ArrivalLatch(4);
+    const contenders = 30;
+    const latch = new ArrivalLatch(contenders);
 
     const results = await Promise.all(
-      Array.from({ length: 4 }, async () => {
+      Array.from({ length: contenders }, async () => {
         await latch.arriveAndWait();
         return repo.beginXenditAccountProvisioning(created.id);
       })
     );
 
     expect(results.filter(Boolean)).toHaveLength(1);
-    expect(latch.arrived).toBe(4);
+    expect(latch.arrived).toBe(contenders);
     expect(await columnOf(created.id)).toBe(SENTINEL);
   });
 });
