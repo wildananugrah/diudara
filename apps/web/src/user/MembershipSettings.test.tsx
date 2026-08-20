@@ -338,8 +338,12 @@ describe("MembershipSettings — a failure is a Bahasa sentence, never the serve
 
     render(<MembershipSettings />);
 
-    await screen.findByText(/Server sedang bermasalah/);
-    expect(screen.queryAllByText(/internal server error/).length).toBe(0);
+    // The whole alert's text, not a text MATCH: an exact-string matcher cannot
+    // see the server's sentence when a screen appends it to its own, which is
+    // the exact shape this rule keeps being broken in.
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Server sedang bermasalah");
+    expect(alert.textContent).not.toContain("internal server error");
   });
 
   it("shows Bahasa when connecting fails", async () => {
@@ -354,8 +358,9 @@ describe("MembershipSettings — a failure is a Bahasa sentence, never the serve
     render(<MembershipSettings />);
     fireEvent.click(await screen.findByRole("button", { name: "Hubungkan akun pembayaran" }));
 
-    await screen.findByText(/Server sedang bermasalah/);
-    expect(screen.queryAllByText(/internal server error/).length).toBe(0);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Server sedang bermasalah");
+    expect(alert.textContent).not.toContain("internal server error");
   });
 
   /**
@@ -385,8 +390,9 @@ describe("MembershipSettings — a failure is a Bahasa sentence, never the serve
     fireEvent.change(screen.getByLabelText("Harga per bulan (Rp)"), { target: { value: "50000" } });
     fireEvent.click(screen.getByRole("button", { name: "Terbitkan tingkatan" }));
 
-    await screen.findByText(/Gagal menerbitkan tingkatan/);
-    expect(screen.queryAllByText(serverSentence).length).toBe(0);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Gagal menerbitkan tingkatan");
+    expect(alert.textContent).not.toContain(serverSentence);
   });
 
   it("shows Bahasa when deactivating fails", async () => {
@@ -400,7 +406,8 @@ describe("MembershipSettings — a failure is a Bahasa sentence, never the serve
     render(<MembershipSettings />);
     fireEvent.click(await screen.findByRole("button", { name: "Nonaktifkan" }));
 
-    await screen.findByText(/Data yang Anda cari tidak ditemukan/);
-    expect(screen.queryAllByText(/tier not found/).length).toBe(0);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Data yang Anda cari tidak ditemukan");
+    expect(alert.textContent).not.toContain("tier not found");
   });
 });
