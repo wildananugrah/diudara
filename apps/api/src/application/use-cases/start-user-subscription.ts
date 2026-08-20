@@ -29,8 +29,20 @@ export interface StartUserSubscriptionResult {
 /**
  * `POST /users/:handle/subscribe` — buying a membership from a person, spec §6.
  *
- * This is the moment money actually moves in Phase 5a, and two things about it
- * are load-bearing enough to state before the code says them.
+ * This is the moment money actually moves, and several things about it are
+ * load-bearing enough to state before the code says them.
+ *
+ * **A LAPSED MEMBERSHIP IS RETIRED HERE, AND THAT IS WHAT RENEWAL IS** (Phase
+ * 5b, Task 2). Nothing in this system charges anybody twice on its own — the
+ * Xendit adapter has two operations and no tokenisation — so "renew" means "buy
+ * again", and the only thing that stood in the way was the buyer's own expired
+ * row: still `status = 'active'`, still holding
+ * `user_subscription_one_active`'s slot, refused by the guard below forever. A
+ * member whose period has ended now presses the button once and gets a fresh
+ * checkout. The retirement and the pending claim commit TOGETHER — see
+ * `UserPurchaseUnitOfWorkPort` — because a retirement that committed alone and
+ * a claim that then failed would leave that person with neither an active
+ * membership nor a pending checkout.
  *
  * **THE PAYOUT GATE IS `isConnectedPaymentAccount`, NEVER TRUTHINESS.**
  * `app_user.xendit_account_id` has three states — NULL, the
@@ -66,9 +78,11 @@ export interface StartUserSubscriptionResult {
  * database and got two live invoices, two subscriptions and two transactions for
  * one pair in one run out of five. A double tap on a phone is CONCURRENT. So the
  * INSERT is the claim — `user_subscription_one_pending` — and the loser is
- * routed into the reuse path by the violation, never by a read. See
- * `claimPending`, and `releaseClaim` for why ANY failure between the claim and
- * the invoice reference must give the claim back.
+ * routed into the reuse path by the conflict, never by a read. See
+ * `claimPending` (whose arbitration is `ON CONFLICT DO NOTHING` and must stay
+ * that, now that it runs inside a transaction), and `releaseClaim` for why ANY
+ * failure between the claim and the invoice reference must give the claim
+ * back.
  *
  * The `external_id` is namespaced (`domain/user-payment.ts`): Xendit delivers ONE
  * webhook stream and the community handler resolves its own invoices by treating
