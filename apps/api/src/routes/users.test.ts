@@ -12,6 +12,7 @@ import { RegisterUser } from "../application/use-cases/register-user";
 import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import { clientIp } from "./users";
 import { isReservedHandle, isValidHandle } from "../domain/handle";
+import { DrizzleUserSubscriptionRepository } from "../infrastructure/repositories/drizzle-user-subscription.repository";
 
 beforeEach(resetDatabase);
 
@@ -1842,5 +1843,238 @@ describe("GET /users/me/payout and POST /users/me/payout", () => {
 
     const post = await connect(a, token);
     expect(post.status).toBe(503);
+  });
+});
+
+describe("GET/POST /users/me/tiers and PATCH /users/me/tiers/:tierId", () => {
+  /** Signs up, logs in, and returns both the bearer token and the user's id — mirrors `payoutUser` above. */
+  async function tierUser(a: ReturnType<typeof app>, overrides: Partial<typeof VALID> = {}) {
+    const account = { ...VALID, ...overrides };
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(account),
+    });
+    const res = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: account.email, password: account.password }),
+    });
+    const body = (await res.json()) as { token: string; user: { id: string } };
+    return { token: body.token, userId: body.user.id };
+  }
+
+  function connectPayout(a: ReturnType<typeof app>, token: string) {
+    return a.request("/users/me/payout", { method: "POST", headers: authed(token) });
+  }
+
+  function postTier(a: ReturnType<typeof app>, token: string, body: unknown) {
+    return a.request("/users/me/tiers", {
+      method: "POST",
+      headers: { ...authed(token), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function getTiers(a: ReturnType<typeof app>, token: string) {
+    return a.request("/users/me/tiers", { headers: authed(token) });
+  }
+
+  function patchTier(a: ReturnType<typeof app>, token: string, tierId: string, body: unknown) {
+    return a.request(`/users/me/tiers/${tierId}`, {
+      method: "PATCH",
+      headers: { ...authed(token), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("rejects an unauthenticated GET, POST and PATCH with 401", async () => {
+    const a = app();
+    expect((await a.request("/users/me/tiers")).status).toBe(401);
+    expect((await a.request("/users/me/tiers", { method: "POST" })).status).toBe(401);
+    expect(
+      (
+        await a.request("/users/me/tiers/00000000-0000-0000-0000-000000000000", {
+          method: "PATCH",
+        })
+      ).status
+    ).toBe(401);
+  });
+
+  it("REFUSES to create a tier before a payout account is connected, in Bahasa naming the remedy", async () => {
+    const a = app();
+    const { token } = await tierUser(a);
+
+    const res = await postTier(a, token, { name: "Anggota", priceAmount: 50_000 });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe(
+      "Hubungkan akun pembayaran Anda terlebih dahulu sebelum menerbitkan tingkatan " +
+        "keanggotaan — uang dari tingkatan ini belum punya tempat tujuan."
+    );
+  });
+
+  it("THE SENTINEL DOES NOT COUNT AS CONNECTED — a mid-provisioning payout also refuses tier creation", async () => {
+    // Seeded through the repository, exactly as the payout suite does for
+    // this exact state: POSTing to `/me/payout` twice would just finish the
+    // connection, never leave it mid-flight.
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { token, userId } = await tierUser(a);
+    expect(await deps.userPayoutRepository.beginXenditAccountProvisioning(userId)).toBe(true);
+
+    const res = await postTier(a, token, { name: "Anggota", priceAmount: 50_000 });
+
+    // The column is NOT empty here — a truthiness check would call this
+    // connected and let the tier publish against an account Xendit does not
+    // recognise.
+    expect(res.status).toBe(409);
+  });
+
+  it("creates a tier once the owner's payout account is connected", async () => {
+    const a = app();
+    const { token } = await tierUser(a);
+    await connectPayout(a, token);
+
+    const res = await postTier(a, token, { name: "Anggota", priceAmount: 50_000 });
+
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+      isActive: true,
+    });
+  });
+
+  it("rejects a non-positive price with 400, and creates nothing", async () => {
+    const a = app();
+    const { token } = await tierUser(a);
+    await connectPayout(a, token);
+
+    for (const priceAmount of [0, -10_000]) {
+      const res = await postTier(a, token, { name: "Anggota", priceAmount });
+      expect(res.status).toBe(400);
+    }
+
+    expect(await (await getTiers(a, token)).json()).toEqual([]);
+  });
+
+  it("400s a malformed JSON body", async () => {
+    const a = app();
+    const { token } = await tierUser(a);
+    await connectPayout(a, token);
+
+    const res = await a.request("/users/me/tiers", {
+      method: "POST",
+      headers: { ...authed(token), "Content-Type": "application/json" },
+      body: "not json",
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("GET lists only the caller's own tiers", async () => {
+    const a = app();
+    const mine = await tierUser(a);
+    const stranger = await tierUser(a, { handle: "rina", email: "rina@example.com" });
+    await connectPayout(a, mine.token);
+    await connectPayout(a, stranger.token);
+    await postTier(a, mine.token, { name: "Punyaku", priceAmount: 20_000 });
+    await postTier(a, stranger.token, { name: "Punya Rina", priceAmount: 30_000 });
+
+    const res = await getTiers(a, mine.token);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toHaveLength(1);
+    expect(body[0].name).toBe("Punyaku");
+  });
+
+  it("PATCH deactivates a tier without touching an existing subscription to it", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { token: ownerToken, userId: ownerId } = await tierUser(a);
+    await connectPayout(a, ownerToken);
+    const created = await (
+      await postTier(a, ownerToken, { name: "Anggota", priceAmount: 50_000 })
+    ).json();
+
+    // A real member, seeded directly (there is no subscribe route yet — that
+    // is Task 6) so this test can prove a claim about `user_subscription`
+    // rather than about HTTP.
+    const [subscriberRow] = await db
+      .insert(appUsers)
+      .values({
+        handle: "subscriber1",
+        email: "subscriber1@example.com",
+        whatsappNumber: null,
+        passwordHash: "irrelevant-hash",
+        displayName: "Subscriber",
+        bio: null,
+      })
+      .returning();
+    const subscriptions = new DrizzleUserSubscriptionRepository(db);
+    const subscription = await subscriptions.create({
+      subscriberId: subscriberRow!.id,
+      tierId: created.id,
+      ownerId,
+    });
+    const periodEnd = new Date("2099-01-01T00:00:00Z");
+    await subscriptions.activate(subscription.id, periodEnd);
+
+    const patchRes = await patchTier(a, ownerToken, created.id, { isActive: false });
+
+    expect(patchRes.status).toBe(200);
+    expect((await patchRes.json()).isActive).toBe(false);
+
+    // The tier stopped being offered...
+    const listed = await (await getTiers(a, ownerToken)).json();
+    expect(listed.find((t: { id: string }) => t.id === created.id)?.isActive).toBe(false);
+
+    // ...but the existing member's subscription is UNTOUCHED — same status,
+    // same period end, still resolvable by id.
+    const stillThere = await subscriptions.findById(subscription.id);
+    expect(stillThere?.status).toBe("active");
+    expect(stillThere?.currentPeriodEnd?.toISOString()).toBe(periodEnd.toISOString());
+  });
+
+  it("one owner cannot edit another's tier — 404s, and the tier is left untouched", async () => {
+    const a = app();
+    const owner = await tierUser(a);
+    const stranger = await tierUser(a, { handle: "rina", email: "rina@example.com" });
+    await connectPayout(a, owner.token);
+    const created = await (
+      await postTier(a, owner.token, { name: "Anggota", priceAmount: 50_000 })
+    ).json();
+
+    const res = await patchTier(a, stranger.token, created.id, { isActive: false });
+
+    expect(res.status).toBe(404);
+
+    const mine = await (await getTiers(a, owner.token)).json();
+    expect(mine[0].isActive).toBe(true);
+  });
+
+  it("404s a PATCH for a tier id that does not exist at all", async () => {
+    const a = app();
+    const { token } = await tierUser(a);
+
+    const res = await patchTier(a, token, "00000000-0000-0000-0000-000000000000", {
+      isActive: false,
+    });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("400s a PATCH that tries to reactivate — isActive: true is refused, not silently ignored", async () => {
+    const a = app();
+    const { token } = await tierUser(a);
+    await connectPayout(a, token);
+    const created = await (await postTier(a, token, { name: "Anggota", priceAmount: 50_000 })).json();
+
+    const res = await patchTier(a, token, created.id, { isActive: true });
+
+    expect(res.status).toBe(400);
   });
 });

@@ -68,6 +68,7 @@ import { CreatePaymentAccount } from "./application/use-cases/create-payment-acc
 import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
 import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
+import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
@@ -88,6 +89,7 @@ import type {
 } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { UserPayoutRepositoryPort } from "./application/ports/user-payout-repository.port";
+import type { UserTierRepositoryPort } from "./application/ports/user-tier-repository.port";
 import type { FollowRepositoryPort } from "./application/ports/follow-repository.port";
 import type { PostRepositoryPort } from "./application/ports/post-repository.port";
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
@@ -239,6 +241,25 @@ const fakeUserPayoutRepository: UserPayoutRepositoryPort = {
   },
   async abandonXenditAccountProvisioning() {
     return false;
+  },
+};
+
+/** Task 1 of Phase 5a's `user_tier` table, faked the same shallow way as `fakeUserPayoutRepository` above — these tests are about `Dependencies` wiring, not tier behaviour. */
+const fakeUserTierRepository: UserTierRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async findById() {
+    return null;
+  },
+  async listByOwner() {
+    return [];
+  },
+  async listActiveByOwner() {
+    return [];
+  },
+  async deactivate() {
+    return null;
   },
 };
 
@@ -716,6 +737,7 @@ describe("Dependencies (composition root contract)", () => {
       ),
       userRepository: fakeUserRepository,
       userPayoutRepository: fakeUserPayoutRepository,
+      userTierRepository: fakeUserTierRepository,
       userTokenIssuer: fakeUserTokenIssuer,
       registerUser: new RegisterUser(
         fakeUserRepository,
@@ -772,6 +794,7 @@ describe("Dependencies (composition root contract)", () => {
       getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
       connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
       getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
+      manageUserTiers: new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository
@@ -936,6 +959,7 @@ describe("Dependencies (composition root contract)", () => {
       ),
       userRepository: fakeUserRepository,
       userPayoutRepository: fakeUserPayoutRepository,
+      userTierRepository: fakeUserTierRepository,
       userTokenIssuer: fakeUserTokenIssuer,
       registerUser: new RegisterUser(
         fakeUserRepository,
@@ -992,6 +1016,7 @@ describe("Dependencies (composition root contract)", () => {
       getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
       connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
       getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
+      manageUserTiers: new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository

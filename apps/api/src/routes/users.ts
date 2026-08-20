@@ -14,7 +14,7 @@ import {
   type UserLoginInput,
   type UserSignupInput,
 } from "@diudara/shared";
-import { validate } from "../http/validate";
+import { uuidParam, validate, validateParams } from "../http/validate";
 import {
   requireUserAuth,
   resolveViewerId,
@@ -105,6 +105,55 @@ function parseExploreQuery(raw: {
 }
 
 /**
+ * `POST /users/me/tiers`'s body — SHAPE only. Every business rule (price must
+ * be positive, an owner must have a connected payout account, the billing
+ * cycle 5a actually supports) is `ManageUserTiers.create`'s job, not this
+ * schema's — see that method's own docstring for why. This exists only to
+ * turn a malformed body (missing `name`, a non-numeric `priceAmount`) into a
+ * 400 before it can reach `input.name.trim()` on `undefined`.
+ *
+ * The failure message is hand-written Bahasa rather than zod's own English
+ * issue text, mirroring `parseFollowListLimit`/`parseExploreQuery` above.
+ */
+const createUserTierSchema = z.object({
+  name: z.string().trim().min(1),
+  priceAmount: z.number(),
+  billingCycle: z.string().trim().min(1).optional(),
+});
+
+function parseCreateUserTierBody(raw: unknown): {
+  name: string;
+  priceAmount: number;
+  billingCycle?: string;
+} {
+  const parsed = createUserTierSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new ValidationError(
+      "Nama dan harga tingkatan wajib diisi dengan format yang benar."
+    );
+  }
+  return parsed.data;
+}
+
+/**
+ * `PATCH /users/me/tiers/:tierId`'s body. `is_active` is the only column
+ * `UserTierRepositoryPort` lets a caller flip (see its `deactivate` doc
+ * comment — there is no `reactivate`), so `isActive: true` is refused here
+ * rather than silently accepted and ignored.
+ */
+const patchUserTierSchema = z.object({ isActive: z.literal(false) });
+
+function parsePatchUserTierBody(raw: unknown): { isActive: false } {
+  const parsed = patchUserTierSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new ValidationError(
+      "Saat ini tingkatan hanya dapat dinonaktifkan, dengan mengirim { isActive: false }."
+    );
+  }
+  return parsed.data;
+}
+
+/**
  * The caller's IP, recorded (hashed) against every password-reset request
  * for forensic/audit value — see `RequestPasswordReset`'s own docstring for
  * why it is NO LONGER used to enforce a rate limit (review finding F4).
@@ -175,6 +224,7 @@ export function userRoutes(
     | "maxPostImages"
     | "connectUserPayout"
     | "getUserPayoutStatus"
+    | "manageUserTiers"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -295,6 +345,71 @@ export function userRoutes(
     const status = await deps.connectUserPayout.execute(c.get("userId"));
     return c.json({ ...status, available: true }, 200);
   });
+
+  /**
+   * Task 4 of Phase 5a. Pengaturan's tier editor: what a creator sells on
+   * their OWN profile, distinct from `/dashboard/*`'s community tiers
+   * (`routes/tiers.ts`, table `membership_tier`) — see `ManageUserTiers`'s
+   * own docstring.
+   *
+   * Static segments (`me/tiers`, `me/tiers/:tierId`), like `me/payout` above
+   * — nothing a handle could ever shadow, since `me` is 2 characters and
+   * already unregisterable under `HANDLE_PATTERN` before this route existed.
+   * `RESERVED_HANDLES` gains nothing from this route; see `domain/handle.ts`.
+   *
+   * `GET` returns the owner's OWN management view — every tier they have
+   * ever defined, active and deactivated alike — never the public
+   * `listActiveByOwner` projection a visitor's profile shows (Task 5).
+   */
+  app.get<"/me/tiers">("/me/tiers", requireAuth, async (c) => {
+    const tiers = await deps.manageUserTiers.list(c.get("userId"));
+    return c.json(tiers);
+  });
+
+  /**
+   * `ManageUserTiers.create` is where the money-has-nowhere-to-go gate lives
+   * — a tier cannot be published without a CONNECTED payout account (spec
+   * §5). This handler does no business validation itself; it only turns a
+   * malformed body into a 400 before that method ever sees it.
+   */
+  app.post<"/me/tiers">("/me/tiers", requireAuth, async (c) => {
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      throw new ValidationError("Isi permintaan harus berupa JSON yang valid.");
+    }
+    const input = parseCreateUserTierBody(raw);
+    const created = await deps.manageUserTiers.create({ ownerId: c.get("userId"), ...input });
+    return c.json(created, 201);
+  });
+
+  /**
+   * The ONLY edit `UserTierRepositoryPort` exposes: withdrawing a tier from
+   * sale. `ManageUserTiers.deactivate` 404s a tier that belongs to a
+   * different owner — one owner cannot edit another's tier — and never
+   * touches `user_subscription`, so an existing member's subscription keeps
+   * resolving after their tier is withdrawn (spec §4).
+   */
+  app.patch<"/me/tiers/:tierId">(
+    "/me/tiers/:tierId",
+    requireAuth,
+    validateParams(z.object({ tierId: uuidParam })),
+    async (c) => {
+      let raw: unknown;
+      try {
+        raw = await c.req.json();
+      } catch {
+        throw new ValidationError("Isi permintaan harus berupa JSON yang valid.");
+      }
+      parsePatchUserTierBody(raw);
+      const updated = await deps.manageUserTiers.deactivate({
+        ownerId: c.get("userId"),
+        tierId: c.req.param("tierId"),
+      });
+      return c.json(updated, 200);
+    }
+  );
 
   /**
    * Task 7 of images (design spec §6). Public and cheap — no auth, no

@@ -41,6 +41,8 @@ import { CreatePaymentAccount } from "./application/use-cases/create-payment-acc
 import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
 import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
+import { DrizzleUserTierRepository } from "./infrastructure/repositories/drizzle-user-tier.repository";
+import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
@@ -92,6 +94,7 @@ import type { MediaRepositoryPort } from "./application/ports/media-repository.p
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { UserPayoutRepositoryPort } from "./application/ports/user-payout-repository.port";
+import type { UserTierRepositoryPort } from "./application/ports/user-tier-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -166,6 +169,14 @@ export interface Dependencies {
    * adapter provisions a KYC entity that has no delete endpoint.
    */
   userPayoutRepository: UserPayoutRepositoryPort;
+  /**
+   * Task 1's `user_tier` table. Exposed for the same reason
+   * `userPayoutRepository` is: `manage-user-tiers.test.ts`'s repository-level
+   * coverage lives beside `DrizzleUserTierRepository` itself, but the HTTP
+   * suite (`routes/users.test.ts`) needs to seed/read tiers directly too — a
+   * subscription fixture, for instance, has to reference a real tier id.
+   */
+  userTierRepository: UserTierRepositoryPort;
   /**
    * Signs and verifies user-session tokens. A SEPARATE class from
    * `tokenIssuer` even though both share `JWT_SECRET` — see
@@ -310,6 +321,15 @@ export interface Dependencies {
    * at all". Read-only and safe on every page load; the POST route is not.
    */
   getUserPayoutStatus: GetUserPayoutStatus;
+  /**
+   * Task 4 of Phase 5a. `GET|POST /users/me/tiers` and
+   * `PATCH /users/me/tiers/:tierId` — the surface where a creator defines
+   * what they are selling. NEVER `undefined`, unlike `connectUserPayout`:
+   * this needs no `PaymentProviderPort`, only the payout column's current
+   * state, which `getUserPayoutStatus` above answers the same way regardless
+   * of whether payments are configured on this box.
+   */
+  manageUserTiers: ManageUserTiers;
   getPublicCommunity: GetPublicCommunity;
   /**
    * `POST /c/:slug/checkout`. `undefined` EXACTLY when `payments` is `null` —
@@ -1815,6 +1835,8 @@ export function bootstrap(): Dependencies {
   // Phase 5a. Its own repository over the same table — see the port's docstring
   // for why the payout column is not on `userRepository`.
   const userPayoutRepository = new DrizzleUserPayoutRepository(db);
+  // Task 1. `user_tier` — another own-table repository beside the two above.
+  const userTierRepository = new DrizzleUserTierRepository(db);
   const userTokenIssuer = new HonoJwtUserTokenIssuer(jwtSecret);
   // `registerUser` is constructed further down, alongside Task 5's password
   // reset — see the comment there for why it needs to wait for `messaging`.
@@ -1914,6 +1936,10 @@ export function bootstrap(): Dependencies {
     ? new ConnectUserPayout(userPayoutRepository, payments)
     : undefined;
   const getUserPayoutStatus = new GetUserPayoutStatus(userPayoutRepository);
+  // Task 4 of Phase 5a. Needs no `PaymentProviderPort` — only the payout
+  // column's current state — so unlike `connectUserPayout` it is constructed
+  // unconditionally, the same reasoning `getUserPayoutStatus` above follows.
+  const manageUserTiers = new ManageUserTiers(userTierRepository, userPayoutRepository);
   // After selectPaymentProvider on purpose — two reasons, one of them dated.
   //
   // STILL TRUE: `createCommunity`/`updateCommunity`/`createPaymentAccount` above
@@ -2278,6 +2304,7 @@ export function bootstrap(): Dependencies {
     authenticateCreator,
     userRepository,
     userPayoutRepository,
+    userTierRepository,
     userTokenIssuer,
     registerUser,
     authenticateUser,
@@ -2307,6 +2334,7 @@ export function bootstrap(): Dependencies {
     getPaymentAccountStatus,
     connectUserPayout,
     getUserPayoutStatus,
+    manageUserTiers,
     getPublicCommunity,
     startCheckout,
     requestToJoin,
