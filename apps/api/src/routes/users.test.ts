@@ -3026,15 +3026,20 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
      * against this database on the implementation's own mutants:
      *
      *  - Claim by `try/catch (23505)` instead of `ON CONFLICT DO NOTHING` —
-     *    which is what `claimPending` did before this task, and which is poison
-     *    inside a transaction because Postgres aborts it before the catch runs:
-     *    4 contenders → 3 of 30 five-hundreds averaged 3 per run; 30 contenders
-     *    → 29 five-hundreds in every run. Deterministic at both, but at four the
-     *    single 201 plus three 409s is a shape a skim reads as healthy.
-     *  - Retirement moved OUT of the transaction: green at 4, 10 and 30. That
-     *    defect is invisible to concurrency by construction (see the rollback
-     *    test above, which is what catches it) and no contender count fixes
-     *    that — recorded here so the next person does not go looking.
+     *    what `claimPending` did before this task, and poison inside a
+     *    transaction because Postgres aborts it before the catch runs. Every
+     *    loser 500s on `25P02`. Measured, two runs each: at 4 contenders,
+     *    `{201: 1, 500: 3}` both times; at 30, `{201: 1, 500: 29}` both times.
+     *    Deterministic at both counts — but three failures is a number a person
+     *    can read as flake, and twenty-nine is not. That is what thirty buys
+     *    here: not detection, legibility of the failure.
+     *  - Retirement moved OUT of the claim's transaction: GREEN at 4, 10 and
+     *    30, three runs each. That defect is invisible to concurrency by
+     *    construction — `retireExpired` is a conditional UPDATE and arbitrates
+     *    correctly on its own connection too — and no contender count fixes
+     *    that. The rollback test above is what catches it (measured red:
+     *    expected "active", received "expired"). Recorded here so the next
+     *    person does not go looking for it in this test.
      *
      * Thirty is also what the payout race and the repository's own claim race
      * settled on against this same database, so the phase carries one number
