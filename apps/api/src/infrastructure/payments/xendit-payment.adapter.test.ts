@@ -96,11 +96,16 @@ describe("XenditPaymentAdapter.createInvoice", () => {
       secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
     });
 
+    // BOTH shapes of "no number": the port's own absent, and the empty string a
+    // caller might still hand over. Neither may reach Xendit as a value.
     await adapter.createInvoice({ ...INPUT, payerWhatsappNumber: undefined });
+    await adapter.createInvoice({ ...INPUT, payerWhatsappNumber: "" });
 
-    const customer = JSON.parse(calls[0].init.body as string).customer;
-    expect(customer).toEqual({ given_names: "Siti" });
-    expect("mobile_number" in customer).toBe(false);
+    for (const call of calls) {
+      const customer = JSON.parse(call.init.body as string).customer;
+      expect(customer).toEqual({ given_names: "Siti" });
+      expect("mobile_number" in customer).toBe(false);
+    }
   });
 
   // MINOR, final whole-branch review: CheckoutPage assigns this straight to

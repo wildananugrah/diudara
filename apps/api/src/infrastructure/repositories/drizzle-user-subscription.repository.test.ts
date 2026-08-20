@@ -288,6 +288,40 @@ describe("DrizzleUserSubscriptionRepository", () => {
     expect(await subs.findPendingCheckout(alice.id, bob.id)).toBe(null);
   });
 
+  it("findPendingCheckout returns the LIVE invoice even when a NEWER transaction never got one", async () => {
+    // The invoice-url predicate, made observable: with two pending
+    // transactions on one subscription — an older one carrying the live invoice
+    // and a newer one whose provider call left nothing — "most recent" alone
+    // would answer `null` and let a second invoice be minted while the first is
+    // still payable.
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const subscription = await subs.create({
+      subscriberId: bob.id,
+      tierId: tier.id,
+      ownerId: alice.id,
+    });
+    const invoiced = await subs.createTransaction({
+      userSubscriptionId: subscription.id,
+      amount: 50_000,
+    });
+    await subs.attachGatewayReference(invoiced.id, "inv-1", "https://pay.test/inv-1");
+    await subs.createTransaction({ userSubscriptionId: subscription.id, amount: 50_000 });
+
+    expect(await subs.findPendingCheckout(bob.id, alice.id)).toEqual({
+      subscriptionId: subscription.id,
+      tierId: tier.id,
+      transactionId: invoiced.id,
+      invoiceUrl: "https://pay.test/inv-1",
+    });
+  });
+
   it("findPendingCheckout ignores a subscription that is no longer pending", async () => {
     const alice = await createUser("alice");
     const bob = await createUser("bob");
