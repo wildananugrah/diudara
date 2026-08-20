@@ -1285,6 +1285,27 @@ describe("HandlePaymentWebhook — user subscriptions (Task 7, Phase 5a)", () =>
     expect(state.subscription!.currentPeriodEnd).toEqual(new Date("2026-09-09T11:00:00.000Z"));
   });
 
+  it("stops a replay AT the event-id guard, before it can re-read anything it authorises", async () => {
+    // Found by mutation: deleting the `recordIfNew` early return left every other
+    // assertion in this block green, because the transaction-status check below
+    // it absorbed the replay. That check is a SECOND line of defence and this is
+    // the defence — so the guard has to be pinned by where the work STOPS, not
+    // only by the answer that comes back.
+    const { useCase, calls, order } = userHarness();
+
+    await useCase.execute(userPaidEvent());
+    const readsAfterFirst = calls.findTransactionById.length;
+    await useCase.execute(userPaidEvent());
+
+    // Two reads for the first delivery — the pooled amount check, then the
+    // re-read inside the unit of work. ONE for the second: the pooled check, and
+    // then nothing, because `recordIfNew` refused it.
+    expect(readsAfterFirst).toBe(2);
+    expect(calls.findTransactionById).toHaveLength(3);
+    expect(order.filter((step) => step === "recordIfNew")).toHaveLength(2);
+    expect(order.filter((step) => step === "findSubscription")).toHaveLength(1);
+  });
+
   it("does not extend the period even when the redelivery arrives a month later", async () => {
     // The clock is what `periodEnd` is measured from, so a replay that got past
     // the guard would move the member's expiry forward by a whole cycle.
