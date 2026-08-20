@@ -919,3 +919,128 @@ export function editPost(id: string, body: string, mediaIds?: string[]): Promise
 export function deletePost(id: string): Promise<void> {
   return apiFetch<void>(`/users/posts/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
+
+/**
+ * **`app_user.xendit_account_id` HAS THREE STATES, AND THIS IS HOW THE WIRE
+ * REPORTS THEM.** `connected` and `provisioning` are never both true, and both
+ * being false means "nothing claimed yet".
+ *
+ * The middle state is the whole reason this is two booleans rather than one:
+ * the column can hold the `provisioning:in-progress` sentinel that
+ * `ConnectUserPayout` writes BEFORE it calls Xendit, and that string is
+ * TRUTHY. The server refuses it everywhere — a tier cannot be published
+ * against it (`ManageUserTiers.create`), a membership cannot be bought against
+ * it (`StartUserSubscription`) — so a screen that rendered it as connected
+ * would offer a person a button that the server will refuse, and a screen that
+ * rendered it as nothing-yet would send them round the connect loop for an
+ * account they already claimed.
+ *
+ * `available` is a DIFFERENT question with a different answer: whether this
+ * deployment has a payment provider wired at all (`bootstrap()` constructs no
+ * `ConnectUserPayout` without one, and `POST /users/me/payout` answers 503).
+ * Without it, `connected: false, provisioning: false` would mean both "you
+ * have not connected yet" and "there is nothing here to connect to", and only
+ * the first is fixable by pressing a button — the ambiguity the creator
+ * dashboard shipped once and `routes/users.ts` deliberately does not.
+ */
+export interface PayoutStatus {
+  connected: boolean;
+  provisioning: boolean;
+  available: boolean;
+}
+
+/**
+ * `GET /users/me/payout` — read-only and safe to call on every page load,
+ * unlike `connectPayout` below, which provisions a KYC entity at the provider
+ * that has NO delete endpoint. Never probe the POST to find this out.
+ */
+export function getPayoutStatus(): Promise<PayoutStatus> {
+  return apiFetch<PayoutStatus>("/users/me/payout");
+}
+
+/**
+ * `POST /users/me/payout` — connects this user to a payout sub-account.
+ *
+ * IDEMPOTENT by the server's design (200, not 201): the response is the
+ * RESULTING state whether or not this call is what changed it, so a second tap
+ * on a slow connection is not an error. What it can never be is a second
+ * sub-account — `ConnectUserPayout` claims the column before it calls the
+ * provider, which is what stopped 30 concurrent requests creating 30
+ * permanent, orphaned KYC entities. A caller that loses that claim is answered
+ * `provisioning: true`, so this promise resolving is NOT the same thing as
+ * being connected — read the flags.
+ */
+export function connectPayout(): Promise<PayoutStatus> {
+  return apiFetch<PayoutStatus>("/users/me/payout", { method: "POST" });
+}
+
+/**
+ * One membership tier this user offers on their own profile.
+ *
+ * `createdAt` is a STRING here and a `Date` on the server (`UserTierRow`) —
+ * JSON has no date type, and nothing on this side parses it back.
+ *
+ * `billingCycle` is a free string rather than a `"monthly"` literal on
+ * purpose: the column is a varchar precisely so 5b can add cycles without a
+ * migration (spec §4), and a union here would make a widened server a
+ * compile error in the client rather than a value it can display.
+ */
+export interface UserTier {
+  id: string;
+  ownerId: string;
+  name: string;
+  priceAmount: number;
+  billingCycle: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+/**
+ * `GET /users/me/tiers` — the owner's own MANAGEMENT view: every tier they
+ * have ever defined, withdrawn ones included. That is deliberately not the
+ * public offer a visitor sees on a profile (`listActiveByOwner`, Task 5),
+ * which omits the inactive rows.
+ */
+export function listOwnTiers(): Promise<UserTier[]> {
+  return apiFetch<UserTier[]>("/users/me/tiers");
+}
+
+/**
+ * `POST /users/me/tiers` (201). `priceAmount` is an INTEGER of rupiah, the
+ * same convention `membership_tier.price_amount` already uses — never a float
+ * and never a formatted string.
+ *
+ * `billingCycle` is omitted entirely when the caller does not name one, so the
+ * server applies its own default rather than the client asserting a value it
+ * would then have to keep in step with `ALLOWED_BILLING_CYCLES`.
+ */
+export function createOwnTier(input: {
+  name: string;
+  priceAmount: number;
+  billingCycle?: string;
+}): Promise<UserTier> {
+  return apiFetch<UserTier>("/users/me/tiers", {
+    method: "POST",
+    body: JSON.stringify(
+      input.billingCycle === undefined
+        ? { name: input.name, priceAmount: input.priceAmount }
+        : input
+    ),
+  });
+}
+
+/**
+ * `PATCH /users/me/tiers/:tierId` with the ONLY body that route accepts.
+ *
+ * Withdrawing a tier from sale, never deleting it: an existing member's
+ * subscription keeps resolving through this tier's id (spec §4), and the
+ * server has no reactivate — `patchUserTierSchema` refuses `isActive: true`
+ * rather than silently ignoring it — so this function has no boolean
+ * parameter to mislead a caller with.
+ */
+export function deactivateOwnTier(tierId: string): Promise<UserTier> {
+  return apiFetch<UserTier>(`/users/me/tiers/${encodeURIComponent(tierId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ isActive: false }),
+  });
+}

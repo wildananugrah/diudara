@@ -213,6 +213,30 @@ describe("SettingsPage", () => {
     expect(await screen.findByDisplayValue("+6281234567890")).toBeTruthy();
   });
 
+  /**
+   * Task 9. Pengaturan is where a creator connects a payout account and
+   * defines what they sell (spec §5-§6), so the membership section has to
+   * be MOUNTED here — every other Task 9 test renders `MembershipSettings`
+   * directly and would stay green if nothing ever rendered it.
+   */
+  it("mounts the membership section, which loads its own payout status", async () => {
+    setUserSession("jwt-abc", USER);
+    const urls: string[] = [];
+    global.fetch = mock(async (url: string) => {
+      urls.push(url);
+      if (url === "/users/me/payout") {
+        return jsonResponse({ connected: false, provisioning: false, available: true });
+      }
+      if (url === "/users/me/tiers") return jsonResponse([]);
+      return jsonResponse(OWN_PROFILE);
+    }) as unknown as typeof fetch;
+
+    renderSettings();
+
+    await screen.findByText("Terima pembayaran");
+    await waitFor(() => expect(urls.filter((url) => url === "/users/me/payout").length).toBe(1));
+  });
+
   it("clearing the WhatsApp field sends an explicit null, not an empty string", async () => {
     setUserSession("jwt-abc", USER);
     const calls: Array<{ url: string; init: RequestInit }> = [];

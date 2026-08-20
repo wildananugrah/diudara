@@ -5,13 +5,17 @@ import {
   apiFetch,
   apiRequest,
   completePasswordReset,
+  connectPayout,
+  createOwnTier,
   createPost,
+  deactivateOwnTier,
   deletePost,
   editPost,
   exploreUsers,
   followUser,
   getMaxPostImages,
   getOwnProfile,
+  getPayoutStatus,
   getProfileByHandle,
   getSessionUser,
   getUserToken,
@@ -19,6 +23,7 @@ import {
   listFeed,
   listFollowers,
   listFollowing,
+  listOwnTiers,
   listUserPosts,
   loadPostImageLimit,
   login,
@@ -1398,5 +1403,131 @@ describe("apiClient — mediaIds on create and edit (Task 8)", () => {
     await editPost("post-1", "Diedit");
 
     expect("mediaIds" in JSON.parse(String(calls[0]!.init.body))).toBe(false);
+  });
+});
+
+describe("apiClient — payout and tiers (Task 9)", () => {
+  const PAYOUT = { connected: false, provisioning: true, available: true };
+  const TIER = {
+    id: "tier-1",
+    ownerId: "user-1",
+    name: "Anggota",
+    priceAmount: 50000,
+    billingCycle: "monthly",
+    isActive: true,
+    createdAt: "2026-08-01T00:00:00.000Z",
+  };
+
+  it("getPayoutStatus GETs /users/me/payout with the bearer header and resolves all three flags", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse(PAYOUT);
+    }) as unknown as typeof fetch;
+
+    const status = await getPayoutStatus();
+
+    expect(calls[0]!.url).toBe("/users/me/payout");
+    expect(calls[0]!.init?.method ?? "GET").toBe("GET");
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+    // All three, not just `connected` — the sentinel state is only visible in
+    // `provisioning`, and `available` is the only thing separating "you have
+    // not connected" from "this box has no payment provider at all".
+    expect(status).toEqual({ connected: false, provisioning: true, available: true });
+  });
+
+  it("connectPayout POSTs to /users/me/payout and resolves the RESULTING state", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ connected: true, provisioning: false, available: true });
+    }) as unknown as typeof fetch;
+
+    const status = await connectPayout();
+
+    expect(calls[0]!.url).toBe("/users/me/payout");
+    expect(calls[0]!.init?.method).toBe("POST");
+    expect(status).toEqual({ connected: true, provisioning: false, available: true });
+  });
+
+  it("listOwnTiers GETs /users/me/tiers — the owner's management view, active and withdrawn alike", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse([TIER, { ...TIER, id: "tier-2", isActive: false }]);
+    }) as unknown as typeof fetch;
+
+    const tiers = await listOwnTiers();
+
+    expect(calls[0]!.url).toBe("/users/me/tiers");
+    expect(tiers.map((tier) => tier.isActive)).toEqual([true, false]);
+  });
+
+  it("createOwnTier POSTs the name and the integer price", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse(TIER, 201);
+    }) as unknown as typeof fetch;
+
+    const created = await createOwnTier({ name: "Anggota", priceAmount: 50000 });
+
+    expect(calls[0]!.url).toBe("/users/me/tiers");
+    expect(calls[0]!.init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({
+      name: "Anggota",
+      priceAmount: 50000,
+    });
+    expect(created.id).toBe("tier-1");
+  });
+
+  it("createOwnTier sends billingCycle only when the caller named one", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (_url: string, init?: RequestInit) => {
+      calls.push({ init });
+      return jsonResponse(TIER, 201);
+    }) as unknown as typeof fetch;
+
+    await createOwnTier({ name: "Anggota", priceAmount: 50000, billingCycle: "monthly" });
+
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({
+      name: "Anggota",
+      priceAmount: 50000,
+      billingCycle: "monthly",
+    });
+  });
+
+  it("deactivateOwnTier PATCHes the tier with isActive:false — the only edit the server accepts", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ ...TIER, isActive: false });
+    }) as unknown as typeof fetch;
+
+    const updated = await deactivateOwnTier("tier-1");
+
+    expect(calls[0]!.url).toBe("/users/me/tiers/tier-1");
+    expect(calls[0]!.init?.method).toBe("PATCH");
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ isActive: false });
+    expect(updated.isActive).toBe(false);
+  });
+
+  it("deactivateOwnTier encodes the id into the path", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string }> = [];
+    global.fetch = mock(async (url: string) => {
+      calls.push({ url });
+      return jsonResponse({ ...TIER, isActive: false });
+    }) as unknown as typeof fetch;
+
+    await deactivateOwnTier("a/b c");
+
+    expect(calls[0]!.url).toBe("/users/me/tiers/a%2Fb%20c");
   });
 });

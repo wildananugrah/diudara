@@ -10,6 +10,7 @@ import {
   type OwnUserProfile,
 } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
+import MembershipSettings from "./MembershipSettings";
 
 type LoadState =
   | { status: "loading" }
@@ -216,6 +217,19 @@ function SettingsForm() {
           </button>
         </form>
       </div>
+
+      {/*
+        Task 9 (spec §5-§6): connecting a payout account and defining what you
+        sell live in Pengaturan, on the seller's own account — not in
+        `/dashboard/*`, which is a different app for a different account type
+        and which Phase 8 deletes.
+
+        It loads its own payout status rather than being handed one, so a
+        failure on either side is independent: this page already refuses to
+        render at all when `GET /users/me` fails, and a payout status that
+        cannot be read must not be able to take the profile form down with it.
+      */}
+      <MembershipSettings />
     </main>
   );
 }
