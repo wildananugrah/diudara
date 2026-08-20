@@ -10,6 +10,7 @@ import {
 } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
 import FollowButton from "./FollowButton";
+import MembershipOffer from "./MembershipOffer";
 import PostFeed, { type PostFeedHandle } from "./PostFeed";
 import { DeleteConfirm, EditComposer, usePostOwnerActions } from "./postOwnerActions";
 
@@ -202,6 +203,41 @@ export default function ProfilePage() {
           <strong>{profile.followingCount}</strong> Mengikuti
         </Link>
       </div>
+
+      {/*
+        Task 10, spec §6. Given the tiers off the profile response and nothing
+        else — `MembershipOffer` decides for itself whether to render at all
+        (no tiers, or your own profile) and whether to offer a button or a link
+        to Masuk, exactly as `FollowButton` above decides its own own-profile
+        case. Placed under the counts and above the feed: it is part of who
+        this person is, not part of what they posted.
+
+        `membership?.tiers ?? []` even though the field is REQUIRED on
+        `PublicUserProfile` and the API always sends it (`toMembershipView`
+        answers `{ tiers: [] }` rather than omitting the key). That is not a
+        state branch — an absent field and an empty list mean the same thing
+        here, "no offer" — it is the blast radius. A bare
+        `profile.membership.tiers` THROWS on a response that predates Task 5,
+        and it throws during render: measured against `App.test.tsx`'s own
+        minimal profile fixtures, the whole page went blank — name, bio,
+        follow button, counts and the entire feed — for a missing offer. A
+        rolling deploy that ships this app before the API is exactly that
+        response, and Phase 4 already shipped a version of this mistake
+        (`toMembershipView`'s docstring records the white screen it caused).
+      */}
+      <MembershipOffer
+        handle={profile.handle}
+        tiers={profile.membership?.tiers ?? []}
+        // `?? false` for the same skew reason as `tiers` above, and `false` is
+        // the safe half of it: a response that could not tell us whether this
+        // viewer is a member must never end up CLAIMING that they are.
+        viewerIsMember={profile.membership?.viewerIsMember ?? false}
+        // `?? false` again, and here the safe half is the OTHER direction:
+        // an API that predates this field says nothing about a lapsed
+        // membership, and defaulting to `true` would hide the offer from
+        // everybody on that deploy.
+        viewerMembershipEnded={profile.membership?.viewerMembershipEnded ?? false}
+      />
 
       {/* The same `EditComposer` Beranda renders — keyed on `editing.id`
           inside it, for the reason its own docstring records. */}

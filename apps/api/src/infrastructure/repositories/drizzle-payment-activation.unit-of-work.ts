@@ -6,6 +6,8 @@ import type {
 import { DrizzleActivityLogRepository } from "./drizzle-activity-log.repository";
 import { DrizzleOutboxRepository } from "./drizzle-outbox.repository";
 import { DrizzleSubscriptionRepository } from "./drizzle-subscription.repository";
+import { DrizzleUserSubscriptionRepository } from "./drizzle-user-subscription.repository";
+import { DrizzleUserTierRepository } from "./drizzle-user-tier.repository";
 import { DrizzleWebhookEventRepository } from "./drizzle-webhook-event.repository";
 
 export class DrizzlePaymentActivationUnitOfWork implements PaymentActivationUnitOfWorkPort {
@@ -29,6 +31,11 @@ export class DrizzlePaymentActivationUnitOfWork implements PaymentActivationUnit
     return this.db.transaction(async (tx) =>
       work({
         subscriptions: new DrizzleSubscriptionRepository(tx),
+        // Phase 5a's parallel flow. Constructed against `tx` for the same reason
+        // as everything else here: a user subscription's activation and the
+        // webhook_event row that authorises it must commit together.
+        userSubscriptions: new DrizzleUserSubscriptionRepository(tx),
+        userTiers: new DrizzleUserTierRepository(tx),
         webhookEvents: new DrizzleWebhookEventRepository(tx),
         activityLog: new DrizzleActivityLogRepository(tx),
         // Constructed against `tx` like the rest, which is the entire mechanism

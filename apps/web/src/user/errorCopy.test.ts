@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { describeRequestFailure, describeUploadFailure } from "./errorCopy";
+import { describeRequestFailure, describeSubscribeFailure, describeUploadFailure } from "./errorCopy";
 import { SESSION_EXPIRED_MESSAGE, UserApiError } from "./apiClient";
 
 /**
@@ -239,5 +239,78 @@ describe("describeUploadFailure", () => {
       expect(`${copy} -> english:${english.test(copy)}`).toBe(`${copy} -> english:false`);
       expect(copy.endsWith(".")).toBe(true);
     }
+  });
+});
+
+/**
+ * Task 10 of Phase 5a. A failed "Jadi anggota" needs ONE distinction the
+ * general sentence cannot make, and it is the same distinction
+ * `describeUploadFailure` exists for: a refusal that a retry cannot fix must
+ * not be answered "coba lagi".
+ *
+ * `POST /users/:handle/subscribe` answers 409 for SEVEN different refusals and
+ * carries no machine-readable `code` for any of them — see the function's own
+ * docstring for the list. Six cannot be fixed by pressing again and one can,
+ * so the sentence promises nothing about pressing again at all: it names the
+ * possibilities, including the one this phase cannot resolve (a membership
+ * that has ended, with no renewal until 5b), and points at the page rather
+ * than at the button.
+ */
+describe("describeSubscribeFailure", () => {
+  it("answers a 409 with a remedy that is not 'try again'", () => {
+    const server =
+      "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah masa aktif.";
+    expect(describeSubscribeFailure(new UserApiError(server, 409))).toBe(
+      "Keanggotaan ini belum bisa dibeli sekarang — tingkatannya mungkin sudah ditutup, " +
+        "kreatornya belum siap menerima pembayaran, pembayaran sebelumnya masih diproses, " +
+        "atau keanggotaan Anda sudah berakhir dan perpanjangan belum tersedia. Muat ulang " +
+        "halaman ini untuk melihat keadaan terbaru."
+    );
+  });
+
+  /**
+   * **THE LOOP, PINNED SHUT.** The previous sentence advised reloading "untuk
+   * melihat penawaran terbaru" — the latest OFFER — which for a lapsed member
+   * is a promise that cannot come true: 5a has no renewal, the server refuses
+   * the purchase forever, and the reload re-rendered the same button. The
+   * final whole-branch review measured it happening to 100% of paying members
+   * one billing cycle after their purchase.
+   */
+  it("promises no fresh offer, and does not tell the buyer to press the button again", () => {
+    const copy = describeSubscribeFailure(new UserApiError("apa pun", 409));
+
+    expect(copy.includes("penawaran terbaru")).toBe(false);
+    expect(copy.includes("coba lagi")).toBe(false);
+    expect(copy.includes("Coba lagi")).toBe(false);
+    // ...and it DOES name the state this phase cannot resolve, rather than
+    // leaving a lapsed member to infer it from silence.
+    expect(copy.includes("sudah berakhir")).toBe(true);
+    expect(copy.includes("perpanjangan belum tersedia")).toBe(true);
+  });
+
+  it("never repeats what the server sent, even though this route's 409 is already Bahasa", () => {
+    const server =
+      "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah masa aktif.";
+    const copy = describeSubscribeFailure(new UserApiError(server, 409));
+
+    // The rule is not "English is banned"; it is that a screen never prints
+    // what the wire sent — see `no-raw-server-errors.test.ts`.
+    expect(copy.includes("Membayar lagi tidak menambah masa aktif")).toBe(false);
+  });
+
+  it("delegates every other shape unchanged — a 500", () => {
+    expect(describeSubscribeFailure(new UserApiError("internal server error", 500))).toBe(
+      "Server sedang bermasalah. Coba lagi sebentar lagi."
+    );
+  });
+
+  it("delegates a dropped connection, which is not a UserApiError at all", () => {
+    expect(describeSubscribeFailure(new TypeError("Failed to fetch"))).toBe(
+      "Tidak dapat menghubungi server. Coba lagi."
+    );
+  });
+
+  it("delegates the 401, whose message this codebase authored and which is already Bahasa", () => {
+    expect(describeSubscribeFailure(new UserApiError("ignored", 401))).toBe(SESSION_EXPIRED_MESSAGE);
   });
 });

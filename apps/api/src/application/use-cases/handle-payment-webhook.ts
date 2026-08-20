@@ -1,11 +1,25 @@
+import {
+  computeUserSubscriptionPeriodEnd,
+  routeInvoiceExternalId,
+} from "../../domain/user-payment";
 import { ConflictError, NotFoundError, ValidationError } from "../errors";
 import type { ClockPort } from "../ports/clock.port";
 import { OUTBOX_GRANT_ACCESS } from "../ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "../ports/payment-activation-unit-of-work.port";
 import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
+import type { UserSubscriptionRepositoryPort } from "../ports/user-subscription-repository.port";
 
 /** The one provider status that turns money into access. Compared exactly. */
 const PAID = "PAID";
+
+/**
+ * `user_transaction.status` — the only value `StartUserSubscription` ever
+ * inserts, and the only one this handler will settle.
+ */
+const TRANSACTION_PENDING = "pending";
+
+/** What `markTransactionPaid` writes. A transaction already here is a duplicate. */
+const TRANSACTION_PAID = "paid";
 
 /**
  * `activity_log.event_type` for a payment that EXTENDED an existing membership rather
@@ -76,6 +90,22 @@ export interface HandlePaymentWebhookResult {
  *  2. Replay defence is entirely `webhook_event.provider_event_id` (UNIQUE),
  *     arbitrated by the database.
  *
+ * ONE STREAM, TWO KINDS OF INVOICE (Phase 5a, spec §7). Xendit delivers every
+ * callback to one endpoint, and since Phase 5a there are two things a paid
+ * invoice can mean: a community subscription under `/dashboard/*` (everything
+ * below) and a membership one person bought from another
+ * (`settleUserSubscription`). They are told apart by the SHAPE of `external_id`
+ * — `usub_<uuid>` versus a bare `transaction.id` uuid — and never by guessing;
+ * anything matching neither shape is IGNORED, because it is somebody else's
+ * invoice or a probe rather than an error of ours. See
+ * `routeInvoiceExternalId`, which owns that decision and is the first thing this
+ * use case does, before a database is touched.
+ *
+ * The two paths share NOTHING but this file, the clock and the unit of work.
+ * They read different tables, and the community path below is reached by exactly
+ * the code it always was — a property with its own named regression tests,
+ * because this handler serves live money.
+ *
  * The order is load-bearing and each step is pinned by a test:
  *
  *  1. Find our transaction. Unknown → 404, and nothing is recorded — recording
@@ -99,6 +129,12 @@ export interface HandlePaymentWebhookResult {
 export class HandlePaymentWebhook {
   constructor(
     private readonly subscriptions: SubscriptionRepositoryPort,
+    /**
+     * Phase 5a's parallel flow, POOLED — used for the reads that decide whether a
+     * delivery is worth opening a transaction for at all (see the class docstring's
+     * steps 1 and 2). The writes go through the unit of work's own copy.
+     */
+    private readonly userSubscriptions: UserSubscriptionRepositoryPort,
     private readonly unitOfWork: PaymentActivationUnitOfWorkPort,
     /**
      * Where `paidAt` comes from. Injected in Phase 5, and not for tidiness: `paidAt` is
@@ -114,6 +150,256 @@ export class HandlePaymentWebhook {
   ) {}
 
   async execute(input: HandlePaymentWebhookInput): Promise<HandlePaymentWebhookResult> {
+    const route = routeInvoiceExternalId(input.externalId);
+    if (route.kind === "user") {
+      return this.settleUserSubscription(route.transactionId, input);
+    }
+    if (route.kind === "unknown") {
+      console.warn(
+        `[payments] webhook IGNORED, external id matches neither namespace: provider=xendit ` +
+          `external_id=${safeLabel(input.externalId)} event=${safeLabel(input.eventType)}`
+      );
+      return { activated: false, duplicate: false };
+    }
+    return this.settleCommunitySubscription(input);
+  }
+
+  /**
+   * Phase 5a's half: a paid invoice becomes an ACTIVE membership between two
+   * people (spec §7), over `user_subscription`/`user_transaction`.
+   *
+   * The community handler below is the thing this is modelled on, deliberately
+   * and step for step — its order is what several real findings shaped, and none
+   * of them may be re-learned here:
+   *
+   *  1. Find OUR transaction, by the uuid behind the namespace. Unknown → 404,
+   *     recording nothing, so the retry after a fix is not swallowed as a replay.
+   *  2. Verify `body.id` against the reference checkout stored
+   *     (`attachGatewayReference`), then the amount against OUR OWN
+   *     `user_transaction.amount`. Both before anything is written — a forger
+   *     must not be able to burn the event id a genuine delivery needs.
+   *  3. `recordIfNew`, inside the unit of work. Already seen → return, touching
+   *     nothing. This is the entire replay defence.
+   *  4. Only for `PAID`: settle the transaction and activate the subscription.
+   *
+   * WHAT THIS PATH DOES NOT DO, and it is not an omission: no `activity_log`
+   * entry and no outbox row. Those are community concepts — a `member`, a
+   * `community_id`, a Telegram invite — and a user subscription grants access by
+   * being ACTIVE, which is the single index hit Phase 6's paywall asks for
+   * (spec §8). There is nothing to send.
+   */
+  private async settleUserSubscription(
+    transactionId: string,
+    input: HandlePaymentWebhookInput
+  ): Promise<HandlePaymentWebhookResult> {
+    const transaction = await this.userSubscriptions.findTransactionById(transactionId);
+    if (!transaction) {
+      // English at every `NotFoundError` call site, and the SAME message the
+      // community path uses: this reaches an HTTP response on a public endpoint,
+      // and telling a caller WHICH namespace it missed in is telling them which
+      // ids are worth guessing.
+      throw new NotFoundError("unknown transaction");
+    }
+
+    if (transaction.gatewayReferenceId === null) {
+      // `StartUserSubscription` writes this immediately after the provider call
+      // returns, so an absent reference means that write failed. Fail CLOSED, for
+      // the reason the community path records: trusting `body.id` when we have
+      // nothing of our own to compare it against is exactly the hole this closes.
+      console.warn(
+        `[security] user webhook for a transaction with no gateway reference: provider=xendit ` +
+          `user_transaction=${transaction.id} event=${safeLabel(input.eventType)} — checkout ` +
+          "never recorded the provider invoice id, so this delivery cannot be verified"
+      );
+      throw new ValidationError("this transaction cannot be verified against the provider");
+    }
+
+    if (input.invoiceId !== transaction.gatewayReferenceId) {
+      console.warn(
+        `[security] webhook invoice id mismatch: provider=xendit ` +
+          `user_transaction=${transaction.id} ` +
+          `expected=${safeLabel(transaction.gatewayReferenceId)} ` +
+          `claimed=${safeLabel(input.invoiceId)} event=${safeLabel(input.eventType)}`
+      );
+      throw new ValidationError("webhook invoice id does not match our record");
+    }
+
+    if (input.amount !== transaction.amount) {
+      // OUR figure against THEIR claim, never the other way round. A forged body
+      // claiming 1 rupiah for a 50,000 tier is the entire reason this comparison
+      // exists. Ids and integers only — the payload carries the payer's name,
+      // email and phone number, and this line goes to stderr.
+      console.warn(
+        `[security] webhook amount mismatch: provider=xendit ` +
+          `user_transaction=${transaction.id} expected=${transaction.amount} ` +
+          `claimed=${input.amount} event=${safeLabel(input.eventType)}`
+      );
+      throw new ValidationError("webhook amount does not match our record");
+    }
+
+    // The instant WE settled this, not a timestamp off the body: nothing in that
+    // body is authoritative, and a forged `paid_at` would move when a member's
+    // access runs out. Taken once, so the transaction's `paid_at` and the
+    // period's end are measured from the same instant.
+    const paidAt = this.clock.now();
+
+    return this.unitOfWork.run(async (repositories) => {
+      const isNew = await repositories.webhookEvents.recordIfNew({
+        provider: "xendit",
+        providerEventId: input.providerEventId,
+        eventType: input.eventType,
+        payload: input.payload,
+      });
+      if (!isNew) {
+        // THE IDEMPOTENCY GUARANTEE, and it is this line rather than anything
+        // below it. Redelivery is normal provider behaviour: the second delivery
+        // of one event activates nothing and extends no period, because it never
+        // reaches the code that could.
+        return { activated: false, duplicate: true };
+      }
+
+      if (input.status !== PAID) {
+        // Recorded, so a replay of THIS event is a no-op, and acted on in no other
+        // way. Said out loud for the reason the community path learned: an
+        // unrecognised status was previously indistinguishable from success on the
+        // wire, and `XenditPaymentAdapter` is unverified against the live API.
+        console.warn(
+          `[payments] webhook recorded but NOT actioned: provider=xendit ` +
+            `user_transaction=${transaction.id} ` +
+            `user_subscription=${transaction.userSubscriptionId} ` +
+            `status=${safeLabel(input.status)} event=${safeLabel(input.eventType)} ` +
+            `activated=false (only ${PAID} activates)`
+        );
+        return { activated: false, duplicate: false };
+      }
+
+      // Re-read inside the unit of work, so the status this branches on is the one
+      // committed when this transaction began rather than the one the pre-checks
+      // above saw on the pool.
+      const current = await repositories.userSubscriptions.findTransactionById(transaction.id);
+      if (!current) {
+        throw new Error(
+          `HandlePaymentWebhook: user transaction ${transaction.id} vanished mid-settlement`
+        );
+      }
+
+      if (current.status !== TRANSACTION_PENDING) {
+        if (current.status === TRANSACTION_PAID) {
+          // A genuine duplicate that got past the event-id guard — which needs a
+          // delivery differing in `body.id` or `status`, or a `webhook_event` row
+          // removed by hand. A 2xx is correct: there is nothing to retry, and
+          // settling again would move `paid_at` and the period end with it.
+          console.warn(
+            `[payments] webhook for an already-settled user transaction: provider=xendit ` +
+              `user_transaction=${current.id} status=${safeLabel(current.status)} ` +
+              `event=${safeLabel(input.eventType)} — no second activation was performed`
+          );
+          return { activated: false, duplicate: true };
+        }
+        // Nothing in 5a writes any other status, so this is a row somebody
+        // reconciled by hand. A real payment has arrived for it, and answering 200
+        // is how that payment disappears — Xendit does not retry a 2xx, and once
+        // the event id is recorded the delivery cannot be replayed by hand either.
+        // So this THROWS, which rolls `recordIfNew` back with it.
+        console.warn(
+          `[payments] ALERT: a payment arrived for a user transaction that is not settleable: ` +
+            `provider=xendit user_transaction=${current.id} ` +
+            `user_subscription=${current.userSubscriptionId} status=${safeLabel(current.status)} ` +
+            `event=${safeLabel(input.eventType)} amount=${current.amount} — the member has PAID ` +
+            "and has NOT been activated. Nothing was recorded, so this delivery can be replayed " +
+            "after the row is reconciled by hand."
+        );
+        throw new ConflictError(
+          "this transaction is not in a state that can be settled; it needs manual review"
+        );
+      }
+
+      const subscription = await repositories.userSubscriptions.findById(
+        current.userSubscriptionId
+      );
+      if (!subscription) {
+        // Unreachable while `user_transaction.user_subscription_id` is a foreign
+        // key. Not assumed away: throwing rolls the unit of work back, which
+        // leaves the delivery replayable, and that is the only safe answer to a
+        // payment we cannot place.
+        throw new Error(
+          `HandlePaymentWebhook: no user subscription for transaction ${current.id}`
+        );
+      }
+
+      const tier = await repositories.userTiers.findById(subscription.tierId);
+      if (!tier) {
+        // Unreachable while the composite foreign key holds — same treatment.
+        throw new Error(
+          `HandlePaymentWebhook: no user tier for subscription ${subscription.id}`
+        );
+      }
+
+      // Throws on a `billing_cycle` it does not recognise rather than guessing
+      // `monthly`, which would sell a yearly member eleven months of nothing. The
+      // throw rolls this unit of work back, event id and all, so the delivery can
+      // be replayed once the tier is fixed. Computed BEFORE anything is written,
+      // so a bad cycle cannot leave a settled transaction behind an unactivated
+      // subscription.
+      const periodEnd = computeUserSubscriptionPeriodEnd(paidAt, tier.billingCycle);
+
+      // ONE ACTIVE MEMBERSHIP PER (SUBSCRIBER, OWNER) — the shape of accidentally
+      // paying twice, and `user_subscription_one_active` is the partial unique
+      // index that forbids it. Excluding the row being activated is what keeps a
+      // redelivery against THAT row working; without it, the second delivery of a
+      // subscription's own activation would refuse itself.
+      //
+      // THIS PREDICATE IS THE GRACEFUL PATH, NOT THE GUARANTEE — the same division
+      // of labour `markPaid` records for the community flow. Under READ COMMITTED
+      // two concurrent activations cannot see each other's uncommitted row, so both
+      // would pass this read; the index is what actually arbitrates, and the loser's
+      // unit of work rolls back with the event id unspent, so the provider's retry
+      // takes this path and is answered without a 500.
+      const active = await repositories.userSubscriptions.findActiveFor(
+        subscription.subscriberId,
+        subscription.ownerId
+      );
+      if (active !== null && active.id !== subscription.id) {
+        // The money ARRIVED, so the transaction settles: hiding that would hide a
+        // refund that is owed, and 5a has no refund path of its own.
+        await repositories.userSubscriptions.markTransactionPaid(current.id, paidAt);
+        // And the pending claim is RELEASED. Nothing in 5a expires a pending
+        // `user_subscription`, and `user_subscription_one_pending` means one left
+        // behind blocks every later checkout for this pair — a buyer wedged out of
+        // a creator by a purchase they already overpaid for.
+        await repositories.userSubscriptions.cancel(subscription.id);
+        console.warn(
+          `[payments] ALERT: a second membership payment for a pair that is already active: ` +
+            `provider=xendit user_transaction=${current.id} ` +
+            `user_subscription=${subscription.id} active=${active.id} ` +
+            `subscriber=${subscription.subscriberId} owner=${subscription.ownerId} ` +
+            `amount=${current.amount} event=${safeLabel(input.eventType)} — the payment was ` +
+            "recorded, the duplicate subscription was cancelled, no second membership was " +
+            "granted, and a refund is likely owed"
+        );
+        // A 2xx: there is nothing for the provider to retry, and a 500 here would
+        // buy nothing but the same failure again.
+        return { activated: false, duplicate: false };
+      }
+
+      await repositories.userSubscriptions.markTransactionPaid(current.id, paidAt);
+      const activated = await repositories.userSubscriptions.activate(subscription.id, periodEnd);
+      if (!activated) {
+        // Zero rows for an id read two statements ago inside this transaction.
+        // Throwing rolls the settlement back rather than reporting an activation
+        // that did not happen.
+        throw new Error(
+          `HandlePaymentWebhook: could not activate user subscription ${subscription.id}`
+        );
+      }
+
+      return { activated: true, duplicate: false };
+    });
+  }
+
+  private async settleCommunitySubscription(
+    input: HandlePaymentWebhookInput
+  ): Promise<HandlePaymentWebhookResult> {
     const transaction = await this.subscriptions.findTransactionByExternalId(input.externalId);
     if (!transaction) {
       throw new NotFoundError("unknown transaction");

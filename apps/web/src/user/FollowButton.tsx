@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { followUser, getSessionUser, unfollowUser, UserApiError } from "./apiClient";
+import { followUser, isOwnHandle, unfollowUser, UserApiError } from "./apiClient";
 
 /**
  * What a failed follow/unfollow says — final review M2, which measured the old
@@ -46,20 +46,6 @@ export interface FollowButtonProps {
 }
 
 /**
- * Both sides of the own-profile comparison below go through this — not just
- * the `handle` prop — so the check stays correct if either one ever carries
- * a leading `@` (defensive; today neither call site does: both
- * `PublicUserProfile.handle`/`FollowListRow.handle` and
- * `getSessionUser().handle` are already server-normalised) and so the two
- * sides cannot silently drift into an asymmetric comparison (review round
- * 2, Minor: applying `.toLowerCase()` to only one side survived every test
- * whose session and target handles already matched in case).
- */
-function normalizeForComparison(raw: string): string {
-  return raw.replace(/^@/, "").toLowerCase();
-}
-
-/**
  * The follow/unfollow toggle — Task 5. **Renders nothing at all on your own
  * profile.**
  *
@@ -96,8 +82,13 @@ export default function FollowButton({ handle, viewerFollows, onChange }: Follow
     setFollowing(viewerFollows === true);
   }, [viewerFollows, handle]);
 
-  const session = getSessionUser();
-  if (session !== null && normalizeForComparison(session.handle) === normalizeForComparison(handle)) {
+  // `isOwnHandle` (apiClient) rather than a comparison written here: Task 10
+  // added a SECOND screen that must vanish on your own profile
+  // (`MembershipOffer`, for the same 409-and-a-check-constraint reason), and
+  // two copies of this comparison is how the two would drift — see that
+  // function's docstring, which carries this button's own asymmetric-case
+  // finding.
+  if (isOwnHandle(handle)) {
     return null;
   }
 

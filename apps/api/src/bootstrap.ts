@@ -1,6 +1,7 @@
 import { db, sql } from "./db/client";
 import { DrizzleCreatorRepository } from "./infrastructure/repositories/drizzle-creator.repository";
 import { DrizzleUserRepository } from "./infrastructure/repositories/drizzle-user.repository";
+import { DrizzleUserPayoutRepository } from "./infrastructure/repositories/drizzle-user-payout.repository";
 import { DrizzleCommunityRepository } from "./infrastructure/repositories/drizzle-community.repository";
 import { BunPasswordHasher } from "./infrastructure/auth/bun-password.hasher";
 import { HonoJwtTokenIssuer } from "./infrastructure/auth/hono-jwt.token-issuer";
@@ -10,6 +11,7 @@ import { AuthenticateCreator } from "./application/use-cases/authenticate-creato
 import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
+import { IsMemberOf } from "./application/use-cases/is-member-of";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -38,6 +40,12 @@ import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
+import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
+import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
+import { DrizzleUserTierRepository } from "./infrastructure/repositories/drizzle-user-tier.repository";
+import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
+import { DrizzleUserSubscriptionRepository } from "./infrastructure/repositories/drizzle-user-subscription.repository";
+import { StartUserSubscription } from "./application/use-cases/start-user-subscription";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
@@ -88,6 +96,8 @@ import type { MediaStoragePort } from "./application/ports/media-storage.port";
 import type { MediaRepositoryPort } from "./application/ports/media-repository.port";
 import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
+import type { UserPayoutRepositoryPort } from "./application/ports/user-payout-repository.port";
+import type { UserTierRepositoryPort } from "./application/ports/user-tier-repository.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -153,6 +163,23 @@ export interface Dependencies {
    * poking Drizzle directly.
    */
   userRepository: UserRepositoryPort;
+  /**
+   * Phase 5a's payout column on `app_user`, kept off `userRepository` so that
+   * `UserRecord` — which is projected straight into profile responses — never
+   * carries a provider account id. Exposed here for the same reason
+   * `creatorRepository` is: a test must be able to put the column into its
+   * claimed state WITHOUT going through the POST route, which in the real
+   * adapter provisions a KYC entity that has no delete endpoint.
+   */
+  userPayoutRepository: UserPayoutRepositoryPort;
+  /**
+   * Task 1's `user_tier` table. Exposed for the same reason
+   * `userPayoutRepository` is: `manage-user-tiers.test.ts`'s repository-level
+   * coverage lives beside `DrizzleUserTierRepository` itself, but the HTTP
+   * suite (`routes/users.test.ts`) needs to seed/read tiers directly too — a
+   * subscription fixture, for instance, has to reference a real tier id.
+   */
+  userTierRepository: UserTierRepositoryPort;
   /**
    * Signs and verifies user-session tokens. A SEPARATE class from
    * `tokenIssuer` even though both share `JWT_SECRET` — see
@@ -281,6 +308,41 @@ export interface Dependencies {
    * without the model itself being aware payments are connected or not.
    */
   getPaymentAccountStatus: GetPaymentAccountStatus;
+  /**
+   * `POST /users/me/payout` (Phase 5a). `undefined` EXACTLY when `payments` is
+   * `null`, mirroring `createPaymentAccount` above: there is no
+   * `PaymentProviderPort` to construct it against on a box with payments
+   * disabled, and `routes/users.ts` answers 503 rather than crashing on a
+   * provider it was never handed.
+   */
+  connectUserPayout: ConnectUserPayout | undefined;
+  /**
+   * `GET /users/me/payout` (Phase 5a). NEVER undefined, unlike
+   * `connectUserPayout` above — a box with no payment provider still has to be
+   * able to answer "are you connected?" with `false`, or Task 4's publish screen
+   * cannot tell "press the button" apart from "this server cannot take payments
+   * at all". Read-only and safe on every page load; the POST route is not.
+   */
+  getUserPayoutStatus: GetUserPayoutStatus;
+  /**
+   * Task 4 of Phase 5a. `GET|POST /users/me/tiers` and
+   * `PATCH /users/me/tiers/:tierId` — the surface where a creator defines
+   * what they are selling. NEVER `undefined`, unlike `connectUserPayout`:
+   * this needs no `PaymentProviderPort`, only the payout column's current
+   * state, which `getUserPayoutStatus` above answers the same way regardless
+   * of whether payments are configured on this box.
+   */
+  manageUserTiers: ManageUserTiers;
+  /**
+   * Task 6 of Phase 5a. `POST /users/:handle/subscribe` — the moment money
+   * moves on a personal profile. `undefined` EXACTLY when `payments` is `null`,
+   * mirroring `connectUserPayout` and `startCheckout`: there is no
+   * `PaymentProviderPort` to construct it against on a box with payments
+   * disabled. Unlike `startCheckout`, whose route is simply not registered,
+   * `routes/users.ts` keeps this route registered and answers 503 — the same
+   * choice `POST /users/me/payout` already makes on this router.
+   */
+  startUserSubscription: StartUserSubscription | undefined;
   getPublicCommunity: GetPublicCommunity;
   /**
    * `POST /c/:slug/checkout`. `undefined` EXACTLY when `payments` is `null` —
@@ -1783,6 +1845,11 @@ export function bootstrap(): Dependencies {
   // `HonoJwtUserTokenIssuer`'s own docstring for why the `typ` claim is what
   // keeps the two session kinds apart, not a second secret.
   const userRepository = new DrizzleUserRepository(db);
+  // Phase 5a. Its own repository over the same table — see the port's docstring
+  // for why the payout column is not on `userRepository`.
+  const userPayoutRepository = new DrizzleUserPayoutRepository(db);
+  // Task 1. `user_tier` — another own-table repository beside the two above.
+  const userTierRepository = new DrizzleUserTierRepository(db);
   const userTokenIssuer = new HonoJwtUserTokenIssuer(jwtSecret);
   // `registerUser` is constructed further down, alongside Task 5's password
   // reset — see the comment there for why it needs to wait for `messaging`.
@@ -1791,7 +1858,41 @@ export function bootstrap(): Dependencies {
   // because `GetUserProfile` now needs it too (`viewerFollows` and the two
   // counts on the public profile) — one repository, three consumers.
   const followRepository = new DrizzleFollowRepository(db);
-  const getUserProfile = new GetUserProfile(userRepository, followRepository);
+  // ONE clock for the process. Phase 5's use-cases read time through it rather than
+  // calling `Date.now()`, so the renewal window and the settlement date a member's next
+  // period is measured from are both observable in a test.
+  //
+  // Constructed HERE, further up than it used to be, because Task 10's
+  // `isMemberOf` (just below) needs it and `getUserProfile` needs that. Its
+  // other consumers are all further down and unaffected — one instance, same
+  // as before.
+  const clock = new SystemClock();
+  // `user_subscription`/`user_transaction`. Task 6 built it for
+  // `startUserSubscription` alone; Task 10 gives it a SECOND consumer that
+  // exists whether or not this deployment has a payment provider, which is why
+  // it is constructed unconditionally and up here rather than beside that
+  // use-case.
+  const userSubscriptionRepository = new DrizzleUserSubscriptionRepository(db);
+  /**
+   * Task 8's use-case, on a request path at last (Task 10).
+   *
+   * Phase 6's paywall is founded on this question and nothing in 5a called it
+   * — a use-case wired to no route is one nothing proves end to end. The
+   * public profile now asks it for every signed-in viewer, which is also the
+   * shape Phase 6 will use: `status = 'active'` AND `current_period_end >
+   * now`, one indexed read.
+   */
+  const isMemberOf = new IsMemberOf(userSubscriptionRepository, clock);
+  // Task 5 of memberships-5a: `userTierRepository` (constructed above, Task 1)
+  // is now GetUserProfile's third dependency too — the public profile's
+  // `membership.tiers` read. Task 10 adds the fourth, `isMemberOf`, for the
+  // same payload's `viewerIsMember`.
+  const getUserProfile = new GetUserProfile(
+    userRepository,
+    followRepository,
+    userTierRepository,
+    isMemberOf
+  );
   const updateUserProfile = new UpdateUserProfile(userRepository);
   const followUser = new FollowUser(userRepository, followRepository);
   const listFollows = new ListFollows(userRepository, followRepository);
@@ -1874,6 +1975,18 @@ export function bootstrap(): Dependencies {
     ? new CreatePaymentAccount(creatorRepository, payments)
     : undefined;
   const getPaymentAccountStatus = new GetPaymentAccountStatus(creatorRepository);
+  // Phase 5a's parallel flow for `app_user`. `undefined` on the same condition
+  // `createPaymentAccount` is, and for the same reason; the STATUS reader below
+  // is always constructed, because a box with payments disabled must still be
+  // able to answer the question.
+  const connectUserPayout = payments
+    ? new ConnectUserPayout(userPayoutRepository, payments)
+    : undefined;
+  const getUserPayoutStatus = new GetUserPayoutStatus(userPayoutRepository);
+  // Task 4 of Phase 5a. Needs no `PaymentProviderPort` — only the payout
+  // column's current state — so unlike `connectUserPayout` it is constructed
+  // unconditionally, the same reasoning `getUserPayoutStatus` above follows.
+  const manageUserTiers = new ManageUserTiers(userTierRepository, userPayoutRepository);
   // After selectPaymentProvider on purpose — two reasons, one of them dated.
   //
   // STILL TRUE: `createCommunity`/`updateCommunity`/`createPaymentAccount` above
@@ -1918,10 +2031,6 @@ export function bootstrap(): Dependencies {
     appBaseUrl: process.env.APP_BASE_URL,
     nodeEnv: process.env.NODE_ENV,
   });
-  // ONE clock for the process. Phase 5's use-cases read time through it rather than
-  // calling `Date.now()`, so the renewal window and the settlement date a member's next
-  // period is measured from are both observable in a test.
-  const clock = new SystemClock();
   // `undefined` EXACTLY when `payments` is `null` — see this field's own
   // docstring on `Dependencies`. `routes/public-community.ts` does not
   // register `POST /c/:slug/checkout` at all when this is `undefined`, so a
@@ -1934,6 +2043,24 @@ export function bootstrap(): Dependencies {
         subscriptionRepository,
         creatorRepository,
         payments,
+        clock,
+        { appBaseUrl }
+      )
+    : undefined;
+
+  // Task 6 of Phase 5a. `undefined` on the same condition `startCheckout` above
+  // is, and for the same reason — but the ROUTE stays registered and answers
+  // 503, see this field's own docstring on `Dependencies`.
+  const startUserSubscription = payments
+    ? new StartUserSubscription(
+        userRepository,
+        userTierRepository,
+        userPayoutRepository,
+        userSubscriptionRepository,
+        payments,
+        // The SAME clock `isMemberOf` above reads, so the two cannot disagree
+        // about whether a subscription's period has passed — the divergence
+        // between them is precisely what the final review's I1 was about.
         clock,
         { appBaseUrl }
       )
@@ -1994,6 +2121,10 @@ export function bootstrap(): Dependencies {
   const paymentActivationUnitOfWork = new DrizzlePaymentActivationUnitOfWork(db);
   const handlePaymentWebhook = new HandlePaymentWebhook(
     subscriptionRepository,
+    // Phase 5a's parallel flow. Xendit delivers ONE webhook stream, so the same
+    // use case resolves both kinds of invoice — routed on the `external_id`
+    // namespace, never guessed (see `domain/user-payment.ts`).
+    userSubscriptionRepository,
     paymentActivationUnitOfWork,
     clock
   );
@@ -2237,6 +2368,8 @@ export function bootstrap(): Dependencies {
     registerCreator,
     authenticateCreator,
     userRepository,
+    userPayoutRepository,
+    userTierRepository,
     userTokenIssuer,
     registerUser,
     authenticateUser,
@@ -2264,6 +2397,10 @@ export function bootstrap(): Dependencies {
     listChannels,
     createPaymentAccount,
     getPaymentAccountStatus,
+    connectUserPayout,
+    getUserPayoutStatus,
+    manageUserTiers,
+    startUserSubscription,
     getPublicCommunity,
     startCheckout,
     requestToJoin,

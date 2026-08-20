@@ -89,9 +89,16 @@ export class XenditPaymentAdapter implements PaymentProviderPort {
         external_id: input.externalId,
         amount: input.amount,
         description: input.description,
+        // `mobile_number` is included ONLY when we actually have one. Spread
+        // rather than `mobile_number: input.payerWhatsappNumber ?? undefined`,
+        // so the omission is a decision this code states rather than a side
+        // effect of `JSON.stringify` dropping undefined values — see
+        // `CreateInvoiceInput.payerWhatsappNumber`.
         customer: {
           given_names: input.payerName,
-          mobile_number: input.payerWhatsappNumber,
+          ...(input.payerWhatsappNumber === undefined || input.payerWhatsappNumber.length === 0
+            ? {}
+            : { mobile_number: input.payerWhatsappNumber }),
         },
         // Sends the payer's browser back to OUR confirmation page after paying.
         // Without it the member is stranded on Xendit's receipt — see

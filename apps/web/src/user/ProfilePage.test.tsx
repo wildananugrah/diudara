@@ -46,6 +46,13 @@ function profileBody(overrides: Record<string, unknown> = {}) {
     followerCount: 0,
     followingCount: 0,
     viewerFollows: null,
+    // Task 5 of memberships-5a widened the public profile by this field, and
+    // it is ALWAYS present — `toMembershipView` reports `{ tiers: [] }` for a
+    // creator who sells nothing rather than omitting the key, so the web never
+    // branches on `undefined`. Every fixture here carries it for the same
+    // reason: a fixture narrower than the wire is a page tested against a
+    // response the API cannot send.
+    membership: { tiers: [], viewerIsMember: false, viewerMembershipEnded: false },
     ...overrides,
   };
 }
@@ -795,5 +802,159 @@ describe("ProfilePage — editing your own post (Task 6, fix round 1 item 2)", (
     fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
     expect(screen.getByText("Hapus kiriman ini?")).toBeTruthy();
     expect(screen.queryAllByRole("button", { name: "Simpan" }).length).toBe(0);
+  });
+});
+
+/**
+ * Task 10 of Phase 5a (spec §6): "A profile shows the offer and a 'Jadi
+ * anggota' button."
+ *
+ * The offer's own behaviour — the rupiah formatting, the signed-out route to
+ * Masuk, the own-profile hide, the invoice redirect and every failure
+ * sentence — is tested against the component itself in
+ * `MembershipOffer.test.tsx`. What is asserted HERE is the wiring that file
+ * cannot see: that the profile page reads `membership.tiers` off the response
+ * and hands it over, and that a profile selling nothing gets no offer at all.
+ */
+describe("ProfilePage — the membership offer (Task 10)", () => {
+  const TIER = { id: "tier-1", name: "Anggota", priceAmount: 50000, billingCycle: "monthly" };
+
+  it("shows what this creator sells, from the profile response's own membership field", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts")
+        ? emptyPostsPage()
+        : jsonResponse(profileBody({ membership: { tiers: [TIER], viewerIsMember: false } }))
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+    await screen.findByText("Budi");
+
+    const offer = await screen.findByTestId("membership-tier-tier-1");
+    expect(offer.textContent).toContain("Anggota");
+    expect(offer.textContent).toContain("Rp 50.000");
+    expect(screen.getByRole("button", { name: "Jadi anggota — Anggota" })).toBeTruthy();
+  });
+
+  /**
+   * The same rule the bio already follows on this page: no element at all,
+   * never an empty one. Most profiles in this app sell nothing.
+   */
+  it("renders no offer element at all for a profile that sells nothing", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts") ? emptyPostsPage() : jsonResponse(profileBody())
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+    await screen.findByText("Budi");
+
+    expect(document.querySelectorAll(".membership-offer").length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: /Jadi anggota/ }).length).toBe(0);
+    expect(screen.queryAllByText("Keanggotaan").length).toBe(0);
+  });
+
+  /**
+   * Fix round 1: the profile now carries `membership.viewerIsMember`
+   * (`IsMemberOf`, Task 8), and this is the wiring that reads it — a member
+   * must not be offered a purchase of something they already hold.
+   */
+  it("tells an existing member they are a member instead of offering the button", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts")
+        ? emptyPostsPage()
+        : jsonResponse(profileBody({ membership: { tiers: [TIER], viewerIsMember: true } }))
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+    await screen.findByText("Budi");
+
+    const panel = await screen.findByTestId("membership-member");
+    expect(panel.textContent).toContain("Anda sudah menjadi anggota");
+    expect(screen.queryAllByRole("button", { name: /Jadi anggota/ }).length).toBe(0);
+  });
+
+  /**
+   * The final whole-branch review's I1, wired: the profile also carries
+   * `membership.viewerMembershipEnded`, and this is the plumbing that reads
+   * it. Without it the page rendered a "Jadi anggota" button for somebody the
+   * server refuses permanently — 5a has no renewal, and §9 puts every paying
+   * member in this state one billing cycle after their purchase.
+   */
+  it("tells somebody whose membership ended that it ended, instead of offering the button", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts")
+        ? emptyPostsPage()
+        : jsonResponse(
+            profileBody({
+              membership: { tiers: [TIER], viewerIsMember: false, viewerMembershipEnded: true },
+            })
+          )
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+    await screen.findByText("Budi");
+
+    const panel = await screen.findByTestId("membership-ended");
+    expect(panel.textContent).toContain("sudah berakhir");
+    expect(screen.queryAllByRole("button", { name: /Jadi anggota/ }).length).toBe(0);
+    expect(screen.queryAllByTestId("membership-tier-tier-1").length).toBe(0);
+  });
+
+  /**
+   * DEPLOY SKEW for this field specifically. An API that predates it sends
+   * `membership` WITHOUT `viewerMembershipEnded`, and the default must be
+   * `false` — defaulting the other way would hide every creator's offer from
+   * every signed-in visitor on that deploy.
+   */
+  it("a membership field with no viewerMembershipEnded still shows the offer", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts")
+        ? emptyPostsPage()
+        : jsonResponse(profileBody({ membership: { tiers: [TIER], viewerIsMember: false } }))
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+    await screen.findByText("Budi");
+
+    expect(await screen.findByRole("button", { name: "Jadi anggota — Anggota" })).toBeTruthy();
+    expect(screen.queryAllByTestId("membership-ended").length).toBe(0);
+  });
+});
+
+/**
+ * DEPLOY SKEW, and the reason `ProfilePage` reads `membership` defensively
+ * even though the field is required on `PublicUserProfile`.
+ *
+ * `membership` arrived in Task 5 of this phase. A browser holding this build
+ * while the API is still the previous one — a rolling deploy, or a cached
+ * bundle — gets a profile with no such field, and reading `.tiers` off it
+ * throws DURING RENDER, which takes the whole page down rather than just the
+ * offer. `toMembershipView`'s own docstring records the white screen Phase 4
+ * shipped from exactly this shape.
+ */
+describe("ProfilePage — a response with no membership field at all", () => {
+  it("still renders the profile and its feed, and simply shows no offer", async () => {
+    setUserSession("jwt-abc", USER);
+    const legacy = profileBody() as Record<string, unknown>;
+    delete legacy.membership;
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts") ? emptyPostsPage() : jsonResponse(legacy)
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+
+    // The page itself is intact: the header, the counts and the feed's own
+    // empty state — none of which has anything to do with memberships.
+    expect(await screen.findByText("Budi")).toBeTruthy();
+    expect(screen.getByText("@budi")).toBeTruthy();
+    expect(await screen.findByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
+    expect(document.querySelectorAll(".membership-offer").length).toBe(0);
+    // And no membership is CLAIMED from a response that said nothing about
+    // one: the safe default for "we could not ask" is "not a member".
+    expect(screen.queryAllByTestId("membership-member").length).toBe(0);
   });
 });

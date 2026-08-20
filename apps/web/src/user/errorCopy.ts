@@ -148,3 +148,65 @@ export function describeUploadFailure(err: unknown): string {
       return describeRequestFailure(err);
   }
 }
+
+/**
+ * **A failed "Jadi anggota", which needs one distinction the general sentence
+ * cannot make** — the same shape `describeUploadFailure` exists for, and for
+ * the same reason: a refusal a retry cannot fix must not be answered "coba
+ * lagi", because that sends a person round a loop that cannot terminate.
+ *
+ * `POST /users/:handle/subscribe` answers **409 for SEVEN different refusals**
+ * (`StartUserSubscription`), and this list is worth keeping accurate — the
+ * version before it said five, and the one it left out was the only one a
+ * retry actually fixes:
+ *
+ *  1. the viewer is the owner (unreachable from here: `MembershipOffer`
+ *     renders nothing at all on your own profile);
+ *  2. the tier is no longer offered;
+ *  3. the creator's payout account is not connected;
+ *  4. the viewer already holds a LIVE membership to this creator;
+ *  5. the viewer's membership has ENDED and 5a has no renewal — a different
+ *     refusal from 4, and a different sentence server-side, because "you are
+ *     already an active member" is simply false for that person;
+ *  6. a PENDING checkout for this pair is open against a different tier;
+ *  7. a PENDING checkout for this pair is being prepared right now — the
+ *     transient one, milliseconds wide, and **the only one where pressing the
+ *     button again works**.
+ *
+ * None of them carries a machine-readable `code` on the wire, so there is
+ * nothing here to branch on more finely.
+ *
+ * **SO THE SENTENCE NAMES THE POSSIBILITIES AND PROMISES NOTHING ABOUT
+ * PRESSING AGAIN.** It cannot say "pressing again changes nothing" — false for
+ * (7) — and it must not say "try again" or "reload for the latest offer" —
+ * which is what it used to say, and what turned (5) into a loop: reloading
+ * re-rendered the very same button, one billing cycle after every purchase, for
+ * every paying member. Guessing which of the seven it was would be confidently
+ * wrong six times out of seven, and vague is honest where confidently wrong is
+ * not, which is the ruling `describeUploadFailure`'s own rewrite recorded.
+ *
+ * Reloading is still named, but for what it actually does now: it re-reads
+ * `membership`, and the profile carries `viewerMembershipEnded`, so the page a
+ * lapsed member comes back to says their membership ended instead of offering
+ * the button again. That is a look at the current state, not a retry — the
+ * loop is closed by the profile, and this sentence simply stops re-opening it.
+ *
+ * Note that this route's 409 body is itself Bahasa, which makes it the most
+ * tempting place in the app to print the wire's text. The rule is not
+ * "English is banned"; it is that a screen never prints what the wire sent —
+ * `src/test/no-raw-server-errors.test.ts`.
+ *
+ * Every other shape is delegated unchanged: for a 5xx, a 429, a dropped
+ * connection or an expired session, the general sentences are already right.
+ */
+export function describeSubscribeFailure(err: unknown): string {
+  if (err instanceof UserApiError && err.status === 409) {
+    return (
+      "Keanggotaan ini belum bisa dibeli sekarang — tingkatannya mungkin sudah ditutup, " +
+      "kreatornya belum siap menerima pembayaran, pembayaran sebelumnya masih diproses, " +
+      "atau keanggotaan Anda sudah berakhir dan perpanjangan belum tersedia. Muat ulang " +
+      "halaman ini untuk melihat keadaan terbaru."
+    );
+  }
+  return describeRequestFailure(err);
+}

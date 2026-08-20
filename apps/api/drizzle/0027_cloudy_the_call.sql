@@ -1,0 +1,1 @@
+ALTER TABLE "user_transaction" ADD COLUMN "gateway_invoice_url" varchar(512);

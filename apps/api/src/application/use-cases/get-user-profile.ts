@@ -2,6 +2,9 @@ import { NotFoundError } from "../errors";
 import { normalizeHandle } from "../../domain/handle";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
 import type { FollowRepositoryPort } from "../ports/follow-repository.port";
+import type { UserTierRepositoryPort } from "../ports/user-tier-repository.port";
+import type { IsMemberOf, MembershipStanding } from "./is-member-of";
+import { toMembershipView, type MembershipView } from "./tier-views";
 
 /**
  * The fields common to every profile shape this use case returns, public or
@@ -34,6 +37,11 @@ export interface UserProfileCore {
  * `followerCount`, `followingCount`, `viewerFollows` — design spec §6: "the
  * public projection stays exactly what Phase 1 pinned ... plus the two
  * counts and, for a signed-in viewer, whether they already follow."
+ *
+ * Task 5 of memberships-5a widens it by one more: `membership`, the
+ * creator's offer (spec §6: "A profile shows the offer and a 'Jadi anggota'
+ * button"). See `tier-views.ts` for why that shape is closed to exactly
+ * `id`/`name`/`priceAmount`/`billingCycle` per tier.
  */
 export interface PublicUserProfile extends UserProfileCore {
   followerCount: number;
@@ -47,6 +55,17 @@ export interface PublicUserProfile extends UserProfileCore {
    * Follow.
    */
   viewerFollows: boolean | null;
+  /**
+   * What this creator is selling, plus where the CALLER stands with them
+   * (Task 10, widened by the final review): a live membership, a membership
+   * that has ENDED with no renewal in 5a, or neither. `tiers` is always an
+   * array, even when the owner has never published a tier or has no connected
+   * payout account (both cases mean `listActiveByOwner` returns no rows) — see
+   * `toMembershipView`'s own docstring for why the field itself must never
+   * be omitted, and `MembershipView`'s for why both viewer booleans are
+   * `false` rather than `null` for an anonymous caller.
+   */
+  membership: MembershipView;
 }
 
 /**
@@ -83,7 +102,25 @@ export function toOwnProfile(user: UserRecord): OwnUserProfile {
 export class GetUserProfile {
   constructor(
     private readonly users: UserRepositoryPort,
-    private readonly follows: FollowRepositoryPort
+    private readonly follows: FollowRepositoryPort,
+    private readonly tiers: UserTierRepositoryPort,
+    /**
+     * Task 10. **The use-case itself, not a re-derivation of it.**
+     *
+     * `IsMemberOf` (Task 8) is the single definition of "is this viewer a
+     * paying member", and Phase 6's paywall is founded on it. Asking a
+     * subscription repository directly from here would put a SECOND
+     * definition in the codebase — and the half that would go missing from
+     * the copy is the `current_period_end > now` comparison, since 5a has no
+     * renewal pass and a lapsed row sits at `status = 'active'` forever
+     * (§9). Injected as the class rather than a hand-written interface so a
+     * test cannot substitute a stub that answers differently from the real
+     * thing.
+     *
+     * This is also the ONLY place in 5a that puts `IsMemberOf` on a request
+     * path at all.
+     */
+    private readonly membership: IsMemberOf
   ) {}
 
   /**
@@ -105,9 +142,33 @@ export class GetUserProfile {
       throw new NotFoundError("user not found");
     }
 
-    const [counts, viewerFollows] = await Promise.all([
+    // One call for the profile's tiers, not one per tier — `listActiveByOwner`
+    // is itself a single scoped query (its own port docstring and
+    // `DrizzleUserTierRepository`); this just runs it alongside the two other
+    // reads this profile already needed rather than after them.
+    const [counts, viewerFollows, activeTiers, standing] = await Promise.all([
       this.follows.countsFor(user.id),
       viewerId === null ? Promise.resolve(null) : this.follows.isFollowing(viewerId, user.id),
+      this.tiers.listActiveByOwner(user.id),
+      // `describe`, not `execute`: the boolean cannot tell a stranger apart
+      // from somebody whose membership has ENDED, and the page owes those two
+      // opposite things — an offer, and the news that renewal does not exist
+      // yet. Same single indexed read either way; see `MembershipStanding`.
+      //
+      // ANONYMOUS SHORT-CIRCUITS to `"none"`, which projects as `false`/`false`
+      // rather than `null`: there is no viewer to hold a membership, so there
+      // is no question to ask the database — this route is public and most of
+      // its traffic has no session at all. See `MembershipView`'s docstring for
+      // why `false` and not `null`, which is what its neighbour `viewerFollows`
+      // above answers.
+      //
+      // For a signed-in caller this is ONE further indexed read
+      // (`user_subscription_one_active`), running alongside the three this
+      // profile already made rather than after them — the same query Phase 6
+      // will run per gated post.
+      viewerId === null
+        ? Promise.resolve<MembershipStanding>("none")
+        : this.membership.describe(viewerId, user.id),
     ]);
 
     return {
@@ -115,6 +176,7 @@ export class GetUserProfile {
       followerCount: counts.followers,
       followingCount: counts.following,
       viewerFollows,
+      membership: toMembershipView(activeTiers, standing),
     };
   }
 

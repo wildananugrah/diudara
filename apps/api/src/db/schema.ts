@@ -11,6 +11,7 @@ import {
   index,
   uniqueIndex,
   check,
+  foreignKey,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -39,6 +40,18 @@ export const appUsers = pgTable(
     // "a reset ends all sessions" possible at all, since a JWT is stateless
     // and cannot otherwise be revoked short of rotating JWT_SECRET.
     sessionEpoch: integer("session_epoch").notNull().default(0),
+    // Where THIS user's membership money settles (Phase 5a). Nullable, and it
+    // holds THREE states, not two — NULL, the `XENDIT_ACCOUNT_PROVISIONING`
+    // sentinel, and a real account id. `domain/payment-account.ts` owns all
+    // three and the predicates that tell them apart; read that file before
+    // touching this column, and never truthiness-check it: the sentinel is
+    // truthy, and a truthy read is what would send `for_account_id:
+    // "provisioning:in-progress"` to the provider.
+    //
+    // The same shape as `creator.xendit_account_id` below, deliberately
+    // separate from it: `creator` is the untouchable /dashboard/* identity, and
+    // an app_user is a different owner entirely.
+    xenditAccountId: varchar("xendit_account_id", { length: 255 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
 );
@@ -924,3 +937,133 @@ export const postMedia = pgTable(
       .where(sql`${table.postId} is null`),
   ]
 );
+
+/**
+ * Task 1 of Phase 5a: a membership tier a user offers on their own profile —
+ * separate from, and unrelated to, `membership_tier` under `/dashboard/*`.
+ */
+export const userTiers = pgTable(
+  "user_tier",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ownerId: uuid("owner_id")
+      .notNull()
+      .references(() => appUsers.id),
+    name: varchar("name", { length: 128 }).notNull(),
+    // Integer rupiah, matching `membership_tier.price_amount`'s convention.
+    priceAmount: integer("price_amount").notNull(),
+    // varchar, not an enum, so 5b can add cycles without a migration — the same
+    // reasoning `subscription.status` records for `past_due`/`churned`.
+    billingCycle: varchar("billing_cycle", { length: 16 }).notNull(),
+    // A deactivated tier stops being offered. Existing subscriptions to it are
+    // unaffected — see the spec's §4.
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("user_tier_owner_idx").on(table.ownerId),
+    // Redundant on its own — `id` is already unique. It exists ONLY so
+    // `user_subscription` can carry a composite foreign key against
+    // (id, owner_id), which is what makes its denormalised `owner_id`
+    // impossible to falsify. Do not remove it as "duplicate".
+    uniqueIndex("user_tier_id_owner_unique").on(table.id, table.ownerId),
+  ]
+);
+
+/**
+ * Task 2 of Phase 5a: what a paid membership actually is — one row per
+ * (subscriber, owner) relationship over time. Separate from, and unrelated
+ * to, `subscription` under `/dashboard/*`.
+ */
+export const userSubscriptions = pgTable(
+  "user_subscription",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subscriberId: uuid("subscriber_id")
+      .notNull()
+      .references(() => appUsers.id),
+    tierId: uuid("tier_id").notNull(),
+    /**
+     * DENORMALISED from the tier, and kept honest by the composite foreign key
+     * below rather than by anyone remembering. Phase 6 asks "is this viewer a
+     * member of that person" on every gated post, and that must be one index
+     * hit, not a join through the tier.
+     */
+    ownerId: uuid("owner_id")
+      .notNull()
+      .references(() => appUsers.id),
+    /** `pending` | `active` | `cancelled`. 5b adds `past_due` and `churned`. */
+    status: varchar("status", { length: 16 }).notNull().default("pending"),
+    currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // The whole point of `user_tier_id_owner_unique`: a subscription whose
+    // owner disagrees with its tier's owner CANNOT BE INSERTED. No trigger, no
+    // application invariant anyone can forget.
+    foreignKey({
+      columns: [table.tierId, table.ownerId],
+      foreignColumns: [userTiers.id, userTiers.ownerId],
+      name: "user_subscription_tier_owner_fk",
+    }),
+    // You cannot subscribe to yourself, exactly as `follow_no_self` forbids
+    // following yourself.
+    check("user_subscription_no_self", sql`${table.subscriberId} <> ${table.ownerId}`),
+    // Nobody holds two live memberships to the same person — which is the
+    // shape of accidentally paying twice.
+    uniqueIndex("user_subscription_one_active")
+      .on(table.subscriberId, table.ownerId)
+      .where(sql`${table.status} = 'active'`),
+    /**
+     * AND NOBODY HOLDS TWO PENDING ONES EITHER — the same shape, one step
+     * earlier, and the one that actually happens.
+     *
+     * Fix round 2. `StartUserSubscription` already refused a second checkout by
+     * READING for a pending one first, and a re-review fired two concurrent
+     * `POST /subscribe` calls at the real database: four runs serialised, the
+     * fifth produced two live invoices, two subscriptions and two transactions
+     * for the identical pair. A double tap on a phone is concurrent, not
+     * sequential, and an application-level read-then-write cannot win a race it
+     * does not arbitrate — the same conclusion Task 2's constraints and Task 3's
+     * claim-first sentinel each reached before it.
+     *
+     * So the INSERT is the claim: exactly one caller can hold a pair's pending
+     * slot, everybody else gets `23505` on this index and is routed into the
+     * reuse path instead of a second invoice. Partial, like the `active` one
+     * above, so a settled or cancelled subscription never blocks a later
+     * purchase.
+     */
+    uniqueIndex("user_subscription_one_pending")
+      .on(table.subscriberId, table.ownerId)
+      .where(sql`${table.status} = 'pending'`),
+    index("user_subscription_owner_idx").on(table.ownerId),
+  ]
+);
+
+export const userTransactions = pgTable("user_transaction", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userSubscriptionId: uuid("user_subscription_id")
+    .notNull()
+    .references(() => userSubscriptions.id),
+  // What WE believe is owed. The webhook compares the provider's claim against
+  // this and never the other way round — see `handle-payment-webhook.ts`'s own
+  // docstring for why that direction is the security property.
+  amount: integer("amount").notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("pending"),
+  gatewayReferenceId: varchar("gateway_reference_id", { length: 255 }),
+  /**
+   * The provider's own hosted payment page for this transaction, stored so a
+   * buyer who taps "Jadi anggota" twice is handed BACK the invoice already
+   * waiting for them instead of being sold a second one (Phase 5a fix round 1,
+   * F2). Two live invoices for one membership are two chargeable invoices, and
+   * 5a has no refund path.
+   *
+   * Nullable and written in the same statement as `gateway_reference_id`, after
+   * the provider call returns: NULL therefore means "no invoice was ever opened
+   * for this attempt", which is exactly the state a failed provider call leaves
+   * behind and the state that must NOT block a fresh attempt.
+   */
+  gatewayInvoiceUrl: varchar("gateway_invoice_url", { length: 512 }),
+  paidAt: timestamp("paid_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});

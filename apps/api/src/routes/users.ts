@@ -14,13 +14,13 @@ import {
   type UserLoginInput,
   type UserSignupInput,
 } from "@diudara/shared";
-import { validate } from "../http/validate";
+import { uuidParam, validate, validateParams } from "../http/validate";
 import {
   requireUserAuth,
   resolveViewerId,
   type UserAuthVariables,
 } from "../http/user-auth.middleware";
-import { ValidationError } from "../application/errors";
+import { ServiceUnavailableError, ValidationError } from "../application/errors";
 import { DEFAULT_FOLLOW_LIST_LIMIT } from "../application/use-cases/follow-user";
 import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import type { Dependencies } from "../bootstrap";
@@ -105,6 +105,77 @@ function parseExploreQuery(raw: {
 }
 
 /**
+ * `POST /users/me/tiers`'s body — SHAPE only. Every business rule (price must
+ * be positive, an owner must have a connected payout account, the billing
+ * cycle 5a actually supports) is `ManageUserTiers.create`'s job, not this
+ * schema's — see that method's own docstring for why. This exists only to
+ * turn a malformed body (missing `name`, a non-numeric `priceAmount`) into a
+ * 400 before it can reach `input.name.trim()` on `undefined`.
+ *
+ * The failure message is hand-written Bahasa rather than zod's own English
+ * issue text, mirroring `parseFollowListLimit`/`parseExploreQuery` above.
+ */
+const createUserTierSchema = z.object({
+  name: z.string().trim().min(1),
+  priceAmount: z.number(),
+  billingCycle: z.string().trim().min(1).optional(),
+});
+
+function parseCreateUserTierBody(raw: unknown): {
+  name: string;
+  priceAmount: number;
+  billingCycle?: string;
+} {
+  const parsed = createUserTierSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new ValidationError(
+      "Nama dan harga tingkatan wajib diisi dengan format yang benar."
+    );
+  }
+  return parsed.data;
+}
+
+/**
+ * `PATCH /users/me/tiers/:tierId`'s body. `is_active` is the only column
+ * `UserTierRepositoryPort` lets a caller flip (see its `deactivate` doc
+ * comment — there is no `reactivate`), so `isActive: true` is refused here
+ * rather than silently accepted and ignored.
+ */
+const patchUserTierSchema = z.object({ isActive: z.literal(false) });
+
+function parsePatchUserTierBody(raw: unknown): { isActive: false } {
+  const parsed = patchUserTierSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new ValidationError(
+      "Saat ini tingkatan hanya dapat dinonaktifkan, dengan mengirim { isActive: false }."
+    );
+  }
+  return parsed.data;
+}
+
+/**
+ * `POST /users/:handle/subscribe`'s body — SHAPE only, exactly as
+ * `createUserTierSchema` above is. Every rule that decides whether this
+ * purchase may happen (the tier is active and belongs to this owner, the owner
+ * can be paid, the buyer is not the owner and is not already a member) is
+ * `StartUserSubscription`'s, and none of it can be expressed here.
+ *
+ * `tierId` is the ONLY field. The amount is read from the tier server-side and
+ * never accepted from a client — it is what Task 7's webhook compares the
+ * provider's claimed amount against, so a client-supplied price would make that
+ * comparison meaningless. The buyer is the SESSION, never the body.
+ */
+const subscribeSchema = z.object({ tierId: uuidParam });
+
+function parseSubscribeBody(raw: unknown): { tierId: string } {
+  const parsed = subscribeSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new ValidationError("Pilih tingkatan keanggotaan yang ingin Anda beli.");
+  }
+  return parsed.data;
+}
+
+/**
  * The caller's IP, recorded (hashed) against every password-reset request
  * for forensic/audit value — see `RequestPasswordReset`'s own docstring for
  * why it is NO LONGER used to enforce a rate limit (review finding F4).
@@ -173,6 +244,10 @@ export function userRoutes(
     | "listFollows"
     | "exploreUsers"
     | "maxPostImages"
+    | "connectUserPayout"
+    | "getUserPayoutStatus"
+    | "manageUserTiers"
+    | "startUserSubscription"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -242,6 +317,124 @@ export function userRoutes(
   });
 
   /**
+   * Phase 5a Task 3. Whether money can reach THIS user yet — the switch every
+   * later task in the phase depends on: a tier cannot be published without it
+   * and an invoice has nowhere to settle.
+   *
+   * Both verbs answer with the same three booleans and NEVER the account id
+   * itself. The id belongs on the server side of `for_account_id`; a client has
+   * no use for it, and a value on the wire is a value that ends up pasted
+   * somewhere.
+   *
+   * `available` is a property of the SERVER, not of the user, which is why it is
+   * composed here rather than inside `GetUserPayoutStatus` — that use case reads
+   * one column and has no business knowing what `bootstrap()` wired. It is the
+   * exact same `connectUserPayout !== undefined` the POST below turns into a
+   * 503, so the two can never disagree. Without it, `connected: false,
+   * provisioning: false` means both "you have not connected yet" and "this
+   * server has no payment provider at all", and only the first is fixable by
+   * pressing a button. The creator dashboard shipped that ambiguity once
+   * (`routes/payment-account.ts`), so this one does not.
+   *
+   * `payout` is NOT in `RESERVED_HANDLES`, deliberately. The route-derived guard
+   * in `users.test.ts` reads only the FIRST segment after `/users/` — here that
+   * is `me`, which `HANDLE_PATTERN` already makes unregisterable at 2
+   * characters — so nothing under `/me/` can ever shadow a profile, and
+   * reserving an ordinary word to prevent a collision that cannot occur would
+   * take it from users for nothing. See `domain/handle.ts` on `me`/`by-handle`/
+   * `password-reset`, which are absent from that list for the same reason.
+   */
+  app.get<"/me/payout">("/me/payout", requireAuth, async (c) => {
+    const status = await deps.getUserPayoutStatus.execute(c.get("userId"));
+    return c.json({ ...status, available: deps.connectUserPayout !== undefined });
+  });
+
+  /**
+   * IDEMPOTENT, and 200 rather than 201 for that reason — the same contract as
+   * the follow routes below: the response is the RESULTING state, whether or not
+   * this call is what changed it. A user on a slow connection will press this
+   * twice, and a Xendit MANAGED sub-account is a KYC entity with NO delete
+   * endpoint, so the one outcome that must be impossible is a second account.
+   * `ConnectUserPayout` guarantees that by claiming the column BEFORE it calls
+   * the provider — read its docstring before changing anything here.
+   */
+  app.post<"/me/payout">("/me/payout", requireAuth, async (c) => {
+    // `undefined` EXACTLY when this box has no payment provider at all. Same
+    // 503, and the same wording, as `routes/payment-account.ts`: this box is
+    // fine, there is just nothing to connect an account to.
+    if (!deps.connectUserPayout) {
+      throw new ServiceUnavailableError("pembayaran belum dikonfigurasi di server ini.");
+    }
+    const status = await deps.connectUserPayout.execute(c.get("userId"));
+    return c.json({ ...status, available: true }, 200);
+  });
+
+  /**
+   * Task 4 of Phase 5a. Pengaturan's tier editor: what a creator sells on
+   * their OWN profile, distinct from `/dashboard/*`'s community tiers
+   * (`routes/tiers.ts`, table `membership_tier`) — see `ManageUserTiers`'s
+   * own docstring.
+   *
+   * Static segments (`me/tiers`, `me/tiers/:tierId`), like `me/payout` above
+   * — nothing a handle could ever shadow, since `me` is 2 characters and
+   * already unregisterable under `HANDLE_PATTERN` before this route existed.
+   * `RESERVED_HANDLES` gains nothing from this route; see `domain/handle.ts`.
+   *
+   * `GET` returns the owner's OWN management view — every tier they have
+   * ever defined, active and deactivated alike — never the public
+   * `listActiveByOwner` projection a visitor's profile shows (Task 5).
+   */
+  app.get<"/me/tiers">("/me/tiers", requireAuth, async (c) => {
+    const tiers = await deps.manageUserTiers.list(c.get("userId"));
+    return c.json(tiers);
+  });
+
+  /**
+   * `ManageUserTiers.create` is where the money-has-nowhere-to-go gate lives
+   * — a tier cannot be published without a CONNECTED payout account (spec
+   * §5). This handler does no business validation itself; it only turns a
+   * malformed body into a 400 before that method ever sees it.
+   */
+  app.post<"/me/tiers">("/me/tiers", requireAuth, async (c) => {
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      throw new ValidationError("Isi permintaan harus berupa JSON yang valid.");
+    }
+    const input = parseCreateUserTierBody(raw);
+    const created = await deps.manageUserTiers.create({ ownerId: c.get("userId"), ...input });
+    return c.json(created, 201);
+  });
+
+  /**
+   * The ONLY edit `UserTierRepositoryPort` exposes: withdrawing a tier from
+   * sale. `ManageUserTiers.deactivate` 404s a tier that belongs to a
+   * different owner — one owner cannot edit another's tier — and never
+   * touches `user_subscription`, so an existing member's subscription keeps
+   * resolving after their tier is withdrawn (spec §4).
+   */
+  app.patch<"/me/tiers/:tierId">(
+    "/me/tiers/:tierId",
+    requireAuth,
+    validateParams(z.object({ tierId: uuidParam })),
+    async (c) => {
+      let raw: unknown;
+      try {
+        raw = await c.req.json();
+      } catch {
+        throw new ValidationError("Isi permintaan harus berupa JSON yang valid.");
+      }
+      parsePatchUserTierBody(raw);
+      const updated = await deps.manageUserTiers.deactivate({
+        ownerId: c.get("userId"),
+        tierId: c.req.param("tierId"),
+      });
+      return c.json(updated, 200);
+    }
+  );
+
+  /**
    * Task 7 of images (design spec §6). Public and cheap — no auth, no
    * database read, just the number `bootstrap()` already resolved from
    * `MAX_POST_IMAGES` at boot. The web is a static build served by nginx and
@@ -287,6 +480,47 @@ export function userRoutes(
       action: "unfollow",
     });
     return c.json(result, 200);
+  });
+
+  /**
+   * Task 6 of Phase 5a (spec §6) — buying a membership from a person, and the
+   * moment money actually moves.
+   *
+   * Behind `requireAuth`: buying is signed-in only, so a signed-out visitor
+   * pressing "Jadi anggota" gets a 401 and is sent to Masuk first. The buyer is
+   * therefore `c.get("userId")` — the session — and never anything in the body,
+   * which carries only the tier id.
+   *
+   * DYNAMIC, like the follow routes above it: `/:handle/subscribe` cannot
+   * shadow, and cannot be shadowed by, any of this router's static paths, since
+   * Hono ranks static segments above dynamic ones.
+   *
+   * 201, not 200: this call CREATES a pending subscription and a pending
+   * transaction, which outlive the response whether or not the buyer ever pays
+   * the invoice. Same status the dashboard's `POST /c/:slug/checkout` returns
+   * for the same reason.
+   */
+  app.post<"/:handle/subscribe">("/:handle/subscribe", requireAuth, async (c) => {
+    // `undefined` EXACTLY when this box has no payment provider at all — same
+    // 503 and the same wording as `POST /users/me/payout` above. The route stays
+    // registered either way, unlike `/c/:slug/checkout`, so a buyer is told why
+    // rather than getting the 404 of a path that does not exist.
+    if (!deps.startUserSubscription) {
+      throw new ServiceUnavailableError("pembayaran belum dikonfigurasi di server ini.");
+    }
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      throw new ValidationError("Isi permintaan harus berupa JSON yang valid.");
+    }
+    const { tierId } = parseSubscribeBody(raw);
+    const result = await deps.startUserSubscription.execute({
+      subscriberId: c.get("userId"),
+      handle: c.req.param("handle"),
+      tierId,
+    });
+    return c.json(result, 201);
   });
 
   // Task 2. Public, like `by-handle/:handle` — anyone can browse who follows

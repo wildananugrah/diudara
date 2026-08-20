@@ -43,6 +43,7 @@ import { AuthenticateCreator } from "./application/use-cases/authenticate-creato
 import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
+import { IsMemberOf } from "./application/use-cases/is-member-of";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -66,6 +67,10 @@ import {
 import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
+import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
+import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
+import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
+import { StartUserSubscription } from "./application/use-cases/start-user-subscription";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
@@ -85,6 +90,9 @@ import type {
   CreatorRepositoryPort,
 } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
+import type { UserPayoutRepositoryPort } from "./application/ports/user-payout-repository.port";
+import type { UserTierRepositoryPort } from "./application/ports/user-tier-repository.port";
+import type { UserSubscriptionRepositoryPort } from "./application/ports/user-subscription-repository.port";
 import type { FollowRepositoryPort } from "./application/ports/follow-repository.port";
 import type { PostRepositoryPort } from "./application/ports/post-repository.port";
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
@@ -220,6 +228,78 @@ const fakeUserRepository: UserRepositoryPort = {
   },
   async mostFollowedPublic() {
     return [];
+  },
+};
+
+/** Phase 5a's payout column, faked the same shallow way every other repository here is — these tests are about `Dependencies` wiring, not payout behaviour. */
+const fakeUserPayoutRepository: UserPayoutRepositoryPort = {
+  async findPayoutAccount() {
+    return null;
+  },
+  async beginXenditAccountProvisioning() {
+    return false;
+  },
+  async finishXenditAccountProvisioning() {
+    return false;
+  },
+  async abandonXenditAccountProvisioning() {
+    return false;
+  },
+};
+
+/** Task 1 of Phase 5a's `user_tier` table, faked the same shallow way as `fakeUserPayoutRepository` above — these tests are about `Dependencies` wiring, not tier behaviour. */
+const fakeUserTierRepository: UserTierRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async findById() {
+    return null;
+  },
+  async listByOwner() {
+    return [];
+  },
+  async listActiveByOwner() {
+    return [];
+  },
+  async deactivate() {
+    return null;
+  },
+};
+
+/** Task 2 of Phase 5a's `user_subscription`/`user_transaction` tables, faked the same shallow way `fakeUserTierRepository` above is. */
+const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async claimPending() {
+    throw new Error("not used");
+  },
+  async findById() {
+    return null;
+  },
+  async activate() {
+    return null;
+  },
+  async cancel() {
+    return null;
+  },
+  async findActiveFor() {
+    return null;
+  },
+  async createTransaction() {
+    throw new Error("not used");
+  },
+  async findTransactionById() {
+    return null;
+  },
+  async attachGatewayReference() {
+    return false;
+  },
+  async findPendingCheckout() {
+    return null;
+  },
+  async markTransactionPaid() {
+    return null;
   },
 };
 
@@ -534,6 +614,8 @@ const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
   async run(work) {
     return work({
       subscriptions: fakeSubscriptionRepository,
+      userSubscriptions: fakeUserSubscriptionRepository,
+      userTiers: fakeUserTierRepository,
       webhookEvents: fakeWebhookEventRepository,
       activityLog: fakeActivityLogRepository,
       outbox: fakeOutboxRepository,
@@ -696,6 +778,8 @@ describe("Dependencies (composition root contract)", () => {
         fakeTokenIssuer
       ),
       userRepository: fakeUserRepository,
+      userPayoutRepository: fakeUserPayoutRepository,
+      userTierRepository: fakeUserTierRepository,
       userTokenIssuer: fakeUserTokenIssuer,
       registerUser: new RegisterUser(
         fakeUserRepository,
@@ -710,7 +794,14 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeUserTokenIssuer
       ),
-      getUserProfile: new GetUserProfile(fakeUserRepository, fakeFollowRepository),
+      getUserProfile: new GetUserProfile(
+        fakeUserRepository,
+        fakeFollowRepository,
+        fakeUserTierRepository,
+        // Task 10's fourth dependency: the REAL `IsMemberOf` over the two
+        // fakes already in this file, never a stub of its own.
+        new IsMemberOf(fakeUserSubscriptionRepository, fakeClock)
+      ),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
@@ -750,6 +841,18 @@ describe("Dependencies (composition root contract)", () => {
       listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
       getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
+      connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
+      getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
+      manageUserTiers: new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository),
+      startUserSubscription: new StartUserSubscription(
+        fakeUserRepository,
+        fakeUserTierRepository,
+        fakeUserPayoutRepository,
+        fakeUserSubscriptionRepository,
+        fakePaymentProvider,
+        fakeClock,
+        { appBaseUrl: "https://app.diudara.test" }
+      ),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository
@@ -789,6 +892,7 @@ describe("Dependencies (composition root contract)", () => {
       }),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
+        fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
         fakeClock
       ),
@@ -913,6 +1017,8 @@ describe("Dependencies (composition root contract)", () => {
         fakeTokenIssuer
       ),
       userRepository: fakeUserRepository,
+      userPayoutRepository: fakeUserPayoutRepository,
+      userTierRepository: fakeUserTierRepository,
       userTokenIssuer: fakeUserTokenIssuer,
       registerUser: new RegisterUser(
         fakeUserRepository,
@@ -927,7 +1033,14 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeUserTokenIssuer
       ),
-      getUserProfile: new GetUserProfile(fakeUserRepository, fakeFollowRepository),
+      getUserProfile: new GetUserProfile(
+        fakeUserRepository,
+        fakeFollowRepository,
+        fakeUserTierRepository,
+        // Task 10's fourth dependency: the REAL `IsMemberOf` over the two
+        // fakes already in this file, never a stub of its own.
+        new IsMemberOf(fakeUserSubscriptionRepository, fakeClock)
+      ),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
@@ -967,6 +1080,18 @@ describe("Dependencies (composition root contract)", () => {
       listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
       getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
+      connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
+      getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
+      manageUserTiers: new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository),
+      startUserSubscription: new StartUserSubscription(
+        fakeUserRepository,
+        fakeUserTierRepository,
+        fakeUserPayoutRepository,
+        fakeUserSubscriptionRepository,
+        fakePaymentProvider,
+        fakeClock,
+        { appBaseUrl: "https://app.diudara.test" }
+      ),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository
@@ -1006,6 +1131,7 @@ describe("Dependencies (composition root contract)", () => {
       }),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
+        fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
         fakeClock
       ),

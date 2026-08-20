@@ -30,6 +30,7 @@ import { DrizzleMemberRepository } from "../../infrastructure/repositories/drizz
 import { DrizzleMembershipTierRepository } from "../../infrastructure/repositories/drizzle-membership-tier.repository";
 import { DrizzleOutboxRepository } from "../../infrastructure/repositories/drizzle-outbox.repository";
 import { DrizzlePaymentActivationUnitOfWork } from "../../infrastructure/repositories/drizzle-payment-activation.unit-of-work";
+import { DrizzleUserSubscriptionRepository } from "../../infrastructure/repositories/drizzle-user-subscription.repository";
 import { DrizzleRenewalReminderRepository } from "../../infrastructure/repositories/drizzle-renewal-reminder.repository";
 import { DrizzleSubscriptionRepository } from "../../infrastructure/repositories/drizzle-subscription.repository";
 import type { MessagingProviderPort } from "../ports/messaging-provider.port";
@@ -107,6 +108,9 @@ function harness(options: { gating?: MessagingProviderPort; now?: Date } = {}) {
   );
   const handleWebhook = new HandlePaymentWebhook(
     subscriptionRepository,
+    // Phase 5a's parallel flow, unused by every test in this file: renewals are a
+    // COMMUNITY concern, and a bare-uuid `external_id` never reaches it.
+    new DrizzleUserSubscriptionRepository(db),
     new DrizzlePaymentActivationUnitOfWork(db),
     clock
   );
