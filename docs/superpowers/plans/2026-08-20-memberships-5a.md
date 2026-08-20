@@ -287,7 +287,20 @@ Cover: creating a tier requires a **connected** payout account (a tier whose mon
 
 - [ ] **Step 2: Run, watch fail, implement**
 
-- [ ] **Step 3: `tiers` is a new literal segment** — reserve it, run the guard, positive control.
+- [ ] **Step 3: Confirm the reserved-handle guard stays green — do NOT reserve `tiers`**
+
+An earlier draft of this plan told you to add `tiers` to `RESERVED_HANDLES`. **That was wrong.** The
+route-derived guard (`apps/api/src/routes/users.test.ts:190`) reads only the FIRST segment after
+`/users/`, and your routes are `/users/me/tiers` — first segment `me`, already unregisterable at 2
+characters. Nothing collides.
+
+Reserving it would take an ordinary word from users to prevent a collision that cannot occur, and
+`handle.test.ts` already asserts that segments the pattern makes impossible are deliberately absent
+from the list. Run the guard before and after mounting and confirm it stays green:
+
+```
+cd apps/api && bun test src/routes/users.test.ts -t "every literal /users segment"
+```
 
 - [ ] **Step 4: Run the api suite once, then commit**
 
