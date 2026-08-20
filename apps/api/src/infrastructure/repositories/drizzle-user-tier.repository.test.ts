@@ -74,8 +74,16 @@ describe("DrizzleUserTierRepository", () => {
     expect(rows.every((r) => r.ownerId === owner.id)).toBe(true);
   });
 
-  it("excludes deactivated tiers from listActiveByOwner", async () => {
+  /**
+   * Seeds a SECOND owner with active tiers of their own — a single-owner
+   * fixture cannot prove the `ownerId` filter does anything, since there is
+   * nothing else in the database for it to exclude. Verified by deleting
+   * the filter from `listActiveByOwner` and confirming this test reddens
+   * (see the Task 1 report for the exact output).
+   */
+  it("excludes deactivated tiers from listActiveByOwner, and other owners' tiers too", async () => {
     const owner = await createUser("wildan");
+    const other = await createUser("someone-else");
     const active = await repo.create({
       ownerId: owner.id,
       name: "Fan",
@@ -89,6 +97,12 @@ describe("DrizzleUserTierRepository", () => {
       billingCycle: "monthly",
     });
     await repo.deactivate(deactivated.id);
+    await repo.create({
+      ownerId: other.id,
+      name: "Not mine",
+      priceAmount: 15_000,
+      billingCycle: "monthly",
+    });
 
     const rows = await repo.listActiveByOwner(owner.id);
 
