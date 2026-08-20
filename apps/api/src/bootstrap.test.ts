@@ -613,6 +613,8 @@ const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
   async run(work) {
     return work({
       subscriptions: fakeSubscriptionRepository,
+      userSubscriptions: fakeUserSubscriptionRepository,
+      userTiers: fakeUserTierRepository,
       webhookEvents: fakeWebhookEventRepository,
       activityLog: fakeActivityLogRepository,
       outbox: fakeOutboxRepository,
@@ -881,6 +883,7 @@ describe("Dependencies (composition root contract)", () => {
       }),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
+        fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
         fakeClock
       ),
@@ -1111,6 +1114,7 @@ describe("Dependencies (composition root contract)", () => {
       }),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
+        fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
         fakeClock
       ),

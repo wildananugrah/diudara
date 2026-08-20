@@ -2093,6 +2093,10 @@ export function bootstrap(): Dependencies {
   const paymentActivationUnitOfWork = new DrizzlePaymentActivationUnitOfWork(db);
   const handlePaymentWebhook = new HandlePaymentWebhook(
     subscriptionRepository,
+    // Phase 5a's parallel flow. Xendit delivers ONE webhook stream, so the same
+    // use case resolves both kinds of invoice — routed on the `external_id`
+    // namespace, never guessed (see `domain/user-payment.ts`).
+    userSubscriptionRepository,
     paymentActivationUnitOfWork,
     clock
   );

@@ -1,11 +1,33 @@
 import type { ActivityLogRepositoryPort } from "./activity-log-repository.port";
 import type { OutboxRepositoryPort } from "./outbox-repository.port";
 import type { SubscriptionRepositoryPort } from "./subscription-repository.port";
+import type { UserSubscriptionRepositoryPort } from "./user-subscription-repository.port";
+import type { UserTierRepositoryPort } from "./user-tier-repository.port";
 import type { WebhookEventRepositoryPort } from "./webhook-event-repository.port";
 
 /** The repositories that must succeed or fail together when a payment lands. */
 export interface PaymentActivationRepositories {
   subscriptions: SubscriptionRepositoryPort;
+  /**
+   * The Phase 5a flow's own subscriptions — `user_subscription`/`user_transaction`,
+   * which have nothing to do with `subscriptions` above beyond arriving down the
+   * same webhook stream (see `domain/user-payment.ts` for how the two are told
+   * apart).
+   *
+   * In HERE, and not read off the pool, for exactly the reason `webhookEvents` is:
+   * the replay claim and the activation it authorises must commit together or not
+   * at all. A claim that committed alone would spend the event id on a delivery
+   * that activated nobody, and every provider retry after it would be answered
+   * "already handled" — money taken, membership never granted, no way back.
+   */
+  userSubscriptions: UserSubscriptionRepositoryPort;
+  /**
+   * Read-only in this unit of work, for one value: the tier's `billing_cycle`,
+   * which is what the paid period's length is computed from. Bound to the
+   * transaction like everything else rather than to the pool, so the cycle a
+   * period is measured with is the one that was true when the payment settled.
+   */
+  userTiers: UserTierRepositoryPort;
   webhookEvents: WebhookEventRepositoryPort;
   activityLog: ActivityLogRepositoryPort;
   /**

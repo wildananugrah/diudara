@@ -9,6 +9,8 @@ import {
   outbox,
   subscriptions,
   transactions,
+  userSubscriptions,
+  userTransactions,
   webhookEvents,
 } from "../db/schema";
 import { resetDatabase } from "../db/test-helpers";
@@ -858,12 +860,32 @@ describe("POST /webhooks/xendit", () => {
     expect(res.status).toBe(404);
   });
 
-  it("404s an external id that is not even a uuid, rather than 500ing", async () => {
+  /**
+   * CHANGED BY TASK 7, deliberately, and it changes nothing about a real invoice.
+   *
+   * Every `external_id` this codebase has ever put on the wire is either a bare
+   * `transaction.id` uuid (community) or `usub_<uuid>` (a user subscription), so
+   * a string that is NEITHER shape cannot be an invoice of ours at all — it is
+   * somebody else's, or a probe. It used to be handed to the community lookup and
+   * answered 404; it is now IGNORED with a 200 (spec §7: "an unrecognised prefix
+   * is ignored, never assumed to be either kind"), which also stops the provider
+   * retrying a delivery no fix of ours could ever make resolvable.
+   *
+   * What this test has always been for survives unchanged: none of these 500s.
+   * And an unknown BARE UUID — the shape a real community invoice has — still
+   * 404s, pinned by the test above.
+   */
+  it("IGNORES an external id that is neither shape, without 500ing and without writing anything", async () => {
     const a = app();
-    await checkout(a);
-    for (const bad of ["haxx", "1 OR 1=1", "0000"]) {
-      expect((await post(a, paidEvent(bad))).status).toBe(404);
+    const { subscriptionId } = await checkout(a);
+    for (const bad of ["haxx", "1 OR 1=1", "0000", "usub_", "usub_x", "usub_1 OR 1=1"]) {
+      expect((await post(a, paidEvent(bad))).status).toBe(200);
     }
+
+    expect(await db.select().from(webhookEvents)).toHaveLength(0);
+    expect(await db.select().from(outbox)).toHaveLength(0);
+    expect(await db.select().from(activityLogs)).toHaveLength(0);
+    expect((await subscriptionRow(subscriptionId)).status).not.toBe("active");
   });
 
   it("ignores a non-PAID status without activating", async () => {
@@ -942,5 +964,367 @@ describe("POST /webhooks/xendit", () => {
       status: "PAID",
       some_extra_field: "kept verbatim",
     });
+  });
+});
+
+/**
+ * Task 7 of Phase 5a — the OTHER kind of invoice arriving down the SAME stream,
+ * at the same public endpoint, against the real database and its real
+ * constraints.
+ *
+ * Nothing here contacts Xendit: `bootstrap()` wires `FakePaymentAdapter` under
+ * NODE_ENV=test, and the invoice id these deliveries echo back is read from the
+ * column `StartUserSubscription` wrote it to.
+ */
+describe("POST /webhooks/xendit — user subscriptions", () => {
+  /** The namespace as a LITERAL. The wire format is the thing under test. */
+  const PREFIX = "usub_";
+
+  let accounts = 0;
+
+  async function account(a: ReturnType<typeof app>) {
+    accounts += 1;
+    const acc = {
+      handle: `orang${accounts}`,
+      email: `orang${accounts}-${Date.now()}@example.com`,
+      password: "supersecret123",
+      displayName: `Orang ${accounts}`,
+    };
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(acc),
+    });
+    const res = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: acc.email, password: acc.password }),
+    });
+    const body = (await res.json()) as { token: string; user: { id: string } };
+    return { token: body.token, userId: body.user.id, handle: acc.handle };
+  }
+
+  function authed(token: string) {
+    return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  }
+
+  /**
+   * A real purchase: owner with a payout account and a tier, buyer subscribing.
+   * Returns the ids the webhook will reference — the invoice id read from the
+   * COLUMN, since that column is what the handler verifies `body.id` against.
+   */
+  async function buyMembership(
+    a: ReturnType<typeof app>,
+    tier: { priceAmount?: number; billingCycle?: string } = {}
+  ) {
+    const owner = await account(a);
+    await a.request("/users/me/payout", { method: "POST", headers: authed(owner.token) });
+    const created = await (
+      await a.request("/users/me/tiers", {
+        method: "POST",
+        headers: authed(owner.token),
+        body: JSON.stringify({
+          name: "Anggota",
+          priceAmount: tier.priceAmount ?? 50_000,
+          ...(tier.billingCycle === undefined ? {} : { billingCycle: tier.billingCycle }),
+        }),
+      })
+    ).json();
+    const buyer = await account(a);
+    const bought = await (
+      await a.request(`/users/${owner.handle}/subscribe`, {
+        method: "POST",
+        headers: authed(buyer.token),
+        body: JSON.stringify({ tierId: created.id }),
+      })
+    ).json();
+
+    const [tx] = await db
+      .select()
+      .from(userTransactions)
+      .where(eq(userTransactions.id, bought.transactionId));
+
+    return {
+      owner,
+      buyer,
+      tierId: created.id as string,
+      subscriptionId: bought.subscriptionId as string,
+      transactionId: bought.transactionId as string,
+      externalId: bought.externalId as string,
+      invoiceId: tx.gatewayReferenceId!,
+    };
+  }
+
+  async function userSubscriptionRowById(id: string) {
+    const [row] = await db
+      .select()
+      .from(userSubscriptions)
+      .where(eq(userSubscriptions.id, id));
+    return row;
+  }
+
+  async function userTransactionRowById(id: string) {
+    const [row] = await db.select().from(userTransactions).where(eq(userTransactions.id, id));
+    return row;
+  }
+
+  it("mints an external_id in the namespace the webhook routes on", async () => {
+    const a = app();
+    const bought = await buyMembership(a);
+
+    expect(bought.externalId).toBe(`${PREFIX}${bought.transactionId}`);
+  });
+
+  it("activates the membership on a verified PAID event", async () => {
+    const a = app();
+    const { subscriptionId, transactionId, externalId, invoiceId } = await buyMembership(a);
+
+    const res = await post(a, verifiedEvent(externalId, invoiceId));
+
+    expect(res.status).toBe(200);
+    const sub = await userSubscriptionRowById(subscriptionId);
+    expect(sub.status).toBe("active");
+    expect(sub.currentPeriodEnd).not.toBeNull();
+    const tx = await userTransactionRowById(transactionId);
+    expect(tx.status).toBe("paid");
+    expect(tx.paidAt).not.toBeNull();
+  });
+
+  it("sets current_period_end one month past the payment for a monthly tier", async () => {
+    const a = app();
+    const { subscriptionId, transactionId, externalId, invoiceId } = await buyMembership(a);
+
+    await post(a, verifiedEvent(externalId, invoiceId));
+
+    const sub = await userSubscriptionRowById(subscriptionId);
+    const tx = await userTransactionRowById(transactionId);
+    const paidAt = tx.paidAt!;
+    const expected = new Date(paidAt);
+    expected.setUTCMonth(expected.getUTCMonth() + 1);
+    expect(sub.currentPeriodEnd!.toISOString()).toBe(expected.toISOString());
+  });
+
+  it("writes NO community rows for a user-subscription payment", async () => {
+    const a = app();
+    const { externalId, invoiceId } = await buyMembership(a);
+
+    await post(a, verifiedEvent(externalId, invoiceId));
+
+    // A user membership grants access by BEING active (spec §8). There is no
+    // Telegram group to invite anybody to, and no `member` row to audit against.
+    expect(await db.select().from(activityLogs)).toHaveLength(0);
+    expect(await db.select().from(outbox)).toHaveLength(0);
+    expect(await db.select().from(subscriptions)).toHaveLength(0);
+  });
+
+  it("is idempotent — a replayed delivery activates once and extends the period once", async () => {
+    const a = app();
+    const { subscriptionId, externalId, invoiceId } = await buyMembership(a);
+
+    expect((await post(a, verifiedEvent(externalId, invoiceId))).status).toBe(200);
+    const after = await userSubscriptionRowById(subscriptionId);
+
+    expect((await post(a, verifiedEvent(externalId, invoiceId))).status).toBe(200);
+    const again = await userSubscriptionRowById(subscriptionId);
+
+    expect(again.currentPeriodEnd!.toISOString()).toBe(after.currentPeriodEnd!.toISOString());
+    expect(await db.select().from(webhookEvents)).toHaveLength(1);
+  });
+
+  it("is idempotent under CONCURRENT deliveries of the same event", async () => {
+    const a = app();
+    const { subscriptionId, externalId, invoiceId } = await buyMembership(a);
+
+    const results = await Promise.all(
+      [1, 2, 3, 4, 5].map(() => post(a, verifiedEvent(externalId, invoiceId)))
+    );
+
+    expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200, 200]);
+    expect(await db.select().from(webhookEvents)).toHaveLength(1);
+    expect((await userSubscriptionRowById(subscriptionId)).status).toBe("active");
+  });
+
+  it("rejects an amount that does not match our own record, and activates nothing", async () => {
+    const a = app();
+    const { subscriptionId, transactionId, externalId, invoiceId } = await buyMembership(a);
+
+    const res = await post(a, verifiedEvent(externalId, invoiceId, { amount: 1 }));
+
+    expect(res.status).toBe(400);
+    expect((await userSubscriptionRowById(subscriptionId)).status).toBe("pending");
+    expect((await userTransactionRowById(transactionId)).status).toBe("pending");
+    // Nothing recorded, so the event id a genuine delivery needs is still unspent.
+    expect(await db.select().from(webhookEvents)).toHaveLength(0);
+  });
+
+  it("rejects an amount HIGHER than our record too", async () => {
+    const a = app();
+    const { subscriptionId, externalId, invoiceId } = await buyMembership(a);
+
+    expect((await post(a, verifiedEvent(externalId, invoiceId, { amount: 500_000 }))).status).toBe(
+      400
+    );
+    expect((await userSubscriptionRowById(subscriptionId)).status).toBe("pending");
+  });
+
+  it("400s a delivery whose invoice id is not the one checkout recorded", async () => {
+    const a = app();
+    const { subscriptionId, externalId } = await buyMembership(a);
+
+    const res = await post(a, paidEvent(externalId, { id: "forged-inv-7" }));
+
+    expect(res.status).toBe(400);
+    expect((await userSubscriptionRowById(subscriptionId)).status).toBe("pending");
+  });
+
+  it("records a non-PAID status without activating", async () => {
+    const a = app();
+    const { subscriptionId, transactionId, externalId, invoiceId } = await buyMembership(a);
+
+    const res = await post(a, verifiedEvent(externalId, invoiceId, { status: "EXPIRED" }));
+
+    expect(res.status).toBe(200);
+    expect((await userSubscriptionRowById(subscriptionId)).status).toBe("pending");
+    expect((await userTransactionRowById(transactionId)).status).toBe("pending");
+    expect(await db.select().from(webhookEvents)).toHaveLength(1);
+  });
+
+  it("404s a namespaced id with no user transaction behind it, without recording anything", async () => {
+    const a = app();
+    await buyMembership(a);
+
+    const res = await post(
+      a,
+      paidEvent(`${PREFIX}00000000-0000-0000-0000-000000000000`, { id: "inv-x" })
+    );
+
+    expect(res.status).toBe(404);
+    expect(await db.select().from(webhookEvents)).toHaveLength(0);
+  });
+
+  /**
+   * THE 500 VECTOR Task 6's re-review measured: slicing the prefix off `usub_`
+   * yields `""` and off `usub_x` yields `"x"`, and both used to reach the driver
+   * as `invalid input syntax for type uuid`. This endpoint is PUBLIC.
+   */
+  it("never 500s on a junk id behind the namespace, however malformed", async () => {
+    const a = app();
+    await buyMembership(a);
+
+    for (const junk of ["", "x", "1 OR 1=1", "'; drop table user_transaction; --", "00000000"]) {
+      const res = await post(a, paidEvent(`${PREFIX}${junk}`, { id: "inv-x" }));
+      expect(res.status).toBe(200);
+    }
+    expect(await db.select().from(webhookEvents)).toHaveLength(0);
+  });
+
+  /**
+   * The ruling carried from Task 6: a second PAID for a pair that is already
+   * active must not 500. `user_subscription_one_pending` stops two live invoices
+   * being minted now, but it is not retroactive — so the rows are staged the way
+   * a pre-fix double tap left them.
+   */
+  describe("a second PAID for a pair that is already active", () => {
+    /**
+     * Activates one membership, then plants a SECOND payable invoice for the same
+     * pair — the state a pre-Task-6 double tap left behind, and the one
+     * `user_subscription_one_pending` prevents being created today but cannot
+     * retroactively remove. Inserted directly, because no route will now produce
+     * it: `POST /subscribe` refuses a pair that already holds an active
+     * membership, which is the point.
+     */
+    async function stageSecondInvoiceForActivePair(a: ReturnType<typeof app>) {
+      const first = await buyMembership(a);
+      expect((await post(a, verifiedEvent(first.externalId, first.invoiceId))).status).toBe(200);
+
+      const [subscription] = await db
+        .insert(userSubscriptions)
+        .values({
+          subscriberId: first.buyer.userId,
+          tierId: first.tierId,
+          ownerId: first.owner.userId,
+          status: "pending",
+        })
+        .returning();
+      const [transaction] = await db
+        .insert(userTransactions)
+        .values({
+          userSubscriptionId: subscription!.id,
+          amount: 50_000,
+          gatewayReferenceId: "fake-inv-stale",
+          gatewayInvoiceUrl: "https://fake-checkout.local/fake-inv-stale",
+        })
+        .returning();
+
+      return {
+        first,
+        second: {
+          subscriptionId: subscription!.id,
+          transactionId: transaction!.id,
+          externalId: `${PREFIX}${transaction!.id}`,
+          invoiceId: "fake-inv-stale",
+        },
+      };
+    }
+
+    it("answers 200 rather than 500, so the provider does not retry a failure forever", async () => {
+      const a = app();
+      const { second } = await stageSecondInvoiceForActivePair(a);
+
+      const res = await post(a, verifiedEvent(second.externalId, second.invoiceId));
+
+      expect(res.status).toBe(200);
+    });
+
+    it("leaves exactly ONE active membership for the pair", async () => {
+      const a = app();
+      const { first, second } = await stageSecondInvoiceForActivePair(a);
+
+      await post(a, verifiedEvent(second.externalId, second.invoiceId));
+
+      expect((await userSubscriptionRowById(first.subscriptionId)).status).toBe("active");
+      expect((await userSubscriptionRowById(second.subscriptionId)).status).toBe("cancelled");
+    });
+
+    it("records the second payment as collected, so the refund owed is visible", async () => {
+      const a = app();
+      const { second } = await stageSecondInvoiceForActivePair(a);
+
+      await post(a, verifiedEvent(second.externalId, second.invoiceId));
+
+      const tx = await userTransactionRowById(second.transactionId);
+      expect(tx.status).toBe("paid");
+      expect(tx.paidAt).not.toBeNull();
+    });
+
+    it("records both deliveries, so neither is retried", async () => {
+      const a = app();
+      const { second } = await stageSecondInvoiceForActivePair(a);
+
+      await post(a, verifiedEvent(second.externalId, second.invoiceId));
+
+      expect(await db.select().from(webhookEvents)).toHaveLength(2);
+    });
+  });
+
+  it("still activates a COMMUNITY invoice arriving between two user ones", async () => {
+    // The regression that matters, end to end: one stream, three deliveries, and
+    // the community path must be reached by exactly the route it always was.
+    const a = app();
+    const community = await checkout(a);
+    const membership = await buyMembership(a);
+
+    expect((await post(a, verifiedEvent(membership.externalId, membership.invoiceId))).status).toBe(
+      200
+    );
+    expect((await post(a, verifiedEvent(community.externalId, community.invoiceId))).status).toBe(
+      200
+    );
+
+    expect((await subscriptionRow(community.subscriptionId)).status).toBe("active");
+    expect((await userSubscriptionRowById(membership.subscriptionId)).status).toBe("active");
+    // The community activation still wrote its own audit entry and its own invite.
+    expect(await db.select().from(activityLogs)).toHaveLength(1);
+    expect(await db.select().from(outbox)).toHaveLength(1);
   });
 });
