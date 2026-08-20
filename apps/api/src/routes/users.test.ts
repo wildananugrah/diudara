@@ -2469,6 +2469,21 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
     ).toBe(400);
   });
 
+  it("503s in Bahasa on a box with no payment provider at all", async () => {
+    // The route stays REGISTERED on such a box — unlike `/c/:slug/checkout`,
+    // which is simply not mounted — so a buyer is told why instead of getting
+    // the 404 of a path that does not exist. Same choice, and the same wording,
+    // as `POST /users/me/payout` above.
+    const deps = bootstrap();
+    const a = createApp({ ...deps, startUserSubscription: undefined });
+    const { buyer, tier } = await seedOffer(a);
+
+    const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toBe("pembayaran belum dikonfigurasi di server ini.");
+  });
+
   it("THE ROW EXISTS BEFORE THE PROVIDER IS CALLED: a failed invoice leaves a pending subscription behind", async () => {
     const deps = bootstrap();
     const a = createApp(deps);
