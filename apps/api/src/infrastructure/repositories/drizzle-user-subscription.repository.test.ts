@@ -179,19 +179,34 @@ describe("DrizzleUserSubscriptionRepository", () => {
       amount: 50_000,
     });
     expect(transaction.gatewayReferenceId).toBe(null);
+    expect(transaction.gatewayInvoiceUrl).toBe(null);
 
-    expect(await subs.attachGatewayReference(transaction.id, "inv-123")).toBe(true);
-    expect((await subs.findTransactionById(transaction.id))?.gatewayReferenceId).toBe("inv-123");
+    expect(
+      await subs.attachGatewayReference(transaction.id, "inv-123", "https://pay.test/inv-123")
+    ).toBe(true);
+    const attached = await subs.findTransactionById(transaction.id);
+    expect(attached?.gatewayReferenceId).toBe("inv-123");
+    expect(attached?.gatewayInvoiceUrl).toBe("https://pay.test/inv-123");
 
-    // The column is the webhook's anchor for `body.id`. Overwriting it would
-    // destroy that, so a second write is refused and the FIRST value stands.
-    expect(await subs.attachGatewayReference(transaction.id, "inv-456")).toBe(false);
-    expect((await subs.findTransactionById(transaction.id))?.gatewayReferenceId).toBe("inv-123");
+    // The reference is the webhook's anchor for `body.id`. Overwriting it would
+    // destroy that, so a second write is refused and the FIRST values stand —
+    // the url with it, since a buyer must keep being handed the invoice that
+    // actually exists at the provider.
+    expect(
+      await subs.attachGatewayReference(transaction.id, "inv-456", "https://pay.test/inv-456")
+    ).toBe(false);
+    const unchanged = await subs.findTransactionById(transaction.id);
+    expect(unchanged?.gatewayReferenceId).toBe("inv-123");
+    expect(unchanged?.gatewayInvoiceUrl).toBe("https://pay.test/inv-123");
   });
 
   it("returns false when attaching a gateway reference to a transaction that does not exist", async () => {
     expect(
-      await subs.attachGatewayReference("00000000-0000-4000-8000-000000000000", "inv-123")
+      await subs.attachGatewayReference(
+        "00000000-0000-4000-8000-000000000000",
+        "inv-123",
+        "https://pay.test/inv-123"
+      )
     ).toBe(false);
   });
 
@@ -219,6 +234,86 @@ describe("DrizzleUserSubscriptionRepository", () => {
 
     expect(paid?.status).toBe("paid");
     expect(paid?.paidAt).toEqual(paidAt);
+  });
+
+  /*
+   * Phase 5a fix round 1, F3. `userTransactionIdFromExternalId` (domain/user-payment.ts)
+   * returns whatever follows the prefix, and an attacker chooses that: `usub_`
+   * yields `""` and `usub_x` yields `"x"`. Task 7's webhook is a PUBLIC endpoint
+   * that will feed exactly this value straight into these reads, and postgres
+   * raises on a malformed uuid — a 500 anyone can trigger at will. Shape-checked
+   * here, exactly as `DrizzleSubscriptionRepository` already shape-checks the
+   * community handler's own `external_id`.
+   */
+  it("answers null — never throws — for an id that cannot be a uuid at all", async () => {
+    for (const junk of ["", "x", "usub_", "not-a-uuid", "00000000-0000-4000-8000-00000000000"]) {
+      expect(await subs.findTransactionById(junk)).toBe(null);
+      expect(await subs.findById(junk)).toBe(null);
+      expect(await subs.attachGatewayReference(junk, "inv-1", "https://x/inv-1")).toBe(false);
+      expect(await subs.findActiveFor(junk, junk)).toBe(null);
+    }
+  });
+
+  it("findPendingCheckout returns the invoice already waiting for this (subscriber, owner) pair", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const subscription = await subs.create({
+      subscriberId: bob.id,
+      tierId: tier.id,
+      ownerId: alice.id,
+    });
+    const transaction = await subs.createTransaction({
+      userSubscriptionId: subscription.id,
+      amount: 50_000,
+    });
+
+    // No invoice yet — nothing is waiting to be paid, so nothing is returned.
+    expect(await subs.findPendingCheckout(bob.id, alice.id)).toBe(null);
+
+    await subs.attachGatewayReference(transaction.id, "inv-1", "https://pay.test/inv-1");
+
+    expect(await subs.findPendingCheckout(bob.id, alice.id)).toEqual({
+      subscriptionId: subscription.id,
+      tierId: tier.id,
+      transactionId: transaction.id,
+      invoiceUrl: "https://pay.test/inv-1",
+    });
+    // Scoped to the pair: neither the other direction nor a third party sees it.
+    expect(await subs.findPendingCheckout(alice.id, bob.id)).toBe(null);
+  });
+
+  it("findPendingCheckout ignores a subscription that is no longer pending", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const subscription = await subs.create({
+      subscriberId: bob.id,
+      tierId: tier.id,
+      ownerId: alice.id,
+    });
+    const transaction = await subs.createTransaction({
+      userSubscriptionId: subscription.id,
+      amount: 50_000,
+    });
+    await subs.attachGatewayReference(transaction.id, "inv-1", "https://pay.test/inv-1");
+
+    await subs.markTransactionPaid(transaction.id, new Date("2026-08-20T00:00:00Z"));
+    await subs.activate(subscription.id, new Date("2099-01-01T00:00:00Z"));
+
+    // Paid and active: `findActiveFor` is what refuses a second purchase now,
+    // and a settled invoice must never be handed back to anybody.
+    expect(await subs.findPendingCheckout(bob.id, alice.id)).toBe(null);
   });
 
   it("REFUSES a subscription whose owner disagrees with its tier's owner", async () => {

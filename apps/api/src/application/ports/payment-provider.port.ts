@@ -4,7 +4,23 @@ export interface CreateInvoiceInput {
   amount: number;
   description: string;
   payerName: string;
-  payerWhatsappNumber: string;
+  /**
+   * OPTIONAL, and absent means "this payer has no number on file" — never an
+   * empty string.
+   *
+   * The community checkout always has one (`startCheckoutSchema` requires it),
+   * but `app_user.whatsapp_number` is NULLABLE: signup validates the number
+   * with that same regex and then marks it `.optional()`, so a person can hold
+   * a personal account, and buy a membership, with an email alone.
+   *
+   * `""` was the first shape `StartUserSubscription` sent and it was wrong
+   * (Phase 5a fix round 1, F1): an empty string is a VALUE that still has to
+   * pass the provider's own format validation, and it is a shape nothing in
+   * this repository had ever sent. Omitting the field is the documented way to
+   * say we do not have one, so the adapter omits `customer.mobile_number`
+   * rather than sending it empty.
+   */
+  payerWhatsappNumber?: string;
   /**
    * The CREATOR's payment-provider account id. Funds settle here, never in a
    * platform account — this is what keeps DIUDARA outside PJP licensing.

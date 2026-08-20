@@ -49,6 +49,14 @@ export interface StartUserSubscriptionResult {
  * paid could not be activated by anything. `StartCheckout` records the same
  * ordering for the same reason.
  *
+ * **A SECOND TAP MUST NOT MINT A SECOND INVOICE.** Refusing an ACTIVE membership
+ * (spec §6) does not cover the buyer who taps "Jadi anggota" twice: nothing
+ * dedupes a PENDING one, so two live invoices used to open, and paying both
+ * charged one person twice for one membership — the second activation hitting
+ * `user_subscription_one_active` as a 500 with the provider retrying behind it,
+ * and 5a has no refund path. So a pending checkout for this pair is handed BACK
+ * rather than replaced. See `findPendingCheckout`.
+ *
  * The `external_id` is namespaced (`domain/user-payment.ts`): Xendit delivers ONE
  * webhook stream and the community handler resolves its own invoices by treating
  * `external_id` as a bare `transaction.id` uuid, so a user-subscription invoice
@@ -150,6 +158,41 @@ export class StartUserSubscription {
       );
     }
 
+    // THE SECOND-TAP GUARD. `findActiveFor` above refuses a membership already
+    // PAID for; this refuses a second INVOICE for one already being paid.
+    // Without it, two taps opened two live invoices, and paying both charged the
+    // buyer twice for one membership — the second activation would then hit
+    // `user_subscription_one_active` as a 500 with the provider retrying behind
+    // it, and 5a has no refund path anywhere in it.
+    //
+    // Only a transaction that actually HAS an invoice url counts as pending, so
+    // an attempt whose provider call failed leaves the buyer free to try again
+    // (see `findPendingCheckout`'s own docstring — there is no way to clear a
+    // pending row in 5a, so a blocking read here would lock them out for good).
+    const pending = await this.subscriptions.findPendingCheckout(input.subscriberId, owner.id);
+    if (pending) {
+      if (pending.tierId !== tier.id) {
+        // A different tier cannot be sold while this invoice is live: opening
+        // one would be the second invoice this guard exists to prevent, and
+        // silently returning the OTHER tier's invoice would charge a price the
+        // buyer did not choose.
+        throw new ConflictError(
+          "Pembayaran keanggotaan untuk kreator ini sedang diproses. Selesaikan dulu " +
+            "pembayaran yang sudah dibuka, atau tunggu tagihannya kedaluwarsa sebelum " +
+            "memilih tingkatan lain."
+        );
+      }
+      // The same tier: hand back the invoice that already exists rather than a
+      // second one. Nothing is created, so this is the one path through this
+      // method that writes nothing at all.
+      return {
+        invoiceUrl: pending.invoiceUrl,
+        subscriptionId: pending.subscriptionId,
+        transactionId: pending.transactionId,
+        externalId: userSubscriptionExternalId(pending.transactionId),
+      };
+    }
+
     const subscriber = await this.users.findById(input.subscriberId);
     if (!subscriber) {
       // The caller authenticated as this id one middleware ago, so this is
@@ -180,12 +223,14 @@ export class StartUserSubscription {
       amount: tier.priceAmount,
       description: `${owner.displayName} — ${tier.name}`,
       payerName: subscriber.displayName,
-      // `app_user.whatsapp_number` is NULLABLE and this field is not: a personal
-      // account can be created with an email alone. The provider uses it to
-      // reach the payer about their own invoice, so an empty string is the
-      // honest "we do not have one" — never a placeholder that would send
-      // somebody else's receipt to a number we made up.
-      payerWhatsappNumber: subscriber.whatsappNumber ?? "",
+      // OMITTED, not empty, when this buyer has no number on file:
+      // `app_user.whatsapp_number` is nullable (signup takes an email alone),
+      // and absent is the documented "we do not have one" while `""` is a value
+      // that still has to pass the provider's format validation. See
+      // `CreateInvoiceInput.payerWhatsappNumber`.
+      ...(subscriber.whatsappNumber === null
+        ? {}
+        : { payerWhatsappNumber: subscriber.whatsappNumber }),
       forAccountId,
       successRedirectUrl: this.profileUrl(owner.handle),
     });
@@ -198,7 +243,16 @@ export class StartUserSubscription {
     // event id at will and walk past the UNIQUE constraint. The community
     // handler measured that hole: 12 concurrent deliveries with 12 distinct
     // `body.id`s all returned 200 and all activated.
-    if (!(await this.subscriptions.attachGatewayReference(transaction.id, invoice.invoiceId))) {
+    if (
+      !(await this.subscriptions.attachGatewayReference(
+        transaction.id,
+        invoice.invoiceId,
+        // Stored, not merely returned: it is what the second-tap guard above
+        // hands back, and a url we did not keep is a url we would have to mint
+        // a second invoice to reproduce.
+        invoice.invoiceUrl
+      ))
+    ) {
       // Only reachable if the column was already set, which cannot happen for a
       // row created two statements ago — so this is a bug, not a race, and
       // swallowing it would leave a transaction the webhook must refuse to

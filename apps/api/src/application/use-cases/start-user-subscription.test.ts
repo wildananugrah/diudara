@@ -202,6 +202,7 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
         amount: input.amount,
         status: "pending",
         gatewayReferenceId: input.gatewayReferenceId ?? null,
+        gatewayInvoiceUrl: null,
         paidAt: null,
         createdAt: new Date("2026-08-20T00:00:00Z"),
       };
@@ -212,11 +213,34 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
       const row = transactions.find((r) => r.id === id);
       return row ? { ...row } : null;
     },
-    async attachGatewayReference(transactionId, gatewayReferenceId) {
+    async attachGatewayReference(transactionId, gatewayReferenceId, invoiceUrl) {
       const row = transactions.find((r) => r.id === transactionId);
       if (!row || row.gatewayReferenceId !== null) return false;
       row.gatewayReferenceId = gatewayReferenceId;
+      row.gatewayInvoiceUrl = invoiceUrl;
       return true;
+    },
+    /** Mirrors the Drizzle query's three predicates, including the invoice-url one. */
+    async findPendingCheckout(subscriberId, ownerId) {
+      const subscription = subscriptions.find(
+        (r) => r.subscriberId === subscriberId && r.ownerId === ownerId && r.status === "pending"
+      );
+      if (!subscription) return null;
+      const transaction = transactions
+        .filter(
+          (t) =>
+            t.userSubscriptionId === subscription.id &&
+            t.status === "pending" &&
+            t.gatewayInvoiceUrl !== null
+        )
+        .at(-1);
+      if (!transaction) return null;
+      return {
+        subscriptionId: subscription.id,
+        tierId: subscription.tierId,
+        transactionId: transaction.id,
+        invoiceUrl: transaction.gatewayInvoiceUrl!,
+      };
     },
     async markTransactionPaid() {
       throw new Error("StartUserSubscription must never settle a transaction — Task 7 does");
@@ -325,14 +349,17 @@ describe("StartUserSubscription — the happy path", () => {
     expect(payments.invoices[0]!.successRedirectUrl).toBe("https://diudara.test/@wildan");
   });
 
-  it("still opens an invoice for a subscriber with no WhatsApp number on file", async () => {
+  it("OMITS the payer's number entirely — never an empty string — when they have none on file", async () => {
     const { useCase, payments } = build({
       users: [userRecord(), subscriberRecord({ whatsappNumber: null })],
     });
 
     await buy(useCase);
 
-    expect(payments.invoices[0]!.payerWhatsappNumber).toBe("");
+    // Absent, not `""`: an empty string is a value the provider still has to
+    // format-validate, and it is a shape nothing else in this repository sends.
+    expect("payerWhatsappNumber" in payments.invoices[0]!).toBe(false);
+    expect(payments.invoices[0]!.payerName).toBe("Rina");
   });
 
   it("resolves a handle typed with a leading @, exactly as the profile route does", async () => {
@@ -501,6 +528,58 @@ describe("StartUserSubscription — the refusals", () => {
 
     expect(subscriptions).toHaveLength(2);
     expect(subscriptions[1]!.ownerId).toBe(OWNER_ID);
+  });
+});
+
+describe("StartUserSubscription — a second tap must not mint a second invoice", () => {
+  it("hands back the invoice already waiting, and creates NO second subscription or transaction", async () => {
+    // Two taps on "Jadi anggota" used to open two live invoices. Pay both and
+    // the second activation hits `user_subscription_one_active` as a 500 with
+    // provider retries behind it — the buyer is simply charged twice, and 5a
+    // has no refund path anywhere.
+    const { useCase, payments, subscriptions, transactions } = build();
+
+    const first = await buy(useCase);
+    const second = await buy(useCase);
+
+    expect(second).toEqual(first);
+    expect(subscriptions).toHaveLength(1);
+    expect(transactions).toHaveLength(1);
+    expect(payments.invoices).toHaveLength(1);
+  });
+
+  it("REFUSES a DIFFERENT tier while an invoice is pending, in Bahasa, rather than opening a second one", async () => {
+    const { useCase, payments, subscriptions, transactions } = build({
+      tiers: [tierRow(), tierRow({ id: "tier-2", name: "Anggota Plus", priceAmount: 100_000 })],
+    });
+    await buy(useCase);
+
+    await expect(buy(useCase, { tierId: "tier-2" })).rejects.toThrow(
+      new ConflictError(
+        "Pembayaran keanggotaan untuk kreator ini sedang diproses. Selesaikan dulu " +
+          "pembayaran yang sudah dibuka, atau tunggu tagihannya kedaluwarsa sebelum " +
+          "memilih tingkatan lain."
+      )
+    );
+    expect(subscriptions).toHaveLength(1);
+    expect(transactions).toHaveLength(1);
+    expect(payments.invoices).toHaveLength(1);
+  });
+
+  it("a pending row whose provider call FAILED does not block a fresh attempt", async () => {
+    // The failed attempt left a pending subscription and transaction with NO
+    // invoice url. Nothing was charged and nothing is waiting to be paid, so
+    // treating it as "a payment is in progress" would lock the buyer out of a
+    // purchase for good — 5a has no way to clear a pending row.
+    const { useCase, payments, transactions } = build();
+    payments.failNextInvoice = true;
+    await expect(buy(useCase)).rejects.toThrow("createInvoice failed");
+
+    const result = await buy(useCase);
+
+    expect(result.invoiceUrl).toBe("https://fake-checkout.local/fake-inv-1");
+    expect(payments.invoices).toHaveLength(1);
+    expect(transactions).toHaveLength(2);
   });
 });
 

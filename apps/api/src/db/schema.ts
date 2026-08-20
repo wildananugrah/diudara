@@ -1029,6 +1029,19 @@ export const userTransactions = pgTable("user_transaction", {
   amount: integer("amount").notNull(),
   status: varchar("status", { length: 16 }).notNull().default("pending"),
   gatewayReferenceId: varchar("gateway_reference_id", { length: 255 }),
+  /**
+   * The provider's own hosted payment page for this transaction, stored so a
+   * buyer who taps "Jadi anggota" twice is handed BACK the invoice already
+   * waiting for them instead of being sold a second one (Phase 5a fix round 1,
+   * F2). Two live invoices for one membership are two chargeable invoices, and
+   * 5a has no refund path.
+   *
+   * Nullable and written in the same statement as `gateway_reference_id`, after
+   * the provider call returns: NULL therefore means "no invoice was ever opened
+   * for this attempt", which is exactly the state a failed provider call leaves
+   * behind and the state that must NOT block a fresh attempt.
+   */
+  gatewayInvoiceUrl: varchar("gateway_invoice_url", { length: 512 }),
   paidAt: timestamp("paid_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

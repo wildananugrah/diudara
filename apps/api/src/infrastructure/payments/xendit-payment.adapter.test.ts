@@ -67,6 +67,42 @@ describe("XenditPaymentAdapter.createInvoice", () => {
     expect(body.success_redirect_url).toContain("sub-1");
   });
 
+  it("sends the payer's number when there is one", async () => {
+    const { calls, fetchFn } = captureFetch({ id: "inv_1", invoice_url: "https://x/inv_1" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    await adapter.createInvoice(INPUT);
+
+    expect(JSON.parse(calls[0].init.body as string).customer).toEqual({
+      given_names: "Siti",
+      mobile_number: "+6281234567890",
+    });
+  });
+
+  /*
+   * Phase 5a fix round 1, F1. `app_user.whatsapp_number` is NULLABLE — signup
+   * validates the number with the same regex the community checkout uses and
+   * then marks it optional — so a personal-membership buyer may genuinely have
+   * none. ABSENT is the documented "no number"; an empty string is a VALUE that
+   * still has to pass Xendit's own format validation, and it is a shape nothing
+   * in this repository has ever sent. So the key is omitted entirely rather
+   * than sent empty.
+   */
+  it("OMITS mobile_number entirely for a payer with no number, rather than sending an empty string", async () => {
+    const { calls, fetchFn } = captureFetch({ id: "inv_1", invoice_url: "https://x/inv_1" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    await adapter.createInvoice({ ...INPUT, payerWhatsappNumber: undefined });
+
+    const customer = JSON.parse(calls[0].init.body as string).customer;
+    expect(customer).toEqual({ given_names: "Siti" });
+    expect("mobile_number" in customer).toBe(false);
+  });
+
   // MINOR, final whole-branch review: CheckoutPage assigns this straight to
   // window.location.href. The source is our own API, so the risk is low — but
   // "low" rests entirely on this check.

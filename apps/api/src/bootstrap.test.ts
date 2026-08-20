@@ -291,6 +291,9 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   async attachGatewayReference() {
     return false;
   },
+  async findPendingCheckout() {
+    return null;
+  },
   async markTransactionPaid() {
     return null;
   },

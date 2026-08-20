@@ -2469,6 +2469,45 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
     ).toBe(400);
   });
 
+  it("A SECOND TAP hands back the SAME invoice — one transaction row, one invoice at the provider", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { buyer, tier } = await seedOffer(a);
+
+    const first = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+    const second = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(await second.json()).toEqual(await first.json());
+    // Two live invoices for one membership are two chargeable invoices, and
+    // there is no refund path anywhere in 5a.
+    expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(1);
+    expect(await db.select().from(userSubscriptions)).toHaveLength(1);
+    expect(await db.select().from(userTransactions)).toHaveLength(1);
+  });
+
+  it("REFUSES a different tier while an invoice is pending, in Bahasa", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { owner, buyer, tier } = await seedOffer(a);
+    const other = await (
+      await postTier(a, owner.token, { name: "Anggota Plus", priceAmount: 100_000 })
+    ).json();
+    await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+    const res = await subscribe(a, buyer.token, "wildan", { tierId: other.id });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe(
+      "Pembayaran keanggotaan untuk kreator ini sedang diproses. Selesaikan dulu " +
+        "pembayaran yang sudah dibuka, atau tunggu tagihannya kedaluwarsa sebelum " +
+        "memilih tingkatan lain."
+    );
+    expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(1);
+    expect(await db.select().from(userTransactions)).toHaveLength(1);
+  });
+
   it("503s in Bahasa on a box with no payment provider at all", async () => {
     // The route stays REGISTERED on such a box — unlike `/c/:slug/checkout`,
     // which is simply not mounted — so a buyer is told why instead of getting

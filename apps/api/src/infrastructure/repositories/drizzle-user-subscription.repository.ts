@@ -1,11 +1,25 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { userSubscriptions, userTransactions } from "../../db/schema";
 import type {
+  PendingUserCheckout,
   UserSubscriptionRepositoryPort,
   UserSubscriptionRow,
   UserTransactionRow,
 } from "../../application/ports/user-subscription-repository.port";
+
+/**
+ * Every id that reaches this repository from OUTSIDE is shape-checked against
+ * this before it reaches the driver, exactly as `DrizzleSubscriptionRepository`
+ * does for the community flow.
+ *
+ * Postgres raises on a malformed uuid, and Task 7's webhook — a PUBLIC endpoint
+ * — resolves its transaction id by slicing a prefix off an attacker-chosen
+ * `external_id`: `usub_` yields `""` and `usub_x` yields `"x"`. Unshaped, each
+ * of those is a 500 anybody can trigger at will. A miss must read as `null`,
+ * which is exactly what "no such row" is.
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class DrizzleUserSubscriptionRepository implements UserSubscriptionRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
@@ -27,6 +41,9 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
   }
 
   async findById(id: string): Promise<UserSubscriptionRow | null> {
+    if (!UUID_PATTERN.test(id)) {
+      return null;
+    }
     const [row] = await this.db
       .select()
       .from(userSubscriptions)
@@ -54,6 +71,9 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
   }
 
   async findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null> {
+    if (!UUID_PATTERN.test(subscriberId) || !UUID_PATTERN.test(ownerId)) {
+      return null;
+    }
     const [row] = await this.db
       .select()
       .from(userSubscriptions)
@@ -85,6 +105,9 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
   }
 
   async findTransactionById(id: string): Promise<UserTransactionRow | null> {
+    if (!UUID_PATTERN.test(id)) {
+      return null;
+    }
     const [row] = await this.db
       .select()
       .from(userTransactions)
@@ -100,11 +123,15 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
    */
   async attachGatewayReference(
     transactionId: string,
-    gatewayReferenceId: string
+    gatewayReferenceId: string,
+    invoiceUrl: string
   ): Promise<boolean> {
+    if (!UUID_PATTERN.test(transactionId)) {
+      return false;
+    }
     const rows = await this.db
       .update(userTransactions)
-      .set({ gatewayReferenceId })
+      .set({ gatewayReferenceId, gatewayInvoiceUrl: invoiceUrl })
       .where(
         and(
           eq(userTransactions.id, transactionId),
@@ -113,6 +140,55 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
       )
       .returning({ id: userTransactions.id });
     return rows.length > 0;
+  }
+
+  /**
+   * ONE query, joining the pair's pending subscription to its pending
+   * transaction — see the port's docstring for the double-charge this exists to
+   * prevent. `isNotNull(gatewayInvoiceUrl)` is the load-bearing predicate: a
+   * transaction with no invoice url is an attempt whose provider call failed,
+   * and treating that as "a payment is already in progress" would lock the
+   * buyer out of a purchase nobody ever charged them for.
+   */
+  async findPendingCheckout(
+    subscriberId: string,
+    ownerId: string
+  ): Promise<PendingUserCheckout | null> {
+    if (!UUID_PATTERN.test(subscriberId) || !UUID_PATTERN.test(ownerId)) {
+      return null;
+    }
+    const [row] = await this.db
+      .select({
+        subscriptionId: userSubscriptions.id,
+        tierId: userSubscriptions.tierId,
+        transactionId: userTransactions.id,
+        invoiceUrl: userTransactions.gatewayInvoiceUrl,
+      })
+      .from(userSubscriptions)
+      .innerJoin(
+        userTransactions,
+        eq(userTransactions.userSubscriptionId, userSubscriptions.id)
+      )
+      .where(
+        and(
+          eq(userSubscriptions.subscriberId, subscriberId),
+          eq(userSubscriptions.ownerId, ownerId),
+          eq(userSubscriptions.status, "pending"),
+          eq(userTransactions.status, "pending"),
+          isNotNull(userTransactions.gatewayInvoiceUrl)
+        )
+      )
+      // Newest first: if an earlier attempt somehow left more than one, the
+      // invoice we hand back is the one most recently opened.
+      .orderBy(desc(userTransactions.createdAt))
+      .limit(1);
+    if (!row || row.invoiceUrl === null) return null;
+    return {
+      subscriptionId: row.subscriptionId,
+      tierId: row.tierId,
+      transactionId: row.transactionId,
+      invoiceUrl: row.invoiceUrl,
+    };
   }
 
   async markTransactionPaid(id: string, paidAt: Date): Promise<UserTransactionRow | null> {
