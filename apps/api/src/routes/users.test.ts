@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { db } from "../db/client";
-import { appUsers } from "../db/schema";
+import { appUsers, userSubscriptions, userTransactions } from "../db/schema";
 import { resetDatabase } from "../db/test-helpers";
 import { FakeEmailAdapter } from "../infrastructure/email/fake-email.adapter";
 import { FakeMessagingAdapter } from "../infrastructure/messaging/fake-messaging.adapter";
@@ -13,6 +13,7 @@ import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import { clientIp } from "./users";
 import { isReservedHandle, isValidHandle } from "../domain/handle";
 import { DrizzleUserSubscriptionRepository } from "../infrastructure/repositories/drizzle-user-subscription.repository";
+import type { FakePaymentAdapter } from "../infrastructure/payments/fake-payment.adapter";
 
 beforeEach(resetDatabase);
 
@@ -2189,5 +2190,313 @@ describe("GET/POST /users/me/tiers and PATCH /users/me/tiers/:tierId", () => {
     const res = await patchTier(a, token, created.id, { isActive: true });
 
     expect(res.status).toBe(400);
+  });
+});
+
+/**
+ * Task 6 of Phase 5a — `POST /users/:handle/subscribe`, the moment money
+ * actually moves. Nothing here contacts Xendit: `bootstrap()` wires
+ * `FakePaymentAdapter` under NODE_ENV=test, and these tests read the calls it
+ * recorded.
+ */
+describe("POST /users/:handle/subscribe (Task 6)", () => {
+  /**
+   * The provisioning sentinel as a LITERAL, never the imported constant —
+   * same rule the payout and tier suites above follow.
+   */
+  const SENTINEL = "provisioning:in-progress";
+  /** The `external_id` prefix as a LITERAL. Task 7's webhook routes on it. */
+  const PREFIX = "usub_";
+
+  /** Signs up, logs in, and returns both the bearer token and the user's id. */
+  async function account(a: ReturnType<typeof app>, overrides: Partial<typeof VALID> = {}) {
+    const acc = { ...VALID, ...overrides };
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(acc),
+    });
+    const res = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: acc.email, password: acc.password }),
+    });
+    const body = (await res.json()) as { token: string; user: { id: string } };
+    return { token: body.token, userId: body.user.id };
+  }
+
+  const RINA = { handle: "rina", email: "rina@example.com" };
+
+  function connectPayout(a: ReturnType<typeof app>, token: string) {
+    return a.request("/users/me/payout", { method: "POST", headers: authed(token) });
+  }
+
+  function postTier(a: ReturnType<typeof app>, token: string, body: unknown) {
+    return a.request("/users/me/tiers", {
+      method: "POST",
+      headers: { ...authed(token), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function subscribe(
+    a: ReturnType<typeof app>,
+    token: string | null,
+    handle: string,
+    body: unknown
+  ) {
+    return a.request(`/users/${handle}/subscribe`, {
+      method: "POST",
+      headers: {
+        ...(token === null ? {} : authed(token)),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** An owner with a connected payout account and one published tier, plus a buyer. */
+  async function seedOffer(a: ReturnType<typeof app>) {
+    const owner = await account(a);
+    await connectPayout(a, owner.token);
+    const tier = await (
+      await postTier(a, owner.token, { name: "Anggota", priceAmount: 50_000 })
+    ).json();
+    const buyer = await account(a, RINA);
+    return { owner, buyer, tier };
+  }
+
+  it("requires a session: a signed-out visitor is a 401, and no invoice is opened", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { tier } = await seedOffer(a);
+
+    const res = await subscribe(a, null, "wildan", { tierId: tier.id });
+
+    expect(res.status).toBe(401);
+    expect((deps.payments as FakePaymentAdapter).invoices).toEqual([]);
+  });
+
+  it("opens the invoice against THE OWNER's sub-account and creates a pending subscription and transaction", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { owner, buyer, tier } = await seedOffer(a);
+
+    const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(Object.keys(body).sort()).toEqual([
+      "externalId",
+      "invoiceUrl",
+      "subscriptionId",
+      "transactionId",
+    ]);
+
+    const subscriptions = new DrizzleUserSubscriptionRepository(db);
+    const subscription = await subscriptions.findById(body.subscriptionId);
+    expect(subscription).toMatchObject({
+      subscriberId: buyer.userId,
+      ownerId: owner.userId,
+      tierId: tier.id,
+      status: "pending",
+      currentPeriodEnd: null,
+    });
+    const transaction = await subscriptions.findTransactionById(body.transactionId);
+    expect(transaction).toMatchObject({
+      userSubscriptionId: body.subscriptionId,
+      amount: 50_000,
+      status: "pending",
+      paidAt: null,
+    });
+
+    const payments = deps.payments as FakePaymentAdapter;
+    expect(payments.invoices).toHaveLength(1);
+    const ownerAccountId = (await deps.userPayoutRepository.findPayoutAccount(owner.userId))
+      ?.xenditAccountId;
+    expect(ownerAccountId).not.toBe(SENTINEL);
+    expect(payments.invoices[0].forAccountId).toBe(ownerAccountId!);
+    expect(payments.invoices[0].amount).toBe(50_000);
+    // The namespaced external id, and the provider's invoice id recorded back
+    // against our transaction — the anchor Task 7's webhook verifies `body.id`
+    // against.
+    expect(payments.invoices[0].externalId).toBe(`${PREFIX}${body.transactionId}`);
+    expect(body.externalId).toBe(`${PREFIX}${body.transactionId}`);
+    expect(transaction?.gatewayReferenceId).toBe("fake-inv-1");
+    // Back to the seller's profile after paying, never stranded on Xendit's receipt.
+    expect(payments.invoices[0].successRedirectUrl).toBe(`${deps.appBaseUrl}/@wildan`);
+  });
+
+  it("REFUSES subscribing to yourself, in Bahasa, without touching the provider", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { owner, tier } = await seedOffer(a);
+
+    const res = await subscribe(a, owner.token, "wildan", { tierId: tier.id });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe(
+      "Anda tidak dapat berlangganan ke diri sendiri. Bagikan tautan profil Anda " +
+        "agar orang lain dapat menjadi anggota."
+    );
+    expect((deps.payments as FakePaymentAdapter).invoices).toEqual([]);
+  });
+
+  it("REFUSES a tier the owner has withdrawn from sale, in Bahasa naming the remedy", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { owner, buyer, tier } = await seedOffer(a);
+    await a.request(`/users/me/tiers/${tier.id}`, {
+      method: "PATCH",
+      headers: { ...authed(owner.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ isActive: false }),
+    });
+
+    const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe(
+      "Tingkatan keanggotaan ini sudah tidak ditawarkan lagi. Pilih tingkatan lain " +
+        "yang masih tersedia di profil kreator ini."
+    );
+    expect((deps.payments as FakePaymentAdapter).invoices).toEqual([]);
+  });
+
+  it("REFUSES an owner with NO payout account, in Bahasa naming the remedy", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const owner = await account(a);
+    // Seeded through the repository, which has no payout gate: `POST
+    // /users/me/tiers` refuses to publish a tier without a connected account
+    // (Task 4), so this state cannot be reached over HTTP — and it is exactly
+    // the state a buyer must not be charged in.
+    const tier = await deps.userTierRepository.create({
+      ownerId: owner.userId,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const buyer = await account(a, RINA);
+
+    const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe(
+      "Kreator ini belum siap menerima pembayaran. Minta mereka menghubungkan akun " +
+        "pembayaran di Pengaturan terlebih dahulu."
+    );
+    expect((deps.payments as FakePaymentAdapter).invoices).toEqual([]);
+  });
+
+  it("THE SENTINEL IS NOT AN ACCOUNT: a MID-PROVISIONING owner's tier cannot be bought", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const owner = await account(a);
+    // The column now holds `provisioning:in-progress` — TRUTHY, but not an
+    // account id. `if (owner.xenditAccountId)` would pass here and send that
+    // literal string to the provider as `for_account_id`.
+    expect(await deps.userPayoutRepository.beginXenditAccountProvisioning(owner.userId)).toBe(true);
+    expect(
+      (await deps.userPayoutRepository.findPayoutAccount(owner.userId))?.xenditAccountId
+    ).toBe(SENTINEL);
+    const tier = await deps.userTierRepository.create({
+      ownerId: owner.userId,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const buyer = await account(a, RINA);
+
+    const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+    expect(res.status).toBe(409);
+    // Nothing reached the provider AT ALL — not an invoice with the sentinel in
+    // it, not an invoice at all.
+    expect((deps.payments as FakePaymentAdapter).invoices).toEqual([]);
+    expect(await db.select().from(userSubscriptions)).toEqual([]);
+  });
+
+  it("REFUSES a second membership to the same owner CLEANLY — a 409, not the unique index's 500", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { buyer, tier } = await seedOffer(a);
+    const first = await (await subscribe(a, buyer.token, "wildan", { tierId: tier.id })).json();
+    // Task 7's webhook is what activates this in production; here it is the
+    // precondition, so it is set directly.
+    const subscriptions = new DrizzleUserSubscriptionRepository(db);
+    await subscriptions.activate(first.subscriptionId, new Date("2099-01-01T00:00:00Z"));
+
+    const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe(
+      "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah " +
+        "masa aktif — jika Anda belum bisa melihat kontennya, hubungi kreator tersebut."
+    );
+    // One subscription, and ONE invoice — the refusal created no second pending
+    // row for a payment nobody should be making.
+    expect(await db.select().from(userSubscriptions)).toHaveLength(1);
+    expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(1);
+  });
+
+  it("404s an unknown handle, and 404s a tier belonging to someone else", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { buyer, tier } = await seedOffer(a);
+    const other = await account(a, { handle: "budi", email: "budi@example.com" });
+    await connectPayout(a, other.token);
+
+    expect((await subscribe(a, buyer.token, "tidakada", { tierId: tier.id })).status).toBe(404);
+    // `wildan`'s handle with `budi`'s... in fact with a tier that is wildan's,
+    // asked of budi's profile: the tier is real, the owner is not its owner.
+    expect((await subscribe(a, buyer.token, "budi", { tierId: tier.id })).status).toBe(404);
+    expect((deps.payments as FakePaymentAdapter).invoices).toEqual([]);
+  });
+
+  it("400s a body with no tier id at all", async () => {
+    const a = app();
+    const { buyer } = await seedOffer(a);
+
+    expect((await subscribe(a, buyer.token, "wildan", {})).status).toBe(400);
+    expect(
+      (
+        await a.request("/users/wildan/subscribe", {
+          method: "POST",
+          headers: { ...authed(buyer.token), "Content-Type": "application/json" },
+          body: "not json",
+        })
+      ).status
+    ).toBe(400);
+  });
+
+  it("THE ROW EXISTS BEFORE THE PROVIDER IS CALLED: a failed invoice leaves a pending subscription behind", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const { owner, buyer, tier } = await seedOffer(a);
+    (deps.payments as FakePaymentAdapter).failNextInvoice = true;
+
+    const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+    expect(res.status).toBe(500);
+    // The reverse ordering would leave a live invoice at Xendit whose
+    // external_id resolves to nothing. This way the attempt is inspectable and
+    // nothing was charged.
+    const rows = await db.select().from(userSubscriptions);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      subscriberId: buyer.userId,
+      ownerId: owner.userId,
+      status: "pending",
+    });
+    const txns = await db.select().from(userTransactions);
+    expect(txns).toHaveLength(1);
+    expect(txns[0]).toMatchObject({
+      userSubscriptionId: rows[0]!.id,
+      amount: 50_000,
+      status: "pending",
+      // No invoice was opened, so there is nothing to anchor on — exactly the
+      // state Task 7 must treat as unverifiable rather than as paid.
+      gatewayReferenceId: null,
+    });
   });
 });

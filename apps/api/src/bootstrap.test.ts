@@ -69,6 +69,7 @@ import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-acc
 import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
 import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
 import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
+import { StartUserSubscription } from "./application/use-cases/start-user-subscription";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
@@ -90,6 +91,7 @@ import type {
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { UserPayoutRepositoryPort } from "./application/ports/user-payout-repository.port";
 import type { UserTierRepositoryPort } from "./application/ports/user-tier-repository.port";
+import type { UserSubscriptionRepositoryPort } from "./application/ports/user-subscription-repository.port";
 import type { FollowRepositoryPort } from "./application/ports/follow-repository.port";
 import type { PostRepositoryPort } from "./application/ports/post-repository.port";
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
@@ -259,6 +261,37 @@ const fakeUserTierRepository: UserTierRepositoryPort = {
     return [];
   },
   async deactivate() {
+    return null;
+  },
+};
+
+/** Task 2 of Phase 5a's `user_subscription`/`user_transaction` tables, faked the same shallow way `fakeUserTierRepository` above is. */
+const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
+  async create() {
+    throw new Error("not used");
+  },
+  async findById() {
+    return null;
+  },
+  async activate() {
+    return null;
+  },
+  async cancel() {
+    return null;
+  },
+  async findActiveFor() {
+    return null;
+  },
+  async createTransaction() {
+    throw new Error("not used");
+  },
+  async findTransactionById() {
+    return null;
+  },
+  async attachGatewayReference() {
+    return false;
+  },
+  async markTransactionPaid() {
     return null;
   },
 };
@@ -795,6 +828,14 @@ describe("Dependencies (composition root contract)", () => {
       connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
       getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
       manageUserTiers: new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository),
+      startUserSubscription: new StartUserSubscription(
+        fakeUserRepository,
+        fakeUserTierRepository,
+        fakeUserPayoutRepository,
+        fakeUserSubscriptionRepository,
+        fakePaymentProvider,
+        { appBaseUrl: "https://app.diudara.test" }
+      ),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository
@@ -1017,6 +1058,14 @@ describe("Dependencies (composition root contract)", () => {
       connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
       getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
       manageUserTiers: new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository),
+      startUserSubscription: new StartUserSubscription(
+        fakeUserRepository,
+        fakeUserTierRepository,
+        fakeUserPayoutRepository,
+        fakeUserSubscriptionRepository,
+        fakePaymentProvider,
+        { appBaseUrl: "https://app.diudara.test" }
+      ),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository

@@ -43,6 +43,8 @@ import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
 import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
 import { DrizzleUserTierRepository } from "./infrastructure/repositories/drizzle-user-tier.repository";
 import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
+import { DrizzleUserSubscriptionRepository } from "./infrastructure/repositories/drizzle-user-subscription.repository";
+import { StartUserSubscription } from "./application/use-cases/start-user-subscription";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
@@ -330,6 +332,16 @@ export interface Dependencies {
    * of whether payments are configured on this box.
    */
   manageUserTiers: ManageUserTiers;
+  /**
+   * Task 6 of Phase 5a. `POST /users/:handle/subscribe` — the moment money
+   * moves on a personal profile. `undefined` EXACTLY when `payments` is `null`,
+   * mirroring `connectUserPayout` and `startCheckout`: there is no
+   * `PaymentProviderPort` to construct it against on a box with payments
+   * disabled. Unlike `startCheckout`, whose route is simply not registered,
+   * `routes/users.ts` keeps this route registered and answers 503 — the same
+   * choice `POST /users/me/payout` already makes on this router.
+   */
+  startUserSubscription: StartUserSubscription | undefined;
   getPublicCommunity: GetPublicCommunity;
   /**
    * `POST /c/:slug/checkout`. `undefined` EXACTLY when `payments` is `null` —
@@ -2008,6 +2020,24 @@ export function bootstrap(): Dependencies {
       )
     : undefined;
 
+  // Task 6 of Phase 5a. `undefined` on the same condition `startCheckout` above
+  // is, and for the same reason — but the ROUTE stays registered and answers
+  // 503, see this field's own docstring on `Dependencies`. Its own repository
+  // over `user_subscription`/`user_transaction`, constructed here beside its
+  // only consumer: nothing else in this process reads those two tables yet
+  // (Task 7's webhook will).
+  const userSubscriptionRepository = new DrizzleUserSubscriptionRepository(db);
+  const startUserSubscription = payments
+    ? new StartUserSubscription(
+        userRepository,
+        userTierRepository,
+        userPayoutRepository,
+        userSubscriptionRepository,
+        payments,
+        { appBaseUrl }
+      )
+    : undefined;
+
   // Task 3 (free communities): constructed UNCONDITIONALLY, unlike
   // `startCheckout` above — see `Dependencies.requestToJoin`'s own docstring
   // for why a community's `accessMode`, not this deployment's payment
@@ -2338,6 +2368,7 @@ export function bootstrap(): Dependencies {
     connectUserPayout,
     getUserPayoutStatus,
     manageUserTiers,
+    startUserSubscription,
     getPublicCommunity,
     startCheckout,
     requestToJoin,

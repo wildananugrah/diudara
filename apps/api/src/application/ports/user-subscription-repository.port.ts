@@ -52,6 +52,22 @@ export interface UserSubscriptionRepositoryPort {
     gatewayReferenceId?: string | null;
   }): Promise<UserTransactionRow>;
   findTransactionById(id: string): Promise<UserTransactionRow | null>;
+  /**
+   * Records the provider's own invoice id against a transaction we already
+   * created, so Task 7's webhook has something of OURS to check the delivered
+   * `body.id` against.
+   *
+   * Written AFTER the invoice exists, and therefore as a second statement:
+   * `StartUserSubscription` creates the rows BEFORE calling the provider (a
+   * failed call must leave a pending row, never a live invoice pointing at
+   * nothing), so the id it anchors on cannot be known at insert time.
+   *
+   * False when the transaction does not exist or already carries a reference —
+   * the column is written exactly once, and overwriting it would destroy the
+   * anchor. Mirrors `SubscriptionRepositoryPort.attachGatewayReference`, whose
+   * own docstring records why the community webhook fails closed without it.
+   */
+  attachGatewayReference(transactionId: string, gatewayReferenceId: string): Promise<boolean>;
   /** Flips a transaction to `paid` and records when. */
   markTransactionPaid(id: string, paidAt: Date): Promise<UserTransactionRow | null>;
 }

@@ -154,6 +154,28 @@ function parsePatchUserTierBody(raw: unknown): { isActive: false } {
 }
 
 /**
+ * `POST /users/:handle/subscribe`'s body — SHAPE only, exactly as
+ * `createUserTierSchema` above is. Every rule that decides whether this
+ * purchase may happen (the tier is active and belongs to this owner, the owner
+ * can be paid, the buyer is not the owner and is not already a member) is
+ * `StartUserSubscription`'s, and none of it can be expressed here.
+ *
+ * `tierId` is the ONLY field. The amount is read from the tier server-side and
+ * never accepted from a client — it is what Task 7's webhook compares the
+ * provider's claimed amount against, so a client-supplied price would make that
+ * comparison meaningless. The buyer is the SESSION, never the body.
+ */
+const subscribeSchema = z.object({ tierId: uuidParam });
+
+function parseSubscribeBody(raw: unknown): { tierId: string } {
+  const parsed = subscribeSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new ValidationError("Pilih tingkatan keanggotaan yang ingin Anda beli.");
+  }
+  return parsed.data;
+}
+
+/**
  * The caller's IP, recorded (hashed) against every password-reset request
  * for forensic/audit value — see `RequestPasswordReset`'s own docstring for
  * why it is NO LONGER used to enforce a rate limit (review finding F4).
@@ -225,6 +247,7 @@ export function userRoutes(
     | "connectUserPayout"
     | "getUserPayoutStatus"
     | "manageUserTiers"
+    | "startUserSubscription"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -457,6 +480,47 @@ export function userRoutes(
       action: "unfollow",
     });
     return c.json(result, 200);
+  });
+
+  /**
+   * Task 6 of Phase 5a (spec §6) — buying a membership from a person, and the
+   * moment money actually moves.
+   *
+   * Behind `requireAuth`: buying is signed-in only, so a signed-out visitor
+   * pressing "Jadi anggota" gets a 401 and is sent to Masuk first. The buyer is
+   * therefore `c.get("userId")` — the session — and never anything in the body,
+   * which carries only the tier id.
+   *
+   * DYNAMIC, like the follow routes above it: `/:handle/subscribe` cannot
+   * shadow, and cannot be shadowed by, any of this router's static paths, since
+   * Hono ranks static segments above dynamic ones.
+   *
+   * 201, not 200: this call CREATES a pending subscription and a pending
+   * transaction, which outlive the response whether or not the buyer ever pays
+   * the invoice. Same status the dashboard's `POST /c/:slug/checkout` returns
+   * for the same reason.
+   */
+  app.post<"/:handle/subscribe">("/:handle/subscribe", requireAuth, async (c) => {
+    // `undefined` EXACTLY when this box has no payment provider at all — same
+    // 503 and the same wording as `POST /users/me/payout` above. The route stays
+    // registered either way, unlike `/c/:slug/checkout`, so a buyer is told why
+    // rather than getting the 404 of a path that does not exist.
+    if (!deps.startUserSubscription) {
+      throw new ServiceUnavailableError("pembayaran belum dikonfigurasi di server ini.");
+    }
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      throw new ValidationError("Isi permintaan harus berupa JSON yang valid.");
+    }
+    const { tierId } = parseSubscribeBody(raw);
+    const result = await deps.startUserSubscription.execute({
+      subscriberId: c.get("userId"),
+      handle: c.req.param("handle"),
+      tierId,
+    });
+    return c.json(result, 201);
   });
 
   // Task 2. Public, like `by-handle/:handle` — anyone can browse who follows

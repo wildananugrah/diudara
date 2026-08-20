@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { userSubscriptions, userTransactions } from "../../db/schema";
 import type {
@@ -91,6 +91,28 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
       .where(eq(userTransactions.id, id))
       .limit(1);
     return row ?? null;
+  }
+
+  /**
+   * Conditional on the column still being NULL, so the reference is written
+   * exactly once — see the port's own docstring for why overwriting it would
+   * destroy the anchor Task 7's webhook checks the delivered `body.id` against.
+   */
+  async attachGatewayReference(
+    transactionId: string,
+    gatewayReferenceId: string
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(userTransactions)
+      .set({ gatewayReferenceId })
+      .where(
+        and(
+          eq(userTransactions.id, transactionId),
+          isNull(userTransactions.gatewayReferenceId)
+        )
+      )
+      .returning({ id: userTransactions.id });
+    return rows.length > 0;
   }
 
   async markTransactionPaid(id: string, paidAt: Date): Promise<UserTransactionRow | null> {

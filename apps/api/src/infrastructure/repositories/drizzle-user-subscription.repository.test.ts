@@ -160,6 +160,41 @@ describe("DrizzleUserSubscriptionRepository", () => {
     expect(await subs.findTransactionById(created.id)).toEqual(created);
   });
 
+  it("attaches the gateway reference ONCE — a second attempt is refused, not an overwrite", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const subscription = await subs.create({
+      subscriberId: bob.id,
+      tierId: tier.id,
+      ownerId: alice.id,
+    });
+    const transaction = await subs.createTransaction({
+      userSubscriptionId: subscription.id,
+      amount: 50_000,
+    });
+    expect(transaction.gatewayReferenceId).toBe(null);
+
+    expect(await subs.attachGatewayReference(transaction.id, "inv-123")).toBe(true);
+    expect((await subs.findTransactionById(transaction.id))?.gatewayReferenceId).toBe("inv-123");
+
+    // The column is the webhook's anchor for `body.id`. Overwriting it would
+    // destroy that, so a second write is refused and the FIRST value stands.
+    expect(await subs.attachGatewayReference(transaction.id, "inv-456")).toBe(false);
+    expect((await subs.findTransactionById(transaction.id))?.gatewayReferenceId).toBe("inv-123");
+  });
+
+  it("returns false when attaching a gateway reference to a transaction that does not exist", async () => {
+    expect(
+      await subs.attachGatewayReference("00000000-0000-4000-8000-000000000000", "inv-123")
+    ).toBe(false);
+  });
+
   it("marks a transaction paid, setting status and paid_at", async () => {
     const alice = await createUser("alice");
     const bob = await createUser("bob");
