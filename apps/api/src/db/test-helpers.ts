@@ -28,6 +28,8 @@ import {
   postMedia,
   posts,
   userTiers,
+  userSubscriptions,
+  userTransactions,
 } from "./schema";
 
 /**
@@ -109,6 +111,12 @@ export async function resetDatabase() {
   await db.delete(postMedia);
   // post references app_user (author), so it must clear before app_user.
   await db.delete(posts);
+  // userTransactions references userSubscriptions, which references both
+  // app_user (subscriber, owner) and userTiers, so the clear order here is
+  // userTransactions, then userSubscriptions, then userTiers, then app_user —
+  // Task 2 of Phase 5a.
+  await db.delete(userTransactions);
+  await db.delete(userSubscriptions);
   // userTiers references app_user (owner) — Task 1 of Phase 5a — so it must
   // clear before app_user too.
   await db.delete(userTiers);

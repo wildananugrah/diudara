@@ -11,6 +11,7 @@ import {
   index,
   uniqueIndex,
   check,
+  foreignKey,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -956,3 +957,66 @@ export const userTiers = pgTable(
     uniqueIndex("user_tier_id_owner_unique").on(table.id, table.ownerId),
   ]
 );
+
+/**
+ * Task 2 of Phase 5a: what a paid membership actually is — one row per
+ * (subscriber, owner) relationship over time. Separate from, and unrelated
+ * to, `subscription` under `/dashboard/*`.
+ */
+export const userSubscriptions = pgTable(
+  "user_subscription",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subscriberId: uuid("subscriber_id")
+      .notNull()
+      .references(() => appUsers.id),
+    tierId: uuid("tier_id").notNull(),
+    /**
+     * DENORMALISED from the tier, and kept honest by the composite foreign key
+     * below rather than by anyone remembering. Phase 6 asks "is this viewer a
+     * member of that person" on every gated post, and that must be one index
+     * hit, not a join through the tier.
+     */
+    ownerId: uuid("owner_id")
+      .notNull()
+      .references(() => appUsers.id),
+    /** `pending` | `active` | `cancelled`. 5b adds `past_due` and `churned`. */
+    status: varchar("status", { length: 16 }).notNull().default("pending"),
+    currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // The whole point of `user_tier_id_owner_unique`: a subscription whose
+    // owner disagrees with its tier's owner CANNOT BE INSERTED. No trigger, no
+    // application invariant anyone can forget.
+    foreignKey({
+      columns: [table.tierId, table.ownerId],
+      foreignColumns: [userTiers.id, userTiers.ownerId],
+      name: "user_subscription_tier_owner_fk",
+    }),
+    // You cannot subscribe to yourself, exactly as `follow_no_self` forbids
+    // following yourself.
+    check("user_subscription_no_self", sql`${table.subscriberId} <> ${table.ownerId}`),
+    // Nobody holds two live memberships to the same person — which is the
+    // shape of accidentally paying twice.
+    uniqueIndex("user_subscription_one_active")
+      .on(table.subscriberId, table.ownerId)
+      .where(sql`${table.status} = 'active'`),
+    index("user_subscription_owner_idx").on(table.ownerId),
+  ]
+);
+
+export const userTransactions = pgTable("user_transaction", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userSubscriptionId: uuid("user_subscription_id")
+    .notNull()
+    .references(() => userSubscriptions.id),
+  // What WE believe is owed. The webhook compares the provider's claim against
+  // this and never the other way round — see `handle-payment-webhook.ts`'s own
+  // docstring for why that direction is the security property.
+  amount: integer("amount").notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("pending"),
+  gatewayReferenceId: varchar("gateway_reference_id", { length: 255 }),
+  paidAt: timestamp("paid_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
