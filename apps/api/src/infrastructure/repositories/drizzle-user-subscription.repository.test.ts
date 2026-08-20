@@ -49,6 +49,29 @@ async function seedActiveSubscription({ periodEnd }: { periodEnd: Date }) {
   return { subscriberId: bob.id, ownerId: alice.id, tierId: tier.id };
 }
 
+/**
+ * A fresh (subscriber, owner) pair whose subscription was activated with
+ * `current_period_end = periodEnd` and then CANCELLED — a row that is no
+ * longer active but whose period date is (or can be) in the past. Proves
+ * `retireExpired`/`listExpiredActive` key off `status = 'active'` and not
+ * merely off the date: a cancelled row with a lapsed period must never be
+ * retired or listed, unlike an active one with the same date.
+ */
+async function seedCancelledSubscription({ periodEnd }: { periodEnd: Date }) {
+  const alice = await createUser("alice");
+  const bob = await createUser("bob");
+  const tier = await tiers.create({
+    ownerId: alice.id,
+    name: "Anggota",
+    priceAmount: 50_000,
+    billingCycle: "monthly",
+  });
+  const created = await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+  await subs.activate(created.id, periodEnd);
+  await subs.cancel(created.id);
+  return { subscriberId: bob.id, ownerId: alice.id, id: created.id };
+}
+
 // Literal, not derived from the implementation — PAST and FUTURE straddle NOW
 // on either side of the `<=` boundary `retireExpired` and `listExpiredActive`
 // both use.
@@ -640,5 +663,25 @@ describe("DrizzleUserSubscriptionRepository", () => {
     const result = await subs.listExpiredActive(NOW, 10);
 
     expect(result.map((row) => row.id)).toEqual([expiredRow!.id]);
+  });
+
+  // Fix round 1 — Important finding. The date predicate alone is not enough:
+  // a cancelled row can carry a `current_period_end` that is just as lapsed
+  // as an active one's. `status = 'active'` is what keeps `retireExpired` and
+  // `listExpiredActive` from touching it, and neither test above reddens if
+  // that predicate is deleted, because neither seeds a non-active row at all.
+  it("does NOT retire a CANCELLED subscription whose period has passed", async () => {
+    const { subscriberId, ownerId, id } = await seedCancelledSubscription({ periodEnd: PAST });
+
+    expect(await subs.retireExpired(subscriberId, ownerId, NOW)).toBe(false);
+
+    const row = await subs.findById(id);
+    expect(row?.status).toBe("cancelled");
+  });
+
+  it("listExpiredActive excludes a CANCELLED subscription whose period has passed", async () => {
+    await seedCancelledSubscription({ periodEnd: PAST });
+
+    expect(await subs.listExpiredActive(NOW, 10)).toEqual([]);
   });
 });

@@ -996,7 +996,7 @@ export const userSubscriptions = pgTable(
      * `pending` | `active` | `cancelled` | `expired`. Still a varchar rather
      * than an enum, so `expired` — retirement's target status, see
      * `DrizzleUserSubscriptionRepository.retireExpired` — needed no migration
-     * to add. 5b can still add `past_due` and `churned` later the same way.
+     * to add, and any future status added here won't either.
      */
     status: varchar("status", { length: 16 }).notNull().default("pending"),
     currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
