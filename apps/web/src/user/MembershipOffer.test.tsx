@@ -41,11 +41,16 @@ function MasukStub() {
   );
 }
 
-function renderOffer(tiers: TierView[], handle = "budi") {
+function renderOffer(tiers: TierView[], handle = "budi", viewerIsMember = false) {
   return render(
     <MemoryRouter initialEntries={[`/@${handle}`]}>
       <Routes>
-        <Route path="/:handleParam" element={<MembershipOffer handle={handle} tiers={tiers} />} />
+        <Route
+          path="/:handleParam"
+          element={
+            <MembershipOffer handle={handle} tiers={tiers} viewerIsMember={viewerIsMember} />
+          }
+        />
         <Route path="/masuk" element={<MasukStub />} />
       </Routes>
     </MemoryRouter>
@@ -345,5 +350,79 @@ describe("MembershipOffer — a failure is a Bahasa sentence, never the server's
     expect(masuk.textContent).toContain("kembali ke /@budi");
     expect(getUserToken()).toBeNull();
     expect(followed.length).toBe(0);
+  });
+});
+
+
+/**
+ * Task 10 fix round 1, spec §6: "an already-active member sees that they are a
+ * member rather than a buy button". `membership.viewerIsMember` is the server's
+ * answer, from `IsMemberOf` — the same question Phase 6's paywall asks.
+ *
+ * §9 is why there is no renew affordance anywhere below: 5a has no renewal
+ * pass, and a lapsed membership comes back as `viewerIsMember: false`, so that
+ * person simply sees the offer again. That is the honest shape, and it needs no
+ * button that has no endpoint.
+ */
+describe("MembershipOffer — somebody who is already a member", () => {
+  it("says they are a member, and offers no way to buy the same thing twice", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([tier()], "budi", true);
+
+    const panel = screen.getByTestId("membership-member");
+    expect(panel.textContent).toContain("Anda sudah menjadi anggota");
+    expect(screen.queryAllByRole("button", { name: /Jadi anggota/ }).length).toBe(0);
+    expect(screen.queryAllByTestId("membership-tier-tier-1").length).toBe(0);
+  });
+
+  /**
+   * A member of a creator who has since withdrawn every tier. The two halves
+   * are independent on the wire (`toMembershipView` takes them separately), and
+   * the membership is the true one to show: there is no offer left, but this
+   * person still holds one.
+   */
+  it("still says so when the creator has withdrawn every tier", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([], "budi", true);
+
+    expect(screen.getByTestId("membership-member").textContent).toContain(
+      "Anda sudah menjadi anggota"
+    );
+  });
+
+  /** PRESENCE control: the same profile offers the button to a NON-member. */
+  it("shows the buy button, and no membership panel, to somebody who is not a member", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([tier()], "budi", false);
+
+    expect(screen.getByRole("button", { name: "Jadi anggota — Anggota" })).toBeTruthy();
+    expect(screen.queryAllByTestId("membership-member").length).toBe(0);
+  });
+
+  /**
+   * Your own profile still renders NOTHING — the member panel must not become
+   * a new way for the own-profile hide to leak. The server answers `false`
+   * here anyway (`IsMemberOf` refuses the pair before it queries, and
+   * `user_subscription_no_self` makes the row impossible), so this is the
+   * belt-and-braces case: even told `true`, the page shows nothing.
+   */
+  it("renders nothing at all on your own profile, member flag or not", () => {
+    setUserSession("jwt-abc", OWNER);
+    renderOffer([tier()], "budi", true);
+
+    expect(document.body.textContent).toBe("");
+  });
+
+  /**
+   * A signed-OUT visitor is never told they are a member. The server answers
+   * `false` for an anonymous request by construction (`MembershipView`'s own
+   * docstring), and this pins the client half: even handed `true`, a browser
+   * with no session gets the route to Masuk, not somebody else's membership.
+   */
+  it("never claims a membership for a visitor with no session", () => {
+    renderOffer([tier()], "budi", true);
+
+    expect(screen.queryAllByTestId("membership-member").length).toBe(0);
+    expect(screen.getByRole("link", { name: "Masuk untuk jadi anggota" })).toBeTruthy();
   });
 });

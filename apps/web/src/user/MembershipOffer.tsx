@@ -15,6 +15,13 @@ export interface MembershipOfferProps {
    * creator who sells nothing, which is most profiles in this app.
    */
   tiers: TierView[];
+  /**
+   * `PublicUserProfile.membership.viewerIsMember` — the SERVER's answer, from
+   * `IsMemberOf`, never a guess made here. `false` for a signed-out visitor by
+   * the API's own construction, and `false` for a LAPSED membership, since
+   * `IsMemberOf` requires `current_period_end > now`.
+   */
+  viewerIsMember: boolean;
 }
 
 /**
@@ -44,29 +51,26 @@ export interface MembershipOfferProps {
  *    place to return to — never a button that fires a request the server
  *    answers 401 to.
  *
- * WHAT IT DOES NOT SHOW, and the honest reason. **A visitor who is already an
- * active member still sees a buy button here.** Nothing on the wire says
- * otherwise: `GET /users/by-handle/:handle`'s `membership` is closed to
- * `{ tiers: [{ id, name, priceAmount, billingCycle }] }` (Task 5) and carries
- * no viewer-specific field, `IsMemberOf` (Task 8) is wired to no route in 5a,
- * and there is no endpoint that reports a viewer's own subscriptions. So this
- * component cannot know, and it does not pretend to: a member who presses is
- * refused by `StartUserSubscription`'s 409 — which never charges them — and
- * reads `describeSubscribeFailure`'s sentence, which names an existing
- * membership as one of the reasons rather than claiming to have identified
- * it. Making this state visible needs a server field, which is outside this
- * task's scope; see the Task 10 report.
+ * AND ONE THING IT SHOWS INSTEAD OF THE BUTTON. **A viewer who already holds a
+ * live membership is told so** (fix round 1) rather than offered a purchase of
+ * something they already own — `StartUserSubscription` answers that a 409, and
+ * while nobody is charged for it, being offered it at all is the defect. The
+ * answer is `membership.viewerIsMember`, decided server-side by `IsMemberOf`
+ * (Task 8) — the same question Phase 6's paywall asks, and the public profile
+ * is the only thing in 5a that puts it on a request path.
  *
- * §9's limitation is deliberately NOT papered over either: 5a has no renewal
- * pass, so nothing here offers to renew a lapsed membership — there is no
- * endpoint behind such a button.
+ * §9's limitation is deliberately NOT papered over: 5a has no renewal pass, and
+ * `IsMemberOf` requires `current_period_end > now`, so a LAPSED membership
+ * comes back `false` and that person simply sees the offer again. Nothing here
+ * offers to *renew* — there is no endpoint behind such a button, and the tier
+ * they are shown is a fresh purchase, which is what actually exists.
  *
  * Every failure becomes a Bahasa sentence through `errorCopy.ts`
  * (`src/test/no-raw-server-errors.test.ts`), except the 401 — the one failure
  * whose remedy is not a sentence but a destination, exactly as `FollowButton`
  * decided for the same status.
  */
-export default function MembershipOffer({ handle, tiers }: MembershipOfferProps) {
+export default function MembershipOffer({ handle, tiers, viewerIsMember }: MembershipOfferProps) {
   /** The tier whose purchase is in flight, or `null`. Also what disables every button. */
   const [pendingTierId, setPendingTierId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,10 +81,33 @@ export default function MembershipOffer({ handle, tiers }: MembershipOfferProps)
   /** Where Masuk sends a visitor back to once they are signed in — `LoginPage` reads this. */
   const backHere = `/@${handle}`;
 
-  if (tiers.length === 0) return null;
+  // FIRST, and before anything is rendered at all — see the docstring: the
+  // server refuses a self-purchase and the database forbids the row, so
+  // neither the offer nor the membership panel belongs on your own profile.
   if (isOwnHandle(handle)) return null;
 
   const signedIn = isUserSignedIn();
+
+  // A member sees their membership INSTEAD of the offer, and this comes before
+  // the empty-tiers check on purpose: a creator can withdraw every tier while
+  // people still hold memberships bought against them (`PATCH
+  // /users/me/tiers/:id` deactivates and never deletes, precisely so an
+  // existing subscription keeps resolving), and that person is still a member.
+  //
+  // Gated on `signedIn` as belt-and-braces. The API answers `false` for an
+  // anonymous request by construction, so this can only fire on a response
+  // that contradicts its own contract — and the failure it prevents is telling
+  // a signed-out stranger that they hold somebody's membership.
+  if (viewerIsMember && signedIn) {
+    return (
+      <section className="card stack membership-offer" aria-labelledby="membership-offer-heading">
+        <h2 id="membership-offer-heading">Keanggotaan</h2>
+        <p data-testid="membership-member">Anda sudah menjadi anggota @{handle}.</p>
+      </section>
+    );
+  }
+
+  if (tiers.length === 0) return null;
 
   async function buy(tierId: string) {
     setError(null);

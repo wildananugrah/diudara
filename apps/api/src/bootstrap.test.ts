@@ -43,6 +43,7 @@ import { AuthenticateCreator } from "./application/use-cases/authenticate-creato
 import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
+import { IsMemberOf } from "./application/use-cases/is-member-of";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -793,7 +794,14 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeUserTokenIssuer
       ),
-      getUserProfile: new GetUserProfile(fakeUserRepository, fakeFollowRepository, fakeUserTierRepository),
+      getUserProfile: new GetUserProfile(
+        fakeUserRepository,
+        fakeFollowRepository,
+        fakeUserTierRepository,
+        // Task 10's fourth dependency: the REAL `IsMemberOf` over the two
+        // fakes already in this file, never a stub of its own.
+        new IsMemberOf(fakeUserSubscriptionRepository, fakeClock)
+      ),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
@@ -1024,7 +1032,14 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeUserTokenIssuer
       ),
-      getUserProfile: new GetUserProfile(fakeUserRepository, fakeFollowRepository, fakeUserTierRepository),
+      getUserProfile: new GetUserProfile(
+        fakeUserRepository,
+        fakeFollowRepository,
+        fakeUserTierRepository,
+        // Task 10's fourth dependency: the REAL `IsMemberOf` over the two
+        // fakes already in this file, never a stub of its own.
+        new IsMemberOf(fakeUserSubscriptionRepository, fakeClock)
+      ),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),

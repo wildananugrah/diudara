@@ -225,7 +225,14 @@ export default function ProfilePage() {
         response, and Phase 4 already shipped a version of this mistake
         (`toMembershipView`'s docstring records the white screen it caused).
       */}
-      <MembershipOffer handle={profile.handle} tiers={profile.membership?.tiers ?? []} />
+      <MembershipOffer
+        handle={profile.handle}
+        tiers={profile.membership?.tiers ?? []}
+        // `?? false` for the same skew reason as `tiers` above, and `false` is
+        // the safe half of it: a response that could not tell us whether this
+        // viewer is a member must never end up CLAIMING that they are.
+        viewerIsMember={profile.membership?.viewerIsMember ?? false}
+      />
 
       {/* The same `EditComposer` Beranda renders — keyed on `editing.id`
           inside it, for the reason its own docstring records. */}

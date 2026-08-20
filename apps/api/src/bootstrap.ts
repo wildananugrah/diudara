@@ -11,6 +11,7 @@ import { AuthenticateCreator } from "./application/use-cases/authenticate-creato
 import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
+import { IsMemberOf } from "./application/use-cases/is-member-of";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -1857,10 +1858,41 @@ export function bootstrap(): Dependencies {
   // because `GetUserProfile` now needs it too (`viewerFollows` and the two
   // counts on the public profile) — one repository, three consumers.
   const followRepository = new DrizzleFollowRepository(db);
+  // ONE clock for the process. Phase 5's use-cases read time through it rather than
+  // calling `Date.now()`, so the renewal window and the settlement date a member's next
+  // period is measured from are both observable in a test.
+  //
+  // Constructed HERE, further up than it used to be, because Task 10's
+  // `isMemberOf` (just below) needs it and `getUserProfile` needs that. Its
+  // other consumers are all further down and unaffected — one instance, same
+  // as before.
+  const clock = new SystemClock();
+  // `user_subscription`/`user_transaction`. Task 6 built it for
+  // `startUserSubscription` alone; Task 10 gives it a SECOND consumer that
+  // exists whether or not this deployment has a payment provider, which is why
+  // it is constructed unconditionally and up here rather than beside that
+  // use-case.
+  const userSubscriptionRepository = new DrizzleUserSubscriptionRepository(db);
+  /**
+   * Task 8's use-case, on a request path at last (Task 10).
+   *
+   * Phase 6's paywall is founded on this question and nothing in 5a called it
+   * — a use-case wired to no route is one nothing proves end to end. The
+   * public profile now asks it for every signed-in viewer, which is also the
+   * shape Phase 6 will use: `status = 'active'` AND `current_period_end >
+   * now`, one indexed read.
+   */
+  const isMemberOf = new IsMemberOf(userSubscriptionRepository, clock);
   // Task 5 of memberships-5a: `userTierRepository` (constructed above, Task 1)
   // is now GetUserProfile's third dependency too — the public profile's
-  // `membership.tiers` read.
-  const getUserProfile = new GetUserProfile(userRepository, followRepository, userTierRepository);
+  // `membership.tiers` read. Task 10 adds the fourth, `isMemberOf`, for the
+  // same payload's `viewerIsMember`.
+  const getUserProfile = new GetUserProfile(
+    userRepository,
+    followRepository,
+    userTierRepository,
+    isMemberOf
+  );
   const updateUserProfile = new UpdateUserProfile(userRepository);
   const followUser = new FollowUser(userRepository, followRepository);
   const listFollows = new ListFollows(userRepository, followRepository);
@@ -1999,10 +2031,6 @@ export function bootstrap(): Dependencies {
     appBaseUrl: process.env.APP_BASE_URL,
     nodeEnv: process.env.NODE_ENV,
   });
-  // ONE clock for the process. Phase 5's use-cases read time through it rather than
-  // calling `Date.now()`, so the renewal window and the settlement date a member's next
-  // period is measured from are both observable in a test.
-  const clock = new SystemClock();
   // `undefined` EXACTLY when `payments` is `null` — see this field's own
   // docstring on `Dependencies`. `routes/public-community.ts` does not
   // register `POST /c/:slug/checkout` at all when this is `undefined`, so a
@@ -2022,11 +2050,7 @@ export function bootstrap(): Dependencies {
 
   // Task 6 of Phase 5a. `undefined` on the same condition `startCheckout` above
   // is, and for the same reason — but the ROUTE stays registered and answers
-  // 503, see this field's own docstring on `Dependencies`. Its own repository
-  // over `user_subscription`/`user_transaction`, constructed here beside its
-  // only consumer: nothing else in this process reads those two tables yet
-  // (Task 7's webhook will).
-  const userSubscriptionRepository = new DrizzleUserSubscriptionRepository(db);
+  // 503, see this field's own docstring on `Dependencies`.
   const startUserSubscription = payments
     ? new StartUserSubscription(
         userRepository,

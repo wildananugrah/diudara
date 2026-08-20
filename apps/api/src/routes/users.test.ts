@@ -381,7 +381,12 @@ describe("GET /users/by-handle/:handle", () => {
     expect(body.followingCount).toBe(0);
     // No session sent — anonymous viewer. Must be `null`, not `false`.
     expect(body.viewerFollows).toBeNull();
-    expect(body.membership).toEqual({ tiers: [] });
+    // Task 10 widened `membership` by exactly ONE field, and this assertion
+    // is updated deliberately rather than loosened: `viewerIsMember` is
+    // `false` for a visitor with no session — NOT null, unlike
+    // `viewerFollows` right above it. See `MembershipView`'s own docstring
+    // for why the two neighbours disagree on purpose.
+    expect(body.membership).toEqual({ tiers: [], viewerIsMember: false });
     expect(body.email).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain(VALID.email);
   });
@@ -504,7 +509,7 @@ describe("GET /users/by-handle/:handle — membership (Task 5)", () => {
 
     const body = await res.json();
     expect("membership" in body).toBe(true);
-    expect(body.membership).toEqual({ tiers: [] });
+    expect(body.membership).toEqual({ tiers: [], viewerIsMember: false });
   });
 
   it("lists a published tier with EXACTLY id/name/priceAmount/billingCycle — never ownerId, isActive or createdAt", async () => {
@@ -548,6 +553,20 @@ describe("GET /users/by-handle/:handle — membership (Task 5)", () => {
     expect(body.membership.tiers.map((t: { id: string }) => t.id)).toEqual([active.id]);
   });
 
+  it("membership itself is CLOSED — exactly tiers and viewerIsMember, nothing else", async () => {
+    const a = app();
+    const { token } = await membershipUser(a);
+    await connectPayout(a, token);
+    await postTier(a, token, { name: "Anggota", priceAmount: 50_000 });
+
+    const res = await a.request("/users/by-handle/wildan");
+
+    expect(Object.keys((await res.json()).membership).sort()).toEqual([
+      "tiers",
+      "viewerIsMember",
+    ]);
+  });
+
   it("keeps one owner's tiers off another owner's profile", async () => {
     const a = app();
     const owner = await membershipUser(a);
@@ -557,7 +576,175 @@ describe("GET /users/by-handle/:handle — membership (Task 5)", () => {
 
     const res = await a.request("/users/by-handle/rina");
     expect(res.status).toBe(200);
-    expect((await res.json()).membership).toEqual({ tiers: [] });
+    expect((await res.json()).membership).toEqual({ tiers: [], viewerIsMember: false });
+  });
+});
+
+/**
+ * Task 10 of Phase 5a (spec §6): "an already-active member sees that they are
+ * a member rather than a buy button" — which the web can only do if the
+ * profile tells it. `GET /users/by-handle/:handle` gains
+ * `membership.viewerIsMember`, answered by `IsMemberOf` (Task 8).
+ *
+ * **This is the only thing in 5a that puts `IsMemberOf` on a real request
+ * path.** Task 8 built the question Phase 6's whole paywall is founded on and
+ * nothing called it; these tests are the first that exercise it through
+ * HTTP, against a real database, rather than in isolation.
+ *
+ * Seeded with the repository directly rather than by paying an invoice: what
+ * activates a subscription in production is Task 7's webhook, and a test that
+ * had to fake a payment gateway to assert a projection would be testing the
+ * wrong thing.
+ */
+describe("GET /users/by-handle/:handle — viewerIsMember (Task 10)", () => {
+  const FUTURE = new Date("2099-01-01T00:00:00.000Z");
+  const PAST = new Date("2020-01-01T00:00:00.000Z");
+
+  async function account(a: ReturnType<typeof app>, overrides: Partial<typeof VALID> = {}) {
+    const acc = { ...VALID, ...overrides };
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(acc),
+    });
+    const res = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: acc.email, password: acc.password }),
+    });
+    const body = (await res.json()) as { token: string; user: { id: string } };
+    return { token: body.token, userId: body.user.id };
+  }
+
+  /** An owner with a connected payout account and one published tier. */
+  async function sellingOwner(a: ReturnType<typeof app>) {
+    const owner = await account(a);
+    await a.request("/users/me/payout", { method: "POST", headers: authed(owner.token) });
+    const tier = await (
+      await a.request("/users/me/tiers", {
+        method: "POST",
+        headers: { ...authed(owner.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Anggota", priceAmount: 50_000 }),
+      })
+    ).json();
+    return { ...owner, tierId: tier.id as string };
+  }
+
+  /** An ACTIVE subscription from `subscriberId` to `owner`, its period ending at `periodEnd`. */
+  async function seedMembership(
+    owner: { userId: string; tierId: string },
+    subscriberId: string,
+    periodEnd: Date
+  ) {
+    const subscriptions = new DrizzleUserSubscriptionRepository(db);
+    const created = await subscriptions.create({
+      subscriberId,
+      tierId: owner.tierId,
+      ownerId: owner.userId,
+    });
+    await subscriptions.activate(created.id, periodEnd);
+    return created;
+  }
+
+  it("is false, never null, for a visitor with no session at all", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const member = await account(a, { handle: "rina", email: "rina@example.com" });
+    // A LIVE membership exists — it just does not belong to whoever is asking.
+    await seedMembership(owner, member.userId, FUTURE);
+
+    const body = await (await a.request("/users/by-handle/wildan")).json();
+
+    expect(body.membership.viewerIsMember).toBe(false);
+    expect(body.membership.viewerIsMember).not.toBeNull();
+    // Its neighbour on the same payload IS null for the same request, on
+    // purpose — the two answer different questions.
+    expect(body.viewerFollows).toBeNull();
+  });
+
+  it("is true for the signed-in member of this creator", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const member = await account(a, { handle: "rina", email: "rina@example.com" });
+    await seedMembership(owner, member.userId, FUTURE);
+
+    const body = await (
+      await a.request("/users/by-handle/wildan", { headers: authed(member.token) })
+    ).json();
+
+    expect(body.membership.viewerIsMember).toBe(true);
+    // The offer is unchanged by who is asking — what a creator sells is not
+    // viewer-specific. Only the web's rendering of it is.
+    expect(body.membership.tiers).toHaveLength(1);
+  });
+
+  it("is false for a signed-in visitor who never subscribed", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const member = await account(a, { handle: "rina", email: "rina@example.com" });
+    const stranger = await account(a, { handle: "budi", email: "budi@example.com" });
+    await seedMembership(owner, member.userId, FUTURE);
+
+    const body = await (
+      await a.request("/users/by-handle/wildan", { headers: authed(stranger.token) })
+    ).json();
+
+    expect(body.membership.viewerIsMember).toBe(false);
+  });
+
+  /**
+   * **THE CASE THAT WOULD SILENTLY REGRESS.** §9: 5a has no renewal pass, so
+   * nothing ever moves a subscription out of `active` when its period ends —
+   * this row is `status = 'active'` with `current_period_end` in 2020. A
+   * check that read the status alone would call this person a member forever
+   * and never offer them the membership again; the period comparison in
+   * `IsMemberOf` is the whole point of that class, and this is the only place
+   * it is proved through HTTP.
+   */
+  it("is FALSE for a LAPSED membership — the row is still 'active', its period is not", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const lapsed = await account(a, { handle: "rina", email: "rina@example.com" });
+    const subscription = await seedMembership(owner, lapsed.userId, PAST);
+
+    const body = await (
+      await a.request("/users/by-handle/wildan", { headers: authed(lapsed.token) })
+    ).json();
+
+    expect(body.membership.viewerIsMember).toBe(false);
+    // The offer is right there to buy again — 5a being honest about having no
+    // renewal rather than inventing one.
+    expect(body.membership.tiers).toHaveLength(1);
+
+    // GUARD: the row really is in the state this test claims — still `active`,
+    // period in the past — so a repository that had quietly expired it would
+    // not let this pass for the wrong reason.
+    const stored = await new DrizzleUserSubscriptionRepository(db).findById(subscription.id);
+    expect(stored?.status).toBe("active");
+    expect(stored?.currentPeriodEnd?.toISOString()).toBe(PAST.toISOString());
+  });
+
+  it("is false on your OWN profile, even with a row that names you both ways", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+
+    const body = await (
+      await a.request("/users/by-handle/wildan", { headers: authed(owner.token) })
+    ).json();
+
+    // `user_subscription_no_self` makes such a row impossible to insert, and
+    // `IsMemberOf` refuses the pair before it even queries — belt and braces.
+    expect(body.membership.viewerIsMember).toBe(false);
+  });
+
+  it("an expired or garbage token degrades to the anonymous answer, never a 401", async () => {
+    const a = app();
+    await sellingOwner(a);
+
+    const res = await a.request("/users/by-handle/wildan", { headers: authed("garbage") });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).membership.viewerIsMember).toBe(false);
   });
 });
 

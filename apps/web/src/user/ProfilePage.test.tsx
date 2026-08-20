@@ -52,7 +52,7 @@ function profileBody(overrides: Record<string, unknown> = {}) {
     // branches on `undefined`. Every fixture here carries it for the same
     // reason: a fixture narrower than the wire is a page tested against a
     // response the API cannot send.
-    membership: { tiers: [] },
+    membership: { tiers: [], viewerIsMember: false },
     ...overrides,
   };
 }
@@ -824,7 +824,7 @@ describe("ProfilePage — the membership offer (Task 10)", () => {
     global.fetch = mock(async (url: string) =>
       url.includes("/posts")
         ? emptyPostsPage()
-        : jsonResponse(profileBody({ membership: { tiers: [TIER] } }))
+        : jsonResponse(profileBody({ membership: { tiers: [TIER], viewerIsMember: false } }))
     ) as unknown as typeof fetch;
 
     renderAt("/@budi");
@@ -852,6 +852,27 @@ describe("ProfilePage — the membership offer (Task 10)", () => {
     expect(document.querySelectorAll(".membership-offer").length).toBe(0);
     expect(screen.queryAllByRole("button", { name: /Jadi anggota/ }).length).toBe(0);
     expect(screen.queryAllByText("Keanggotaan").length).toBe(0);
+  });
+
+  /**
+   * Fix round 1: the profile now carries `membership.viewerIsMember`
+   * (`IsMemberOf`, Task 8), and this is the wiring that reads it — a member
+   * must not be offered a purchase of something they already hold.
+   */
+  it("tells an existing member they are a member instead of offering the button", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) =>
+      url.includes("/posts")
+        ? emptyPostsPage()
+        : jsonResponse(profileBody({ membership: { tiers: [TIER], viewerIsMember: true } }))
+    ) as unknown as typeof fetch;
+
+    renderAt("/@budi");
+    await screen.findByText("Budi");
+
+    const panel = await screen.findByTestId("membership-member");
+    expect(panel.textContent).toContain("Anda sudah menjadi anggota");
+    expect(screen.queryAllByRole("button", { name: /Jadi anggota/ }).length).toBe(0);
   });
 });
 
@@ -883,5 +904,8 @@ describe("ProfilePage — a response with no membership field at all", () => {
     expect(screen.getByText("@budi")).toBeTruthy();
     expect(await screen.findByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
     expect(document.querySelectorAll(".membership-offer").length).toBe(0);
+    // And no membership is CLAIMED from a response that said nothing about
+    // one: the safe default for "we could not ask" is "not a member".
+    expect(screen.queryAllByTestId("membership-member").length).toBe(0);
   });
 });

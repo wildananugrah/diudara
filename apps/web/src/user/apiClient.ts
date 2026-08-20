@@ -519,9 +519,26 @@ export interface TierView {
   billingCycle: string;
 }
 
-/** `membership` on `PublicUserProfile`. `tiers` is always present, possibly empty. */
+/**
+ * `membership` on `PublicUserProfile`. `tiers` is always present, possibly
+ * empty.
+ *
+ * **`viewerIsMember` is `false`, never `null`, for a signed-out visitor** —
+ * deliberately unlike `viewerFollows` on the same payload. That field DRIVES a
+ * toggle whose three states are three different controls; this one gates a
+ * CLAIM the page makes about the caller ("Anda sudah menjadi anggota"), and
+ * the only safe answer to a claim about somebody the server cannot identify is
+ * "no". See the API's own `MembershipView` docstring, which carries the same
+ * reasoning on the other side of the wire.
+ *
+ * It comes from `IsMemberOf` — `status = 'active'` AND `current_period_end >
+ * now` — so a LAPSED membership reads `false` and that person is offered the
+ * tier again. 5a has no renewal (spec §9), and that is what being honest about
+ * it looks like: no renew button, because there is no renew endpoint.
+ */
 export interface MembershipView {
   tiers: TierView[];
+  viewerIsMember: boolean;
 }
 
 /**

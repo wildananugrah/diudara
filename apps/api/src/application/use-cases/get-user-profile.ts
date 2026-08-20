@@ -3,6 +3,7 @@ import { normalizeHandle } from "../../domain/handle";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
 import type { FollowRepositoryPort } from "../ports/follow-repository.port";
 import type { UserTierRepositoryPort } from "../ports/user-tier-repository.port";
+import type { IsMemberOf } from "./is-member-of";
 import { toMembershipView, type MembershipView } from "./tier-views";
 
 /**
@@ -55,11 +56,13 @@ export interface PublicUserProfile extends UserProfileCore {
    */
   viewerFollows: boolean | null;
   /**
-   * What this creator is selling. `tiers` is always an array, even when the
-   * owner has never published a tier or has no connected payout account
+   * What this creator is selling, plus whether the CALLER already holds a
+   * live membership to them (Task 10). `tiers` is always an array, even when
+   * the owner has never published a tier or has no connected payout account
    * (both cases mean `listActiveByOwner` returns no rows) — see
    * `toMembershipView`'s own docstring for why the field itself must never
-   * be omitted.
+   * be omitted, and `MembershipView`'s for why `viewerIsMember` is `false`
+   * rather than `null` for an anonymous caller.
    */
   membership: MembershipView;
 }
@@ -99,7 +102,24 @@ export class GetUserProfile {
   constructor(
     private readonly users: UserRepositoryPort,
     private readonly follows: FollowRepositoryPort,
-    private readonly tiers: UserTierRepositoryPort
+    private readonly tiers: UserTierRepositoryPort,
+    /**
+     * Task 10. **The use-case itself, not a re-derivation of it.**
+     *
+     * `IsMemberOf` (Task 8) is the single definition of "is this viewer a
+     * paying member", and Phase 6's paywall is founded on it. Asking a
+     * subscription repository directly from here would put a SECOND
+     * definition in the codebase — and the half that would go missing from
+     * the copy is the `current_period_end > now` comparison, since 5a has no
+     * renewal pass and a lapsed row sits at `status = 'active'` forever
+     * (§9). Injected as the class rather than a hand-written interface so a
+     * test cannot substitute a stub that answers differently from the real
+     * thing.
+     *
+     * This is also the ONLY place in 5a that puts `IsMemberOf` on a request
+     * path at all.
+     */
+    private readonly membership: IsMemberOf
   ) {}
 
   /**
@@ -125,10 +145,21 @@ export class GetUserProfile {
     // is itself a single scoped query (its own port docstring and
     // `DrizzleUserTierRepository`); this just runs it alongside the two other
     // reads this profile already needed rather than after them.
-    const [counts, viewerFollows, activeTiers] = await Promise.all([
+    const [counts, viewerFollows, activeTiers, viewerIsMember] = await Promise.all([
       this.follows.countsFor(user.id),
       viewerId === null ? Promise.resolve(null) : this.follows.isFollowing(viewerId, user.id),
       this.tiers.listActiveByOwner(user.id),
+      // ANONYMOUS SHORT-CIRCUITS, and answers `false` rather than `null`: there
+      // is no viewer to hold a membership, so there is no question to ask the
+      // database — this route is public and most of its traffic has no session
+      // at all. See `MembershipView`'s docstring for why `false` and not
+      // `null`, which is what its neighbour `viewerFollows` above answers.
+      //
+      // For a signed-in caller this is ONE further indexed read
+      // (`user_subscription_one_active`), running alongside the three this
+      // profile already made rather than after them — the same query Phase 6
+      // will run per gated post.
+      viewerId === null ? Promise.resolve(false) : this.membership.execute(viewerId, user.id),
     ]);
 
     return {
@@ -136,7 +167,7 @@ export class GetUserProfile {
       followerCount: counts.followers,
       followingCount: counts.following,
       viewerFollows,
-      membership: toMembershipView(activeTiers),
+      membership: toMembershipView(activeTiers, viewerIsMember),
     };
   }
 
