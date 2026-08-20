@@ -266,6 +266,28 @@ describe("ConnectUserPayout", () => {
     expect(payments.accounts).toEqual([]);
   });
 
+  it("answers from a FRESH read, not the stale copy it started with", async () => {
+    // Mutation-driven (the claim-first order survived swapping
+    // `isConnectedPaymentAccount` for a truthiness check in the early return,
+    // because `payoutStatusOf` still interpreted the value correctly). This is
+    // what that early return actually buys: the read at the top is a COURTESY,
+    // and the conditional UPDATE is the guard, so a caller that finds the
+    // sentinel must still go to the database and report what it says NOW. Here
+    // the other request finishes while this one is between its read and its
+    // claim, and this caller must say "connected", not "still provisioning".
+    const { repository } = fakeRepository([user({ xenditAccountId: SENTINEL })], {
+      onBegin(current) {
+        current[0].xenditAccountId = "xnd-acct-the-other-request-just-finished";
+      },
+    });
+    const payments = new FakePaymentAdapter();
+
+    const status = await new ConnectUserPayout(repository, payments).execute("user-1");
+
+    expect(status).toEqual({ connected: true, provisioning: false });
+    expect(payments.accounts).toEqual([]);
+  });
+
   it("releases the claim when the provider call fails, so the user can retry", async () => {
     // Without the release, one provider timeout would wedge this user forever:
     // the sentinel blocks every later claim and there is no reset path for the
