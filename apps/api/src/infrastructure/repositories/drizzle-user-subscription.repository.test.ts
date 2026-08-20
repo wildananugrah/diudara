@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "bun:test";
-import { db } from "../../db/client";
+import { db, type DatabaseExecutor } from "../../db/client";
 import { appUsers, userSubscriptions } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { ArrivalLatch } from "../../test-support/arrival-latch";
@@ -442,6 +442,50 @@ describe("DrizzleUserSubscriptionRepository", () => {
 
     expect(second.created).toBe(true);
     expect(second.subscription.id).not.toBe(first.subscription.id);
+  });
+
+  /**
+   * THE CATCH IS NARROW, and this is the only way to show it: the double-fault
+   * insert cannot, because postgres raises the unique violation first (probed —
+   * an insert that breaks both `user_subscription_one_pending` and the tier
+   * foreign key reports `23505` on the index, never `23503`).
+   *
+   * So the failure is injected instead. A blanket catch would look at a pending
+   * row that genuinely exists, answer `created: false`, and report a dead
+   * connection as "somebody else is already paying" — the buyer would be told to
+   * wait for an invoice nobody is opening.
+   */
+  it("rethrows an error that is NOT the pending-claim violation, even when a pending row exists", async () => {
+    const boom = new Error("connection terminated unexpectedly");
+    const stubbed = new DrizzleUserSubscriptionRepository({
+      insert: () => ({ values: () => ({ returning: () => Promise.reject(boom) }) }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: () =>
+              Promise.resolve([
+                {
+                  id: "11111111-1111-4111-8111-111111111111",
+                  subscriberId: "22222222-2222-4222-8222-222222222222",
+                  tierId: "33333333-3333-4333-8333-333333333333",
+                  ownerId: "44444444-4444-4444-8444-444444444444",
+                  status: "pending",
+                  currentPeriodEnd: null,
+                  createdAt: new Date(),
+                },
+              ]),
+          }),
+        }),
+      }),
+    } as unknown as DatabaseExecutor);
+
+    await expect(
+      stubbed.claimPending({
+        subscriberId: "22222222-2222-4222-8222-222222222222",
+        tierId: "33333333-3333-4333-8333-333333333333",
+        ownerId: "44444444-4444-4444-8444-444444444444",
+      })
+    ).rejects.toThrow("connection terminated unexpectedly");
   });
 
   /**
