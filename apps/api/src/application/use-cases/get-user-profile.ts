@@ -2,6 +2,8 @@ import { NotFoundError } from "../errors";
 import { normalizeHandle } from "../../domain/handle";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
 import type { FollowRepositoryPort } from "../ports/follow-repository.port";
+import type { UserTierRepositoryPort } from "../ports/user-tier-repository.port";
+import { toMembershipView, type MembershipView } from "./tier-views";
 
 /**
  * The fields common to every profile shape this use case returns, public or
@@ -34,6 +36,11 @@ export interface UserProfileCore {
  * `followerCount`, `followingCount`, `viewerFollows` — design spec §6: "the
  * public projection stays exactly what Phase 1 pinned ... plus the two
  * counts and, for a signed-in viewer, whether they already follow."
+ *
+ * Task 5 of memberships-5a widens it by one more: `membership`, the
+ * creator's offer (spec §6: "A profile shows the offer and a 'Jadi anggota'
+ * button"). See `tier-views.ts` for why that shape is closed to exactly
+ * `id`/`name`/`priceAmount`/`billingCycle` per tier.
  */
 export interface PublicUserProfile extends UserProfileCore {
   followerCount: number;
@@ -47,6 +54,14 @@ export interface PublicUserProfile extends UserProfileCore {
    * Follow.
    */
   viewerFollows: boolean | null;
+  /**
+   * What this creator is selling. `tiers` is always an array, even when the
+   * owner has never published a tier or has no connected payout account
+   * (both cases mean `listActiveByOwner` returns no rows) — see
+   * `toMembershipView`'s own docstring for why the field itself must never
+   * be omitted.
+   */
+  membership: MembershipView;
 }
 
 /**
@@ -83,7 +98,8 @@ export function toOwnProfile(user: UserRecord): OwnUserProfile {
 export class GetUserProfile {
   constructor(
     private readonly users: UserRepositoryPort,
-    private readonly follows: FollowRepositoryPort
+    private readonly follows: FollowRepositoryPort,
+    private readonly tiers: UserTierRepositoryPort
   ) {}
 
   /**
@@ -105,9 +121,14 @@ export class GetUserProfile {
       throw new NotFoundError("user not found");
     }
 
-    const [counts, viewerFollows] = await Promise.all([
+    // One call for the profile's tiers, not one per tier — `listActiveByOwner`
+    // is itself a single scoped query (its own port docstring and
+    // `DrizzleUserTierRepository`); this just runs it alongside the two other
+    // reads this profile already needed rather than after them.
+    const [counts, viewerFollows, activeTiers] = await Promise.all([
       this.follows.countsFor(user.id),
       viewerId === null ? Promise.resolve(null) : this.follows.isFollowing(viewerId, user.id),
+      this.tiers.listActiveByOwner(user.id),
     ]);
 
     return {
@@ -115,6 +136,7 @@ export class GetUserProfile {
       followerCount: counts.followers,
       followingCount: counts.following,
       viewerFollows,
+      membership: toMembershipView(activeTiers),
     };
   }
 

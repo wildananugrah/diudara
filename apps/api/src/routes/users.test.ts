@@ -346,7 +346,7 @@ describe("POST /users/login", () => {
 });
 
 describe("GET /users/by-handle/:handle", () => {
-  it("returns EXACTLY handle/displayName/bio/createdAt/followerCount/followingCount/viewerFollows — no email, no anything else", async () => {
+  it("returns EXACTLY handle/displayName/bio/createdAt/followerCount/followingCount/viewerFollows/membership — no email, no anything else", async () => {
     const a = app();
     await a.request("/users/signup", {
       method: "POST",
@@ -361,7 +361,9 @@ describe("GET /users/by-handle/:handle", () => {
     // Assert on the response body's ACTUAL keys, not on the type — extra
     // properties (email, whatsappNumber, id, sessionEpoch) would pass a
     // structural-type check silently even though they must never appear
-    // here. This is the form that catches that.
+    // here. This is the form that catches that. `membership` was added by
+    // Task 5 (memberships-5a) — see the dedicated describe block below for
+    // its own closed-projection assertion.
     expect(Object.keys(body).sort()).toEqual([
       "bio",
       "createdAt",
@@ -369,6 +371,7 @@ describe("GET /users/by-handle/:handle", () => {
       "followerCount",
       "followingCount",
       "handle",
+      "membership",
       "viewerFollows",
     ]);
     expect(body.handle).toBe("wildan");
@@ -377,6 +380,7 @@ describe("GET /users/by-handle/:handle", () => {
     expect(body.followingCount).toBe(0);
     // No session sent — anonymous viewer. Must be `null`, not `false`.
     expect(body.viewerFollows).toBeNull();
+    expect(body.membership).toEqual({ tiers: [] });
     expect(body.email).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain(VALID.email);
   });
@@ -444,6 +448,115 @@ describe("GET /users/by-handle/:handle", () => {
     const res = await a.request("/users/by-handle/wildan", { headers: authed("garbage") });
     expect(res.status).toBe(200);
     expect((await res.json()).viewerFollows).toBeNull();
+  });
+});
+
+/**
+ * Task 5 of memberships-5a (spec §6): the offer on a public profile.
+ * `GET /users/by-handle/:handle` gains `membership: { tiers: [...] }`
+ * alongside the fields Task 2 already pinned above.
+ */
+describe("GET /users/by-handle/:handle — membership (Task 5)", () => {
+  /** Signs up, logs in, and returns both the bearer token and the user's id — mirrors `payoutUser`/`tierUser` in the payout/tier suites below. */
+  async function membershipUser(a: ReturnType<typeof app>, overrides: Partial<typeof VALID> = {}) {
+    const account = { ...VALID, ...overrides };
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(account),
+    });
+    const res = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: account.email, password: account.password }),
+    });
+    const body = (await res.json()) as { token: string; user: { id: string } };
+    return { token: body.token, userId: body.user.id };
+  }
+
+  function connectPayout(a: ReturnType<typeof app>, token: string) {
+    return a.request("/users/me/payout", { method: "POST", headers: authed(token) });
+  }
+
+  function postTier(a: ReturnType<typeof app>, token: string, body: unknown) {
+    return a.request("/users/me/tiers", {
+      method: "POST",
+      headers: { ...authed(token), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function patchTier(a: ReturnType<typeof app>, token: string, tierId: string, body: unknown) {
+    return a.request(`/users/me/tiers/${tierId}`, {
+      method: "PATCH",
+      headers: { ...authed(token), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("a profile with no payout account and no tiers reports membership: { tiers: [] } — not an omitted field", async () => {
+    const a = app();
+    await membershipUser(a);
+
+    const res = await a.request("/users/by-handle/wildan");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect("membership" in body).toBe(true);
+    expect(body.membership).toEqual({ tiers: [] });
+  });
+
+  it("lists a published tier with EXACTLY id/name/priceAmount/billingCycle — never ownerId, isActive or createdAt", async () => {
+    const a = app();
+    const { token } = await membershipUser(a);
+    await connectPayout(a, token);
+    const created = await (
+      await postTier(a, token, { name: "Anggota", priceAmount: 50_000 })
+    ).json();
+
+    const res = await a.request("/users/by-handle/wildan");
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.membership.tiers).toHaveLength(1);
+    const tier = body.membership.tiers[0];
+    expect(Object.keys(tier).sort()).toEqual(["billingCycle", "id", "name", "priceAmount"]);
+    expect(tier).toEqual({
+      id: created.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+  });
+
+  it("a DEACTIVATED tier is never offered to a visitor", async () => {
+    const a = app();
+    const { token } = await membershipUser(a);
+    await connectPayout(a, token);
+    const active = await (
+      await postTier(a, token, { name: "Tetap Aktif", priceAmount: 20_000 })
+    ).json();
+    const toDeactivate = await (
+      await postTier(a, token, { name: "Akan Dinonaktifkan", priceAmount: 30_000 })
+    ).json();
+    await patchTier(a, token, toDeactivate.id, { isActive: false });
+
+    const res = await a.request("/users/by-handle/wildan");
+    const body = await res.json();
+
+    expect(body.membership.tiers.map((t: { id: string }) => t.id)).toEqual([active.id]);
+  });
+
+  it("keeps one owner's tiers off another owner's profile", async () => {
+    const a = app();
+    const owner = await membershipUser(a);
+    const stranger = await membershipUser(a, { handle: "rina", email: "rina@example.com" });
+    await connectPayout(a, owner.token);
+    await postTier(a, owner.token, { name: "Punya Wildan", priceAmount: 50_000 });
+
+    const res = await a.request("/users/by-handle/rina");
+    expect(res.status).toBe(200);
+    expect((await res.json()).membership).toEqual({ tiers: [] });
   });
 });
 

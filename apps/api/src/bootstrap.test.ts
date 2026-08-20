@@ -752,7 +752,7 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeUserTokenIssuer
       ),
-      getUserProfile: new GetUserProfile(fakeUserRepository, fakeFollowRepository),
+      getUserProfile: new GetUserProfile(fakeUserRepository, fakeFollowRepository, fakeUserTierRepository),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
@@ -974,7 +974,7 @@ describe("Dependencies (composition root contract)", () => {
         fakePasswordHasher,
         fakeUserTokenIssuer
       ),
-      getUserProfile: new GetUserProfile(fakeUserRepository, fakeFollowRepository),
+      getUserProfile: new GetUserProfile(fakeUserRepository, fakeFollowRepository, fakeUserTierRepository),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),

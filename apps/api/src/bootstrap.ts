@@ -1845,7 +1845,10 @@ export function bootstrap(): Dependencies {
   // because `GetUserProfile` now needs it too (`viewerFollows` and the two
   // counts on the public profile) — one repository, three consumers.
   const followRepository = new DrizzleFollowRepository(db);
-  const getUserProfile = new GetUserProfile(userRepository, followRepository);
+  // Task 5 of memberships-5a: `userTierRepository` (constructed above, Task 1)
+  // is now GetUserProfile's third dependency too — the public profile's
+  // `membership.tiers` read.
+  const getUserProfile = new GetUserProfile(userRepository, followRepository, userTierRepository);
   const updateUserProfile = new UpdateUserProfile(userRepository);
   const followUser = new FollowUser(userRepository, followRepository);
   const listFollows = new ListFollows(userRepository, followRepository);
