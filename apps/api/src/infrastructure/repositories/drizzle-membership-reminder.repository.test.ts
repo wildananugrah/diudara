@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import { db } from "../../db/client";
+import { db, sql } from "../../db/client";
 import { appUsers } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { ArrivalLatch } from "../../test-support/arrival-latch";
@@ -65,8 +65,27 @@ describe("DrizzleMembershipReminderRepository.claim", () => {
     // reads are ordered, so a select-then-insert implementation passes every test
     // above. Five callers are forced to arrive at `claim` together, so the ONLY thing
     // that can arbitrate is the unique index in Postgres.
+    //
+    // WARMING THE POOL IS PART OF THE TEST, NOT SETUP NOISE — measured, and it is the
+    // difference between this test proving something and proving nothing.
+    // `ArrivalLatch` guarantees five callers are at the same LINE, and that is all it
+    // can guarantee: postgres.js establishes connections lazily, so on a cold pool
+    // four of the five callers' first statements simply QUEUE behind the one live
+    // connection, the five requests serialise inside the driver, and every caller
+    // reads the previous caller's committed row. Against a deliberately broken
+    // select-then-insert `claim`, the cold version of this test passed — 1 winner, 4
+    // losers, no error — while the warmed version below produced 1 winner and FOUR
+    // THROWN unique violations. That is the whole point of the `Promise.all` here:
+    // it rejects on any of them, so a `claim` that does not name the conflict target
+    // fails this test rather than quietly reminding a member twice.
+    //
+    // FIVE is the measured number that holds, and it holds at 10, 25 and 50 too — the
+    // count is part of the assertion (Task 1's lesson, where four contenders proved
+    // far too few against a conditional UPDATE), and here it is the WARM-UP rather
+    // than the count that the property depends on.
     const subscriptionId = await seedSubscription();
     const contenders = 5;
+    await Promise.all(Array.from({ length: contenders }, () => sql`select 1`));
     const latch = new ArrivalLatch(contenders);
 
     const outcomes = await Promise.all(
@@ -79,6 +98,8 @@ describe("DrizzleMembershipReminderRepository.claim", () => {
     expect(latch.arrived).toBe(contenders);
     expect(outcomes.filter((won) => won).length).toBe(1);
     expect(outcomes.filter((won) => !won).length).toBe(4);
+    // And exactly one row exists, so "one winner" is not merely one return value.
+    expect(await reminders.findBySubscriptionId(subscriptionId)).not.toBe(null);
   });
 
   it("leaves two DIFFERENT memberships each claimable", async () => {

@@ -230,6 +230,29 @@ describe("RemindExpiringMembership", () => {
     expect(sent.body).not.toContain("Rp");
   });
 
+  it("names the end date as the member's own WIB calendar day, not UTC's", async () => {
+    // 22:00 WIB on the 23rd is still the 23rd to the member; in UTC it is already the
+    // 22nd's evening... and an hour later it is the 24th. Getting this wrong tells a
+    // member their membership ends a day earlier or later than it does, which is the
+    // one fact the message exists to carry. Asia/Jakarta is UTC+7 all year — Indonesia
+    // has never observed daylight saving — so the shift is a constant, not a lookup.
+    const email = new FakeEmailAdapter();
+    const useCase = build({
+      subscriptions: fakeSubscriptions([
+        [subscriptionRow({ currentPeriodEnd: new Date("2026-08-23T20:00:00.000Z") })],
+      ]).repository,
+      users: fakeUsers([subscriberRow(), ownerRow()]),
+      reminders: fakeReminders().port,
+      email,
+      notifier: null,
+    });
+
+    await useCase.execute();
+
+    // 2026-08-23T20:00Z is 2026-08-24T03:00 WIB.
+    expect(email.sent[0].body).toContain("berakhir pada 24 Agustus 2026");
+  });
+
   it("sends to email only when the member has no WhatsApp number", async () => {
     // `app_user.whatsapp_number` is nullable — signup offers it and never requires it.
     const email = new FakeEmailAdapter();
@@ -337,6 +360,46 @@ describe("RemindExpiringMembership", () => {
     expect(order).toEqual(["claim", "send"]);
   });
 
+  it("obeys the CLAIM and never a read, so a losing pass sends nothing even while the table looks empty to it", async () => {
+    // THE TOCTOU, expressed as a test. A pass that decided by READING
+    // `membership_reminder` first would pass every other test in this file, because a
+    // sequential fake orders the reads — and would then send a second reminder in
+    // production, where two overlapping passes both read "not yet" before either
+    // commits. So the repository below answers the read the way a losing pass's read
+    // genuinely answers (nothing there yet) while the CLAIM refuses. Only an
+    // implementation that routes on `claim`'s return value sends nothing here.
+    const email = new FakeEmailAdapter();
+    const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+    const reminders: MembershipReminderRepositoryPort = {
+      async claim() {
+        return false;
+      },
+      async recordOutcome() {
+        return true;
+      },
+      async release() {
+        return true;
+      },
+      async findBySubscriptionId() {
+        return null;
+      },
+    };
+    const useCase = build({
+      subscriptions: fakeSubscriptions([[subscriptionRow()]]).repository,
+      users: fakeUsers([subscriberRow(), ownerRow()]),
+      reminders,
+      email,
+      notifier,
+    });
+
+    const result = await useCase.execute();
+
+    expect(result.alreadyReminded).toBe(1);
+    expect(result.reminded).toBe(0);
+    expect(email.sent.length).toBe(0);
+    expect(notifier.notifications.length).toBe(0);
+  });
+
   it("KEEPS the claim when one channel fails and the other succeeds", async () => {
     // Deliberate: the next hourly pass must not re-send over the channel that already
     // worked. One member told once beats one member told 72 times.
@@ -363,6 +426,41 @@ describe("RemindExpiringMembership", () => {
     expect(errors.length).toBe(1);
     expect(errors[0]).toContain("whatsapp");
     // The second pass finds the claim spent and sends nothing at all.
+    expect(second.alreadyReminded).toBe(1);
+    expect(email.sent.length).toBe(1);
+  });
+
+  it("KEEPS the claim when the member WAS told and only the bookkeeping afterwards failed", async () => {
+    // The narrow case the release guard actually exists for. A partial channel
+    // failure never reaches the release path at all — each channel has its own
+    // try/catch — so the only way to arrive there holding a delivered message is for
+    // something AFTER the sends to throw. Releasing then would hand the membership
+    // back to the next pass an hour later and re-send to a member who already has it.
+    const email = new FakeEmailAdapter();
+    const { port: inner, rows } = fakeReminders();
+    const reminders: MembershipReminderRepositoryPort = {
+      claim: inner.claim,
+      async recordOutcome() {
+        throw new Error("the audit write failed");
+      },
+      release: inner.release,
+      findBySubscriptionId: inner.findBySubscriptionId,
+    };
+    const subscriptions = [subscriptionRow()];
+    const useCase = build({
+      subscriptions: fakeSubscriptions([subscriptions, subscriptions]).repository,
+      users: fakeUsers([subscriberRow(), ownerRow()]),
+      reminders,
+      email,
+      notifier: null,
+      logError: () => undefined,
+    });
+
+    const first = await useCase.execute();
+    expect(first.failed).toBe(1);
+    // The claim survives, so the second pass sends nothing.
+    expect(rows.get("sub-1")).toBeDefined();
+    const second = await useCase.execute();
     expect(second.alreadyReminded).toBe(1);
     expect(email.sent.length).toBe(1);
   });
