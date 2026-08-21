@@ -849,11 +849,18 @@ describe("Dependencies (composition root contract)", () => {
       maxPostImages: 5,
       editPost: new EditPost(fakePostRepository, fakeMediaRepository),
       deletePost: new DeletePost(fakePostRepository),
-      listFeed: new ListFeed(fakePostRepository, fakeMediaRepository),
+      listFeed: new ListFeed(
+        fakePostRepository,
+        fakeMediaRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
+      ),
       listUserPosts: new ListUserPosts(
         fakeUserRepository,
         fakePostRepository,
-        fakeMediaRepository
+        fakeMediaRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
       ),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
@@ -1090,11 +1097,18 @@ describe("Dependencies (composition root contract)", () => {
       maxPostImages: 5,
       editPost: new EditPost(fakePostRepository, fakeMediaRepository),
       deletePost: new DeletePost(fakePostRepository),
-      listFeed: new ListFeed(fakePostRepository, fakeMediaRepository),
+      listFeed: new ListFeed(
+        fakePostRepository,
+        fakeMediaRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
+      ),
       listUserPosts: new ListUserPosts(
         fakeUserRepository,
         fakePostRepository,
-        fakeMediaRepository
+        fakeMediaRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
       ),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,

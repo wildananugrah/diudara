@@ -179,11 +179,18 @@ export function postRoutes(
     return c.json(page);
   });
 
+  // A profile page is publicly reachable, exactly like `/beranda` — hence
+  // `resolveViewerId`, which degrades to `null` rather than rejecting, and no
+  // 401 here. Phase 6 is why this route resolves a viewer at all: the paywall
+  // gate is answered per VIEWER, so a signed-out reader gets a gated post's
+  // caption and none of its images while its author gets all of them.
   app.get<"/:handle/posts">("/:handle/posts", async (c) => {
     const { limit } = parseFeedQuery(undefined, c.req.query("limit"));
     const before = parseBefore(c.req.query("before"));
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
     const page = await deps.listUserPosts.execute({
       handle: c.req.param("handle"),
+      viewerId,
       limit,
       before,
     });

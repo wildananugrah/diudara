@@ -108,12 +108,20 @@ export class CreatePost {
     await requireAttachable(this.media, input.authorId, mediaIds, null);
 
     const row = await this.posts.create(input.authorId, body);
-    if (mediaIds.length === 0) return toPostView(row, []);
+    // `locked: false` — NEVER copy this to a read path. Every `toPostView` in
+    // this file answers the post's OWN AUTHOR, who is the one person the
+    // paywall never applies to: `CreatePost` and `EditPost` have already
+    // proven ownership before reaching here. A read path must instead ask
+    // `read-posts.ts`'s gate, which needs a viewer id and a membership lookup
+    // that this file has neither of.
+    if (mediaIds.length === 0) return toPostView(row, [], false);
 
     requireFullyClaimed(await this.media.claim(row.id, mediaIds), mediaIds);
     // Read back rather than echoing the ids: what the client gets is what a
     // reload would show, ordered by the `position` that was actually stored.
-    return toPostView(row, await this.media.listForPost(row.id));
+    // `locked: false` for the reason given at the call site above — this is
+    // the author's own post coming straight back to them.
+    return toPostView(row, await this.media.listForPost(row.id), false);
   }
 }
 
@@ -159,7 +167,11 @@ export class EditPost {
     if (input.mediaIds !== undefined) {
       requireFullyClaimed(await this.media.claim(input.postId, input.mediaIds), input.mediaIds);
     }
-    return toPostView(row, await this.media.listForPost(input.postId));
+    // `locked: false`: `requireOwn` above has already established that the
+    // editor IS the author, and an author is never locked out of their own
+    // post. See `CreatePost`'s call site for why a read path must never copy
+    // this literal.
+    return toPostView(row, await this.media.listForPost(input.postId), false);
   }
 
   private async requireOwn(postId: string, actorId: string) {
