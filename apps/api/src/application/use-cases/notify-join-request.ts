@@ -12,14 +12,9 @@ export const JOIN_REQUEST_NOTIFY_SKIPPED_EVENT = "join_request_notify_skipped";
 
 /**
  * `skippedReason`/`activity_log.metadata.reason` for the crux case this class
- * exists to handle: the owner has no WhatsApp number anywhere, and would
- * otherwise turn every single join request into a permanently failing outbox
- * row.
- *
- * The VALUE is deliberately unchanged by Task 7 even though the number is no
- * longer read from `creator` alone (see `findNotificationContext`): it is
- * already written into `activity_log` rows in the field, and renaming it would
- * split the history of one situation across two strings for no gain.
+ * exists to handle: `creator.whatsapp_number` is nullable, and a creator who
+ * never set one would otherwise turn every single join request into a
+ * permanently failing outbox row.
  */
 export const CREATOR_WHATSAPP_MISSING_REASON = "creator_whatsapp_missing";
 
@@ -50,7 +45,7 @@ export interface NotifyJoinRequestResult {
  *
  * ONE message to ONE person — the community's creator — never the member, and
  * never a group. The payload carries `joinRequestId` only; everything else
- * (community name, member name, tier name, the owner's own WhatsApp number)
+ * (community name, member name, tier name, the creator's own WhatsApp number)
  * is re-resolved FRESH at delivery time via `findNotificationContext`, the same
  * reason `NotifyStreamLive`'s payload carries ids and not a snapshot: a row can
  * sit queued long enough for the community's name or the creator's own number
@@ -70,11 +65,9 @@ export interface NotifyJoinRequestResult {
  *    bug), this row can be enqueued and then sit for a while before delivery,
  *    so a miss is treated as "nothing to do" rather than alarmed on.
  *
- * 2. THE OWNER HAS NO WHATSAPP NUMBER ON FILE ANYWHERE. Both columns
- *    `findNotificationContext` reads are nullable — their `app_user` account's
- *    (the one this application lets them edit, preferred) and their `creator`
- *    row's (the fallback) — and an owner can sign up and set neither, so there
- *    is no number to retry against tomorrow that was not there today. Treated
+ * 2. THE CREATOR HAS NO WHATSAPP NUMBER ON FILE. `creator.whatsapp_number` is
+ *    nullable — a creator can sign up and never set one — and there is no
+ *    number to retry against tomorrow that was not there today. Treated
  *    exactly the way `GrantChannelAccess` treats a platform it cannot gate
  *    automatically: recorded in `activity_log` and moved on, never thrown.
  *    Task 7's pending-requests dashboard is the real fallback for this case,

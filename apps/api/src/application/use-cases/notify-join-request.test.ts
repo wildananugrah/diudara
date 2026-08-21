@@ -3,7 +3,6 @@ import { and, eq, lte, sql } from "drizzle-orm";
 import { db } from "../../db/client";
 import {
   activityLogs,
-  appUsers,
   communities,
   creators,
   joinRequests,
@@ -85,37 +84,20 @@ async function seedPendingRequest(
     communityName?: string;
     memberName?: string | null;
     tierName?: string;
-    /**
-     * Task 7. Pass to give the owner an `app_user` account on the SAME email
-     * address as their `creator` row — the only join between the two tables,
-     * since there is no foreign key. Omit for an owner who has no account,
-     * which is every owner the pre-Task-7 tests seed.
-     */
-    appUserWhatsappNumber?: string | null;
   } = {}
 ) {
   seedCounter += 1;
-  const creatorEmail = `rina-${seedCounter}@example.com`;
   const [creator] = await db
     .insert(creators)
     .values({
       name: "Rina",
-      email: creatorEmail,
+      email: `rina-${seedCounter}@example.com`,
       whatsappNumber:
         options.creatorWhatsappNumber === undefined
           ? `+62810${String(seedCounter).padStart(6, "0")}`
           : options.creatorWhatsappNumber,
     })
     .returning();
-  if (options.appUserWhatsappNumber !== undefined) {
-    await db.insert(appUsers).values({
-      handle: `rina${seedCounter}`,
-      email: creatorEmail,
-      whatsappNumber: options.appUserWhatsappNumber,
-      passwordHash: "argon2id$placeholder",
-      displayName: "Rina",
-    });
-  }
   const [community] = await db
     .insert(communities)
     .values({
@@ -262,109 +244,6 @@ describe("NotifyJoinRequest", () => {
     // fixable by a retry" — the whole point is that a retry CAN fix it.
     const activity = await activityRowsFor(request.id);
     expect(activity).toHaveLength(0);
-  });
-});
-
-/**
- * Task 7. The machinery above was correct and still notified nobody: the number
- * it reads, `creator.whatsapp_number`, has no editor anywhere in the app, so it
- * is null for every owner alive and the skip path fires every single time. The
- * number an owner CAN edit is `app_user.whatsapp_number` (Phase 1), reached
- * through the one join available — `creator.email` = `app_user.email`, since
- * `creator` is a /dashboard/* table whose shape must not change and there is no
- * foreign key between the two.
- *
- * These run against the REAL repository, which is what makes them able to
- * disagree with the SQL; a fake repository could only restate the mapping.
- */
-describe("the owner's number is read from app_user, where it is editable", () => {
-  it("notifies an owner who is only reachable through their app_user account", async () => {
-    const { request } = await seedPendingRequest({
-      creatorWhatsappNumber: null,
-      appUserWhatsappNumber: "+628999990011",
-    });
-    const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
-    const useCase = buildUseCase(notifier);
-
-    const result = await useCase.execute({ joinRequestId: request.id });
-
-    expect(result).toEqual({ notified: true });
-    expect(notifier.notifications).toHaveLength(1);
-    expect(notifier.notifications[0]!.toWhatsappNumber).toBe("+628999990011");
-    // Not recorded as unreachable: this is the case the whole task exists to fix.
-    expect(await activityRowsFor(request.id)).toHaveLength(0);
-  });
-
-  /**
-   * THE ANTI-INNER-JOIN TEST, at this layer. An INNER JOIN onto `app_user`
-   * would stop notifying every creator without an account — people who ARE
-   * being notified today. `seedPendingRequest` creates no account unless asked.
-   */
-  it("still notifies an owner who has no app_user account, on their creator number", async () => {
-    const { request } = await seedPendingRequest({ creatorWhatsappNumber: "+628130009911" });
-    const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
-    const useCase = buildUseCase(notifier);
-
-    const result = await useCase.execute({ joinRequestId: request.id });
-
-    expect(result).toEqual({ notified: true });
-    expect(notifier.notifications).toHaveLength(1);
-    expect(notifier.notifications[0]!.toWhatsappNumber).toBe("+628130009911");
-  });
-
-  it("sends to the app_user number, NOT the creator's, when the owner has both", async () => {
-    const { request } = await seedPendingRequest({
-      creatorWhatsappNumber: "+628130009922",
-      appUserWhatsappNumber: "+628999990022",
-    });
-    const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
-    const useCase = buildUseCase(notifier);
-
-    await useCase.execute({ joinRequestId: request.id });
-
-    // Both literals asserted: which of the two numbers was used is the whole
-    // claim, and asserting only "one message went out" would not make it.
-    expect(notifier.notifications).toHaveLength(1);
-    expect(notifier.notifications[0]!.toWhatsappNumber).toBe("+628999990022");
-    expect(notifier.notifications[0]!.toWhatsappNumber).not.toBe("+628130009922");
-  });
-
-  it("falls back to the creator's number when the owner's account has none", async () => {
-    const { request } = await seedPendingRequest({
-      creatorWhatsappNumber: "+628130009933",
-      appUserWhatsappNumber: null,
-    });
-    const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
-    const useCase = buildUseCase(notifier);
-
-    await useCase.execute({ joinRequestId: request.id });
-
-    expect(notifier.notifications[0]!.toWhatsappNumber).toBe("+628130009933");
-  });
-
-  /**
-   * The skip path still fires, and still fires with the SAME `event_type` and
-   * `reason` — asserted as literal strings rather than as the constants that
-   * define them, so renaming either constant shows up here as a failure rather
-   * than as a test that silently follows it.
-   */
-  it("records the skip, unchanged, for an owner with neither number", async () => {
-    const { member, request } = await seedPendingRequest({
-      creatorWhatsappNumber: null,
-      appUserWhatsappNumber: null,
-    });
-    const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
-    const useCase = buildUseCase(notifier);
-
-    const result = await useCase.execute({ joinRequestId: request.id });
-
-    expect(result).toEqual({ notified: false, skippedReason: "creator_whatsapp_missing" });
-    expect(notifier.notifications).toHaveLength(0);
-    const activity = await activityRowsFor(request.id);
-    expect(activity).toHaveLength(1);
-    expect(activity[0]!.eventType).toBe("join_request_notify_skipped");
-    expect(activity[0]!.memberId).toBe(member.id);
-    expect((activity[0]!.metadata as { reason?: string }).reason).toBe("creator_whatsapp_missing");
   });
 });
 
