@@ -38,4 +38,34 @@ describe("FakePaymentAdapter", () => {
     adapter.failNextInvoice = true;
     await expect(adapter.createInvoice(INPUT)).rejects.toThrow();
   });
+
+  /**
+   * The final whole-branch review's I-1: the stale-pending sweep cancels the
+   * abandoned invoice when it frees the row, so the fake has to record what it
+   * was asked to cancel — a sweep that expired the row and quietly skipped the
+   * provider would otherwise look identical from a test.
+   */
+  it("records the invoices it was asked to expire, with the account they belong to", async () => {
+    const adapter = new FakePaymentAdapter();
+    const created = await adapter.createInvoice(INPUT);
+
+    await adapter.expireInvoice({ invoiceId: created.invoiceId, forAccountId: "acct-creator-1" });
+
+    expect(adapter.expiredInvoices).toEqual([
+      { invoiceId: created.invoiceId, forAccountId: "acct-creator-1" },
+    ]);
+  });
+
+  it("can be told to fail an expiry, so the sweep's failure path is testable", async () => {
+    const adapter = new FakePaymentAdapter();
+    adapter.failNextInvoiceExpiry = true;
+
+    await expect(
+      adapter.expireInvoice({ invoiceId: "inv-1", forAccountId: "acct-1" })
+    ).rejects.toThrow();
+    expect(adapter.expiredInvoices).toEqual([]);
+    // One-shot, exactly like `failNextInvoice`: the next call works.
+    await adapter.expireInvoice({ invoiceId: "inv-1", forAccountId: "acct-1" });
+    expect(adapter.expiredInvoices).toHaveLength(1);
+  });
 });

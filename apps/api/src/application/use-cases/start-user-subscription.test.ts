@@ -182,6 +182,14 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
    */
   const retireExpiredCalls: { subscriberId: string; ownerId: string; now: Date }[] = [];
   const repository: UserSubscriptionRepositoryPort = {
+    /**
+     * Only `SweepStalePendingCheckouts` reads this (final review, I-1) — nothing on
+     * the purchase path does, and a purchase that started cancelling invoices would
+     * be a defect this fake should not make easy to write.
+     */
+    async findExpirableInvoice() {
+      return null;
+    },
     /** Mirrors `user_subscription_one_pending`: one pending row per (subscriber, owner). */
     async claimPending(input) {
       const held = subscriptions.find(

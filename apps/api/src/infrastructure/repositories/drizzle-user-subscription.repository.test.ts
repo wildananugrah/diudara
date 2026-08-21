@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { db, type DatabaseExecutor } from "../../db/client";
 import { appUsers, userSubscriptions } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
+import { XENDIT_ACCOUNT_PROVISIONING } from "../../domain/payment-account";
 import { ArrivalLatch } from "../../test-support/arrival-latch";
 import { DrizzleUserTierRepository } from "./drizzle-user-tier.repository";
 import { DrizzleUserSubscriptionRepository } from "./drizzle-user-subscription.repository";
@@ -802,6 +803,116 @@ describe("DrizzleUserSubscriptionRepository.listStalePending / expireStalePendin
 
   it("returns false for an unknown id, rather than throwing", async () => {
     expect(await subs.expireStalePending("00000000-0000-4000-8000-000000000000")).toBe(false);
+  });
+});
+
+/**
+ * **THE FINAL WHOLE-BRANCH REVIEW'S I-1.** Expiring the row frees the pending slot
+ * so the buyer's next tap mints a fresh invoice; the abandoned one lives 24 hours at
+ * the provider and used to stay payable for all of them. This is the lookup that
+ * lets `SweepStalePendingCheckouts` cancel it — and every `null` it returns is a
+ * case where calling the provider would be wrong, not merely useless.
+ */
+describe("DrizzleUserSubscriptionRepository.findExpirableInvoice", () => {
+  /** Gives the OWNER a connected provider account, the way `ConnectUserPayout` finishes. */
+  async function connectOwner(ownerId: string, accountId: string) {
+    await db
+      .update(appUsers)
+      .set({ xenditAccountId: accountId })
+      .where(eq(appUsers.id, ownerId));
+  }
+
+  async function seedInvoicedPending() {
+    const seeded = await seedPendingSubscription();
+    await connectOwner(seeded.ownerId, "acct-real-1");
+    const transaction = await subs.createTransaction({
+      userSubscriptionId: seeded.id,
+      amount: 50_000,
+    });
+    await subs.attachGatewayReference(transaction.id, "inv-1", "https://pay.test/inv-1");
+    return { ...seeded, transactionId: transaction.id };
+  }
+
+  it("returns the invoice id and the OWNER's provider account", async () => {
+    const { id } = await seedInvoicedPending();
+
+    expect(await subs.findExpirableInvoice(id)).toEqual({
+      invoiceId: "inv-1",
+      forAccountId: "acct-real-1",
+    });
+  });
+
+  /**
+   * The invoice id, NEVER the url. The url is the payer-facing page — it must not
+   * travel to a sweep that logs, and the provider does not accept it as an
+   * identifier anyway.
+   */
+  it("carries no invoice url, and nothing else about the payer", async () => {
+    const { id } = await seedInvoicedPending();
+    const found = await subs.findExpirableInvoice(id);
+
+    expect(Object.keys(found!).sort()).toEqual(["forAccountId", "invoiceId"]);
+    expect(JSON.stringify(found)).not.toContain("https://");
+  });
+
+  /**
+   * The row a failed `createInvoice` left behind — 5a's own recorded case, and one
+   * the stale-pending sweep exists partly to clean up. There is nothing at the
+   * provider, so there is nothing to cancel; sending an empty reference would be a
+   * request that can only be refused.
+   */
+  it("returns null when no invoice was ever opened for the row", async () => {
+    const seeded = await seedPendingSubscription();
+    await connectOwner(seeded.ownerId, "acct-real-1");
+    await subs.createTransaction({ userSubscriptionId: seeded.id, amount: 50_000 });
+
+    expect(await subs.findExpirableInvoice(seeded.id)).toBeNull();
+  });
+
+  /**
+   * **THE ONE THAT WOULD COST REAL MONEY.** A transaction that has settled must
+   * never have its invoice cancelled: the payer already paid it, and the sweep is
+   * only ever meant to kill invoices nobody used.
+   */
+  it("returns null once the transaction has been PAID", async () => {
+    const { id, transactionId } = await seedInvoicedPending();
+    await subs.markTransactionPaid(transactionId, new Date());
+
+    expect(await subs.findExpirableInvoice(id)).toBeNull();
+  });
+
+  /**
+   * The sentinel is TRUTHY, and this is the same trap `StartCheckout` fell into
+   * (`isConnectedPaymentAccount`'s own docstring). Sending
+   * `for-user-id: "provisioning:in-progress"` is a literal English phrase where a
+   * 24-character Xendit object id belongs.
+   */
+  it("returns null when the owner's account is the provisioning sentinel, not a real id", async () => {
+    const { id, ownerId } = await seedInvoicedPending();
+    await connectOwner(ownerId, XENDIT_ACCOUNT_PROVISIONING);
+
+    expect(await subs.findExpirableInvoice(id)).toBeNull();
+  });
+
+  it("returns null when the owner has no provider account at all", async () => {
+    const seeded = await seedPendingSubscription();
+    const transaction = await subs.createTransaction({
+      userSubscriptionId: seeded.id,
+      amount: 50_000,
+    });
+    await subs.attachGatewayReference(transaction.id, "inv-1", "https://pay.test/inv-1");
+
+    expect(await subs.findExpirableInvoice(seeded.id)).toBeNull();
+  });
+
+  /**
+   * A miss reads as `null`, never as a 500 — the same rule every other method here
+   * follows, and the reason `UUID_PATTERN` exists at this boundary.
+   */
+  it("returns null for an unknown or malformed id rather than throwing", async () => {
+    expect(await subs.findExpirableInvoice("00000000-0000-4000-8000-000000000000")).toBeNull();
+    expect(await subs.findExpirableInvoice("not-a-uuid")).toBeNull();
+    expect(await subs.findExpirableInvoice("")).toBeNull();
   });
 });
 

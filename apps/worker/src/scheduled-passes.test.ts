@@ -834,9 +834,30 @@ describe("SweepExpiredMemberships", () => {
 class FakeStalePendingCheckoutRepository {
   readonly rows = new Map<string, { status: string; createdAt: Date }>();
   readonly failFor = new Set<string>();
+  /** subscription id -> the live invoice its pending transaction still points at. */
+  readonly invoices = new Map<string, { invoiceId: string; forAccountId: string }>();
+  /** Subscription ids whose `findExpirableInvoice` throws — a database blip on the lookup. */
+  readonly failInvoiceLookupFor = new Set<string>();
+  /** Every call, in order, so a test can prove the ROW moved before the provider was called. */
+  readonly calls: string[] = [];
 
   seed(id: string, status: string, createdAt: Date): void {
     this.rows.set(id, { status, createdAt });
+  }
+
+  /** Gives this row a live invoice at the provider, the way a real claim-then-invoice does. */
+  seedInvoice(id: string, invoiceId: string, forAccountId = "acct-budi"): void {
+    this.invoices.set(id, { invoiceId, forAccountId });
+  }
+
+  async findExpirableInvoice(
+    id: string
+  ): Promise<{ invoiceId: string; forAccountId: string } | null> {
+    this.calls.push(`find:${id}`);
+    if (this.failInvoiceLookupFor.has(id)) {
+      throw new Error(`findExpirableInvoice(${id}) failed: connection reset`);
+    }
+    return this.invoices.get(id) ?? null;
   }
 
   statusOf(id: string): string | undefined {
@@ -852,6 +873,7 @@ class FakeStalePendingCheckoutRepository {
   }
 
   async expireStalePending(id: string): Promise<boolean> {
+    this.calls.push(`expire-row:${id}`);
     if (this.failFor.has(id)) {
       // The real adapter's `expireStalePending` is a single UPDATE against a live
       // connection — a thrown error here stands in for the database being briefly
@@ -871,6 +893,27 @@ class FakeStalePendingCheckoutRepository {
   moveExternally(id: string, status: string): void {
     const row = this.rows.get(id);
     if (row !== undefined) row.status = status;
+  }
+}
+
+/**
+ * In-memory `InvoiceExpiryProvider` — the sweep's half of `PaymentProviderPort`,
+ * structurally. `FakePaymentAdapter` in `apps/api` satisfies the same shape; this
+ * one lives here so the worker's tests need no composition root, exactly as
+ * `FakeStalePendingCheckoutRepository` does for the database.
+ */
+class FakeInvoiceExpiryProvider {
+  readonly expired: { invoiceId: string; forAccountId: string }[] = [];
+  readonly failFor = new Set<string>();
+  /** Shared with the repository fake so ORDER across the two is observable. */
+  constructor(private readonly calls: string[] = []) {}
+
+  async expireInvoice(input: { invoiceId: string; forAccountId: string }): Promise<void> {
+    this.calls.push(`expire-invoice:${input.invoiceId}`);
+    if (this.failFor.has(input.invoiceId)) {
+      throw new Error(`xendit expireInvoice failed with status 500`);
+    }
+    this.expired.push(input);
   }
 }
 
@@ -902,7 +945,7 @@ describe("SweepStalePendingCheckouts", () => {
     const checkouts = new FakeStalePendingCheckoutRepository();
     checkouts.seed("pending-1", "pending", pastWindowBy(1_000));
 
-    const sweep = new SweepStalePendingCheckouts(checkouts, {
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
       now: () => NOW,
       windowMs: TEST_WINDOW_MS,
     });
@@ -923,7 +966,7 @@ describe("SweepStalePendingCheckouts", () => {
     const checkouts = new FakeStalePendingCheckoutRepository();
     checkouts.seed("pending-1", "pending", insideWindowBy(1_000));
 
-    const sweep = new SweepStalePendingCheckouts(checkouts, {
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
       now: () => NOW,
       windowMs: TEST_WINDOW_MS,
     });
@@ -937,7 +980,7 @@ describe("SweepStalePendingCheckouts", () => {
     const checkouts = new FakeStalePendingCheckoutRepository();
     checkouts.seed("pending-1", "pending", pastWindowBy(0));
 
-    const sweep = new SweepStalePendingCheckouts(checkouts, {
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
       now: () => NOW,
       windowMs: TEST_WINDOW_MS,
     });
@@ -964,7 +1007,7 @@ describe("SweepStalePendingCheckouts", () => {
       return page;
     };
 
-    const sweep = new SweepStalePendingCheckouts(checkouts, {
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
       now: () => NOW,
       windowMs: TEST_WINDOW_MS,
     });
@@ -983,7 +1026,7 @@ describe("SweepStalePendingCheckouts", () => {
     checkouts.failFor.add("b");
 
     const errors: string[] = [];
-    const sweep = new SweepStalePendingCheckouts(checkouts, {
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
       now: () => NOW,
       windowMs: TEST_WINDOW_MS,
       logError: (line) => errors.push(line),
@@ -1013,7 +1056,7 @@ describe("SweepStalePendingCheckouts", () => {
     checkouts.failFor.add("x");
     checkouts.failFor.add("y");
 
-    const sweep = new SweepStalePendingCheckouts(checkouts, {
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
       now: () => NOW,
       windowMs: TEST_WINDOW_MS,
       batchSize: 2,
@@ -1022,6 +1065,234 @@ describe("SweepStalePendingCheckouts", () => {
     const result = await sweep.execute();
 
     expect(result).toEqual({ considered: 2, expired: 0, skipped: 0, failed: 2 });
+  });
+
+  /**
+   * **THE FINAL WHOLE-BRANCH REVIEW'S I-1 — the money one.** Freeing the pending
+   * slot after two hours is only half the job: the invoice this row opened lives
+   * 24 hours at Xendit and nothing used to cancel it. The buyer returns at T+2h05,
+   * taps, gets a fresh invoice I2 — and the abandoned I1 is still payable, sitting
+   * in their WhatsApp. Paying both is a DOUBLE CHARGE (detected and alerted by the
+   * webhook's duplicate branch, no second membership granted, and no refund path
+   * anywhere in this product). So the row and its invoice are retired together.
+   */
+  it("expires the invoice AT THE PROVIDER too, so the abandoned one cannot still be paid", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("pending-1", "pending", pastWindowBy(1_000));
+    checkouts.seedInvoice("pending-1", "inv_1", "acct-budi");
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(checkouts.statusOf("pending-1")).toBe("expired");
+    expect(payments.expired).toEqual([{ invoiceId: "inv_1", forAccountId: "acct-budi" }]);
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 0 });
+  });
+
+  /**
+   * **THE ORDER, AND IT IS THE WHOLE SAFETY ARGUMENT.** The row is freed FIRST and
+   * the provider is called after.
+   *
+   * Row-then-provider: if the provider call fails, the buyer's slot is already free,
+   * so they can buy again immediately — the abandoned invoice stays payable, which
+   * is exactly the state this branch was already in before I-1, never worse.
+   *
+   * Provider-then-row: a provider call that SUCCEEDS and a row update that then
+   * fails leaves the buyer holding the pending slot AND a dead invoice —
+   * `findPendingCheckout` hands back a URL Xendit has killed and there is no way to
+   * mint another until a later pass gets the row moved. That is the abandoned-cart
+   * trap Task 5 exists to close, re-opened by the fix for it.
+   *
+   * So a buyer can never be stranded by this pass, in either direction.
+   */
+  it("expires the ROW BEFORE the provider — a provider failure can never strand the buyer", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("pending-1", "pending", pastWindowBy(1_000));
+    checkouts.seedInvoice("pending-1", "inv_1");
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+    payments.failFor.add("inv_1");
+
+    const errors: string[] = [];
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+      logError: (line) => errors.push(line),
+    });
+    const result = await sweep.execute();
+
+    // The order, stated as the assertion rather than inferred from a mock.
+    expect(checkouts.calls).toEqual([
+      "expire-row:pending-1",
+      "find:pending-1",
+      "expire-invoice:inv_1",
+    ]);
+    // THE ROW IS FREE regardless of what the provider did. This buyer taps once and
+    // buys; nothing about the failure above reaches them.
+    expect(checkouts.statusOf("pending-1")).toBe("expired");
+    // Counted and visible, never thrown: the pass keeps going. `expired` and
+    // `failed` both name this row on purpose — the slot moved, the invoice did not.
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 1 });
+    expect(errors).toHaveLength(1);
+  });
+
+  /**
+   * NO INVOICE URL, NO EMAIL, NO WHATSAPP NUMBER — the rule this whole repository
+   * holds, and this log line is written on a path that has a live payment page's id
+   * in hand. It names the SUBSCRIPTION and the counts, and nothing the provider
+   * handed us.
+   */
+  it("never puts the invoice id or its url in the failure log line", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("sub-77", "pending", pastWindowBy(1_000));
+    checkouts.seedInvoice("sub-77", "inv_secret_1", "acct-budi");
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+    payments.failFor.add("inv_secret_1");
+
+    const errors: string[] = [];
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+      logError: (line) => errors.push(line),
+    });
+    await sweep.execute();
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("sub-77");
+    expect(errors[0]).not.toContain("inv_secret_1");
+    expect(errors[0]).not.toContain("acct-budi");
+    expect(errors[0]).not.toContain("https://");
+  });
+
+  /**
+   * A row whose provider call fails must not take the pass down with it, exactly as
+   * a row whose UPDATE throws does not. Both neighbours are still swept AND still
+   * cancelled at the provider.
+   */
+  it("does not abort the pass when one row's provider call throws", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    for (const [id, ms] of [["a", 30_000], ["b", 20_000], ["c", 10_000]] as const) {
+      checkouts.seed(id, "pending", pastWindowBy(ms));
+      checkouts.seedInvoice(id, `inv_${id}`);
+    }
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+    payments.failFor.add("inv_b");
+
+    const errors: string[] = [];
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+      logError: (line) => errors.push(line),
+    });
+    const result = await sweep.execute();
+
+    expect(result).toEqual({ considered: 3, expired: 3, skipped: 0, failed: 1 });
+    expect(payments.expired.map((i) => i.invoiceId)).toEqual(["inv_a", "inv_c"]);
+    expect(["a", "b", "c"].map((id) => checkouts.statusOf(id))).toEqual([
+      "expired",
+      "expired",
+      "expired",
+    ]);
+    expect(errors).toHaveLength(1);
+  });
+
+  /**
+   * A lookup that throws is the same shape of failure as a provider that throws —
+   * the row is already free, so it is counted and logged and the pass moves on.
+   */
+  it("survives a findExpirableInvoice that throws", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("pending-1", "pending", pastWindowBy(1_000));
+    checkouts.seedInvoice("pending-1", "inv_1");
+    checkouts.failInvoiceLookupFor.add("pending-1");
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+      logError: () => undefined,
+    });
+    const result = await sweep.execute();
+
+    expect(checkouts.statusOf("pending-1")).toBe("expired");
+    expect(payments.expired).toEqual([]);
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 1 });
+  });
+
+  /**
+   * The row a failed `createInvoice` left behind — 5a's own recorded case. There is
+   * nothing at the provider to cancel, so nothing is called and nothing is counted
+   * as a failure. Calling the provider with an empty reference would be a request
+   * that can only be refused.
+   */
+  it("calls nothing at the provider for a row that never opened an invoice", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("no-invoice", "pending", pastWindowBy(1_000));
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(payments.expired).toEqual([]);
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 0 });
+  });
+
+  /**
+   * A row this pass did NOT move — paid via the webhook, cancelled, or already swept
+   * — must not have its invoice cancelled. The clearest case is the one that would
+   * cost real money: the buyer paid it between the listing and this row's turn.
+   */
+  it("never cancels the invoice of a row it did not move", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("raced", "pending", pastWindowBy(10_000));
+    checkouts.seedInvoice("raced", "inv_paid");
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+
+    const listSpy = checkouts.listStalePending.bind(checkouts);
+    checkouts.listStalePending = async (cutoff, limit) => {
+      const page = await listSpy(cutoff, limit);
+      checkouts.moveExternally("raced", "paid");
+      return page;
+    };
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(payments.expired).toEqual([]);
+    expect(checkouts.calls).toEqual(["expire-row:raced"]);
+    expect(result).toEqual({ considered: 1, expired: 0, skipped: 1, failed: 0 });
+  });
+
+  /**
+   * A box with no payment provider at all — `selectPaymentProvider` answers `null`
+   * for one, and `bootstrap()` does not register a checkout route there. The sweep
+   * still has to free pending slots (rows can predate the configuration change), and
+   * it must not pretend a cancellation happened.
+   */
+  it("still frees the slot on a box with no payment provider configured", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("pending-1", "pending", pastWindowBy(1_000));
+    checkouts.seedInvoice("pending-1", "inv_1");
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(checkouts.statusOf("pending-1")).toBe("expired");
+    // Not even looked up: there is nobody to ask.
+    expect(checkouts.calls).toEqual(["expire-row:pending-1"]);
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 0 });
   });
 });
 

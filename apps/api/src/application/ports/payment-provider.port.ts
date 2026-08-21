@@ -77,8 +77,48 @@ export interface CreatePaymentAccountInput {
   name: string;
 }
 
+export interface ExpireInvoiceInput {
+  /**
+   * The provider's own id for the invoice — `CreateInvoiceResult.invoiceId`, stored
+   * as `user_transaction.gateway_reference_id`. NOT the invoice URL: that is the
+   * payer-facing page, it must never be logged, and the provider does not accept it
+   * as an identifier.
+   */
+  invoiceId: string;
+  /**
+   * The CREATOR's provider account — the same `for-user-id` the invoice was created
+   * under. Required, never optional: the invoice belongs to that sub-account, and a
+   * cancellation sent without it addresses the platform account, where the invoice
+   * does not exist. See `CreateInvoiceInput.forAccountId`.
+   */
+  forAccountId: string;
+}
+
 export interface PaymentProviderPort {
   createPaymentAccount(input: CreatePaymentAccountInput): Promise<{ accountId: string }>;
 
   createInvoice(input: CreateInvoiceInput): Promise<CreateInvoiceResult>;
+
+  /**
+   * Kills an invoice at the provider so it can no longer be paid — the third
+   * operation this port has ever had, added by the final whole-branch review's I-1.
+   *
+   * **WHY IT EXISTS.** `SweepStalePendingCheckouts` frees an abandoned checkout's
+   * `user_subscription_one_pending` slot after two hours, so the buyer's next tap
+   * mints a fresh invoice. Xendit's default invoice lifetime is 24 hours, and before
+   * this method nothing cancelled the first one: for the remaining ~22 hours the
+   * abandoned link (sitting in the buyer's WhatsApp — spec §7's own example) and the
+   * new one were BOTH payable. Paying both is a duplicate charge; the webhook detects
+   * it, grants no second membership and logs that a refund is likely owed, and this
+   * product has no refund path. So the invoice is cancelled when the row is retired.
+   *
+   * Returns nothing: there is no useful answer beyond "it did not throw". A failure
+   * IS thrown, and `SweepStalePendingCheckouts.cancelInvoiceFor` is where the
+   * decision about what that costs is written down — the row is already free by
+   * then, so a failure is counted and logged rather than retried.
+   *
+   * ONLY ever called for an invoice whose subscription this process has just moved
+   * OFF `pending`. Never for one that may have been paid.
+   */
+  expireInvoice(input: ExpireInvoiceInput): Promise<void>;
 }

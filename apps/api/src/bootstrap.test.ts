@@ -297,6 +297,9 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   async expireStalePending() {
     return false;
   },
+  async findExpirableInvoice() {
+    return null;
+  },
   async listExpiringActive() {
     return [];
   },
@@ -735,6 +738,9 @@ const fakePaymentProvider: PaymentProviderPort = {
     return { accountId: "fake-acct" };
   },
   async createInvoice() {
+    throw new Error("not used");
+  },
+  async expireInvoice() {
     throw new Error("not used");
   },
 };

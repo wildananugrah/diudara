@@ -31,6 +31,17 @@ export interface UserTransactionRow {
   createdAt: Date;
 }
 
+/**
+ * One live invoice at the payment provider, addressed the way the provider needs
+ * it: the invoice's own id, and the CREATOR's sub-account it was created under.
+ * `SweepStalePendingCheckouts` hands this straight to
+ * `PaymentProviderPort.expireInvoice`.
+ */
+export interface ExpirableInvoiceRef {
+  invoiceId: string;
+  forAccountId: string;
+}
+
 /** What `claimPending` hands back: the pair's pending subscription, and who put it there. */
 export interface PendingSubscriptionClaim {
   subscription: UserSubscriptionRow;
@@ -207,6 +218,39 @@ export interface UserSubscriptionRepositoryPort {
    * pending by the time this call reached it.
    */
   expireStalePending(id: string): Promise<boolean>;
+  /**
+   * The still-payable invoice a stale pending subscription opened, so the sweep
+   * can cancel it at the provider instead of leaving it alive — the final
+   * whole-branch review's I-1.
+   *
+   * **WHY THE SWEEP NEEDS THIS AT ALL.** `expireStalePending` frees
+   * `user_subscription_one_pending`'s slot after two hours, so the buyer's next
+   * tap mints a SECOND invoice. Xendit's invoices live 24 hours, so for the
+   * remaining ~22 the abandoned link (sitting in the buyer's WhatsApp — spec §7's
+   * own example) and the new one are both payable. Paying both is a duplicate
+   * charge: the webhook detects it, grants no second membership and logs that a
+   * refund is likely owed, and there is no refund path in this product.
+   *
+   * **EVERY `null` IS A CASE WHERE CALLING THE PROVIDER WOULD BE WRONG**, not
+   * merely useless:
+   *
+   *  - no `gateway_reference_id` — no invoice was ever opened (a failed
+   *    `createInvoice`, 5a's own recorded case). There is nothing to cancel;
+   *  - the transaction is no longer `pending` — most importantly, it was PAID.
+   *    Cancelling a settled invoice is the one call here that could cost real
+   *    money;
+   *  - the owner's `xendit_account_id` is absent or the provisioning SENTINEL —
+   *    the sentinel is truthy, and sending it as `for-user-id` puts a literal
+   *    English phrase where a 24-character object id belongs
+   *    (`isConnectedPaymentAccount`, and `StartCheckout`'s own version of this
+   *    bug);
+   *  - the id is unknown or malformed — a miss, like every other read here.
+   *
+   * The invoice ID only, never the invoice URL: the url is the payer-facing page,
+   * it must not travel to a pass that logs, and the provider does not accept it as
+   * an identifier.
+   */
+  findExpirableInvoice(subscriptionId: string): Promise<ExpirableInvoiceRef | null>;
   /**
    * ACTIVE memberships whose period ends inside the reminder window — what Task
    * 4's `RemindExpiringMembership` pass walks so a member is told BEFORE their

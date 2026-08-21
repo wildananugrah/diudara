@@ -1,7 +1,9 @@
 import { and, asc, desc, eq, gt, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { appUsers, userSubscriptions, userTransactions } from "../../db/schema";
+import { isConnectedPaymentAccount } from "../../domain/payment-account";
 import type {
+  ExpirableInvoiceRef,
   PendingSubscriptionClaim,
   PendingUserCheckout,
   SubscriberRow,
@@ -244,6 +246,55 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
       .where(and(eq(userSubscriptions.id, id), eq(userSubscriptions.status, "pending")))
       .returning({ id: userSubscriptions.id });
     return rows.length > 0;
+  }
+
+  /**
+   * The invoice a stale pending row opened, for the sweep to cancel at the provider
+   * — see the port's own docstring for why each `null` below is a case where the
+   * call would be WRONG rather than merely pointless.
+   *
+   * ONE query, three tables: the subscription for its owner, the transaction for
+   * the gateway reference, and `app_user` for the sub-account the invoice was
+   * created under. It is run at most once per swept row (and stale pending rows are
+   * a small, fast-turning slice by construction — `user_subscription_one_pending`
+   * allows at most one per pair), so it is not on any hot path.
+   *
+   * `isConnectedPaymentAccount` is applied HERE rather than left to the caller: the
+   * sentinel is truthy, and the worker's structural port deliberately knows nothing
+   * about this codebase's domain. A row whose owner is half-connected reads as "no
+   * invoice to cancel", which is the safe answer — the provider would refuse the
+   * call anyway, and the sweep would count a failure for it.
+   *
+   * Newest transaction first, matching `findPendingCheckout`: if an earlier attempt
+   * left more than one, the invoice we kill is the one most recently opened — the
+   * same one that method would have handed back to the buyer.
+   */
+  async findExpirableInvoice(subscriptionId: string): Promise<ExpirableInvoiceRef | null> {
+    if (!UUID_PATTERN.test(subscriptionId)) {
+      return null;
+    }
+    const [row] = await this.db
+      .select({
+        invoiceId: userTransactions.gatewayReferenceId,
+        forAccountId: appUsers.xenditAccountId,
+      })
+      .from(userSubscriptions)
+      .innerJoin(userTransactions, eq(userTransactions.userSubscriptionId, userSubscriptions.id))
+      .innerJoin(appUsers, eq(appUsers.id, userSubscriptions.ownerId))
+      .where(
+        and(
+          eq(userSubscriptions.id, subscriptionId),
+          eq(userTransactions.status, "pending"),
+          isNotNull(userTransactions.gatewayReferenceId)
+        )
+      )
+      .orderBy(desc(userTransactions.createdAt))
+      .limit(1);
+    if (!row || row.invoiceId === null) return null;
+    // NOT `if (row.forAccountId)`. The provisioning sentinel is truthy — see the
+    // port docstring, and `isConnectedPaymentAccount`'s own.
+    if (!isConnectedPaymentAccount(row.forAccountId)) return null;
+    return { invoiceId: row.invoiceId, forAccountId: row.forAccountId };
   }
 
   /**

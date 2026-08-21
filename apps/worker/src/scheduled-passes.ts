@@ -509,6 +509,36 @@ export interface StalePendingCheckoutRepository {
    * `status = 'pending'` alone is the whole arbiter.
    */
   expireStalePending(id: string): Promise<boolean>;
+  /**
+   * The still-payable invoice this subscription opened, or `null` when there is
+   * nothing at the provider to cancel — no invoice was ever opened (a failed
+   * `createInvoice`, 5a's own recorded case), the transaction is no longer
+   * pending, or the creator's payout account is not a real one. See
+   * `UserSubscriptionRepositoryPort.findExpirableInvoice`.
+   */
+  findExpirableInvoice(subscriptionId: string): Promise<ExpirableInvoice | null>;
+}
+
+/** One live invoice at the payment provider, and the sub-account it belongs to. */
+export interface ExpirableInvoice {
+  invoiceId: string;
+  /**
+   * The CREATOR's provider account. Required, not optional: the invoice was
+   * created against that sub-account (`for-user-id`), and a cancellation sent
+   * without it addresses the platform account, where the invoice does not exist.
+   */
+  forAccountId: string;
+}
+
+/**
+ * The one provider operation this pass needs — structurally the same method
+ * `PaymentProviderPort.expireInvoice` declares, so `XenditPaymentAdapter` and
+ * `FakePaymentAdapter` both satisfy it with nothing declared against this
+ * interface. Narrow on purpose, exactly like `StalePendingCheckoutRepository`
+ * above: this pass has no business being able to CREATE an invoice.
+ */
+export interface InvoiceExpiryProvider {
+  expireInvoice(input: ExpirableInvoice): Promise<void>;
 }
 
 export interface StalePendingSweepResult {
@@ -524,7 +554,25 @@ export interface StalePendingSweepResult {
    * own `skipped`.
    */
   skipped: number;
-  /** Rows whose `expireStalePending` call threw and were left pending for the next pass to retry. */
+  /**
+   * Rows this pass could not finish.
+   *
+   * **`considered` is NOT `expired + skipped + failed`, and that is deliberate.**
+   * Two different failures land here and they leave the row in opposite states:
+   *
+   *  - `expireStalePending` threw — the row is still `pending`, still stale by age,
+   *    and the next pass finds it again and retries. Counted in `failed` alone.
+   *  - the row moved but its INVOICE could not be cancelled at the provider — the
+   *    lookup or the provider call threw. Counted in BOTH `expired` and `failed`,
+   *    because both statements are true: the buyer's slot is free (they can buy
+   *    again immediately) and an abandoned invoice may still be payable at the
+   *    provider until its own 24-hour life runs out. The row has left this pass's
+   *    result set, so there is no retry — which is why the failure is logged as well
+   *    as counted, and why the ORDER is row-first (see `expireOne`).
+   *
+   * A non-zero `failed` is worth an operator's attention either way; the log line
+   * beside it says which kind it was.
+   */
   failed: number;
 }
 
@@ -571,6 +619,18 @@ const DEFAULT_STALE_PENDING_SWEEP_BATCH_SIZE = 500;
  * the provider, while comfortably covering "a person's checkout": a WhatsApp OTP, a
  * bank redirect, someone stepping away and coming back. The return visit this task
  * exists for — the spec's own example, "a day later" — is 12x past it.
+ *
+ * **AND THE GAP BETWEEN THOSE TWO NUMBERS WAS THE PROBLEM** (the final whole-branch
+ * review's I-1). Freeing the slot at `T+2h` while the invoice lives to `T+24h` left
+ * a 22-hour window in which one pair could hold two simultaneously-payable
+ * invoices — the abandoned link still sitting in the buyer's WhatsApp, and a fresh
+ * one from their return visit. It needed no failure at all to reach, and paying both
+ * is a double charge with no refund path anywhere in this product. That is why the
+ * sweep now cancels the invoice at the provider when it retires the row (see
+ * `SweepStalePendingCheckouts.cancelInvoiceFor`): the two numbers no longer have to
+ * agree, because the invoice does not outlive the row. Widening this window to 25
+ * hours would have "fixed" it by re-opening the abandoned-cart trap this pass exists
+ * to close.
  */
 export const STALE_PENDING_CHECKOUT_WINDOW_MS = 2 * 60 * 60_000;
 
@@ -589,6 +649,10 @@ export const STALE_PENDING_CHECKOUT_WINDOW_MS = 2 * 60 * 60_000;
  * reasoning as `SweepExpiredMemberships`'s own `retireExpired` call: a `false`
  * return means the row was no longer pending by this row's turn, not that this
  * pass read stale data and acted on it wrongly.
+ *
+ * AND IT CANCELS THE INVOICE THE ROW OPENED, not only the row — see
+ * `cancelInvoiceFor` for the ordering and for what each direction's failure costs.
+ * That is the difference between freeing a slot and closing a double-charge window.
  */
 export class SweepStalePendingCheckouts {
   private readonly windowMs: number;
@@ -598,6 +662,15 @@ export class SweepStalePendingCheckouts {
 
   constructor(
     private readonly subscriptions: StalePendingCheckoutRepository,
+    /**
+     * Where the abandoned invoice is cancelled, or `null` on a box with no payment
+     * provider configured at all (`selectPaymentProvider` answers `null` for one,
+     * and `bootstrap()` registers no checkout route there). REQUIRED and positional
+     * rather than an option, so wiring this pass without deciding what to do about
+     * the invoice is a compile error rather than a silently re-opened double-charge
+     * window.
+     */
+    private readonly payments: InvoiceExpiryProvider | null,
     options: SweepStalePendingCheckoutsOptions = {}
   ) {
     this.windowMs = options.windowMs ?? STALE_PENDING_CHECKOUT_WINDOW_MS;
@@ -636,17 +709,73 @@ export class SweepStalePendingCheckouts {
   /** One stale-pending row. Never throws — a per-row failure lands on `result.failed`, not on the pass. */
   private async expireOne(id: string, result: StalePendingSweepResult): Promise<void> {
     try {
-      if (await this.subscriptions.expireStalePending(id)) {
-        result.expired += 1;
+      if (!(await this.subscriptions.expireStalePending(id))) {
+        // No longer pending — see `StalePendingSweepResult.skipped`'s own docstring.
+        // Nothing is cancelled at the provider for such a row, and the case that
+        // makes that non-negotiable is the one where the buyer PAID it between the
+        // listing and this row's turn.
+        result.skipped += 1;
         return;
       }
-      // No longer pending — see `StalePendingSweepResult.skipped`'s own docstring.
-      result.skipped += 1;
+      result.expired += 1;
     } catch (err) {
       result.failed += 1;
       this.logError(
         `[pending-checkouts] subscription=${id} was NOT expired and is left pending for ` +
           `the next pass — expireStalePending failed: ${redactLinks(safeErrorSummary(err))}`
+      );
+      return;
+    }
+    // ---- The ROW HAS MOVED. Only now is the provider called.
+    await this.cancelInvoiceFor(id, result);
+  }
+
+  /**
+   * **THE OTHER HALF OF FREEING THE SLOT** (the final whole-branch review's I-1).
+   * Expiring the row lets the buyer open a SECOND invoice; the first one lives 24
+   * hours at Xendit and nothing used to cancel it, so between `T+2h` and `T+24h` one
+   * pair could hold two simultaneously-payable invoices. Paying both is a double
+   * charge — the webhook detects it, grants no second membership, and logs that a
+   * refund is likely owed, but there is no refund path in this product.
+   *
+   * **ORDER: THE ROW FIRST, THE PROVIDER SECOND, AND NEITHER DIRECTION IS FREE.**
+   *
+   *  - Row first (this): a provider failure leaves an abandoned invoice payable for
+   *    the rest of its 24 hours — exactly the state this branch was already in — and
+   *    the buyer's slot is free, so they buy again with one tap. Nobody is stranded.
+   *  - Provider first: a cancellation that SUCCEEDS followed by a row update that
+   *    FAILS leaves the buyer holding the pending slot and a dead invoice.
+   *    `findPendingCheckout` would hand them back a URL Xendit has killed, with no
+   *    way to mint another until a later pass moves the row — the abandoned-cart
+   *    trap Task 5 exists to close, re-opened by the fix for it, and permanently if
+   *    the row update keeps failing.
+   *
+   * So the failure this ordering admits is bounded and already understood, and the
+   * one it refuses is a buyer who cannot buy. It never throws: the row is already
+   * free, and taking the pass down here would strand every stale row behind it.
+   *
+   * NO INVOICE ID, NO URL, NO EMAIL, NO NUMBER in the log line — the subscription id
+   * and the sanitised error summary only. That rule holds throughout this repository,
+   * and this is the one pass that has a live payment page's identifiers in hand.
+   */
+  private async cancelInvoiceFor(id: string, result: StalePendingSweepResult): Promise<void> {
+    // A box with no provider has nothing to cancel and nobody to ask. Checked before
+    // the lookup so it costs no query.
+    if (this.payments === null) return;
+    try {
+      const invoice = await this.subscriptions.findExpirableInvoice(id);
+      // No invoice was ever opened for this row (a failed `createInvoice` — 5a's own
+      // recorded case), or its transaction has moved on. Nothing to cancel, and not
+      // a failure.
+      if (invoice === null) return;
+      await this.payments.expireInvoice(invoice);
+    } catch (err) {
+      result.failed += 1;
+      this.logError(
+        `[pending-checkouts] subscription=${id} was expired and its slot IS free, but its ` +
+          `invoice could NOT be cancelled at the provider and may still be payable until it ` +
+          `expires there — a payment against it would be a duplicate charge with no refund ` +
+          `path: ${redactLinks(safeErrorSummary(err))}`
       );
     }
   }

@@ -30,6 +30,14 @@ cd apps/api  && bun run db:migrate     # 0029_open_proudstar, 0030_early_puma
 cd ../worker && bun run dev
 ```
 
+**Check the environment is whole before you deploy, because the worker now REFUSES to start on a
+half-configured one** — and it is the process that delivers paid members' invites:
+
+- `RESEND_API_KEY` and `EMAIL_FROM`: **both set or both unset**. One without the other is silent
+  non-delivery, so `bootstrapWorker` throws rather than boot.
+- `XENDIT_SECRET_KEY` and `XENDIT_SPLIT_RULE_ID`: **both set or both unset**, for the same reason —
+  the worker reads them too now, to cancel abandoned invoices at the provider (§5).
+
 **Read the worker's boot log.** You are looking for the passes to be registered at all:
 
 ```
@@ -169,9 +177,27 @@ UPDATE user_subscription
 
 - [ ] Press **Jadi anggota** again. You must get a **brand-new invoice URL**, not the old one.
 
+**And the OLD invoice must now be dead.** The sweep cancels it at Xendit when it frees the row
+(final whole-branch review, I-1) — before this, the abandoned invoice stayed payable for the rest of
+its 24 hours alongside the new one, and paying both is a duplicate charge with **no refund path**.
+
+- [ ] Open the invoice URL you closed in the first step. It must show Xendit's **expired** page, not a
+      payable one.
+- [ ] Confirm in the Xendit test dashboard that the first invoice reads `EXPIRED` and the new one
+      `PENDING`.
+- [ ] `failed=0` on the line above. A non-zero `failed` here can now also mean "the row was freed but
+      its invoice could NOT be cancelled" — the log line beside it says which, and it names the
+      subscription only, never the invoice or its URL.
+
 **The judgement call to confirm:** open a real test-mode invoice and leave it. **Does Xendit still
 accept payment on it after 2 hours?** If a real invoice dies sooner than that, the window is too long
 and the dead-page case reopens inside it — tell me and I will shorten it.
+
+**And confirm the expire call itself works**, because `XenditPaymentAdapter` is still UNVERIFIED
+against the live API: the endpoint (`POST /invoices/{id}/expire!`, with `for-user-id`) comes from
+Xendit's documentation, not from a live account. If it answers anything but success, you will see the
+`failed` line above rather than a broken checkout — nobody is stranded either way, because the row is
+always freed first.
 
 ## 6. What is deliberately NOT here
 

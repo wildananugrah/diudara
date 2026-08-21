@@ -23,6 +23,103 @@ const INPUT = {
   successRedirectUrl: "http://localhost:5173/c/kelas-budi/status/sub-1",
 };
 
+/**
+ * The final whole-branch review's I-1. `SweepStalePendingCheckouts` frees an
+ * abandoned checkout's pending slot after two hours; Xendit's invoices live 24,
+ * so without this call the abandoned one stayed payable alongside the fresh one
+ * the buyer's return visit mints. Paying both is a duplicate charge with no
+ * refund path.
+ *
+ * Still UNVERIFIED against the live API, like everything else in this adapter —
+ * the endpoint shape comes from Xendit's published documentation. What these
+ * tests prove is the port contract and the sub-account routing.
+ */
+describe("XenditPaymentAdapter.expireInvoice", () => {
+  it("expires the invoice at its own endpoint, by id", async () => {
+    const { calls, fetchFn } = captureFetch({ id: "inv_1", status: "EXPIRED" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", baseUrl: "https://x.test", fetchFn,
+    });
+
+    await adapter.expireInvoice({ invoiceId: "inv_1", forAccountId: "acct-creator-1" });
+
+    expect(calls.length).toBe(1);
+    expect(calls[0].url).toBe("https://x.test/invoices/inv_1/expire!");
+    expect(calls[0].init.method).toBe("POST");
+  });
+
+  /**
+   * THE SUB-ACCOUNT, and it is the same property `createInvoice`'s first test
+   * pins. The invoice was created under `for-user-id`, so it does not exist in
+   * the platform account: a cancellation sent without the header addresses the
+   * wrong account, answers "not found", and the abandoned invoice stays payable
+   * while this pass reports success.
+   */
+  it("addresses the CREATOR's sub-account, the same one the invoice was created under", async () => {
+    const { calls, fetchFn } = captureFetch({ id: "inv_1", status: "EXPIRED" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    await adapter.expireInvoice({ invoiceId: "inv_1", forAccountId: "acct-creator-1" });
+
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers["for-user-id"]).toBe("acct-creator-1");
+    expect(headers.Authorization).toContain("Basic ");
+  });
+
+  /**
+   * A path segment, not a query value: an id with a slash or a `?` in it would
+   * otherwise address a different endpoint entirely.
+   */
+  it("encodes the invoice id into the path", async () => {
+    const { calls, fetchFn } = captureFetch({ id: "x", status: "EXPIRED" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", baseUrl: "https://x.test", fetchFn,
+    });
+
+    await adapter.expireInvoice({ invoiceId: "inv/../accounts", forAccountId: "acct-1" });
+
+    expect(calls[0].url).toBe("https://x.test/invoices/inv%2F..%2Faccounts/expire!");
+  });
+
+  /**
+   * IT MUST THROW rather than swallow. The caller (`SweepStalePendingCheckouts`)
+   * has already freed the row, and a silent success there would report a
+   * double-charge window as closed when it is open. The message names the
+   * operation and the status and NOTHING else — never the response body, never
+   * the request, so the secret key cannot reach a log through here.
+   */
+  it("throws on a refusal, naming neither the invoice nor the response body", async () => {
+    const { fetchFn } = captureFetch({ error_code: "INVOICE_NOT_FOUND", id: "inv_secret" }, 404);
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    const error = (await adapter
+      .expireInvoice({ invoiceId: "inv_secret", forAccountId: "acct-1" })
+      .catch((e) => e)) as Error;
+
+    expect(error.message).toContain("expireInvoice");
+    expect(error.message).toContain("404");
+    expect(error.message).not.toContain("inv_secret");
+    expect(error.message).not.toContain("INVOICE_NOT_FOUND");
+    expect(error.message).not.toContain("sk_test");
+  });
+
+  it("refuses an empty invoice id rather than POSTing to the collection endpoint", async () => {
+    const { calls, fetchFn } = captureFetch({ id: "x", status: "EXPIRED" });
+    const adapter = new XenditPaymentAdapter({
+      secretKey: "sk_test", splitRuleId: "splitrule_1", fetchFn,
+    });
+
+    await expect(
+      adapter.expireInvoice({ invoiceId: "", forAccountId: "acct-1" })
+    ).rejects.toThrow(/expireInvoice/);
+    expect(calls.length).toBe(0);
+  });
+});
+
 describe("XenditPaymentAdapter.createInvoice", () => {
   it("charges the creator's sub-account, never the platform", async () => {
     const { calls, fetchFn } = captureFetch({ id: "inv_1", invoice_url: "https://x/inv_1" });

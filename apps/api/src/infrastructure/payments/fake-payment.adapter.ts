@@ -1,6 +1,7 @@
 import type {
   CreateInvoiceInput,
   CreateInvoiceResult,
+  ExpireInvoiceInput,
   PaymentProviderPort,
 } from "../../application/ports/payment-provider.port";
 
@@ -20,6 +21,20 @@ export class FakePaymentAdapter implements PaymentProviderPort {
    * did not release the claim would wedge the creator permanently.
    */
   failNextPaymentAccount = false;
+  /**
+   * Every invoice this adapter was asked to KILL, in order — the stale-pending
+   * sweep's half of the port (final whole-branch review, I-1). Recorded rather than
+   * counted, because "which invoice, and against which sub-account" is exactly what
+   * a caller that got the routing wrong would still get past a counter.
+   */
+  readonly expiredInvoices: ExpireInvoiceInput[] = [];
+  /**
+   * Makes the next `expireInvoice` throw. One-shot, exactly like `failNextInvoice`:
+   * it exists so `SweepStalePendingCheckouts`'s provider-failure path — the row is
+   * already free, the invoice is not, count it and keep going — can be exercised
+   * without a real provider.
+   */
+  failNextInvoiceExpiry = false;
 
   async createPaymentAccount(input: {
     creatorId: string;
@@ -43,5 +58,13 @@ export class FakePaymentAdapter implements PaymentProviderPort {
     this.invoices.push(input);
     const invoiceId = `fake-inv-${this.invoices.length}`;
     return { invoiceId, invoiceUrl: `https://fake-checkout.local/${invoiceId}` };
+  }
+
+  async expireInvoice(input: ExpireInvoiceInput): Promise<void> {
+    if (this.failNextInvoiceExpiry) {
+      this.failNextInvoiceExpiry = false;
+      throw new Error("fake payment provider: expireInvoice failed");
+    }
+    this.expiredInvoices.push(input);
   }
 }

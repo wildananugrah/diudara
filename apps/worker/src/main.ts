@@ -101,7 +101,22 @@ const { DrizzleUserSubscriptionRepository } = await import(
 // It block-boots on a half-configured or absent-outside-development setup, same as it
 // does for the API (see its own docstring, case 4): a worker that started anyway and
 // quietly swept nothing, forever, would be worse than one that refuses to start.
-const { selectMediaStorage } = await import("../../api/src/bootstrap");
+// `selectPaymentProvider` comes from the same module, and the worker needs it for
+// the SAME reason the API does: Task 5's sweep cancels an abandoned invoice at the
+// provider when it frees the pending row (final whole-branch review, I-1). Reused
+// rather than re-derived so the two processes can never disagree about which
+// provider — or the fake — an invoice was opened against.
+//
+// It can THROW, on a half-configured Xendit (one of the two keys set). That is a new
+// way for this process to refuse to start, and it is the right one: a worker that
+// booted anyway would sweep rows while silently leaving every invoice payable, which
+// is the double-charge window this change exists to close. The API already refuses to
+// boot in the same state, so such a box has no working checkout either.
+//
+// It can also answer `null` — a box with no payment provider at all, where
+// `bootstrap()` registers no checkout route. The sweep takes that and simply skips
+// the provider call; see `SweepStalePendingCheckouts`'s own `payments` parameter.
+const { selectMediaStorage, selectPaymentProvider } = await import("../../api/src/bootstrap");
 
 const { processOutbox, processRenewals, processChurn, remindExpiringMemberships } =
   bootstrapWorker();
@@ -133,7 +148,16 @@ const processMembershipSweep = new SweepExpiredMemberships(new DrizzleUserSubscr
 // sharing one, matching that pass's own reasoning even though both happen to be
 // stateless wrappers around the same pooled `db`.
 const processStalePendingSweep = new SweepStalePendingCheckouts(
-  new DrizzleUserSubscriptionRepository(db)
+  new DrizzleUserSubscriptionRepository(db),
+  // Freeing the slot is only half of it: the invoice the abandoned row opened lives
+  // 24 hours at Xendit, and until this argument existed nothing cancelled it — so a
+  // buyer who returned after two hours held TWO payable invoices, and paying both is
+  // a duplicate charge with no refund path. Final whole-branch review, I-1.
+  selectPaymentProvider({
+    secretKey: process.env.XENDIT_SECRET_KEY,
+    splitRuleId: process.env.XENDIT_SPLIT_RULE_ID,
+    nodeEnv: process.env.NODE_ENV,
+  })
 );
 const intervalMs = resolvePollIntervalMs(process.env.WORKER_POLL_INTERVAL_MS);
 const renewalIntervalMs = resolveRenewalIntervalMs(process.env.WORKER_RENEWAL_INTERVAL_MS);
