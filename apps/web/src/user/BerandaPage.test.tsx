@@ -30,6 +30,8 @@ function makePost(id: string, body: string, handle = "wildan"): PostView {
     // `[]` rather than absent: the API sends this key on every post, edited or
     // not (see `toPostView`), and `PostView` requires it for that reason.
     media: [],
+    membersOnly: false,
+    lockedMediaCount: 0,
   };
 }
 
@@ -1051,6 +1053,182 @@ describe("BerandaPage — a post carries its photos (Task 8)", () => {
     expect(JSON.parse(String(patched.init?.body))).toEqual({
       body: "isi lama",
       mediaIds: ["media-2"],
+    });
+  });
+});
+
+
+/**
+ * Fix round 1. `PostComposer`'s "Khusus anggota" checkbox existed (Task 6)
+ * but nothing wired its value into the actual request — `handleCreate` and
+ * `saveEdit` both dropped the third argument, so checking the box and
+ * submitting produced an ordinary public post. These pin the wiring, and
+ * the second test is the one that matters most: spec §7's rule that an
+ * OMITTED `visibility` on an edit means "leave it alone", never "make it
+ * public" — a caption fix on a members-only post must never silently
+ * un-gate it. Asserted on the ACTUAL request body via `JSON.parse`, never
+ * on a return value, so a route that echoes the right response while
+ * writing the wrong thing cannot pass.
+ */
+describe("BerandaPage — Khusus anggota reaches the network (spec §7)", () => {
+  it("sends visibility: members with a new post once the box is checked", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls = mockFetch((url, init) => {
+      if (url === "/users/media") {
+        return jsonResponse({ id: "media-1", width: 800, height: 600 }, 201);
+      }
+      if (init?.method === "POST") return jsonResponse(makePost("p2", "kiriman baru"), 201);
+      return jsonResponse({ posts: [], nextCursor: null });
+    });
+
+    renderBeranda();
+    await screen.findByRole("button", { name: "Kirim" });
+
+    fireEvent.change(screen.getByTestId("media-picker"), {
+      target: { files: [new File([new Uint8Array([1])], "satu.jpg", { type: "image/jpeg" })] },
+    });
+    await waitFor(() => {
+      expect(screen.queryAllByRole("progressbar").length).toBe(0);
+    });
+
+    fireEvent.click(screen.getByLabelText("Khusus anggota"));
+    fireEvent.change(screen.getByLabelText("Apa yang terjadi?"), {
+      target: { value: "kiriman baru" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Kirim" }));
+
+    await screen.findByText("kiriman baru");
+    const created = calls.find((call) => call.url === "/users/posts")!;
+    expect(JSON.parse(String(created.init?.body))).toEqual({
+      body: "kiriman baru",
+      mediaIds: ["media-1"],
+      visibility: "members",
+    });
+  });
+
+  it("sends no visibility key at all when a public post is created without checking the box", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls = mockFetch((url, init) => {
+      if (init?.method === "POST") return jsonResponse(makePost("p2", "kiriman biasa"), 201);
+      return jsonResponse({ posts: [], nextCursor: null });
+    });
+
+    renderBeranda();
+    await screen.findByRole("button", { name: "Kirim" });
+
+    fireEvent.change(screen.getByLabelText("Apa yang terjadi?"), {
+      target: { value: "kiriman biasa" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Kirim" }));
+
+    await screen.findByText("kiriman biasa");
+    const created = calls.find((call) => call.url === "/users/posts")!;
+    expect(JSON.parse(String(created.init?.body))).toEqual({
+      body: "kiriman biasa",
+      mediaIds: [],
+    });
+  });
+
+  it("editing a members-only post WITHOUT touching Khusus anggota sends no visibility key at all", async () => {
+    setUserSession("jwt-abc", USER);
+    const locked = {
+      ...makePost("p1", "isi lama"),
+      membersOnly: true,
+      media: [{ id: "media-1", width: 800, height: 600 }],
+    };
+    const calls = mockFetch((url, init) => {
+      if (init?.method === "PATCH") return jsonResponse({ ...locked, body: "isi baru" });
+      return jsonResponse({ posts: [locked], nextCursor: null });
+    });
+
+    renderBeranda();
+    await screen.findByText("isi lama");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    // The seed: already checked, because the post already is members-only.
+    expect((screen.getByLabelText("Khusus anggota") as HTMLInputElement).checked).toBe(true);
+
+    // A caption fix, and NOTHING else — never touches the checkbox.
+    fireEvent.change(screen.getByLabelText("Apa yang terjadi?"), {
+      target: { value: "isi baru" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Simpan" }));
+
+    await screen.findByText("isi baru");
+    const patched = calls.find((call) => call.init?.method === "PATCH")!;
+    // The whole point: no `visibility` key at all. A defect that always sent
+    // the CURRENT value (rather than omitting an untouched one) would still
+    // pass an assertion on the return value — this is why the assertion is
+    // on the REQUEST body's own key set, via `toEqual` against an object
+    // with no `visibility` key: an actual extra key fails `toEqual`.
+    expect(JSON.parse(String(patched.init?.body))).toEqual({
+      body: "isi baru",
+      mediaIds: ["media-1"],
+    });
+  });
+
+  it("unchecking Khusus anggota on an edit sends visibility: public, unlocking the post", async () => {
+    setUserSession("jwt-abc", USER);
+    const locked = {
+      ...makePost("p1", "isi lama"),
+      membersOnly: true,
+      media: [{ id: "media-1", width: 800, height: 600 }],
+    };
+    const calls = mockFetch((url, init) => {
+      if (init?.method === "PATCH") return jsonResponse({ ...locked, membersOnly: false });
+      return jsonResponse({ posts: [locked], nextCursor: null });
+    });
+
+    renderBeranda();
+    await screen.findByText("isi lama");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByLabelText("Khusus anggota"));
+    fireEvent.click(screen.getByRole("button", { name: "Simpan" }));
+
+    await waitFor(() => {
+      expect(calls.some((call) => call.init?.method === "PATCH")).toBe(true);
+    });
+    const patched = calls.find((call) => call.init?.method === "PATCH")!;
+    expect(JSON.parse(String(patched.init?.body))).toEqual({
+      body: "isi lama",
+      mediaIds: ["media-1"],
+      visibility: "public",
+    });
+  });
+
+  it("checking it and then unchecking it again before saving still sends no visibility key", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls = mockFetch((url, init) => {
+      if (url === "/users/media") {
+        return jsonResponse({ id: "media-1", width: 800, height: 600 }, 201);
+      }
+      if (init?.method === "POST") return jsonResponse(makePost("p2", "kiriman"), 201);
+      return jsonResponse({ posts: [], nextCursor: null });
+    });
+
+    renderBeranda();
+    await screen.findByRole("button", { name: "Kirim" });
+
+    fireEvent.change(screen.getByTestId("media-picker"), {
+      target: { files: [new File([new Uint8Array([1])], "satu.jpg", { type: "image/jpeg" })] },
+    });
+    await waitFor(() => {
+      expect(screen.queryAllByRole("progressbar").length).toBe(0);
+    });
+
+    fireEvent.click(screen.getByLabelText("Khusus anggota"));
+    fireEvent.click(screen.getByLabelText("Khusus anggota"));
+    fireEvent.change(screen.getByLabelText("Apa yang terjadi?"), {
+      target: { value: "kiriman" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Kirim" }));
+
+    await screen.findByText("kiriman");
+    const created = calls.find((call) => call.url === "/users/posts")!;
+    expect(JSON.parse(String(created.init?.body))).toEqual({
+      body: "kiriman",
+      mediaIds: ["media-1"],
     });
   });
 });

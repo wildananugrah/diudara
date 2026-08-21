@@ -1029,6 +1029,8 @@ const POST_VIEW = {
   editedAt: null,
   media: [],
   author: { handle: "wildan", displayName: "Wildan" },
+  membersOnly: false,
+  lockedMediaCount: 0,
 };
 
 /**
@@ -1187,6 +1189,90 @@ describe("apiClient — posts and the feed (Task 4)", () => {
     expect(calls[0]!.url).toBe("/users/posts/post-1");
     expect(calls[0]!.init.method).toBe("PATCH");
     expect(calls[0]!.init.body).toBe(JSON.stringify({ body: "Diedit" }));
+  });
+
+  /**
+   * Fix round 1 (Task 6). `createPost`/`editPost` gained a `visibility`
+   * parameter so "Khusus anggota" could reach the network at all. These pin
+   * the wire shape directly, one layer below the composer/page integration
+   * tests in `BerandaPage.test.tsx` — a defect here would be invisible to
+   * any test that only inspects a mocked RETURN value.
+   */
+  it("createPost sends visibility: members when given, alongside mediaIds", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse(POST_VIEW, 201);
+    }) as unknown as typeof fetch;
+
+    await createPost("Halo", ["media-1"], "members");
+
+    expect(calls[0]!.init.body).toBe(
+      JSON.stringify({ body: "Halo", mediaIds: ["media-1"], visibility: "members" })
+    );
+  });
+
+  it("createPost sends no visibility key at all when omitted, even with mediaIds given", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse(POST_VIEW, 201);
+    }) as unknown as typeof fetch;
+
+    await createPost("Halo", ["media-1"]);
+
+    expect(calls[0]!.init.body).toBe(JSON.stringify({ body: "Halo", mediaIds: ["media-1"] }));
+  });
+
+  it("editPost sends visibility: members when given", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ ...POST_VIEW, membersOnly: true });
+    }) as unknown as typeof fetch;
+
+    await editPost("post-1", "Diedit", undefined, "members");
+
+    expect(calls[0]!.init.body).toBe(
+      JSON.stringify({ body: "Diedit", visibility: "members" })
+    );
+  });
+
+  it("editPost sends visibility: public when given, unlocking a post", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ ...POST_VIEW, membersOnly: false });
+    }) as unknown as typeof fetch;
+
+    await editPost("post-1", "Diedit", undefined, "public");
+
+    expect(calls[0]!.init.body).toBe(JSON.stringify({ body: "Diedit", visibility: "public" }));
+  });
+
+  /**
+   * THE test that matters most (spec §7): an untouched `visibility` on an
+   * edit must be genuinely ABSENT from the request, not sent as the current
+   * value and not defaulted to `"public"`. Getting this backwards silently
+   * un-gates every members-only post on its next caption fix.
+   */
+  it("editPost sends no visibility key at all when omitted, even with mediaIds given", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({ ...POST_VIEW, body: "Diedit" });
+    }) as unknown as typeof fetch;
+
+    await editPost("post-1", "Diedit", ["media-1"]);
+
+    expect(calls[0]!.init.body).toBe(
+      JSON.stringify({ body: "Diedit", mediaIds: ["media-1"] })
+    );
   });
 
   it("deletePost DELETEs /users/posts/:id", async () => {

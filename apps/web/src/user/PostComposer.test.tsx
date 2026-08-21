@@ -1496,3 +1496,112 @@ describe("PostComposer — Khusus anggota (spec §7)", () => {
     );
   });
 });
+
+
+/**
+ * Fix round 1. The checkbox existed but `onSubmit`'s third argument was
+ * always resolved against a hard-coded `false` seed, so an EDIT of an
+ * already-members-only post had no way to say "I did not touch this" — any
+ * caller wiring `initialVisibility` through would have had every untouched
+ * edit either omit the field with the wrong seed, or (worse) send an
+ * explicit value every time. These pin `initialVisibility` and
+ * `resolveVisibility` directly, one level below the `BerandaPage`
+ * integration tests that exercise the same rule through the network.
+ */
+describe("PostComposer — initialVisibility seeds the edit, and drives what is sent (spec §7)", () => {
+  it("starts checked when initialVisibility is members, given at least one seeded image", () => {
+    renderComposer({
+      initialVisibility: "members",
+      initialMedia: [media("media-1")],
+    });
+
+    expect(membersOnlyBox().checked).toBe(true);
+    expect(membersOnlyBox().disabled).toBe(false);
+  });
+
+  it("starts unchecked when initialVisibility is public, or left unset", () => {
+    renderComposer({ initialVisibility: "public", initialMedia: [media("media-1")] });
+    expect(membersOnlyBox().checked).toBe(false);
+
+    cleanup();
+    renderComposer({ initialMedia: [media("media-1")] });
+    expect(membersOnlyBox().checked).toBe(false);
+  });
+
+  it("sends NO visibility key when the seed is members and the box is never touched", async () => {
+    const onSubmit = mock(async () => {});
+    renderComposer({
+      onSubmit,
+      submitLabel: "Simpan",
+      initialVisibility: "members",
+      initialMedia: [media("media-1")],
+      initialBody: "isi lama",
+    });
+
+    type("isi baru");
+    fireEvent.click(submitButton("Simpan"));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit).toHaveBeenCalledWith("isi baru", ["media-1"]);
+  });
+
+  it("sends visibility: public when a members-seeded box is unchecked", async () => {
+    const onSubmit = mock(async () => {});
+    renderComposer({
+      onSubmit,
+      submitLabel: "Simpan",
+      initialVisibility: "members",
+      initialMedia: [media("media-1")],
+      initialBody: "isi lama",
+    });
+
+    fireEvent.click(membersOnlyBox());
+    fireEvent.click(submitButton("Simpan"));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit).toHaveBeenCalledWith("isi lama", ["media-1"], "public");
+  });
+
+  it("un-checking and re-checking a members-seeded box before saving still sends nothing", async () => {
+    const onSubmit = mock(async () => {});
+    renderComposer({
+      onSubmit,
+      submitLabel: "Simpan",
+      initialVisibility: "members",
+      initialMedia: [media("media-1")],
+      initialBody: "isi lama",
+    });
+
+    fireEvent.click(membersOnlyBox());
+    fireEvent.click(membersOnlyBox());
+    fireEvent.click(submitButton("Simpan"));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit).toHaveBeenCalledWith("isi lama", ["media-1"]);
+  });
+
+  it("sends visibility: members when a public-seeded edit is checked", async () => {
+    const onSubmit = mock(async () => {});
+    renderComposer({
+      onSubmit,
+      submitLabel: "Simpan",
+      initialVisibility: "public",
+      initialMedia: [media("media-1")],
+      initialBody: "isi lama",
+    });
+
+    fireEvent.click(membersOnlyBox());
+    fireEvent.click(submitButton("Simpan"));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit).toHaveBeenCalledWith("isi lama", ["media-1"], "members");
+  });
+});

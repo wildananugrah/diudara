@@ -16,6 +16,8 @@ const POST: PostView = {
   editedAt: null,
   media: [],
   author: { handle: "wildan", displayName: "Wildan" },
+  membersOnly: false,
+  lockedMediaCount: 0,
 };
 
 function renderCard(props: Partial<Parameters<typeof PostCard>[0]> = {}) {

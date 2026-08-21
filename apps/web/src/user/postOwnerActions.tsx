@@ -27,7 +27,7 @@ export interface PostOwnerActions {
   cancelDelete: () => void;
   /** The edit composer's "Batal". Its own function rather than a raw `setEditing` a page could misuse. */
   cancelEdit: () => void;
-  saveEdit: (body: string, mediaIds: string[]) => Promise<void>;
+  saveEdit: (body: string, mediaIds: string[], visibility?: "public" | "members") => Promise<void>;
 }
 
 /**
@@ -93,7 +93,7 @@ export function usePostOwnerActions(
   const cancelEdit = useCallback(() => setEditing(null), []);
 
   const saveEdit = useCallback(
-    async (body: string, mediaIds: string[]): Promise<void> => {
+    async (body: string, mediaIds: string[], visibility?: "public" | "members"): Promise<void> => {
       const target = editing;
       if (target === null) return;
       // Deliberately NOT wrapped in try/catch: a rejection has to reach
@@ -104,7 +104,14 @@ export function usePostOwnerActions(
       // `mediaIds` is the COMPLETE desired list, not a delta (spec §5.2) — the
       // composer seeded itself with this post's images, so what comes back is
       // the final state, including `[]` when every image was removed.
-      const updated = await editPost(target.id, body, mediaIds);
+      //
+      // `visibility` is passed straight through, UNTOUCHED — `PostComposer`
+      // already resolved "the creator did not change this" into a genuinely
+      // omitted argument (see its own `resolveVisibility`), so this function
+      // must not "helpfully" default it to anything. Doing so is exactly the
+      // bug spec §7 calls out by name: an omitted `visibility` on an edit
+      // silently un-gating a members-only post.
+      const updated = await editPost(target.id, body, mediaIds, visibility);
       feed.current?.replace(updated);
       setEditing(null);
     },
@@ -237,7 +244,7 @@ export function EditComposer({
   onCancel,
 }: {
   post: PostView;
-  onSubmit: (body: string, mediaIds: string[]) => Promise<void>;
+  onSubmit: (body: string, mediaIds: string[], visibility?: "public" | "members") => Promise<void>;
   onCancel: () => void;
 }) {
   const form = useRef<HTMLFormElement>(null);
@@ -259,6 +266,11 @@ export function EditComposer({
       // carried into another's edit — `initialMedia` is read once, exactly
       // like `initialBody`.
       initialMedia={post.media}
+      // Seeds "Khusus anggota" from what the post already is (spec §7), so
+      // the checkbox never lies about a post's current state — and so
+      // `PostComposer`'s own `resolveVisibility` has the right baseline to
+      // compare "did the creator actually change this" against.
+      initialVisibility={post.membersOnly ? "members" : "public"}
       submitLabel="Simpan"
       onSubmit={onSubmit}
       onCancel={onCancel}

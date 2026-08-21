@@ -108,11 +108,29 @@ export default function BerandaPage() {
     setPostSent(false);
   }, [tab]);
 
-  async function handleCreate(body: string, mediaIds: string[]): Promise<void> {
+  async function handleCreate(
+    body: string,
+    mediaIds: string[],
+    visibility?: "public" | "members"
+  ): Promise<void> {
     // The composer sends the complete list of ids it managed to upload — see
     // `PostComposer`'s `onSubmit`. Passed straight through: `position` is the
     // array's order (spec §5.2), so this page must not reorder or filter it.
-    const created = await createPost(body, mediaIds);
+    //
+    // `visibility` is typed as broadly as `PostComposer`'s own `onSubmit`
+    // prop (it has to be, to stay assignable to it) but a CREATE composer
+    // never actually produces "public" -- its seed is always false, so its
+    // own resolveVisibility can only ever emit "members" or nothing.
+    // createPost narrows its own parameter to "members" for exactly that
+    // reason (spec section 7: "on create, omitting visibility means public"
+    // -- there is nothing to explicitly ask for otherwise), so this
+    // collapses the theoretical "public" to the same omission a fresh post
+    // already gets.
+    const created = await createPost(
+      body,
+      mediaIds,
+      visibility === "members" ? "members" : undefined
+    );
     // `mengikuti` is "posts by people you follow, never your own" — measured in
     // `drizzle-post.repository.test.ts`'s "returns only followed authors' posts,
     // never the viewer's own". Prepending your new post there would show a row

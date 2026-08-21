@@ -34,6 +34,8 @@ function makePost(id: string, body: string, handle: string): PostView {
     editedAt: null,
     media: [],
     author: { handle, displayName: handle === "wildan" ? "Wildan" : "Budi" },
+    membersOnly: false,
+    lockedMediaCount: 0,
   };
 }
 

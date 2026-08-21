@@ -20,6 +20,8 @@ function makePost(id: string, handle = "wildan"): PostView {
     editedAt: null,
     media: [],
     author: { handle, displayName: "Wildan" },
+    membersOnly: false,
+    lockedMediaCount: 0,
   };
 }
 
