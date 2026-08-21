@@ -166,6 +166,12 @@ export function mediaRoutes(
     // reader — so a missing, malformed or expired token resolves to `null`
     // (which locks every gated image) instead of turning a public image into
     // a 401.
+    // The gate is given the ID, not the `row` just fetched — it resolves the
+    // media row itself. That is one extra primary-key read, and it is the
+    // price of the barrier being independent of this handler: a gate that
+    // trusts a row its caller looked up would be opened by any later refactor
+    // that passed the wrong one. Do not "optimise" it by threading `row`
+    // through.
     const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
     const gate = await deps.mediaEntitlement.decide({ mediaId: id, viewerId });
     // 404 rather than 403: media ids are stripped from the projection, so they

@@ -22,9 +22,9 @@ import { MEMBERS_ONLY } from "./post-views";
  */
 export interface MediaGateDecision {
   /** May these bytes be written into the response at all? `false` is a 404, never a 403 (spec §6.2). */
-  allowed: boolean;
+  readonly allowed: boolean;
   /** Do these bytes belong to a members-only post? Decides the cache header, whoever is asking. */
-  gated: boolean;
+  readonly gated: boolean;
 }
 
 /**
@@ -33,13 +33,25 @@ export interface MediaGateDecision {
  * nothing, so a future caller that renders a refusal with a body can never
  * hand a cache permission this decision did not grant.
  */
-const REFUSED: MediaGateDecision = { allowed: false, gated: true };
+const REFUSED: MediaGateDecision = Object.freeze({ allowed: false, gated: true });
 
 /** Served, and freely cacheable — a public post's image, or one on no post at all. */
-const OPEN: MediaGateDecision = { allowed: true, gated: false };
+const OPEN: MediaGateDecision = Object.freeze({ allowed: true, gated: false });
 
 /** Served to somebody entitled to it, and never publicly cacheable. */
-const ENTITLED: MediaGateDecision = { allowed: true, gated: true };
+const ENTITLED: MediaGateDecision = Object.freeze({ allowed: true, gated: true });
+
+// THE THREE ABOVE ARE THE ONLY PAIRINGS THIS CLASS CAN PRODUCE, which is what
+// makes "the header and the bytes come from one decision" a property of the
+// type rather than of every return statement remembering. `{ allowed: true,
+// gated: false }` for a members-only image — the pairing that puts a gated
+// photo into a CDN — is not expressible at any call site below.
+//
+// Shared singletons, so `readonly` above and `Object.freeze` here together:
+// a caller that reached in and flipped `gate.gated` would otherwise be
+// rewriting the answer for every LATER request in the process, not just its
+// own. Frozen, that attempt throws (modules are strict mode) instead of
+// silently un-gating the next person's image.
 
 /**
  * **BARRIER TWO of two — the media route refuses an id it never sent** (spec
