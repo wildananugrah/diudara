@@ -19,7 +19,7 @@ query per page, decided in the use case where a test can point at it.
 - **`/dashboard/*` and its six tables are UNTOUCHABLE**: `community`, `membership_tier`, `member`, `subscription`, `transaction`, `creator`.
 - **`isMemberOf` must not change** — `apps/api/src/application/use-cases/is-member-of.ts` is byte-identical to its Phase 5a form and pinned by an `EXPLAIN` test. Reuse its predicate; never edit it.
 - **Never turn `/users/media/:id` into a redirect.** Read the comment at `apps/api/src/routes/media.ts:125` before touching that file.
-- `apps/api/src/test/no-raw-server-errors.test.ts` and `apps/web/src/test/no-hanging-dom-assertions.test.ts` must stay green.
+- **Both guard tests live in `apps/web`**: `apps/web/src/test/no-raw-server-errors.test.ts` and `apps/web/src/test/no-hanging-dom-assertions.test.ts`. There is no `apps/api/src/test/no-raw-server-errors.test.ts`. Both must stay green.
 - **Never put a DOM node on either side of an assertion that can fail** — it serialises the node's whole object graph and has taken this machine down once. Use the `isNode` helper in `BerandaPage.test.tsx`, or compare `textContent` strings.
 - Tests assert **literal values**, never the constant they check.
 - **Read the clock once per operation** and pass the `Date` down. Phase 5b shipped a residual (m-8) caused by one use case reading `clock.now()` twice around a query.
