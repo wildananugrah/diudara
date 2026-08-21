@@ -41,8 +41,22 @@ function requireImageWhenLocked(visibility: string, mediaCount: number): void {
  * missing id was a silent no-op — the author's post came back with fewer
  * photos than they sent, and nothing said so.
  *
- * A 409 rather than a 500 because the person can act on it: upload the photo
- * again.
+ * A 409 rather than a 500 because the person can act on it — but **WHICH thing
+ * they should do depends on which race was lost, and the two answers point in
+ * opposite directions** (re-review, follow-up 2). A short claim now has two
+ * causes, not one: the sweep deleted the row (upload it again), or MAJ-2's
+ * guard refused it because another post holds it (the photo is fine — it is
+ * somewhere else). Telling somebody to re-upload a file they still have,
+ * because a DIFFERENT post claimed it, sends them down the wrong path
+ * entirely. So this reads the ids back and picks the sentence that is true:
+ * `MEDIA_TAKEN_MESSAGE` when a row survives under another post,
+ * `MEDIA_VANISHED_MESSAGE` when it is really gone.
+ *
+ * `MEDIA_TAKEN_MESSAGE` is the SAME sentence `requireAttachable` gives for the
+ * same situation caught earlier, deliberately: one situation, one sentence,
+ * whichever check happens to notice it. The STATUS differs and should — 400
+ * when the request was already wrong when it arrived, 409 when it lost a race
+ * while in flight.
  *
  * **UPDATED, Task 5 fix round 2.** This docstring used to record that "the
  * post row DOES already exist by the time this fires on create... a loud
@@ -59,8 +73,29 @@ function requireImageWhenLocked(visibility: string, mediaCount: number): void {
  * a caller who sees it can retry knowing nothing was left half-written,
  * gated or not.
  */
-function requireFullyClaimed(claimed: number, ids: string[]): void {
-  if (claimed !== ids.length) throw new ConflictError(MEDIA_VANISHED_MESSAGE);
+async function requireFullyClaimed(
+  media: MediaRepositoryPort,
+  postId: string,
+  claimed: number,
+  ids: string[]
+): Promise<void> {
+  if (claimed === ids.length) return;
+  // WHICH race was lost decides which sentence the person reads, and the two
+  // point in opposite directions. Re-read the ids — one extra query, on the
+  // failure path only, and never on the path everybody takes.
+  //
+  // The read happens inside this transaction AFTER the claim came back short,
+  // so under READ COMMITTED it takes a fresh snapshot and sees whatever the
+  // winner committed. A row still present but parented to a DIFFERENT post is
+  // the MAJ-2 race: another post took the photo. A row that is simply gone is
+  // the sweep race: the bytes really are not there any more.
+  const rows = await media.findManyByIds(ids);
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const takenByAnotherPost = ids.some((id) => {
+    const row = byId.get(id);
+    return row !== undefined && row.postId !== null && row.postId !== postId;
+  });
+  throw new ConflictError(takenByAnotherPost ? MEDIA_TAKEN_MESSAGE : MEDIA_VANISHED_MESSAGE);
 }
 
 /**
@@ -165,7 +200,7 @@ export class CreatePost {
       // row back WITH it — see that function's own docstring (Task 5 fix
       // round 2) for why this stopped being an accepted trade-off the
       // instant `visibility` became writable.
-      requireFullyClaimed(await media.claim(row.id, mediaIds), mediaIds);
+      await requireFullyClaimed(media, row.id, await media.claim(row.id, mediaIds), mediaIds);
       // Read back rather than echoing the ids: what the client gets is what a
       // reload would show, ordered by the `position` that was actually stored.
       // `locked: false` for the reason given at the call site above — this is
@@ -259,7 +294,12 @@ export class EditPost {
         // `ConflictError` here rolls `updateBody`'s visibility write back
         // with it, which is fix round 1's path 2 — a 409 now means nothing
         // changed, not "half of it did."
-        requireFullyClaimed(await media.claim(input.postId, input.mediaIds), input.mediaIds);
+        await requireFullyClaimed(
+          media,
+          input.postId,
+          await media.claim(input.postId, input.mediaIds),
+          input.mediaIds
+        );
       }
       // `locked: false`: the ownership check above has already established
       // that the editor IS the author, and an author is never locked out of

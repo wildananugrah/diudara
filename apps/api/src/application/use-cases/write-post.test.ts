@@ -850,6 +850,37 @@ function raceDeletingMedia(tx: DatabaseExecutor): MediaRepositoryPort {
   };
 }
 
+/**
+ * The MAJ-2 race, FORCED rather than hoped for — the mirror image of
+ * `raceDeletingMedia` above. `findManyByIds` (called by `requireAttachable`,
+ * BEFORE `claim`) hands back the rows it really found and then re-parents them
+ * onto `thiefPostId`, which is exactly what a concurrent write on another post
+ * does in the window between the unlocked read and the guarded write.
+ *
+ * Deterministic on purpose. The concurrent test below cannot make the EDIT win
+ * reliably — `EditPost` does two extra round trips (`lockForEdit`,
+ * `updateBody`) before its `claim`, so it structurally tends to lose the race
+ * — and a test that hopes for an ordering it cannot cause is a flaky test. This
+ * forces the ordering instead.
+ */
+function raceStealingMedia(tx: DatabaseExecutor, thiefPostId: string): MediaRepositoryPort {
+  const real = new DrizzleMediaRepository(tx);
+  return {
+    create: (input) => real.create(input),
+    findById: (id) => real.findById(id),
+    async findManyByIds(ids) {
+      const rows = await real.findManyByIds(ids);
+      await tx.update(postMedia).set({ postId: thiefPostId }).where(inArray(postMedia.id, ids));
+      return rows;
+    },
+    claim: (postId, ids) => real.claim(postId, ids),
+    listForPost: (postId) => real.listForPost(postId),
+    listForPosts: (postIds) => real.listForPosts(postIds),
+    listUnclaimedBefore: (cutoff, limit) => real.listUnclaimedBefore(cutoff, limit),
+    deleteIfUnclaimed: (id) => real.deleteIfUnclaimed(id),
+  };
+}
+
 describe("EditPost — real transaction (Task 5 fix round 1)", () => {
   beforeEach(resetDatabase);
 
@@ -888,6 +919,20 @@ describe("EditPost — real transaction (Task 5 fix round 1)", () => {
         visibility: "members",
       })
     ).rejects.toBeInstanceOf(ConflictError);
+    // THE SENTENCE, not just the class. This is the SWEEP race — the row really
+    // is gone — so "upload it again" is the true and useful thing to say. Its
+    // twin below proves the other race gets the other sentence; asserting only
+    // `ConflictError` on both would let one message serve two opposite
+    // situations, which is the defect this pair exists to prevent.
+    await expect(
+      new EditPost(raceUnitOfWork).execute({
+        editorId: authorId,
+        postId,
+        body: "sekarang khusus anggota",
+        mediaIds: [mediaId],
+        visibility: "members",
+      })
+    ).rejects.toThrow("foto sudah tidak tersedia, silakan unggah ulang");
 
     // Read through a FRESH connection, not `tx` (which no longer exists —
     // the transaction rolled back). If `updateBody`'s write had survived the
@@ -895,6 +940,55 @@ describe("EditPost — real transaction (Task 5 fix round 1)", () => {
     const after = await currentVisibilityAndMediaCount(postId);
     expect(after.visibility).toBe("public");
     expect(after.mediaCount).toBe(1);
+  });
+
+  /**
+   * **Follow-up 2 of the re-review: the race loser gets the RIGHT sentence.**
+   *
+   * Before this, every short claim answered `"foto sudah tidak tersedia,
+   * silakan unggah ulang"` — "upload it again". True when the orphan sweep
+   * deleted the row. **False, and actively misleading, when MAJ-2's guard
+   * refused the claim because another post holds the photo**: the file is
+   * fine, it is somewhere else, and re-uploading is the one thing that does
+   * not help. Same sentence `requireAttachable` already gives for the same
+   * situation caught a moment earlier.
+   *
+   * FORCED, not raced — see `raceStealingMedia`.
+   */
+  it("a claim lost to ANOTHER POST says the photo is taken, not that it vanished", async () => {
+    const { authorId, postId, mediaId } = await seedPublicPostWithOneImage();
+    const posts = new DrizzlePostRepository(db);
+    const thief = await posts.create(authorId, "kiriman pencuri", "public");
+    const raceUnitOfWork: PostEditUnitOfWorkPort = {
+      run: (work) =>
+        db.transaction((tx) =>
+          work({ posts: new DrizzlePostRepository(tx), media: raceStealingMedia(tx, thief.id) })
+        ),
+    };
+
+    await expect(
+      new EditPost(raceUnitOfWork).execute({
+        editorId: authorId,
+        postId,
+        body: "sekarang khusus anggota",
+        mediaIds: [mediaId],
+        visibility: "members",
+      })
+    ).rejects.toThrow("foto sudah dipakai kiriman lain");
+
+    // Still a 409, not a 400: the request was correct when it arrived and lost
+    // a race in flight. And still a full rollback — the visibility write must
+    // not survive its claim failing, whichever sentence it failed with.
+    await expect(
+      new EditPost(raceUnitOfWork).execute({
+        editorId: authorId,
+        postId,
+        body: "sekarang khusus anggota",
+        mediaIds: [mediaId],
+        visibility: "members",
+      })
+    ).rejects.toBeInstanceOf(ConflictError);
+    expect((await currentVisibilityAndMediaCount(postId)).visibility).toBe("public");
   });
 
   /**
@@ -1032,6 +1126,29 @@ describe("CreatePost/EditPost — cross-post media race (MAJ-2, real transaction
    * measuring the driver queueing behind one live connection instead of the
    * database arbitrating anything.
    */
+  /**
+   * **How a loss is classified, and why the test cares.**
+   *
+   * A contender that loses this race can lose it in two very different places,
+   * and only one of them is the window MAJ-2 lives in:
+   *
+   * - `ConflictError` — it passed `requireAttachable` (the UNLOCKED read),
+   *   reached `claim`, and the guard refused the write. **This is the MAJ-2
+   *   window itself**: the loser was inside the read-to-write gap when the
+   *   winner committed. Nothing but real overlap at the database produces it.
+   * - `ValidationError` — the winner had already committed by the time the
+   *   loser even read the row, so `requireAttachable` refused it up front. A
+   *   correct refusal, but evidence of NO overlap.
+   *
+   * Anything else is a bug, and is reported as itself rather than swallowed.
+   */
+  type Loss = "conflict" | "validation" | "other";
+  function classify(err: unknown): Loss {
+    if (err instanceof ConflictError) return "conflict";
+    if (err instanceof ValidationError) return "validation";
+    return "other";
+  }
+
   it("a create-as-members cannot be robbed of its last image by an edit on another post", async () => {
     const PAIRS = 20;
     const posts = new DrizzlePostRepository(db);
@@ -1052,19 +1169,16 @@ describe("CreatePost/EditPost — cross-post media race (MAJ-2, real transaction
           authorId: author.id,
           otherPostId: otherPost.id,
           mediaId: image.id,
-          // HALF THE PAIRS DISPATCH THE EDIT FIRST. Measured: with the create
-          // always enqueued first it won all 20 pairs on roughly one run in
-          // four, and an assertion that both orderings occurred was then flaky
-          // for a reason that had nothing to do with the fix. Alternating makes
-          // BOTH sides of the contest real in every run, which is the property
-          // this test is actually about — the loser loses safely whichever one
-          // it is.
           editFirst: index % 2 === 1,
         };
       })
     );
 
     const contenders = PAIRS * 2;
+    // WARMING THE POOL IS PART OF THE TEST, NOT SETUP NOISE — `postgres.js`
+    // connects lazily, and this project has a confirmed case of a race test
+    // measuring the driver queueing behind one live connection instead of the
+    // database arbitrating anything.
     await Promise.all(Array.from({ length: contenders }, () => sql`select 1`));
     const latch = new ArrivalLatch(contenders);
 
@@ -1074,7 +1188,7 @@ describe("CreatePost/EditPost — cross-post media race (MAJ-2, real transaction
 
     const results = await Promise.all(
       seeded.map(async ({ authorId, otherPostId, mediaId, editFirst }) => {
-        const runCreate = async (): Promise<string | null> => {
+        const runCreate = async () => {
           await latch.arriveAndWait();
           try {
             const view = await createPost.execute({
@@ -1083,12 +1197,12 @@ describe("CreatePost/EditPost — cross-post media race (MAJ-2, real transaction
               mediaIds: [mediaId],
               visibility: "members",
             });
-            return view.id;
-          } catch {
-            return null;
+            return { won: true, id: view.id, loss: null as Loss | null };
+          } catch (err) {
+            return { won: false, id: null, loss: classify(err) };
           }
         };
-        const runEdit = async (): Promise<boolean> => {
+        const runEdit = async () => {
           await latch.arriveAndWait();
           try {
             await editPost.execute({
@@ -1097,25 +1211,27 @@ describe("CreatePost/EditPost — cross-post media race (MAJ-2, real transaction
               body: "ambil fotonya",
               mediaIds: [mediaId],
             });
-            return true;
-          } catch {
-            return false;
+            return { won: true, loss: null as Loss | null };
+          } catch (err) {
+            return { won: false, loss: classify(err) };
           }
         };
-        // Started in the order this pair was assigned; the latch is what makes
-        // them arrive together regardless.
-        const [createdId, editWon] = editFirst
+        // Half the pairs start the edit first. It does NOT reliably change who
+        // wins — see the block comment on the contention assertion below — but
+        // it costs nothing and keeps the dispatch order from being a hidden
+        // constant.
+        const [create, edit] = editFirst
           ? await (async () => {
-              const edit = runEdit();
-              const create = runCreate();
-              return [await create, await edit] as const;
+              const e = runEdit();
+              const c = runCreate();
+              return [await c, await e] as const;
             })()
           : await (async () => {
-              const create = runCreate();
-              const edit = runEdit();
-              return [await create, await edit] as const;
+              const c = runCreate();
+              const e = runEdit();
+              return [await c, await e] as const;
             })();
-        return { mediaId, createdId, editWon };
+        return { mediaId, create, edit };
       })
     );
 
@@ -1137,25 +1253,66 @@ describe("CreatePost/EditPost — cross-post media race (MAJ-2, real transaction
     // EXACTLY ONE WINNER PER PAIR, and the winner really holds the row. Two
     // successes over one media row is the bug itself; two failures would mean
     // the guard had started refusing writes that should have gone through.
-    for (const { mediaId, createdId, editWon } of results) {
-      expect([createdId !== null, editWon].filter(Boolean).length).toBe(1);
+    for (const { mediaId, create, edit } of results) {
+      expect([create.won, edit.won].filter(Boolean).length).toBe(1);
       const [row] = await db.select().from(postMedia).where(eq(postMedia.id, mediaId));
       expect(row!.postId).not.toBe(null);
     }
 
     // A create that reported success must still HAVE its image — a 200 that
     // left nothing behind is the same lie in the other direction.
-    for (const { createdId } of results) {
-      if (createdId === null) continue;
-      const claimed = await db.select().from(postMedia).where(eq(postMedia.postId, createdId));
+    for (const { create } of results) {
+      if (create.id === null) continue;
+      const claimed = await db.select().from(postMedia).where(eq(postMedia.postId, create.id));
       expect(claimed.length).toBe(1);
     }
 
-    // Both sides of the contest really happened somewhere across the 20 pairs.
-    // A run where the create always won would be consistent with the two
-    // requests never overlapping at the database at all.
-    expect(results.some((result) => result.createdId !== null)).toBe(true);
-    expect(results.some((result) => result.editWon)).toBe(true);
+    // EVERY loss is one of the two refusals this code is allowed to answer
+    // with. A loss classified "other" is an exception nobody designed for —
+    // a 500, a driver error, a deadlock abort surfacing raw — and it must not
+    // hide inside a `catch` that only asked "did it throw?".
+    const losses = results.flatMap(({ create, edit }) =>
+      [create.loss, edit.loss].filter((loss): loss is Loss => loss !== null)
+    );
+    expect(losses.filter((loss) => loss === "other")).toEqual([]);
+
+    /**
+     * **REAL OVERLAP AT THE DATABASE, and this is the assertion that proves
+     * it** — re-review NEW-1.
+     *
+     * This used to assert `results.some(r => r.editWon)`: that the EDIT won at
+     * least one of the 20 pairs. It was flaky — the reviewer measured **3 red
+     * in 50 runs**, with per-run edit wins of 4, 4, 2, 5, 1, 0, 1, 4 — and the
+     * cause is structural, not scheduling. `EditPost` does two extra round
+     * trips (`lockForEdit`, `updateBody`) before its `claim`, so it reaches the
+     * contended write later than `CreatePost` does and tends to lose whoever
+     * was dispatched first. The assertion was hoping for an outcome the code
+     * shape makes unlikely, and hoping is what flakes.
+     *
+     * A `ConflictError` loss cannot be produced by anything EXCEPT overlap: the
+     * loser read the row as attachable and only then found the write refused,
+     * which means the winner committed inside that gap. So this asserts the
+     * property the old line was reaching for — the requests really contended —
+     * without depending on which of them wins, which is the part this test
+     * cannot control.
+     *
+     * The other half of what the old line proved — that the EDIT winning also
+     * resolves safely — is now proved DETERMINISTICALLY instead of raced, by
+     * "a claim lost to ANOTHER POST says the photo is taken, not that it
+     * vanished" (and its create-side twin), which force that exact ordering
+     * through `raceStealingMedia`.
+     *
+     * **MEASURED over 25 instrumented runs (500 pairs): `conflict = 20` of 20
+     * in EVERY run, `validation = 0`, `other = 0`.** Every loser in every pair
+     * lost at the guard, so the overlap this asserts is total rather than
+     * incidental — it needs 1 of 20 and gets 20 of 20. Edit wins over the same
+     * 25 runs ranged 0 to 8, including a run at 0, which is exactly what the
+     * old assertion would have gone red on.
+     *
+     * `toContain` on an array compares ELEMENTS, not substrings, so the
+     * superstring hazard this branch keeps finding does not apply here.
+     */
+    expect(losses).toContain("conflict");
   });
 });
 
@@ -1195,6 +1352,17 @@ describe("CreatePost — real transaction (Task 5 fix round 2)", () => {
         visibility: "members",
       })
     ).rejects.toBeInstanceOf(ConflictError);
+    // The SWEEP race's own sentence — the row really is gone here, so "upload
+    // it again" is true. Its twin below covers the other race on this same
+    // entry point.
+    await expect(
+      new CreatePost(raceUnitOfWork).execute({
+        authorId: author.id,
+        body: "khusus anggota, foto hilang",
+        mediaIds: [image.id],
+        visibility: "members",
+      })
+    ).rejects.toThrow("foto sudah tidak tersedia, silakan unggah ulang");
 
     // Read through a FRESH connection, not `tx` (which no longer exists —
     // the transaction rolled back). Before fix round 2, `posts.create` had
@@ -1202,5 +1370,40 @@ describe("CreatePost — real transaction (Task 5 fix round 2)", () => {
     // a `members` post with zero images, the exact forbidden state.
     const rows = await db.select().from(postsTable).where(eq(postsTable.authorId, author.id));
     expect(rows).toEqual([]);
+  });
+
+  /**
+   * The create path's twin of the edit's taken-vs-vanished test. Both entry
+   * points share `requireFullyClaimed`, and both are pinned, because "the
+   * shared helper is right" is not the same claim as "both callers reach it".
+   */
+  it("a create whose photo was taken by another post says so, and leaves no post row", async () => {
+    const author = await seedRealUser();
+    const posts = new DrizzlePostRepository(db);
+    const media = new DrizzleMediaRepository(db);
+    const image = await media.create({ ownerId: author.id, width: 10, height: 10, byteSize: 1 });
+    const thief = await posts.create(author.id, "kiriman pencuri", "public");
+    const raceUnitOfWork: PostEditUnitOfWorkPort = {
+      run: (work) =>
+        db.transaction((tx) =>
+          work({ posts: new DrizzlePostRepository(tx), media: raceStealingMedia(tx, thief.id) })
+        ),
+    };
+
+    await expect(
+      new CreatePost(raceUnitOfWork).execute({
+        authorId: author.id,
+        body: "khusus anggota",
+        mediaIds: [image.id],
+        visibility: "members",
+      })
+    ).rejects.toThrow("foto sudah dipakai kiriman lain");
+
+    // Only the thief's post survives — the members-only create rolled back
+    // whole, exactly as the vanish case does.
+    const bodies = (
+      await db.select().from(postsTable).where(eq(postsTable.authorId, author.id))
+    ).map((row) => row.body);
+    expect(bodies).toEqual(["kiriman pencuri"]);
   });
 });
