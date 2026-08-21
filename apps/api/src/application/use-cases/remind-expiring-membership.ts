@@ -111,11 +111,16 @@ export interface RemindExpiringMembershipOptions {
  *     silently reached nobody would otherwise look exactly like a pass that reached
  *     everybody.
  *
- *     The claim is taken and KEPT for a skip, deliberately — the same choice
- *     `ProcessRenewals` makes and for the same reason: the claim is what bounds the
- *     audit trail. Without it an hourly pass would write a skip record for the same
- *     membership 72 times across the window. With it there is exactly one row per
- *     membership, which is the same "once" rule the reminders themselves obey.
+ *     THE SKIP IS RECORDED BUT NOT PERMANENT — review fix round 1, I1. The row stays
+ *     (one per membership, updated in place, so an hourly pass cannot write 72 skip
+ *     records across the window) but `no_channel` is the one outcome
+ *     `MembershipReminderRepositoryPort.claim` will re-claim. It has to be: this
+ *     branch is reachable only when the BOX has no email provider — `app_user.email`
+ *     is `NOT NULL UNIQUE`, so a member always has an address — and treating it as
+ *     final meant a worker deployed for one hour without email configuration
+ *     permanently burned the reminder for every in-window member without a WhatsApp
+ *     number, with fixing the configuration repairing nothing. A `sent` row is still
+ *     final, because that member WAS told.
  *
  *  4. ONE MEMBERSHIP'S FAILURE MUST NOT ABORT THE PASS, and one CHANNEL's failure must
  *     not prevent the other. Each row is handled in its own try/catch and each channel
@@ -281,12 +286,17 @@ export class RemindExpiringMembership {
           outcome: MEMBERSHIP_REMINDER_NO_CHANNEL,
           channels: null,
         });
+        // Fires on EVERY pass while the box stays broken, deliberately: this is an
+        // alarm, not an audit entry, and an operator who has not configured email
+        // should keep being told so until they have. The audit entry is the row, and
+        // there is still only one of those per membership.
         this.logWarn(
           `[memberships] NO CHANNEL AVAILABLE for subscription=${row.id} — email ` +
             `${this.email !== null ? "configured" : "not configured on this box"}, whatsapp ` +
             `${subscriber.whatsappNumber !== null ? "on file" : "not on file"}. The member ` +
-            `was NOT told their membership ends, and that is recorded in ` +
-            `membership_reminder.outcome='${MEMBERSHIP_REMINDER_NO_CHANNEL}'.`
+            `was NOT told their membership ends; recorded as ` +
+            `membership_reminder.outcome='${MEMBERSHIP_REMINDER_NO_CHANNEL}', which a later ` +
+            `pass WILL retry once a channel exists — configure email to fix this.`
         );
         result.skipped += 1;
         return;

@@ -97,10 +97,15 @@ function fakeUsers(seed: UserRecord[]): UserRepositoryPort {
 }
 
 /**
- * The claim table, in memory, arbitrated the way the real unique index arbitrates:
- * the FIRST caller for a subscription id gets `true` and every later one gets
- * `false`. `claims` records every call so a test can prove the claim happened BEFORE
- * the send rather than merely alongside it.
+ * The claim table, in memory, arbitrated exactly the way the real
+ * `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE outcome = 'no_channel'` arbitrates:
+ * the first caller for a subscription id gets `true`, a later caller gets `false` —
+ * UNLESS the only thing on record is a `no_channel` skip, which is re-claimable
+ * because it describes a broken box rather than an unreachable member. Kept in step
+ * with `DrizzleMembershipReminderRepository.claim` deliberately; a fake that were more
+ * permissive than the real one would let a double-send through here unnoticed.
+ * `claimCalls` records every call so a test can prove the claim happened BEFORE the
+ * send rather than merely alongside it.
  */
 function fakeReminders() {
   const rows = new Map<string, MembershipReminderRow>();
@@ -108,9 +113,10 @@ function fakeReminders() {
   const port: MembershipReminderRepositoryPort = {
     async claim(userSubscriptionId) {
       claimCalls.push(userSubscriptionId);
-      if (rows.has(userSubscriptionId)) return false;
+      const held = rows.get(userSubscriptionId);
+      if (held !== undefined && held.outcome !== "no_channel") return false;
       rows.set(userSubscriptionId, {
-        id: `reminder-${rows.size + 1}`,
+        id: held?.id ?? `reminder-${rows.size + 1}`,
         userSubscriptionId,
         outcome: "claimed",
         channels: null,
@@ -304,6 +310,73 @@ describe("RemindExpiringMembership", () => {
     expect(warnings[0]).toContain("sub-1");
     // Never the address or the number, even though both were on the record read.
     expect(warnings[0]).not.toContain("rina@example.com");
+  });
+
+  it("RETRIES a membership skipped for want of a channel once a channel exists", async () => {
+    // Review fix round 1, I1. The skip records the BOX, not the member: every account
+    // has an email address, so "no channel at all" means this deployment has no email
+    // provider. A worker deployed for an hour without one must not permanently burn
+    // the reminder for every in-window member who has no WhatsApp number.
+    const { port: reminders, rows } = fakeReminders();
+    const subscriptions = [subscriptionRow()];
+    const users = fakeUsers([subscriberRow({ whatsappNumber: null }), ownerRow()]);
+
+    const broken = build({
+      subscriptions: fakeSubscriptions([subscriptions]).repository,
+      users,
+      reminders,
+      email: null,
+      notifier: null,
+      logWarn: () => undefined,
+    });
+    const first = await broken.execute();
+    expect(first.skipped).toBe(1);
+    expect(rows.get("sub-1")?.outcome).toBe("no_channel");
+
+    // Somebody configures email. The next pass on the repaired box must send.
+    const email = new FakeEmailAdapter();
+    const repaired = build({
+      subscriptions: fakeSubscriptions([subscriptions]).repository,
+      users,
+      reminders,
+      email,
+      notifier: null,
+    });
+    const second = await repaired.execute();
+
+    expect(second.reminded).toBe(1);
+    expect(second.alreadyReminded).toBe(0);
+    expect(email.sent.length).toBe(1);
+    expect(email.sent[0].to).toBe("rina@example.com");
+    expect(rows.get("sub-1")?.outcome).toBe("sent");
+    expect(rows.get("sub-1")?.channels).toBe("email");
+  });
+
+  it("still never reminds a SENT membership twice, however many later passes run", async () => {
+    // The half that must not break while fixing the one above. Three passes on a
+    // fully working box after a successful send: one email, one WhatsApp, ever.
+    const email = new FakeEmailAdapter();
+    const notifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
+    const { port: reminders, rows } = fakeReminders();
+    const subscriptions = [subscriptionRow()];
+    const useCase = build({
+      subscriptions: fakeSubscriptions([subscriptions, subscriptions, subscriptions]).repository,
+      users: fakeUsers([subscriberRow(), ownerRow()]),
+      reminders,
+      email,
+      notifier,
+    });
+
+    const first = await useCase.execute();
+    const second = await useCase.execute();
+    const third = await useCase.execute();
+
+    expect(first.reminded).toBe(1);
+    expect(second.alreadyReminded).toBe(1);
+    expect(third.alreadyReminded).toBe(1);
+    expect(email.sent.length).toBe(1);
+    expect(notifier.notifications.length).toBe(1);
+    expect(rows.get("sub-1")?.outcome).toBe("sent");
   });
 
   it("claims before sending, so a pass that runs twice reminds once", async () => {

@@ -20,6 +20,13 @@ export const MEMBERSHIP_REMINDER_SENT = "sent";
  * whole phase, so the one case where it is intentional has to be visible in the audit
  * trail.* A pass that silently reached nobody looks exactly like a pass that reached
  * everybody; this value is what tells them apart.
+ *
+ * IT IS ALSO THE ONE OUTCOME THAT CAN BE RE-CLAIMED, and that is not a convenience —
+ * it is what stops the record of a problem from becoming the problem. This state is
+ * reachable ONLY through the box: `app_user.email` is `NOT NULL UNIQUE`, so every
+ * member has an email address, and "no channel at all" therefore means this deployment
+ * has no email provider configured. That gets fixed; a member who was never told does
+ * not. See `claim`.
  */
 export const MEMBERSHIP_REMINDER_NO_CHANNEL = "no_channel";
 
@@ -61,10 +68,27 @@ export interface MembershipReminderRepositoryPort {
   /**
    * Claims the right to remind this membership.
    *
-   * `true` means this caller claimed it and is the one that must send; `false` means
-   * somebody already has, and this caller must send nothing. A conflict is ABSORBED
-   * rather than raised: a second pass has to be able to carry on with the rest of its
-   * batch, not abort and leave everybody behind it unreminded.
+   * `true` means this caller holds the claim and is the one that must send; `false`
+   * means somebody already has, and this caller must send nothing. A conflict is
+   * ABSORBED rather than raised: a second pass has to be able to carry on with the
+   * rest of its batch, not abort and leave everybody behind it unreminded.
+   *
+   * A MEMBERSHIP WHOSE ONLY RECORD IS A `no_channel` SKIP IS CLAIMABLE AGAIN, and
+   * nothing else is. Review fix round 1, I1: with every existing row treated as
+   * permanent, a worker that ran for one hour without email configuration burned the
+   * reminder for every in-window member who had no WhatsApp number — the skip row
+   * blocked re-claiming, and fixing the configuration the next morning repaired
+   * nothing. A skip records a broken BOX, not a member who cannot be reached, so it
+   * has to expire when the box is repaired. A `sent` row, and a `claimed` one (a pass
+   * that died between claiming and delivering, or whose audit write failed after a
+   * successful send), must NEVER be re-claimed: one is a member already reminded and
+   * the other is a member who may have been.
+   *
+   * Implementations MUST make that distinction IN THE STATEMENT — `ON CONFLICT ... DO
+   * UPDATE ... WHERE outcome = 'no_channel' ... RETURNING`, whose predicate Postgres
+   * evaluates against the locked current row — and must never precede the write with a
+   * select. Reading the outcome first and deciding in application code is the same
+   * TOCTOU this port's docstring exists to forbid, merely one level up.
    *
    * Throws only for a real problem — a subscription that does not exist, an
    * unreachable database.

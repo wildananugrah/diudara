@@ -1151,6 +1151,13 @@ export const membershipReminders = pgTable(
      * member was never told" is the failure mode this whole pass exists to prevent,
      * so the one case where it is intentional has to be visible rather than look
      * identical to a pass that reached everybody.
+     *
+     * IT IS ALSO READ, not merely written: `no_channel` is the one value that lets a
+     * later pass RE-CLAIM the row, because that value records a deployment with no
+     * email provider rather than a member who cannot be reached (`app_user.email` is
+     * `NOT NULL UNIQUE`). See `MembershipReminderRepositoryPort.claim`, which puts the
+     * predicate in the `ON CONFLICT ... DO UPDATE`'s own `WHERE` so the database
+     * still decides.
      */
     outcome: varchar("outcome", { length: 24 }).notNull().default("claimed"),
     /**

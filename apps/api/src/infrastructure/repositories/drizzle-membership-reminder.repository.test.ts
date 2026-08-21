@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { db, sql } from "../../db/client";
-import { appUsers } from "../../db/schema";
+import { appUsers, membershipReminders } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { ArrivalLatch } from "../../test-support/arrival-latch";
 import { DrizzleMembershipReminderRepository } from "./drizzle-membership-reminder.repository";
@@ -100,6 +100,87 @@ describe("DrizzleMembershipReminderRepository.claim", () => {
     expect(outcomes.filter((won) => !won).length).toBe(4);
     // And exactly one row exists, so "one winner" is not merely one return value.
     expect(await reminders.findBySubscriptionId(subscriptionId)).not.toBe(null);
+  });
+
+  it("RE-CLAIMS a membership that was skipped for want of a channel", async () => {
+    // Review fix round 1, I1. A `no_channel` row records a deployment with no email
+    // provider, not a member who cannot be reached — `app_user.email` is
+    // `NOT NULL UNIQUE`, so every member has an address. Under a plain
+    // `DO NOTHING` this row was permanent, and a worker that ran for one hour without
+    // email configuration burned the reminder for every in-window member without a
+    // WhatsApp number, for ever.
+    const subscriptionId = await seedSubscription();
+    expect(await reminders.claim(subscriptionId)).toBe(true);
+    await reminders.recordOutcome({
+      userSubscriptionId: subscriptionId,
+      outcome: "no_channel",
+      channels: null,
+    });
+
+    expect(await reminders.claim(subscriptionId)).toBe(true);
+    // Re-claimed IN PLACE — still one row per membership, back to an undelivered
+    // claim, so a second skip cannot accumulate a second record either.
+    const row = await reminders.findBySubscriptionId(subscriptionId);
+    expect(row?.outcome).toBe("claimed");
+    expect(row?.channels).toBe(null);
+    expect(await db.select().from(membershipReminders)).toHaveLength(1);
+  });
+
+  it("NEVER re-claims a membership that was actually reminded", async () => {
+    // The other half, and the one that must not be broken while fixing the first: a
+    // member who WAS told is told once, for ever.
+    const subscriptionId = await seedSubscription();
+    await reminders.claim(subscriptionId);
+    await reminders.recordOutcome({
+      userSubscriptionId: subscriptionId,
+      outcome: "sent",
+      channels: "email",
+    });
+
+    expect(await reminders.claim(subscriptionId)).toBe(false);
+    // And the refusal did not quietly rewrite the record of the send.
+    const row = await reminders.findBySubscriptionId(subscriptionId);
+    expect(row?.outcome).toBe("sent");
+    expect(row?.channels).toBe("email");
+  });
+
+  it("NEVER re-claims a membership still sitting at 'claimed'", async () => {
+    // `claimed` after a pass has finished means a process died between claiming and
+    // delivering, or an audit write failed AFTER a successful send. Neither can be
+    // told apart from the other, and one of them is a member who already has the
+    // message — so the ambiguous case fails closed.
+    const subscriptionId = await seedSubscription();
+    expect(await reminders.claim(subscriptionId)).toBe(true);
+    expect(await reminders.claim(subscriptionId)).toBe(false);
+  });
+
+  it("gives EXACTLY ONE of five simultaneous claimants a SKIPPED membership too", async () => {
+    // Re-claiming must not open a second door into the double-send. Five passes race
+    // for the same `no_channel` row, warmed pool and all (see the test above for why
+    // the warm-up is load-bearing): Postgres evaluates the DO UPDATE's `WHERE` against
+    // the locked current row, so the first to win flips it to `claimed` and the other
+    // four find the predicate false.
+    const subscriptionId = await seedSubscription();
+    await reminders.claim(subscriptionId);
+    await reminders.recordOutcome({
+      userSubscriptionId: subscriptionId,
+      outcome: "no_channel",
+      channels: null,
+    });
+    const contenders = 5;
+    await Promise.all(Array.from({ length: contenders }, () => sql`select 1`));
+    const latch = new ArrivalLatch(contenders);
+
+    const outcomes = await Promise.all(
+      Array.from({ length: contenders }, async () => {
+        await latch.arriveAndWait();
+        return reminders.claim(subscriptionId);
+      })
+    );
+
+    expect(latch.arrived).toBe(contenders);
+    expect(outcomes.filter((won) => won).length).toBe(1);
+    expect(await db.select().from(membershipReminders)).toHaveLength(1);
   });
 
   it("leaves two DIFFERENT memberships each claimable", async () => {

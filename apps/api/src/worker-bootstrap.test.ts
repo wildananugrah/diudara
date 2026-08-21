@@ -765,6 +765,70 @@ describe("bootstrapWorker", () => {
     expect(fakeNotifierOf(worker).notifications).toHaveLength(1);
   });
 
+  it("re-reminds a membership a MISCONFIGURED BOX skipped, once email is configured", async () => {
+    // Review fix round 1, I1, proved end to end against real Postgres and the real
+    // repository rather than a fake. `no_channel` describes a deployment with no email
+    // provider — every account has an email address — so a worker that ran for an hour
+    // without one must not have permanently burned this member's only warning.
+    const { subscription } = await seedMembershipEndingInDays(2);
+    await db
+      .insert(membershipReminders)
+      .values({ userSubscriptionId: subscription.id, outcome: "no_channel", channels: null });
+
+    const worker = bootstrapWorker();
+    const result = await worker.remindExpiringMemberships.execute();
+
+    expect(result.reminded).toBe(1);
+    expect(result.alreadyReminded).toBe(0);
+    expect((worker.email as FakeEmailAdapter).sent).toHaveLength(1);
+    const [claim] = await db
+      .select()
+      .from(membershipReminders)
+      .where(eq(membershipReminders.userSubscriptionId, subscription.id));
+    expect(claim.outcome).toBe("sent");
+    // Re-claimed in place: still exactly one row for this membership.
+    expect(await db.select().from(membershipReminders)).toHaveLength(1);
+  });
+
+  it("does NOT re-remind a membership that was already sent one", async () => {
+    // The half that must survive the fix above, also end to end: a member who was told
+    // is told once, whatever any later pass does.
+    const { subscription } = await seedMembershipEndingInDays(2);
+    await db
+      .insert(membershipReminders)
+      .values({ userSubscriptionId: subscription.id, outcome: "sent", channels: "email" });
+
+    const worker = bootstrapWorker();
+    const result = await worker.remindExpiringMemberships.execute();
+
+    expect(result.reminded).toBe(0);
+    expect(result.alreadyReminded).toBe(1);
+    expect((worker.email as FakeEmailAdapter).sent).toHaveLength(0);
+    expect(fakeNotifierOf(worker).notifications).toHaveLength(0);
+    // And the record of the original send was not rewritten by the refusal.
+    const [claim] = await db
+      .select()
+      .from(membershipReminders)
+      .where(eq(membershipReminders.userSubscriptionId, subscription.id));
+    expect(claim.outcome).toBe("sent");
+    expect(claim.channels).toBe("email");
+  });
+
+  it("refuses to boot on partial email configuration", () => {
+    // The worker started reading `RESEND_API_KEY`/`EMAIL_FROM` when Task 4 gave it a
+    // reason to send email, so it inherited `selectEmailProvider`'s half-configured
+    // guard — a key with no "from" address is a typo, never intentional, and an
+    // operator who set one believes email is live. `bootstrap()` has this test; this
+    // root did not, so nothing would have caught the guard being removed from the
+    // process that actually sends the reminders.
+    withEnv({ RESEND_API_KEY: "re_live_x", EMAIL_FROM: undefined }, () => {
+      expect(() => bootstrapWorker()).toThrow(/half-configured/);
+    });
+    withEnv({ RESEND_API_KEY: undefined, EMAIL_FROM: "DIUDARA <no-reply@diudara.example>" }, () => {
+      expect(() => bootstrapWorker()).toThrow(/half-configured/);
+    });
+  });
+
   it("injects the REAL clock into the passes, not a fixture", () => {
     // The passes are the first things in this codebase whose behaviour depends entirely
     // on the current instant, and `FixedClock` exists in this workspace. A root that
@@ -785,3 +849,35 @@ describe("bootstrapWorker", () => {
     expect(worker.messaging.gating.get("telegram")?.capabilities().canGateAccess).toBe(true);
   });
 });
+
+/**
+ * Runs `fn` with `vars` applied to `process.env`, restoring every one of them
+ * afterwards — including the ones that were previously unset. Copied from
+ * `bootstrap.test.ts` rather than shared: these are two composition roots with two
+ * different sets of variables, and a helper imported across them would tie their test
+ * files together for four lines of bookkeeping.
+ */
+function withEnv(vars: Record<string, string | undefined>, fn: () => void) {
+  const originals: Record<string, string | undefined> = {};
+  for (const key of Object.keys(vars)) {
+    originals[key] = process.env[key];
+  }
+  try {
+    for (const [key, value] of Object.entries(vars)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    fn();
+  } finally {
+    for (const [key, value] of Object.entries(originals)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
