@@ -1,7 +1,14 @@
 import { describe, expect, it, beforeEach } from "bun:test";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client";
-import { communities, creators, joinRequests, members, membershipTiers } from "../../db/schema";
+import {
+  appUsers,
+  communities,
+  creators,
+  joinRequests,
+  members,
+  membershipTiers,
+} from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { ArrivalLatch } from "../../test-support/arrival-latch";
 import { DrizzleJoinRequestRepository } from "./drizzle-join-request.repository";
@@ -301,13 +308,21 @@ describe("DrizzleJoinRequestRepository.findNotificationContext", () => {
    * Like `seedFreeCommunity`, but with a configurable `creator.whatsapp_number`
    * — this describe block is the one place that column's nullability matters.
    */
-  async function seedWithCreatorWhatsapp(creatorWhatsappNumber: string | null) {
+  async function seedWithCreatorWhatsapp(
+    creatorWhatsappNumber: string | null,
+    /**
+     * `undefined` generates a unique address; pass `null` for the
+     * WhatsApp-only creator `creator_email_unique`'s partial predicate allows,
+     * who has no address to join an account on.
+     */
+    creatorEmail?: string | null
+  ) {
     seedCounter += 1;
     const [creator] = await db
       .insert(creators)
       .values({
         name: "Rina",
-        email: `rina-notify-${seedCounter}@example.com`,
+        email: creatorEmail === undefined ? `rina-notify-${seedCounter}@example.com` : creatorEmail,
         whatsappNumber: creatorWhatsappNumber ?? undefined,
       })
       .returning();
@@ -407,5 +422,93 @@ describe("DrizzleJoinRequestRepository.findNotificationContext", () => {
 
   it("reports a malformed id as a miss, not a driver error", async () => {
     expect(await repo.findNotificationContext("not-a-uuid")).toBeNull();
+  });
+
+  /**
+   * Task 7. `creator.whatsapp_number` has no editor anywhere in the app, so it
+   * is null for everybody and the skip path fires every time; the number the
+   * owner can actually edit lives on `app_user`. There is NO foreign key
+   * between `creator` and `app_user` — the only join available is
+   * `creator.email` = `app_user.email`, nullable and unique-when-not-null on
+   * one side, not-null and unique on the other, so it resolves to at most one
+   * account wherever it resolves at all.
+   *
+   * Matched with `=`, case-sensitively, deliberately: that is already how both
+   * `DrizzleUserRepository.findByEmail` and `DrizzleCreatorRepository.findByEmail`
+   * decide which account an address belongs to, and a join with looser
+   * semantics than the login it mirrors could reach an account the owner
+   * cannot log into.
+   */
+  async function seedAccountFor(email: string, whatsappNumber: string | null) {
+    seedCounter += 1;
+    const [user] = await db
+      .insert(appUsers)
+      .values({
+        handle: `rina${seedCounter}`,
+        email,
+        whatsappNumber,
+        passwordHash: "argon2id$placeholder",
+        displayName: "Rina",
+      })
+      .returning();
+    return user;
+  }
+
+  it("prefers the owner's app_user number over creator.whatsapp_number when both exist", async () => {
+    const { creator, request } = await seedWithCreatorWhatsapp("+628130001111");
+    await seedAccountFor(creator.email!, "+628999990001");
+
+    const context = await repo.findNotificationContext(request.id);
+
+    // The literal app_user number, not the constant and not the creator's:
+    // app_user's is the one the owner can edit, so it is the fresher truth.
+    expect(context!.creatorWhatsappNumber).toBe("+628999990001");
+  });
+
+  /**
+   * THE ANTI-INNER-JOIN TEST. An INNER JOIN here would silently stop notifying
+   * every creator who has no `app_user` account — a fix that removes working
+   * notifications from anyone is not a fix. This test fails the moment the
+   * `leftJoin` becomes an `innerJoin`.
+   */
+  it("still resolves a creator who has NO app_user account at all", async () => {
+    const { request } = await seedWithCreatorWhatsapp("+628130002222");
+    // An unrelated account exists, on a different address: the join must not
+    // reach it, and must not require any account to exist to return a row.
+    await seedAccountFor(`someone-else-${seedCounter}@example.com`, "+628999990002");
+
+    const context = await repo.findNotificationContext(request.id);
+
+    expect(context).not.toBeNull();
+    expect(context!.creatorWhatsappNumber).toBe("+628130002222");
+  });
+
+  it("falls back to creator.whatsapp_number when the matching account has none", async () => {
+    const { creator, request } = await seedWithCreatorWhatsapp("+628130003333");
+    await seedAccountFor(creator.email!, null);
+
+    const context = await repo.findNotificationContext(request.id);
+
+    expect(context!.creatorWhatsappNumber).toBe("+628130003333");
+  });
+
+  it("a creator with a NULL email matches no account, rather than an arbitrary one", async () => {
+    const { request } = await seedWithCreatorWhatsapp("+628130004444", null);
+    await seedAccountFor(`unrelated-${seedCounter}@example.com`, "+628999990004");
+
+    const context = await repo.findNotificationContext(request.id);
+
+    expect(context).not.toBeNull();
+    expect(context!.creatorWhatsappNumber).toBe("+628130004444");
+  });
+
+  it("reports null when neither the creator nor their account has a number", async () => {
+    const { creator, request } = await seedWithCreatorWhatsapp(null);
+    await seedAccountFor(creator.email!, null);
+
+    const context = await repo.findNotificationContext(request.id);
+
+    expect(context).not.toBeNull();
+    expect(context!.creatorWhatsappNumber).toBeNull();
   });
 });

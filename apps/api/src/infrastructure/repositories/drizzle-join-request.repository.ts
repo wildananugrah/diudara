@@ -1,6 +1,13 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { communities, creators, joinRequests, members, membershipTiers } from "../../db/schema";
+import {
+  appUsers,
+  communities,
+  creators,
+  joinRequests,
+  members,
+  membershipTiers,
+} from "../../db/schema";
 import type {
   JoinRequestNotificationContext,
   JoinRequestRecord,
@@ -123,6 +130,42 @@ export class DrizzleJoinRequestRepository implements JoinRequestRepositoryPort {
    * real community, creator, member or tier) collapses into the same `null`
    * `NotifyJoinRequest` treats as "consume, do not retry" — there is no need
    * to tell those cases apart, since none of them is fixable by a retry.
+   *
+   * ==========================================================================
+   * THE FIFTH JOIN IS A **LEFT** JOIN, AND CHANGING IT TO AN INNER JOIN SILENTLY
+   * STOPS NOTIFYING PEOPLE (Task 7)
+   *
+   * `creator.whatsapp_number` has no editor anywhere in this application — no
+   * screen, no endpoint, writes it — so it is null for essentially every owner
+   * and `NotifyJoinRequest`'s skip path fired every single time. The number an
+   * owner CAN edit is `app_user.whatsapp_number`, built and made editable in
+   * Phase 1.
+   *
+   * `creator` is one of the six untouchable /dashboard/* tables, so it gets no
+   * `user_id` column: this is a READ, and `creator.email` = `app_user.email` is
+   * the ONLY join the schema offers. It is deterministic wherever it resolves —
+   * `app_user.email` is NOT NULL and unique, `creator.email` is unique-when-not-
+   * null (`creator_email_unique`, partial) — so it matches at most one account.
+   * Matched with plain `=`, case-sensitively, because that is already how both
+   * `DrizzleUserRepository.findByEmail` and `DrizzleCreatorRepository.findByEmail`
+   * decide which account an address belongs to; a looser join here could reach
+   * an account the owner cannot log into.
+   *
+   * LEFT, never INNER: a creator with a `whatsapp_number` and no `app_user`
+   * account is being notified TODAY, and an INNER JOIN would drop their row
+   * entirely — the query would return `null`, `NotifyJoinRequest` would consume
+   * the outbox row as "context missing", and nobody would ever be told. Not one
+   * error anywhere. `drizzle-join-request.repository.test.ts` has a test that
+   * exists purely to fail if this word changes.
+   *
+   * A creator whose `email` IS NULL matches nothing rather than matching an
+   * arbitrary row — `NULL = anything` is NULL, never true — so the coalesce
+   * below falls back to their own number, which is exactly right.
+   *
+   * `coalesce(app_user, creator)` and not the reverse: `app_user`'s is the one
+   * the owner can actually edit, so it is the fresher truth, and the creator's
+   * stays as the fallback so that nobody reachable today stops being reachable.
+   * ==========================================================================
    */
   async findNotificationContext(id: string): Promise<JoinRequestNotificationContext | null> {
     if (!UUID_PATTERN.test(id)) {
@@ -138,11 +181,17 @@ export class DrizzleJoinRequestRepository implements JoinRequestRepositoryPort {
         // `memberName` above.
         memberName: members.name,
         tierName: membershipTiers.name,
-        creatorWhatsappNumber: creators.whatsappNumber,
+        // See the docstring above: the owner's own account wins, the creator
+        // row is the fallback, and null still means "cannot be reached".
+        creatorWhatsappNumber: sql<
+          string | null
+        >`coalesce(${appUsers.whatsappNumber}, ${creators.whatsappNumber})`,
       })
       .from(joinRequests)
       .innerJoin(communities, eq(joinRequests.communityId, communities.id))
       .innerJoin(creators, eq(communities.creatorId, creators.id))
+      // LEFT. Read the docstring before changing this word.
+      .leftJoin(appUsers, eq(appUsers.email, creators.email))
       .innerJoin(members, eq(joinRequests.memberId, members.id))
       .innerJoin(membershipTiers, eq(joinRequests.tierId, membershipTiers.id))
       .where(eq(joinRequests.id, id))

@@ -63,9 +63,16 @@ export interface JoinRequestNotificationContext {
   memberName: string | null;
   tierName: string;
   /**
-   * `creator.whatsapp_number`, verbatim — including null. A creator who never
-   * set one cannot be reached here; `NotifyJoinRequest` is what decides what
-   * that means.
+   * The number the community's OWNER is reached on, or null when there isn't
+   * one — `NotifyJoinRequest` is what decides what that means.
+   *
+   * Named for `creator.whatsapp_number`, but no longer only that column
+   * (Task 7). It is the owner's `app_user.whatsapp_number` when they have an
+   * account — that is the one this application gives them an editor for, so it
+   * is the fresher truth — falling back to `creator.whatsapp_number` when they
+   * have no account, or an account with no number on it. Null only when
+   * neither holds one. The implementation's docstring has the join and why it
+   * must stay a LEFT join.
    */
   creatorWhatsappNumber: string | null;
 }
