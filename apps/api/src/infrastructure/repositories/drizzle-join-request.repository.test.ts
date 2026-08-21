@@ -433,10 +433,11 @@ describe("DrizzleJoinRequestRepository.findNotificationContext", () => {
    * one side, not-null and unique on the other, so it resolves to at most one
    * account wherever it resolves at all.
    *
-   * Matched with `=`, case-sensitively, deliberately: `RegisterCreator` and
-   * `RegisterUser` both lowercase through `normalizeEmail` before inserting,
-   * and both `findByEmail`s compare with the same plain `=`, so this join
-   * agrees exactly with the two logins it sits between.
+   * Matched with `=`, case-sensitively, deliberately: that is already how both
+   * `DrizzleUserRepository.findByEmail` and `DrizzleCreatorRepository.findByEmail`
+   * decide which account an address belongs to, and a join with looser
+   * semantics than the login it mirrors could reach an account the owner
+   * cannot log into.
    */
   async function seedAccountFor(email: string, whatsappNumber: string | null) {
     seedCounter += 1;
