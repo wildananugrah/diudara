@@ -1489,6 +1489,7 @@ describe("PostComposer — Khusus anggota (spec §7)", () => {
     await waitFor(() => {
       expect(textarea().value).toBe("");
     });
+    expect(membersOnlyBox().checked).toBe(false);
     expect(membersOnlyBox().disabled).toBe(true);
     expect(screen.getByTestId("members-only-hint").textContent).toContain(
       "Tambahkan foto dulu"
