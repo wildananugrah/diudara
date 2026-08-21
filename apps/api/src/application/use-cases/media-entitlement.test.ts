@@ -111,6 +111,10 @@ class FakePosts implements PostRepositoryPort {
   async ownershipOf(): Promise<never> {
     return this.unused();
   }
+  /** Same reason as `ownershipOf` just above: the gate never edits. */
+  async lockForEdit(): Promise<never> {
+    return this.unused();
+  }
   async updateBody(): Promise<never> {
     return this.unused();
   }

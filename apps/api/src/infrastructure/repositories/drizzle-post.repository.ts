@@ -106,6 +106,36 @@ export class DrizzlePostRepository implements PostRepositoryPort {
   }
 
   /**
+   * Task 5 fix round 1. Same projection and same shape as `ownershipOf`,
+   * `FOR UPDATE OF post` added — this is what makes it safe to read
+   * `visibility` and the post's current media for a resulting-state check: a
+   * second caller locking the SAME id blocks here until this transaction
+   * ends. `of posts` names the table explicitly even though this query has
+   * no join, matching `DrizzleSubscriptionRepository.markPaid`'s own
+   * `for("update", { of: subscriptions })` — naming the target is what keeps
+   * a later join added to this method from silently widening the lock.
+   */
+  async lockForEdit(id: string): Promise<PostOwnership | null> {
+    const [row] = await this.db
+      .select({
+        id: posts.id,
+        authorId: posts.authorId,
+        deletedAt: posts.deletedAt,
+        visibility: posts.visibility,
+      })
+      .from(posts)
+      .where(eq(posts.id, id))
+      .for("update", { of: posts });
+    if (row === undefined) return null;
+    return {
+      id: row.id,
+      authorId: row.authorId,
+      isDeleted: row.deletedAt !== null,
+      visibility: row.visibility,
+    };
+  }
+
+  /**
    * Two columns, by primary key — what BARRIER TWO reads before any bytes
    * leave `MediaStoragePort` (spec §6.2).
    *

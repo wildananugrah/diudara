@@ -119,6 +119,7 @@ import type { PaymentActivationUnitOfWorkPort } from "./application/ports/paymen
 import type { UserPurchaseUnitOfWorkPort } from "./application/ports/user-purchase-unit-of-work.port";
 import type { JoinRequestRepositoryPort } from "./application/ports/join-request-repository.port";
 import type { JoinRequestUnitOfWorkPort } from "./application/ports/join-request-unit-of-work.port";
+import type { PostEditUnitOfWorkPort } from "./application/ports/post-edit-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -373,6 +374,10 @@ const fakePostRepository: PostRepositoryPort = {
   async ownershipOf() {
     return null;
   },
+  /** Same reason as `ownershipOf` above: unused by these smoke tests. */
+  async lockForEdit() {
+    return null;
+  },
   // Phase 6's `MediaEntitlement` reads this. `null` is the REFUSING answer —
   // these smoke tests never drive the gate, and a fake that answered "public"
   // by default would be a fake that opens a paywall.
@@ -391,6 +396,19 @@ const fakePostRepository: PostRepositoryPort = {
   },
   async listByAuthor() {
     return [];
+  },
+};
+
+/**
+ * Task 5 fix round 1: `EditPost` now takes a `PostEditUnitOfWorkPort`
+ * instead of the two repositories directly — see that port's own docstring.
+ * Runs the work inline against the same fakes, like every other unit of
+ * work in this file: bootstrap wiring, not atomicity, is what this file
+ * pins.
+ */
+const fakePostEditUnitOfWork: PostEditUnitOfWorkPort = {
+  async run(work) {
+    return work({ posts: fakePostRepository, media: fakeMediaRepository });
   },
 };
 
@@ -854,7 +872,7 @@ describe("Dependencies (composition root contract)", () => {
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
       createPost: new CreatePost(fakePostRepository, fakeMediaRepository),
       maxPostImages: 5,
-      editPost: new EditPost(fakePostRepository, fakeMediaRepository),
+      editPost: new EditPost(fakePostEditUnitOfWork),
       deletePost: new DeletePost(fakePostRepository),
       listFeed: new ListFeed(
         fakePostRepository,
@@ -1112,7 +1130,7 @@ describe("Dependencies (composition root contract)", () => {
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
       createPost: new CreatePost(fakePostRepository, fakeMediaRepository),
       maxPostImages: 5,
-      editPost: new EditPost(fakePostRepository, fakeMediaRepository),
+      editPost: new EditPost(fakePostEditUnitOfWork),
       deletePost: new DeletePost(fakePostRepository),
       listFeed: new ListFeed(
         fakePostRepository,

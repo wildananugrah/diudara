@@ -64,6 +64,22 @@ export interface PostRepositoryPort {
   /** `null` when the id has never existed. A soft-deleted post still resolves, with `isDeleted: true`. */
   ownershipOf(id: string): Promise<PostOwnership | null>;
   /**
+   * Task 5 fix round 1. Identical answer to `ownershipOf`, but taken under
+   * `SELECT ... FOR UPDATE`: a row lock a caller holds for the rest of an
+   * open transaction, so a SECOND call to `lockForEdit` on the SAME id — from
+   * a concurrent edit — blocks until the first transaction commits or rolls
+   * back. That is the entire mechanism behind "the resulting-state check
+   * reads fresh data": the second edit's read happens strictly after the
+   * first edit's write is visible, never before.
+   *
+   * MUST be called inside an open transaction (see `PostEditUnitOfWorkPort`).
+   * Called outside one, the lock is released the instant the statement
+   * completes and buys no serialisation at all — `ownershipOf` above is the
+   * right choice for every caller that does not need this guarantee
+   * (`DeletePost`, and any read that is not about to write `visibility`).
+   */
+  lockForEdit(id: string): Promise<PostOwnership | null>;
+  /**
    * The two fields `MediaEntitlement` gates on. `null` when the id has never
    * existed — which the gate treats as REFUSED, never as ungated: an image
    * whose post cannot be read is an image nobody can prove is public.

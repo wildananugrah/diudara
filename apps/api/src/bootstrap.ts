@@ -54,6 +54,7 @@ import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/req
 import { DecideJoinRequest, ListJoinRequests } from "./application/use-cases/decide-join-request";
 import { DrizzleJoinRequestRepository } from "./infrastructure/repositories/drizzle-join-request.repository";
 import { DrizzleJoinRequestUnitOfWork } from "./infrastructure/repositories/drizzle-join-request-unit-of-work";
+import { DrizzlePostEditUnitOfWork } from "./infrastructure/repositories/drizzle-post-edit-unit-of-work";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
@@ -1952,7 +1953,12 @@ export function bootstrap(): Dependencies {
   // to be enabled.
   const maxPostImages = resolveMaxPostImages(process.env.MAX_POST_IMAGES);
   const createPost = new CreatePost(postRepository, mediaRepository);
-  const editPost = new EditPost(postRepository, mediaRepository);
+  // Task 5 fix round 1: the lock, the resulting-state check, the body/
+  // visibility write and the media claim all run in ONE transaction — see
+  // `PostEditUnitOfWorkPort`'s own docstring for the two paths that left a
+  // members-only post with zero images before this existed.
+  const postEditUnitOfWork = new DrizzlePostEditUnitOfWork(db);
+  const editPost = new EditPost(postEditUnitOfWork);
   const deletePost = new DeletePost(postRepository);
   // The SAME `userSubscriptionRepository` and the SAME `clock` `isMemberOf`
   // and `listSubscribers` read, so the paywall gate cannot disagree with the

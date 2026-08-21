@@ -46,6 +46,10 @@ class FakePosts implements PostRepositoryPort {
   async ownershipOf() {
     return null;
   }
+  /** Not used from this file's read paths, same as `ownershipOf` above. */
+  async lockForEdit() {
+    return null;
+  }
   /** Barrier TWO's read, not barrier one's — nothing in this file drives it. */
   async gatingOf() {
     return null;

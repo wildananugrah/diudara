@@ -1,6 +1,16 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
+import { eq, inArray } from "drizzle-orm";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../errors";
+import type { DatabaseExecutor } from "../../db/client";
+import { db, sql } from "../../db/client";
+import { appUsers, posts as postsTable, postMedia } from "../../db/schema";
+import { resetDatabase } from "../../db/test-helpers";
+import { DrizzleMediaRepository } from "../../infrastructure/repositories/drizzle-media.repository";
+import { DrizzlePostEditUnitOfWork } from "../../infrastructure/repositories/drizzle-post-edit-unit-of-work";
+import { DrizzlePostRepository } from "../../infrastructure/repositories/drizzle-post.repository";
+import { ArrivalLatch } from "../../test-support/arrival-latch";
 import type { MediaRepositoryPort, MediaRow } from "../ports/media-repository.port";
+import type { PostEditUnitOfWorkPort } from "../ports/post-edit-unit-of-work.port";
 import type {
   PostOwnership,
   PostRepositoryPort,
@@ -40,6 +50,17 @@ class FakePosts implements PostRepositoryPort {
     return fakeRow({ body, visibility: visibility ?? "public" });
   }
   async ownershipOf(): Promise<PostOwnership | null> {
+    return this.ownership;
+  }
+  /**
+   * No real lock semantics in a synchronous fake — there is nothing for a
+   * SECOND caller to block on inside one `bun:test` process. The DB-backed
+   * concurrency tests below (`EditPost against a real transaction`) are what
+   * prove the row lock itself; this fake exists so `EditPost`'s ORDER of
+   * operations (lock, then check, then write) is still provable against
+   * fakes exactly as `ownershipOf` was before it.
+   */
+  async lockForEdit(): Promise<PostOwnership | null> {
     return this.ownership;
   }
   /** Barrier two's read (`MediaEntitlement`); the write path never calls it. */
@@ -161,6 +182,24 @@ const AUTHOR = "11111111-0000-4000-8000-000000000000";
 const SOMEONE_ELSE = "22222222-0000-4000-8000-000000000000";
 const FIRST_IMAGE = "cccccccc-0000-4000-8000-000000000000";
 const SECOND_IMAGE = "dddddddd-0000-4000-8000-000000000000";
+
+/**
+ * `EditPost` now takes a `PostEditUnitOfWorkPort` (Task 5 fix round 1)
+ * rather than the two repositories directly. Every existing test in this
+ * file constructs one against the SAME fakes it already builds — this just
+ * runs `work` inline, exactly as `fakeJoinRequestUnitOfWork` and friends do
+ * in `bootstrap.test.ts` — so every assertion already written against
+ * `posts.updated` / `media.claims` keeps meaning what it always meant. Real
+ * transactional behaviour (the row lock, the rollback) is proved separately,
+ * against a real Postgres transaction, in the `EditPost — real transaction`
+ * describe block below.
+ */
+function editPostFor(posts: PostRepositoryPort, media: MediaRepositoryPort): EditPost {
+  const unitOfWork: PostEditUnitOfWorkPort = {
+    run: (work) => work({ posts, media }),
+  };
+  return new EditPost(unitOfWork);
+}
 
 describe("CreatePost", () => {
   it("refuses an empty body", async () => {
@@ -387,7 +426,7 @@ describe("EditPost", () => {
     const posts = new FakePosts();
     posts.ownership = null;
     await expect(
-      new EditPost(posts, new FakeMedia()).execute({
+      editPostFor(posts, new FakeMedia()).execute({
         editorId: AUTHOR,
         postId: POST_ID,
         body: "baru",
@@ -399,7 +438,7 @@ describe("EditPost", () => {
     const posts = new FakePosts();
     posts.ownership = { id: POST_ID, authorId: SOMEONE_ELSE, isDeleted: false, visibility: "public" };
     await expect(
-      new EditPost(posts, new FakeMedia()).execute({
+      editPostFor(posts, new FakeMedia()).execute({
         editorId: AUTHOR,
         postId: POST_ID,
         body: "baru",
@@ -412,7 +451,7 @@ describe("EditPost", () => {
     const posts = new FakePosts();
     posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: true, visibility: "public" };
     await expect(
-      new EditPost(posts, new FakeMedia()).execute({
+      editPostFor(posts, new FakeMedia()).execute({
         editorId: AUTHOR,
         postId: POST_ID,
         body: "baru",
@@ -431,7 +470,7 @@ describe("EditPost", () => {
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
-    const view = await new EditPost(posts, media).execute({
+    const view = await editPostFor(posts, media).execute({
       editorId: AUTHOR,
       postId: POST_ID,
       body: "halo lagi",
@@ -448,7 +487,7 @@ describe("EditPost", () => {
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: OTHER_POST_ID });
 
     await expect(
-      new EditPost(posts, media).execute({
+      editPostFor(posts, media).execute({
         editorId: AUTHOR,
         postId: POST_ID,
         body: "baru",
@@ -466,7 +505,7 @@ describe("EditPost", () => {
     media.seed({ id: FIRST_IMAGE, ownerId: SOMEONE_ELSE });
 
     await expect(
-      new EditPost(posts, media).execute({
+      editPostFor(posts, media).execute({
         editorId: AUTHOR,
         postId: POST_ID,
         body: "baru",
@@ -488,7 +527,7 @@ describe("EditPost", () => {
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
-    const view = await new EditPost(posts, media).execute({
+    const view = await editPostFor(posts, media).execute({
       editorId: AUTHOR,
       postId: POST_ID,
       body: "hanya teks yang berubah",
@@ -504,7 +543,7 @@ describe("EditPost", () => {
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
-    const view = await new EditPost(posts, media).execute({
+    const view = await editPostFor(posts, media).execute({
       editorId: AUTHOR,
       postId: POST_ID,
       body: "tanpa foto",
@@ -538,7 +577,7 @@ describe("EditPost", () => {
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID, position: 0 });
     media.seed({ id: SECOND_IMAGE, ownerId: AUTHOR, postId: POST_ID, position: 1 });
 
-    const view = await new EditPost(posts, media).execute({
+    const view = await editPostFor(posts, media).execute({
       editorId: AUTHOR,
       postId: POST_ID,
       body: "satu foto saja",
@@ -563,7 +602,7 @@ describe("EditPost", () => {
     };
 
     await expect(
-      new EditPost(posts, media).execute({
+      editPostFor(posts, media).execute({
         editorId: AUTHOR,
         postId: POST_ID,
         body: "halo",
@@ -585,7 +624,7 @@ describe("EditPost", () => {
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
     await expect(
-      new EditPost(posts, media).execute({
+      editPostFor(posts, media).execute({
         editorId: AUTHOR,
         postId: POST_ID,
         body: "halo",
@@ -610,7 +649,7 @@ describe("EditPost", () => {
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
-    const view = await new EditPost(posts, media).execute({
+    const view = await editPostFor(posts, media).execute({
       editorId: AUTHOR,
       postId: POST_ID,
       body: "halo",
@@ -637,7 +676,7 @@ describe("EditPost", () => {
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
-    const view = await new EditPost(posts, media).execute({
+    const view = await editPostFor(posts, media).execute({
       editorId: AUTHOR,
       postId: POST_ID,
       body: "hanya teks yang berubah",
@@ -659,7 +698,7 @@ describe("EditPost", () => {
     const media = new FakeMedia();
 
     await expect(
-      new EditPost(posts, media).execute({
+      editPostFor(posts, media).execute({
         editorId: AUTHOR,
         postId: POST_ID,
         body: "halo",
@@ -680,7 +719,7 @@ describe("EditPost", () => {
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
-    const view = await new EditPost(posts, media).execute({
+    const view = await editPostFor(posts, media).execute({
       editorId: AUTHOR,
       postId: POST_ID,
       body: "sekarang khusus anggota",
@@ -708,5 +747,212 @@ describe("DeletePost", () => {
       new DeletePost(posts).execute({ deleterId: AUTHOR, postId: "p" })
     ).rejects.toBeInstanceOf(ForbiddenError);
     expect(posts.deleted).toEqual([]);
+  });
+});
+
+/**
+ * Task 5 fix round 1 (spec §7, review Major finding). `EditPost`'s use-case
+ * tests above prove the RULE against fakes; these prove the FIX — a row lock
+ * inside one transaction — actually closes the two concrete paths a review
+ * traced from the un-transacted version of this file to a `members` post
+ * with zero images:
+ *
+ *   1. Two concurrent edits on the same post (`the invariant survives
+ *      concurrent edits` below).
+ *   2. A single edit whose own `claim` fails after `updateBody` already
+ *      committed (`a failed claim rolls the visibility write back with it`
+ *      below) — no concurrency machinery needed for this one at all.
+ *
+ * A FAKE unit of work (used everywhere above) cannot prove either: fakes
+ * mutate in place with no commit/rollback, and a single `bun:test` process
+ * has no second connection to race. Both tests here run against the REAL
+ * `DrizzlePostEditUnitOfWork`, the real `db`, and — for the second test — a
+ * thin wrapper around the real `DrizzleMediaRepository` that injects the
+ * exact race `requireFullyClaimed`'s own docstring names (a row vanishing
+ * between the ownership check and the claim), using the SAME technique the
+ * fake-based tests above use for the identical race, now against real rows.
+ */
+describe("EditPost — real transaction (Task 5 fix round 1)", () => {
+  beforeEach(resetDatabase);
+  let seedCounter = 0;
+
+  async function seedUser() {
+    seedCounter += 1;
+    const [row] = await db
+      .insert(appUsers)
+      .values({
+        handle: `edituow${seedCounter}`,
+        email: `edituow${seedCounter}@example.com`,
+        whatsappNumber: null,
+        passwordHash: "irrelevant-hash",
+        displayName: `Edit UoW ${seedCounter}`,
+        bio: null,
+      })
+      .returning();
+    return row!;
+  }
+
+  /** One author, one post carrying exactly one image, both real rows. */
+  async function seedPublicPostWithOneImage(): Promise<{
+    authorId: string;
+    postId: string;
+    mediaId: string;
+  }> {
+    const posts = new DrizzlePostRepository(db);
+    const media = new DrizzleMediaRepository(db);
+    const author = await seedUser();
+    const post = await posts.create(author.id, "asli", "public");
+    const image = await media.create({ ownerId: author.id, width: 10, height: 10, byteSize: 1 });
+    await media.claim(post.id, [image.id]);
+    return { authorId: author.id, postId: post.id, mediaId: image.id };
+  }
+
+  async function currentVisibilityAndMediaCount(
+    postId: string
+  ): Promise<{ visibility: string; mediaCount: number }> {
+    const [row] = await db.select().from(postsTable).where(eq(postsTable.id, postId));
+    const claimed = await db.select().from(postMedia).where(eq(postMedia.postId, postId));
+    return { visibility: row!.visibility, mediaCount: claimed.length };
+  }
+
+  /**
+   * `DrizzleMediaRepository.findManyByIds` (called by `requireAttachable`,
+   * BEFORE `claim`), wrapped to delete the row it just found the instant
+   * after reading it — the orphan sweep's exact timing, forced rather than
+   * hoped for. The delete runs on `tx`, the SAME transaction `claim` will
+   * run its own SAVEPOINT inside, so by the time `claim`'s UPDATE reaches
+   * that row it is gone and `claimed` comes back short.
+   */
+  function raceDeletingMedia(tx: DatabaseExecutor): MediaRepositoryPort {
+    const real = new DrizzleMediaRepository(tx);
+    return {
+      create: (input) => real.create(input),
+      findById: (id) => real.findById(id),
+      async findManyByIds(ids) {
+        const rows = await real.findManyByIds(ids);
+        await tx.delete(postMedia).where(inArray(postMedia.id, ids));
+        return rows;
+      },
+      claim: (postId, ids) => real.claim(postId, ids),
+      listForPost: (postId) => real.listForPost(postId),
+      listForPosts: (postIds) => real.listForPosts(postIds),
+      listUnclaimedBefore: (cutoff, limit) => real.listUnclaimedBefore(cutoff, limit),
+      deleteIfUnclaimed: (id) => real.deleteIfUnclaimed(id),
+    };
+  }
+
+  /**
+   * Path 2. No `ArrivalLatch`, no `Promise.all` — a single sequential
+   * request, because that is the whole point: this needs no concurrency at
+   * all to reach the forbidden state under the pre-fix code.
+   */
+  it("a failed claim rolls the visibility write back with it — no invariant left broken", async () => {
+    const { authorId, postId, mediaId } = await seedPublicPostWithOneImage();
+    const raceUnitOfWork: PostEditUnitOfWorkPort = {
+      run: (work) => db.transaction((tx) => work({ posts: new DrizzlePostRepository(tx), media: raceDeletingMedia(tx) })),
+    };
+
+    await expect(
+      new EditPost(raceUnitOfWork).execute({
+        editorId: authorId,
+        postId,
+        body: "sekarang khusus anggota",
+        mediaIds: [mediaId],
+        visibility: "members",
+      })
+    ).rejects.toBeInstanceOf(ConflictError);
+
+    // Read through a FRESH connection, not `tx` (which no longer exists —
+    // the transaction rolled back). If `updateBody`'s write had survived the
+    // later `claim` failure, this would read "members".
+    const after = await currentVisibilityAndMediaCount(postId);
+    expect(after.visibility).toBe("public");
+    expect(after.mediaCount).toBe(1);
+  });
+
+  /**
+   * Path 1. Real concurrency, real `ArrivalLatch`, pool warmed first —
+   * Phase 5b's own lesson, applied here: an unwarmed pair can measure
+   * connection-level serialisation in the driver rather than the row lock
+   * this test exists to prove. `PAIRS` independent posts race SIMULTANEOUSLY
+   * (one genuine 2-way contest per post — flip-to-members vs. clear-the-
+   * last-image — not `PAIRS` copies of the same request), so the assertion
+   * is checked against every one of them, not against a single lucky
+   * interleaving.
+   *
+   * MEASURED: at `PAIRS = 1` (a single pair, run repeatedly) the two
+   * requests serialised through the lock every time on this database — the
+   * SAME machine drizzle-payment-activation and the reminder-claim races
+   * above run against — and the invariant held, but a single pair proves
+   * only that ONE interleaving was safe. Raised to 20 simultaneous pairs (40
+   * requests total, one shared latch) to put real scheduler and connection-
+   * pool pressure behind the claim "the lock, not luck, is what closes this"
+   * — and to observe BOTH orderings actually occur (see the assertion on
+   * `outcomes` below), not just one repeated 20 times.
+   */
+  it("the invariant survives concurrent edits — flip-to-members racing clear-the-last-image", async () => {
+    const PAIRS = 20;
+    const seeded = await Promise.all(
+      Array.from({ length: PAIRS }, () => seedPublicPostWithOneImage())
+    );
+
+    const contenders = PAIRS * 2;
+    // WARMING THE POOL IS PART OF THE TEST, NOT SETUP NOISE — see
+    // `drizzle-membership-reminder.repository.test.ts`'s own version of this
+    // comment: `postgres.js` connects lazily, and an unwarmed pool measures
+    // the driver queueing behind one live connection, not the database
+    // arbitrating anything.
+    await Promise.all(Array.from({ length: contenders }, () => sql`select 1`));
+    const latch = new ArrivalLatch(contenders);
+
+    const editPost = new EditPost(new DrizzlePostEditUnitOfWork(db));
+    const outcomes = await Promise.all(
+      seeded.flatMap(({ authorId, postId }) => [
+        (async () => {
+          await latch.arriveAndWait();
+          try {
+            await editPost.execute({
+              editorId: authorId,
+              postId,
+              body: "sekarang khusus anggota",
+              visibility: "members",
+            });
+            return "A-won" as const;
+          } catch {
+            return "A-refused" as const;
+          }
+        })(),
+        (async () => {
+          await latch.arriveAndWait();
+          try {
+            await editPost.execute({
+              editorId: authorId,
+              postId,
+              body: "hapus foto terakhir",
+              mediaIds: [],
+            });
+            return "B-won" as const;
+          } catch {
+            return "B-refused" as const;
+          }
+        })(),
+      ])
+    );
+
+    expect(latch.arrived).toBe(contenders);
+
+    // THE INVARIANT ITSELF, checked against every one of the PAIRS posts —
+    // not against whichever one the test happened to look at.
+    const finalStates = await Promise.all(seeded.map(({ postId }) => currentVisibilityAndMediaCount(postId)));
+    for (const state of finalStates) {
+      expect(state.visibility === "members" && state.mediaCount === 0).toBe(false);
+    }
+
+    // Real contention, not a foregone conclusion: both orderings occurred
+    // somewhere across 20 independent pairs. A test where A always won (or
+    // always lost) would be consistent with the requests never truly
+    // overlapping at the database.
+    expect(outcomes).toContain("A-won");
+    expect(outcomes).toContain("B-won");
   });
 });
