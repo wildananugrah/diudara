@@ -178,6 +178,27 @@ describe("DrizzleMediaRepository", () => {
     expect((await repo.listForPost(post.id)).map((row) => row.id)).toEqual([b.id, a.id]);
   });
 
+  /**
+   * The `OR post_id = $postId` half of MAJ-2's guard, pinned. The release
+   * statement at the top of `claim` has already NULLed this post's own rows by
+   * the time the loop runs, so that disjunct is reached only when the SAME id
+   * appears twice in one call — the loop's second pass sees a row this very
+   * transaction just re-parented. Without it that second UPDATE would match
+   * nothing and `requireFullyClaimed` would answer a duplicate list with a 409
+   * instead of the 400 `requireAttachable` already gives it, moving the
+   * duplicate rule out of the one place that owns it.
+   *
+   * Pre-existing behaviour, unchanged by the guard, and asserted so the guard
+   * cannot be quietly tightened into changing it.
+   */
+  it("counts a repeated id twice — the duplicate rule lives in the use case, not here", async () => {
+    const owner = await createUser("wildan");
+    const post = await createPost(owner.id);
+    const image = await repo.create({ ownerId: owner.id, width: 10, height: 10, byteSize: 1 });
+
+    expect(await repo.claim(post.id, [image.id, image.id])).toBe(2);
+  });
+
   it("lists unclaimed rows older than a cutoff, for the sweep", async () => {
     const owner = await createUser("wildan");
     const old = await repo.create({ ownerId: owner.id, width: 10, height: 10, byteSize: 1 });
