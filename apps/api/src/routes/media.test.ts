@@ -1,7 +1,10 @@
 import { describe, expect, it, beforeEach } from "bun:test";
+import { eq } from "drizzle-orm";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { resetDatabase } from "../db/test-helpers";
+import { db } from "../db/client";
+import { appUsers, posts as postsTable, userSubscriptions, userTiers } from "../db/schema";
 
 beforeEach(resetDatabase);
 
@@ -407,5 +410,368 @@ describe("GET /users/media/:id and /thumb", () => {
     const res = await a.request(`/users/media/${id}/thumb`);
 
     expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  });
+});
+
+/**
+ * **BARRIER TWO — the route refuses an id it never sent** (spec §6.2, §6.4).
+ *
+ * Barrier one (Task 3) strips media ids out of the projection, so a non-member
+ * is never handed one. That is not a paywall on its own: a paying member holds
+ * legitimate ids and can forward one — a link in a group chat, a screenshot of
+ * a URL. **Every test below is written as though barrier one did not exist**,
+ * because for an id obtained any other way, it doesn't: each one hands this
+ * route a real gated id directly and asserts what it does with it.
+ *
+ * `/users/media/:id` and `/users/media/:id/thumb` are two handlers, gated
+ * independently, so every scenario here is asserted TWICE. Phase 4 split them
+ * so they would be "not one line a future change could gate halfway", and
+ * review round 1's C1 on this very file records what a suite that covers only
+ * the full route misses. The thumbnail is the one the feed actually renders.
+ *
+ * The write path does not accept `visibility` yet — Task 5 of this phase adds
+ * it — so a gated post is made by writing the column directly, the same
+ * technique `posts.test.ts`'s barrier-one block uses.
+ */
+describe("members-only media: the route refuses an id it never sent", () => {
+  const RINA = { handle: "rina", email: "rina@example.com", displayName: "Rina" };
+  const BUYER = { handle: "andi", email: "andi@example.com", displayName: "Andi" };
+  const STRANGER = { handle: "sinta", email: "sinta@example.com", displayName: "Sinta" };
+
+  let a: ReturnType<typeof app>;
+
+  beforeEach(() => {
+    a = app();
+  });
+
+  async function userIdFor(handle: string): Promise<string> {
+    const [row] = await db.select().from(appUsers).where(eq(appUsers.handle, handle));
+    return row!.id;
+  }
+
+  /** Makes an existing post members-only. */
+  async function gate(postId: string): Promise<void> {
+    await db.update(postsTable).set({ visibility: "members" }).where(eq(postsTable.id, postId));
+  }
+
+  /**
+   * A real membership row for (subscriber → owner), ending at `periodEnd`. A
+   * tier comes first because `user_subscription_tier_owner_fk` makes a
+   * subscription whose owner disagrees with its tier's owner impossible to
+   * insert.
+   */
+  async function grantMembership(
+    subscriberId: string,
+    ownerId: string,
+    periodEnd: Date
+  ): Promise<void> {
+    const [tier] = await db
+      .insert(userTiers)
+      .values({ ownerId, name: "Anggota", priceAmount: 50000, billingCycle: "monthly" })
+      .returning();
+    await db.insert(userSubscriptions).values({
+      subscriberId,
+      tierId: tier!.id,
+      ownerId,
+      status: "active",
+      currentPeriodEnd: periodEnd,
+    });
+  }
+
+  const IN_A_MONTH = () => new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  const YESTERDAY = () => new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  async function upload(token: string): Promise<string> {
+    const form = new FormData();
+    form.append("file", new Blob([await fixture("small.png")], { type: "image/png" }), "small.png");
+    const res = await a.request("/users/media", {
+      method: "POST",
+      headers: authed(token),
+      body: form,
+    });
+    return (await res.json()).id as string;
+  }
+
+  async function createPost(token: string, body: string, mediaIds: string[]) {
+    const res = await a.request("/users/posts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ body, mediaIds }),
+    });
+    return (await res.json()) as { id: string };
+  }
+
+  /** Rina, one MEMBERS-ONLY post holding one image. */
+  async function rinaWithAGatedImage() {
+    const token = await tokenForValidUser(a, RINA);
+    const mediaId = await upload(token);
+    const post = await createPost(token, "Behind the scenes", [mediaId]);
+    await gate(post.id);
+    return { token, mediaId, postId: post.id };
+  }
+
+  /** Rina, one PUBLIC post holding one image. */
+  async function rinaWithAPublicImage() {
+    const token = await tokenForValidUser(a, RINA);
+    const mediaId = await upload(token);
+    const post = await createPost(token, "terbuka", [mediaId]);
+    return { token, mediaId, postId: post.id };
+  }
+
+  const full = (id: string) => `/users/media/${id}`;
+  const thumb = (id: string) => `/users/media/${id}/thumb`;
+
+  /**
+   * 404, never 403 — media ids are stripped from the projection, so they are
+   * not public knowledge and a 403 would confirm which ids exist. It is also
+   * what both routes already answer for a missing row, so gated and absent are
+   * indistinguishable from outside (spec §6.2).
+   */
+  async function expectRefused(path: string, headers: Record<string, string> = {}) {
+    const res = await a.request(path, { headers });
+    expect(res.status).toBe(404);
+    expect(res.status).not.toBe(403);
+  }
+
+  /**
+   * The bytes really arrived — checked against the body's own WebP magic
+   * number and a `Location` header that must not exist, because a 302 to a
+   * signed URL would hand the caller a URL outliving the check that produced
+   * it. `cacheControl` is asserted as a LITERAL: the header is decided by the
+   * same check that decided the bytes, and a shared cache holding gated images
+   * is a failure no status-code assertion would ever catch (spec §8.1).
+   */
+  async function expectServed(
+    path: string,
+    cacheControl: string,
+    headers: Record<string, string> = {}
+  ) {
+    const res = await a.request(path, { headers, redirect: "manual" });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBe(null);
+    expect(res.headers.get("cache-control")).toBe(cacheControl);
+    expect(isWebp(await res.bytes())).toBe(true);
+  }
+
+  it("a signed-out caller gets 404 for a members-only post's image — not 403, which would confirm it exists", async () => {
+    const { mediaId } = await rinaWithAGatedImage();
+    await expectRefused(full(mediaId));
+  });
+
+  it("a signed-out caller gets 404 for a members-only post's THUMBNAIL", async () => {
+    const { mediaId } = await rinaWithAGatedImage();
+    await expectRefused(thumb(mediaId));
+  });
+
+  /**
+   * The row still reads `status = 'active'` — nothing has retired it, and 5b's
+   * sweep may not run for hours. A status-only check would serve this person
+   * every gated image they have stopped paying for. This is where 5b's
+   * retirement work becomes visible.
+   */
+  it("a LAPSED member gets 404", async () => {
+    const { mediaId } = await rinaWithAGatedImage();
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), YESTERDAY());
+
+    await expectRefused(full(mediaId), authed(buyer));
+  });
+
+  it("a LAPSED member gets 404 on the thumbnail", async () => {
+    const { mediaId } = await rinaWithAGatedImage();
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), YESTERDAY());
+
+    await expectRefused(thumb(mediaId), authed(buyer));
+  });
+
+  it("a paying member gets the bytes", async () => {
+    const { mediaId } = await rinaWithAGatedImage();
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+
+    await expectServed(full(mediaId), "private, no-store", authed(buyer));
+  });
+
+  it("a paying member gets the thumbnail bytes", async () => {
+    const { mediaId } = await rinaWithAGatedImage();
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+
+    await expectServed(thumb(mediaId), "private, no-store", authed(buyer));
+  });
+
+  it("the author gets their own bytes", async () => {
+    const { token, mediaId } = await rinaWithAGatedImage();
+    await expectServed(full(mediaId), "private, no-store", authed(token));
+  });
+
+  it("the author gets their own thumbnail bytes", async () => {
+    const { token, mediaId } = await rinaWithAGatedImage();
+    await expectServed(thumb(mediaId), "private, no-store", authed(token));
+  });
+
+  /**
+   * Asserted on the LITERAL header. The bytes and the header come from one
+   * decision, so this cannot be satisfied by a 200 whose caching was computed
+   * somewhere else — and a `public` header here would license an nginx layer
+   * or a CDN to replay this member's gated image to a stranger without ever
+   * re-entering the handler.
+   */
+  it("a gated response is never publicly cacheable", async () => {
+    const { mediaId } = await rinaWithAGatedImage();
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+
+    const res = await a.request(full(mediaId), { headers: authed(buyer) });
+
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("a gated THUMBNAIL response is never publicly cacheable", async () => {
+    const { mediaId } = await rinaWithAGatedImage();
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+
+    const res = await a.request(thumb(mediaId), { headers: authed(buyer) });
+
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  /**
+   * The AUTHOR is served, and is still served `private, no-store`: `gated`
+   * describes the MEDIA, not the caller. A creator's own browser cache is
+   * shared with whoever else uses that device, and a year-long `immutable`
+   * entry for a gated image is the same hole one step removed.
+   */
+  it("the author's own gated bytes are not publicly cacheable either", async () => {
+    const { token, mediaId } = await rinaWithAGatedImage();
+
+    const res = await a.request(full(mediaId), { headers: authed(token) });
+
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("the author's own gated THUMBNAIL is not publicly cacheable either", async () => {
+    const { token, mediaId } = await rinaWithAGatedImage();
+
+    const res = await a.request(thumb(mediaId), { headers: authed(token) });
+
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("a public post's image keeps the immutable cache", async () => {
+    const { mediaId } = await rinaWithAPublicImage();
+
+    const res = await a.request(full(mediaId));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  });
+
+  it("a public post's THUMBNAIL keeps the immutable cache", async () => {
+    const { mediaId } = await rinaWithAPublicImage();
+
+    const res = await a.request(thumb(mediaId));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  });
+
+  /**
+   * **THE POINT OF THIS PHASE.** The projection never sends this id to a
+   * non-member — this test hands it over anyway, exactly as a member
+   * forwarding a link would, with a stranger's own valid session. If barrier
+   * one were deleted entirely, this is the assertion that would still hold.
+   */
+  it("BARRIER TWO ALONE: an id obtained legitimately by a member is refused to a non-member", async () => {
+    const { mediaId } = await rinaWithAGatedImage();
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+    // The member really can fetch it — otherwise the refusal below would prove
+    // nothing about entitlement, only that the id was broken.
+    await expectServed(full(mediaId), "private, no-store", authed(buyer));
+
+    const stranger = await tokenForValidUser(a, STRANGER);
+    await expectRefused(full(mediaId), authed(stranger));
+  });
+
+  it("BARRIER TWO ALONE: a forwarded THUMBNAIL id is refused to a non-member", async () => {
+    const { mediaId } = await rinaWithAGatedImage();
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+    await expectServed(thumb(mediaId), "private, no-store", authed(buyer));
+
+    const stranger = await tokenForValidUser(a, STRANGER);
+    await expectRefused(thumb(mediaId), authed(stranger));
+  });
+
+  /**
+   * A membership buys that creator's gated images and nothing else. The gate
+   * answers per AUTHOR; a check keyed on "is this viewer a member of anybody"
+   * would be exactly this bug.
+   */
+  it("paying one creator does not unlock another creator's gated image", async () => {
+    await rinaWithAGatedImage();
+    const budi = await tokenForValidUser(a, VALID);
+    const budiMedia = await upload(budi);
+    const budiPost = await createPost(budi, "punya budi", [budiMedia]);
+    await gate(budiPost.id);
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+
+    await expectRefused(full(budiMedia), authed(buyer));
+  });
+
+  it("paying one creator does not unlock another creator's gated THUMBNAIL", async () => {
+    await rinaWithAGatedImage();
+    const budi = await tokenForValidUser(a, VALID);
+    const budiMedia = await upload(budi);
+    const budiPost = await createPost(budi, "punya budi", [budiMedia]);
+    await gate(budiPost.id);
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+
+    await expectRefused(thumb(budiMedia), authed(buyer));
+  });
+
+  /**
+   * Spec §6.3. Unclaimed media (`post_id is null`) has no post and therefore
+   * no visibility to read: it stays ungated and publicly cacheable, exactly as
+   * before this phase. The id is known only to its uploader, who is the only
+   * person who could have received it.
+   */
+  it("unclaimed media — no post, so no visibility — is served ungated to a signed-out caller", async () => {
+    const token = await tokenForValidUser(a, RINA);
+    const mediaId = await upload(token);
+
+    await expectServed(full(mediaId), "public, max-age=31536000, immutable");
+  });
+
+  it("an unclaimed THUMBNAIL is served ungated to a signed-out caller", async () => {
+    const token = await tokenForValidUser(a, RINA);
+    const mediaId = await upload(token);
+
+    await expectServed(thumb(mediaId), "public, max-age=31536000, immutable");
+  });
+
+  /**
+   * Spec §6.3. Deleting a post does not un-gate its images: the row is
+   * soft-deleted and this route keeps serving it exactly as it does today, so
+   * the gate must still read the visibility of a post no projection will ever
+   * show again.
+   */
+  it("media on a SOFT-DELETED members-only post is still refused to a non-member", async () => {
+    const { token, mediaId, postId } = await rinaWithAGatedImage();
+    await a.request(`/users/posts/${postId}`, { method: "DELETE", headers: authed(token) });
+
+    await expectRefused(full(mediaId));
+  });
+
+  it("the THUMBNAIL of a soft-deleted members-only post is still refused to a non-member", async () => {
+    const { token, mediaId, postId } = await rinaWithAGatedImage();
+    await a.request(`/users/posts/${postId}`, { method: "DELETE", headers: authed(token) });
+
+    await expectRefused(thumb(mediaId));
   });
 });

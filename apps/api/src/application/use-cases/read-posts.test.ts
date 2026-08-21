@@ -46,6 +46,10 @@ class FakePosts implements PostRepositoryPort {
   async ownershipOf() {
     return null;
   }
+  /** Barrier TWO's read, not barrier one's — nothing in this file drives it. */
+  async gatingOf() {
+    return null;
+  }
   async updateBody(): Promise<PostRow | null> {
     return null;
   }

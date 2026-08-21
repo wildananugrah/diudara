@@ -99,6 +99,7 @@ import type { PostRepositoryPort } from "./application/ports/post-repository.por
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
 import type { MediaRepositoryPort } from "./application/ports/media-repository.port";
 import { UploadMedia } from "./application/use-cases/upload-media";
+import { MediaEntitlement } from "./application/use-cases/media-entitlement";
 import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
@@ -370,6 +371,12 @@ const fakePostRepository: PostRepositoryPort = {
     };
   },
   async ownershipOf() {
+    return null;
+  },
+  // Phase 6's `MediaEntitlement` reads this. `null` is the REFUSING answer —
+  // these smoke tests never drive the gate, and a fake that answered "public"
+  // by default would be a fake that opens a paywall.
+  async gatingOf() {
     return null;
   },
   async updateBody() {
@@ -1012,6 +1019,16 @@ describe("Dependencies (composition root contract)", () => {
       // Task 5's delivery routes. Same fake as `uploadMedia` above — neither
       // test calls `mediaRepository.findById` either.
       mediaRepository: fakeMediaRepository,
+      // Phase 6's barrier two. Built from the module-level fakes rather than
+      // `null`ed out, because this block's whole job is to prove a
+      // hand-written `Dependencies` still SATISFIES the container's type with
+      // no casts — a field that only `bootstrap()` can supply would defeat it.
+      mediaEntitlement: new MediaEntitlement(
+        fakeMediaRepository,
+        fakePostRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
+      ),
     };
 
     const created = await deps.creatorRepository.create({
@@ -1260,6 +1277,16 @@ describe("Dependencies (composition root contract)", () => {
       // Task 5's delivery routes. Same fake as `uploadMedia` above — neither
       // test calls `mediaRepository.findById` either.
       mediaRepository: fakeMediaRepository,
+      // Phase 6's barrier two. Built from the module-level fakes rather than
+      // `null`ed out, because this block's whole job is to prove a
+      // hand-written `Dependencies` still SATISFIES the container's type with
+      // no casts — a field that only `bootstrap()` can supply would defeat it.
+      mediaEntitlement: new MediaEntitlement(
+        fakeMediaRepository,
+        fakePostRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
+      ),
     };
 
     const res = await createApp(deps).request("/health");

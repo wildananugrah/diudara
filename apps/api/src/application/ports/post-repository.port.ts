@@ -22,6 +22,23 @@ export interface PostRow {
   authorDisplayName: string;
 }
 
+/**
+ * What BARRIER TWO needs to know about the post an image hangs on (spec
+ * §6.2): who wrote it, and whether it is gated.
+ *
+ * Deliberately NOT folded into `PostOwnership` below. That type answers "may
+ * this editor proceed" and carries `isDeleted` for it; this one answers "may
+ * this viewer see these bytes" and must NOT read `isDeleted`, because §6.3
+ * settles that the media route keeps serving a soft-deleted post's images
+ * exactly as it does today. One type carrying both questions is one field a
+ * future reader would apply to the wrong one.
+ */
+export interface PostGating {
+  authorId: string;
+  /** `public` | `members` — the same widened string `PostRow.visibility` carries. */
+  visibility: string;
+}
+
 /** What an edit or delete needs before it is allowed to proceed. */
 export interface PostOwnership {
   id: string;
@@ -33,6 +50,15 @@ export interface PostRepositoryPort {
   create(authorId: string, body: string): Promise<PostRow>;
   /** `null` when the id has never existed. A soft-deleted post still resolves, with `isDeleted: true`. */
   ownershipOf(id: string): Promise<PostOwnership | null>;
+  /**
+   * The two fields `MediaEntitlement` gates on. `null` when the id has never
+   * existed — which the gate treats as REFUSED, never as ungated: an image
+   * whose post cannot be read is an image nobody can prove is public.
+   *
+   * A soft-deleted post still resolves, and still reports the visibility it
+   * was deleted with. Deleting a post does not un-gate its images (spec §6.3).
+   */
+  gatingOf(id: string): Promise<PostGating | null>;
   /** `null` if the post is missing or already deleted. Sets `edited_at`. */
   updateBody(id: string, body: string): Promise<PostRow | null>;
   /** Idempotent: deleting an already-deleted post is a no-op, not an error. */

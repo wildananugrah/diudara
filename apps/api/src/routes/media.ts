@@ -7,6 +7,7 @@ import { ImageRejectedError } from "../domain/image";
 import { uuidParam, validateParams } from "../http/validate";
 import {
   requireUserAuth,
+  resolveViewerId,
   type UserAuthVariables,
 } from "../http/user-auth.middleware";
 import type { Dependencies } from "../bootstrap";
@@ -63,13 +64,34 @@ const NOT_FOUND_MESSAGE = "media not found";
  */
 const CACHE_CONTROL = "public, max-age=31536000, immutable";
 
+/**
+ * What a members-only post's image goes out with instead — Phase 6, the header
+ * the comment above demanded (spec §8.1).
+ *
+ * `private` forbids every SHARED cache (an nginx layer, a CDN, a browser
+ * profile shared between people) from storing it at all, and `no-store` stops
+ * the caller's own browser keeping it after the entitlement that produced it
+ * lapses. Both halves matter: `private` alone would still let a member's
+ * browser replay a gated image for a year after they stopped paying.
+ *
+ * It is chosen by `MediaGateDecision.gated`, from THE SAME decision that
+ * decided the bytes, and never recomputed at the response. See the return
+ * statement of either handler.
+ */
+const GATED_CACHE_CONTROL = "private, no-store";
+
 /** Same idiom as `postIdParams` in `routes/posts.ts`: a malformed `:id` is a 400 here, never a raw uuid-syntax error from the database driver. */
 const mediaIdParams = z.object({ id: uuidParam });
 
 export function mediaRoutes(
   deps: Pick<
     Dependencies,
-    "userTokenIssuer" | "userRepository" | "uploadMedia" | "mediaStorage" | "mediaRepository"
+    | "userTokenIssuer"
+    | "userRepository"
+    | "uploadMedia"
+    | "mediaStorage"
+    | "mediaRepository"
+    | "mediaEntitlement"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -137,6 +159,21 @@ export function mediaRoutes(
     const row = await deps.mediaRepository.findById(id);
     if (row === null) throw new NotFoundError(NOT_FOUND_MESSAGE);
 
+    // BARRIER TWO, and it runs BEFORE a single byte is touched.
+    //
+    // `resolveViewerId` rather than `requireAuth`: these routes are publicly
+    // reachable — a public post's image must still load for a signed-out
+    // reader — so a missing, malformed or expired token resolves to `null`
+    // (which locks every gated image) instead of turning a public image into
+    // a 401.
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    const gate = await deps.mediaEntitlement.decide({ mediaId: id, viewerId });
+    // 404 rather than 403: media ids are stripped from the projection, so they
+    // are not public knowledge, and a 403 would confirm which ids exist. It is
+    // also what this route already returns for a missing row, so gated and
+    // absent look identical from outside.
+    if (!gate.allowed) throw new NotFoundError(NOT_FOUND_MESSAGE);
+
     const object = await deps.mediaStorage.get(id, "full");
     // A row with no bytes behind it (interrupted upload, manual bucket
     // interference) is absence from the caller's point of view — 404, never
@@ -149,7 +186,11 @@ export function mediaRoutes(
     // depending on how the adapter read it), which Hono's `BodyRespond` does not accept.
     return c.body(new Uint8Array(object.bytes), 200, {
       "Content-Type": object.contentType,
-      "Cache-Control": CACHE_CONTROL,
+      // Decided by the SAME check that decided the bytes, never computed
+      // separately. Computed apart, the two can disagree — and a shared cache
+      // then holds gated images and serves them to strangers, which no
+      // assertion on this route's status code would ever catch (spec §8.1).
+      "Cache-Control": gate.gated ? GATED_CACHE_CONTROL : CACHE_CONTROL,
     });
   });
 
@@ -163,6 +204,17 @@ export function mediaRoutes(
     const row = await deps.mediaRepository.findById(id);
     if (row === null) throw new NotFoundError(NOT_FOUND_MESSAGE);
 
+    // BARRIER TWO on the thumbnail, WRITTEN OUT AGAIN rather than shared with
+    // the route above. That is the point of there being two handlers: the
+    // thumbnail is the variant the feed actually renders, so a gate factored
+    // into one place that only one handler remembered to call is precisely the
+    // "gated halfway" failure this split exists to make impossible. Every test
+    // for `/media/:id` has a twin for this route.
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    const gate = await deps.mediaEntitlement.decide({ mediaId: id, viewerId });
+    // 404, not 403 — see the full route above.
+    if (!gate.allowed) throw new NotFoundError(NOT_FOUND_MESSAGE);
+
     const object = await deps.mediaStorage.get(id, "thumb");
     if (object === null) throw new NotFoundError(NOT_FOUND_MESSAGE);
 
@@ -171,7 +223,11 @@ export function mediaRoutes(
     // depending on how the adapter read it), which Hono's `BodyRespond` does not accept.
     return c.body(new Uint8Array(object.bytes), 200, {
       "Content-Type": object.contentType,
-      "Cache-Control": CACHE_CONTROL,
+      // Decided by the SAME check that decided the bytes, never computed
+      // separately. Computed apart, the two can disagree — and a shared cache
+      // then holds gated images and serves them to strangers, which no
+      // assertion on this route's status code would ever catch (spec §8.1).
+      "Cache-Control": gate.gated ? GATED_CACHE_CONTROL : CACHE_CONTROL,
     });
   });
 

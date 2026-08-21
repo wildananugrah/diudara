@@ -97,6 +97,64 @@ describe("DrizzlePostRepository.create", () => {
   });
 });
 
+/**
+ * What BARRIER TWO (`MediaEntitlement`, spec §6.2) reads before any bytes
+ * leave storage.
+ */
+describe("DrizzlePostRepository.gatingOf", () => {
+  it("answers the author and the visibility of a public post", async () => {
+    const author = await seedUser();
+    const post = await repo.create(author.id, "terbuka");
+
+    expect(await repo.gatingOf(post.id)).toEqual({
+      authorId: author.id,
+      // The literal on the wire between the column and the gate, never the
+      // constant it is compared against.
+      visibility: "public",
+    });
+  });
+
+  it("answers 'members' for a gated post", async () => {
+    const author = await seedUser();
+    const post = await repo.create(author.id, "khusus anggota");
+    await db
+      .update(posts)
+      .set({ visibility: "members" })
+      .where(sql`${posts.id} = ${post.id}`);
+
+    expect(await repo.gatingOf(post.id)).toEqual({
+      authorId: author.id,
+      visibility: "members",
+    });
+  });
+
+  /**
+   * Spec §6.3, and the reason this method has no `deleted_at` filter: a
+   * soft-deleted post is unreachable through every projection, but its images
+   * are still reachable by id and this route keeps serving them exactly as it
+   * does today. Answering `null` here would make the gate refuse them, which
+   * is a change to deletion semantics smuggled in through a WHERE clause.
+   */
+  it("still answers for a SOFT-DELETED post, with the visibility it was deleted with", async () => {
+    const author = await seedUser();
+    const post = await repo.create(author.id, "dihapus");
+    await db
+      .update(posts)
+      .set({ visibility: "members" })
+      .where(sql`${posts.id} = ${post.id}`);
+    await repo.softDelete(post.id);
+
+    expect(await repo.gatingOf(post.id)).toEqual({
+      authorId: author.id,
+      visibility: "members",
+    });
+  });
+
+  it("answers null for an id that has never existed", async () => {
+    expect(await repo.gatingOf("8a1f0e6e-0000-4000-8000-000000000000")).toBeNull();
+  });
+});
+
 describe("DrizzlePostRepository soft delete", () => {
   it("hides a deleted post from ALL THREE list paths", async () => {
     const author = await seedUser();

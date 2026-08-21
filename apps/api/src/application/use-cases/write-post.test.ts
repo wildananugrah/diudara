@@ -42,6 +42,10 @@ class FakePosts implements PostRepositoryPort {
   async ownershipOf(): Promise<PostOwnership | null> {
     return this.ownership;
   }
+  /** Barrier two's read (`MediaEntitlement`); the write path never calls it. */
+  async gatingOf() {
+    return null;
+  }
   async updateBody(id: string, body: string): Promise<PostRow | null> {
     this.updated = { id, body };
     return this.updateResult;

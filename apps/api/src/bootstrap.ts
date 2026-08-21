@@ -21,6 +21,7 @@ import { DrizzlePostRepository } from "./infrastructure/repositories/drizzle-pos
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
 import { DrizzleMediaRepository } from "./infrastructure/repositories/drizzle-media.repository";
 import { UploadMedia } from "./application/use-cases/upload-media";
+import { MediaEntitlement } from "./application/use-cases/media-entitlement";
 import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
@@ -631,6 +632,18 @@ export interface Dependencies {
    * function.
    */
   mediaRepository: MediaRepositoryPort;
+  /**
+   * **BARRIER TWO of Phase 6's paywall** (spec §6.2, §6.4) — the decision
+   * `GET /users/media/:id` and `/thumb` make before a single byte leaves
+   * `mediaStorage`, and the decision that also chooses their `Cache-Control`.
+   *
+   * A field on the container rather than something the route builds, for the
+   * same reason every other use case here is: the route must be handed the
+   * SAME subscription repository and the SAME clock the projection's gate
+   * reads, so the two barriers cannot disagree about who is a member or about
+   * what time it is.
+   */
+  mediaEntitlement: MediaEntitlement;
 }
 
 /**
@@ -1952,6 +1965,17 @@ export function bootstrap(): Dependencies {
     userSubscriptionRepository,
     clock
   );
+  // BARRIER TWO (spec §6.2), built from the very same four collaborators the
+  // feed's gate above reads — the same `userSubscriptionRepository` and the
+  // same `clock` as `isMemberOf`, `listSubscribers` and `listFeed`. Two
+  // barriers answering to two different membership sources is the one way this
+  // phase could be green in tests and wrong in production.
+  const mediaEntitlement = new MediaEntitlement(
+    mediaRepository,
+    postRepository,
+    userSubscriptionRepository,
+    clock
+  );
 
   const communityRepository = new DrizzleCommunityRepository(db);
   const listCommunities = new ListCommunities(communityRepository);
@@ -2464,5 +2488,6 @@ export function bootstrap(): Dependencies {
     mediaStorage,
     uploadMedia,
     mediaRepository,
+    mediaEntitlement,
   };
 }

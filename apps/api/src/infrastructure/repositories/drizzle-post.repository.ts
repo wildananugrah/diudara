@@ -3,6 +3,7 @@ import type { DatabaseExecutor } from "../../db/client";
 import { appUsers, follows, posts } from "../../db/schema";
 import type { KeysetCursor } from "../../domain/keyset-cursor";
 import type {
+  PostGating,
   PostOwnership,
   PostRepositoryPort,
   PostRow,
@@ -88,6 +89,25 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       .where(eq(posts.id, id));
     if (row === undefined) return null;
     return { id: row.id, authorId: row.authorId, isDeleted: row.deletedAt !== null };
+  }
+
+  /**
+   * Two columns, by primary key — what BARRIER TWO reads before any bytes
+   * leave `MediaStoragePort` (spec §6.2).
+   *
+   * NO `deleted_at` FILTER, and that is the whole difference from the read
+   * paths above: a soft-deleted post is unreachable through every projection,
+   * but its images are still reachable by id, and §6.3 settles that this route
+   * keeps serving them exactly as it does today. Filtering here would answer
+   * `null` for a deleted post, which the gate refuses — a behaviour change to
+   * deletion semantics smuggled in through a WHERE clause.
+   */
+  async gatingOf(id: string): Promise<PostGating | null> {
+    const [row] = await this.db
+      .select({ authorId: posts.authorId, visibility: posts.visibility })
+      .from(posts)
+      .where(eq(posts.id, id));
+    return row ?? null;
   }
 
   async updateBody(id: string, body: string): Promise<PostRow | null> {
