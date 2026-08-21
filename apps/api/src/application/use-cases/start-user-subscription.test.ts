@@ -335,6 +335,9 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
     async markTransactionPaid() {
       throw new Error("StartUserSubscription must never settle a transaction — Task 7 does");
     },
+    async listActiveSubscribers() {
+      throw new Error("StartUserSubscription must never read the subscriber list — Task 6 of 5b does");
+    },
   };
   return { repository, subscriptions, transactions, retireExpiredCalls };
 }

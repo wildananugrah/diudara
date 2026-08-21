@@ -25,6 +25,7 @@ import {
   listFollowers,
   listFollowing,
   listOwnTiers,
+  listSubscribers,
   listUserPosts,
   loadPostImageLimit,
   login,
@@ -1655,5 +1656,46 @@ describe("isOwnHandle", () => {
     // `FollowButton`, kept here now that the comparison lives in one place).
     setUserSession("jwt-abc", { ...USER, handle: "WILDAN" });
     expect(isOwnHandle("wildan")).toBe(true);
+  });
+});
+
+/**
+ * Task 6 of Phase 5b (spec §8) — `GET /users/me/subscribers`. This suite is
+ * about the CLIENT function's own contract (path, method, auth header,
+ * pass-through of what the server sends): the server's own closed-projection
+ * and owner-only guarantees are proven against the real API in
+ * `apps/api/src/routes/users.test.ts`, not here.
+ */
+describe("apiClient — a creator's own subscriber list (Task 6 of Phase 5b)", () => {
+  it("GETs /users/me/subscribers with the bearer token, and hands back what the server sent", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse({
+        subscribers: [{ handle: "bob", displayName: "Bob", since: "2026-08-01T00:00:00.000Z" }],
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await listSubscribers();
+
+    expect(calls[0]!.url).toBe("/users/me/subscribers");
+    expect(calls[0]!.init?.method ?? "GET").toBe("GET");
+    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
+    expect(result).toEqual({
+      subscribers: [{ handle: "bob", displayName: "Bob", since: "2026-08-01T00:00:00.000Z" }],
+    });
+  });
+
+  it("rejects with the API's status intact on failure", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async () =>
+      jsonResponse({ error: "invalid or expired token" }, 401)
+    ) as unknown as typeof fetch;
+
+    const failure = await listSubscribers().catch((err: unknown) => err);
+
+    expect(failure instanceof UserApiError).toBe(true);
+    expect((failure as UserApiError).status).toBe(401);
   });
 });

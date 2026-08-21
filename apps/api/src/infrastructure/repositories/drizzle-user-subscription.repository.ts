@@ -1,13 +1,29 @@
 import { and, asc, desc, eq, gt, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { userSubscriptions, userTransactions } from "../../db/schema";
+import { appUsers, userSubscriptions, userTransactions } from "../../db/schema";
 import type {
   PendingSubscriptionClaim,
   PendingUserCheckout,
+  SubscriberRow,
   UserSubscriptionRepositoryPort,
   UserSubscriptionRow,
   UserTransactionRow,
 } from "../../application/ports/user-subscription-repository.port";
+
+/**
+ * The CLOSED wire projection for `listActiveSubscribers` — see
+ * `SubscriberRow`'s own docstring for exactly why these three columns and
+ * no others. Named explicitly, same discipline as
+ * `DrizzleFollowRepository`'s `publicListColumns`: the excluded columns
+ * (`app_user.email`, `.whatsapp_number`, `.xendit_account_id`, `.id`, and
+ * every OTHER subscription this subscriber holds) are never fetched from
+ * the database at all, not merely stripped from a wider row afterwards.
+ */
+const subscriberProjection = {
+  handle: appUsers.handle,
+  displayName: appUsers.displayName,
+  since: userSubscriptions.createdAt,
+} as const;
 
 /**
  * Every id that reaches this repository from OUTSIDE is shape-checked against
@@ -317,6 +333,35 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     }
     const [row] = await this.activeMembershipQuery(subscriberId, ownerId);
     return row ?? null;
+  }
+
+  /**
+   * See the port's own docstring for the full contract. `gt` on
+   * `current_period_end` is the SAME strict comparison
+   * `IsMemberOf.membershipStanding` uses (`> now`, not `>=`) — a period
+   * ending at exactly `now` has ended, not one tick from ending.
+   *
+   * Selects `subscriberProjection` ONLY — never `userSubscriptions.*` or
+   * `appUsers.*` — so the closed shape is enforced at the query, the same
+   * discipline `findPendingCheckout` and `DrizzleFollowRepository`'s
+   * `listFollowers` both already follow.
+   */
+  async listActiveSubscribers(ownerId: string, now: Date): Promise<SubscriberRow[]> {
+    if (!UUID_PATTERN.test(ownerId)) {
+      return [];
+    }
+    return this.db
+      .select(subscriberProjection)
+      .from(userSubscriptions)
+      .innerJoin(appUsers, eq(userSubscriptions.subscriberId, appUsers.id))
+      .where(
+        and(
+          eq(userSubscriptions.ownerId, ownerId),
+          eq(userSubscriptions.status, "active"),
+          gt(userSubscriptions.currentPeriodEnd, now)
+        )
+      )
+      .orderBy(desc(userSubscriptions.createdAt), desc(userSubscriptions.id));
   }
 
   async createTransaction(input: {

@@ -44,6 +44,7 @@ import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { IsMemberOf } from "./application/use-cases/is-member-of";
+import { ListSubscribers } from "./application/use-cases/list-subscribers";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -301,6 +302,9 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   },
   async findActiveFor() {
     return null;
+  },
+  async listActiveSubscribers() {
+    return [];
   },
   async createTransaction() {
     throw new Error("not used");
@@ -877,6 +881,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
+      listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository
@@ -1117,6 +1122,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
+      listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository

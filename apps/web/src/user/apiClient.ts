@@ -1188,3 +1188,33 @@ export function startSubscription(handle: string, tierId: string): Promise<Start
     { method: "POST", body: JSON.stringify({ tierId }) }
   );
 }
+
+/**
+ * `GET /users/me/subscribers` — Task 6 of Phase 5b (spec §8). ONE subscriber
+ * as this CLOSED wire projection carries it: never an email, a
+ * `whatsappNumber`, a payout id, and never anything about that person's OWN
+ * memberships elsewhere. See the API's own `SubscriberRow`/`ListSubscribers`
+ * docstrings for the full reasoning — this type only mirrors the shape the
+ * server actually sends, and does not widen it.
+ *
+ * `since` is a STRING here and a `Date` on the server (`SubscriberRow`) —
+ * same convention as `UserTier.createdAt` above: JSON has no date type, and
+ * nothing on this side parses it back into one before handing it to
+ * `formatRelativeTime`, which itself takes an ISO string.
+ */
+export interface SubscriberEntry {
+  handle: string;
+  displayName: string;
+  since: string;
+}
+
+/**
+ * The caller's OWN subscriber list, and only the people CURRENTLY
+ * subscribed to them — a past subscriber whose period lapsed is not among
+ * these rows, the exact same "currently subscribed" boundary `viewerIsMember`
+ * on a profile already uses. Owner-only server-side: there is no handle to
+ * pass here, because the server answers only for the session's own id.
+ */
+export function listSubscribers(): Promise<{ subscribers: SubscriberEntry[] }> {
+  return apiFetch<{ subscribers: SubscriberEntry[] }>("/users/me/subscribers");
+}

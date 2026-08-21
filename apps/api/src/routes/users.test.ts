@@ -3268,3 +3268,197 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
     });
   });
 });
+
+/**
+ * Task 6 of Phase 5b (spec §8) — `GET /users/me/subscribers`, a creator's
+ * own subscriber list.
+ *
+ * A subscriber list is NOT public information: the route is owner-only
+ * (behind `requireAuth`, and scoped to `c.get("userId")` alone — there is no
+ * handle parameter for another caller to name), and the wire projection is
+ * CLOSED — `{ handle, displayName, since }`, never an email, a
+ * `whatsapp_number`, a payout id, or a subscriber's own memberships to
+ * anyone else.
+ *
+ * Seeded with the repository directly, exactly as
+ * `describe("GET /users/by-handle/:handle — viewerIsMember (Task 10)")`
+ * above does: what activates a subscription in production is Task 7's
+ * webhook, and faking a payment gateway here would test the wrong thing.
+ */
+describe("GET /users/me/subscribers (Task 6 of Phase 5b)", () => {
+  const FUTURE = new Date("2099-01-01T00:00:00.000Z");
+  const PAST = new Date("2020-01-01T00:00:00.000Z");
+
+  async function account(a: ReturnType<typeof app>, overrides: Partial<typeof VALID> = {}) {
+    const acc = { ...VALID, ...overrides };
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(acc),
+    });
+    const res = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: acc.email, password: acc.password }),
+    });
+    const body = (await res.json()) as { token: string; user: { id: string } };
+    return { token: body.token, userId: body.user.id };
+  }
+
+  /** An owner with a connected payout account and one published tier. */
+  async function sellingOwner(a: ReturnType<typeof app>, overrides: Partial<typeof VALID> = {}) {
+    const owner = await account(a, overrides);
+    await a.request("/users/me/payout", { method: "POST", headers: authed(owner.token) });
+    const tier = await (
+      await a.request("/users/me/tiers", {
+        method: "POST",
+        headers: { ...authed(owner.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Anggota", priceAmount: 50_000 }),
+      })
+    ).json();
+    return { ...owner, tierId: tier.id as string };
+  }
+
+  /** An ACTIVE subscription from `subscriberId` to `owner`, its period ending at `periodEnd`. */
+  async function seedMembership(
+    owner: { userId: string; tierId: string },
+    subscriberId: string,
+    periodEnd: Date
+  ) {
+    const subscriptions = new DrizzleUserSubscriptionRepository(db);
+    const created = await subscriptions.create({
+      subscriberId,
+      tierId: owner.tierId,
+      ownerId: owner.userId,
+    });
+    await subscriptions.activate(created.id, periodEnd);
+    return created;
+  }
+
+  function getSubscribers(a: ReturnType<typeof app>, token: string | null) {
+    return a.request("/users/me/subscribers", {
+      headers: token === null ? {} : authed(token),
+    });
+  }
+
+  it("requires a session: a signed-out caller is a 401", async () => {
+    const a = app();
+
+    const res = await getSubscribers(a, null);
+
+    expect(res.status).toBe(401);
+  });
+
+  it("lists a currently active subscriber", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, FUTURE);
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.subscribers).toEqual([
+      { handle: "bob", displayName: "Bob", since: expect.any(String) },
+    ]);
+  });
+
+  it("returns an empty list for an owner with no subscribers, not an error", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ subscribers: [] });
+  });
+
+  /**
+   * §9's honest limitation, and Task 3's own retirement sweep: nothing
+   * guarantees a lapsed row has been flipped to `expired` by the time this
+   * route reads it, so the SAME `current_period_end > now` boundary
+   * `IsMemberOf` uses is what keeps a past subscriber off this list — a
+   * status-only read would show them forever.
+   */
+  it("excludes a subscriber whose period has already lapsed — a past subscriber, not a current one", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, PAST);
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ subscribers: [] });
+  });
+
+  it("excludes a subscriber whose subscription is still pending — never activated", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    const subscriptions = new DrizzleUserSubscriptionRepository(db);
+    await subscriptions.create({ subscriberId: bob.userId, tierId: owner.tierId, ownerId: owner.userId });
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ subscribers: [] });
+  });
+
+  /**
+   * OWNER-ONLY, proved rather than assumed. `rina` is signed in and has a
+   * real, valid session — an ordinary authenticated caller, not an attacker
+   * with a forged token — and still cannot see `wildan`'s subscribers,
+   * because this route never accepts a handle: it can only ever answer for
+   * the caller's OWN session.
+   */
+  it("OWNER-ONLY: another signed-in user cannot read this creator's subscriber list", async () => {
+    const a = app();
+    const owner = await sellingOwner(a); // wildan
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, FUTURE);
+    const rina = await account(a, { handle: "rina", email: "rina@example.com" });
+
+    const res = await getSubscribers(a, rina.token);
+    const body = await res.json();
+
+    // rina gets HER OWN list back — which is empty, since nobody subscribes
+    // to her — never wildan's, and never a 403 that would confirm wildan
+    // even has a list. There is no way for rina to ask for wildan's at all.
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ subscribers: [] });
+  });
+
+  it("the projection is CLOSED: exactly handle, displayName, since — never an email, a whatsapp_number, or a payout id", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, FUTURE);
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    expect(Object.keys(body).sort()).toEqual(["subscribers"]);
+    // Object.keys, not a spot-check — a spot-check against `toMatchObject`
+    // or reading three named fields would pass unchanged if a fourth field
+    // (an email, a whatsapp_number, a payout id) were added beside them.
+    expect(Object.keys(body.subscribers[0]).sort()).toEqual(["displayName", "handle", "since"]);
+  });
+
+  it("`since` is an ISO string on the wire, not a raw Date", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, FUTURE);
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    const since = body.subscribers[0].since as string;
+    expect(new Date(since).toISOString()).toBe(since);
+  });
+});

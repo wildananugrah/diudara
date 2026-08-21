@@ -45,6 +45,25 @@ export interface PendingSubscriptionClaim {
   created: boolean;
 }
 
+/**
+ * One row of a creator's subscriber list — the wire's CLOSED public
+ * projection and nothing else. Spec §8 of the 5b design: a subscriber list
+ * is NOT public information, and what may ever cross this boundary is
+ * `{ handle, displayName, since }` — never an email, a `whatsapp_number`,
+ * a payout id (`app_user.xendit_account_id`), and never a subscriber's own
+ * memberships to anyone else. Selected as exactly these three columns at
+ * the query (see `DrizzleUserSubscriptionRepository`'s
+ * `subscriberProjection`), the same discipline `DrizzleFollowRepository`'s
+ * `publicListColumns` uses — the excluded columns are never fetched from
+ * the database in the first place, not merely stripped afterwards.
+ */
+export interface SubscriberRow {
+  handle: string;
+  displayName: string;
+  /** When this membership began — the subscription row's own `created_at`. */
+  since: Date;
+}
+
 /** What `findPendingCheckout` hands back: enough to re-answer a second tap without the provider. */
 export interface PendingUserCheckout {
   subscriptionId: string;
@@ -216,6 +235,34 @@ export interface UserSubscriptionRepositoryPort {
   }): Promise<UserSubscriptionRow[]>;
   /** Task 8's membership check: is this subscriber an active member of this owner. */
   findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null>;
+  /**
+   * A creator's OWN subscriber list — Task 6 of Phase 5b, spec §8. Only
+   * CURRENTLY subscribed members: `status = 'active'` AND
+   * `current_period_end > now`, strict — the exact same "currently
+   * subscribed" definition `is-member-of.ts`'s `membershipStanding` uses,
+   * mirrored here rather than composed from it: `IsMemberOf` answers a
+   * per-pair question off `findActiveFor`'s single row, and this answers a
+   * per-owner LIST, so sharing a call would mean an N+1 query per
+   * subscriber. `isMemberOf` itself is untouched — see that class's own
+   * docstring on why it stays exactly as reviewed and mutation-pinned in 5a.
+   *
+   * A membership whose period has lapsed is a PAST subscriber, not a current
+   * one — it still holds `status = 'active'` until Task 3's sweep retires
+   * it (§9's honest limitation, and the sweep may not have run yet), so a
+   * status-only filter would list somebody the paywall has already stopped
+   * admitting. `now` is a parameter, never read inside this method, for the
+   * same `ClockPort` reason every time-sensitive read in this codebase takes
+   * one: the boundary — the exact instant `current_period_end` passes — is
+   * what a caller needs to place deliberately in a test.
+   *
+   * NEWEST FIRST (`created_at` desc, `id` desc tiebreak) — mirrors
+   * `DrizzleFollowRepository.listFollowers`'s own ordering, and its own
+   * reason: `created_at` alone is not a guaranteed total order.
+   *
+   * Returns the CLOSED projection (`SubscriberRow`) — see that type's own
+   * docstring for exactly what may and may not cross this boundary.
+   */
+  listActiveSubscribers(ownerId: string, now: Date): Promise<SubscriberRow[]>;
   createTransaction(input: {
     userSubscriptionId: string;
     amount: number;

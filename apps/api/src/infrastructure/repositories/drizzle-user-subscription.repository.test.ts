@@ -882,3 +882,183 @@ describe("DrizzleUserSubscriptionRepository.listExpiringActive", () => {
     expect(third.length).toBe(0);
   });
 });
+
+/**
+ * Task 6 of Phase 5b (spec §8) — a creator's own subscriber list.
+ *
+ * "Currently subscribed" mirrors `IsMemberOf`'s own definition exactly:
+ * `status = 'active'` AND `current_period_end > now`, strict. Every boundary
+ * this suite exercises is the SAME boundary `is-member-of.test.ts` pins for
+ * that use case — a status-only filter would list a member the sweep has
+ * not yet retired (§9's honest limitation) as though nothing had lapsed.
+ */
+describe("listActiveSubscribers (Task 6 of Phase 5b)", () => {
+  const PAST_PERIOD_END = new Date("2026-01-01T00:00:00.000Z"); // before NOW
+  const FUTURE_PERIOD_END = new Date("2027-01-01T00:00:00.000Z"); // after NOW
+
+  it("lists a currently active subscriber with the CLOSED projection: handle, displayName, since — nothing else", async () => {
+    const alice = await createUser("alice"); // owner
+    const bob = await createUser("bob"); // subscriber
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const created = await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+    await subs.activate(created.id, FUTURE_PERIOD_END);
+
+    const rows = await subs.listActiveSubscribers(alice.id, NOW);
+
+    expect(rows.length).toBe(1);
+    // Object.keys, not a spot-check — a spot-check passes against an extra
+    // field, which is the entire failure mode this projection exists to
+    // close off. See the port's own `SubscriberRow` docstring.
+    expect(Object.keys(rows[0]!).sort()).toEqual(["displayName", "handle", "since"]);
+    expect(rows[0]!.handle).toBe(bob.handle);
+    expect(rows[0]!.displayName).toBe(bob.displayName);
+    expect(rows[0]!.since).toEqual(created.createdAt);
+  });
+
+  it("EXCLUDES a subscription whose current_period_end has already passed, even though status is still 'active'", async () => {
+    // THE case this whole method exists to get right — identical reasoning to
+    // `is-member-of.test.ts`'s own "THE case" test. 5b's sweep is what
+    // eventually flips this row's status, and it may not have run yet.
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const created = await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+    await subs.activate(created.id, PAST_PERIOD_END);
+
+    const rows = await subs.listActiveSubscribers(alice.id, NOW);
+
+    expect(rows.length).toBe(0);
+  });
+
+  it("EXCLUDES a subscription whose current_period_end equals now exactly (strict >, not >=)", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const created = await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+    await subs.activate(created.id, NOW);
+
+    const rows = await subs.listActiveSubscribers(alice.id, NOW);
+
+    expect(rows.length).toBe(0);
+  });
+
+  it("EXCLUDES a pending subscription — never activated", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+
+    const rows = await subs.listActiveSubscribers(alice.id, NOW);
+
+    expect(rows.length).toBe(0);
+  });
+
+  it("EXCLUDES a cancelled subscription, even with a future period end", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const created = await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+    await subs.activate(created.id, FUTURE_PERIOD_END);
+    await subs.cancel(created.id);
+
+    const rows = await subs.listActiveSubscribers(alice.id, NOW);
+
+    expect(rows.length).toBe(0);
+  });
+
+  it("EXCLUDES an expired subscription, even with a (stale) future-looking period end left on the row", async () => {
+    // Direct column write, not `retireExpired` — that method only ever flips a
+    // row whose period has already lapsed, which would exclude this row on
+    // the date alone. Writing `status = 'expired'` directly against a FUTURE
+    // period end isolates the STATUS predicate exactly the way
+    // `listExpiredActive`'s own cancelled-row test isolates it.
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const created = await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+    await subs.activate(created.id, FUTURE_PERIOD_END);
+    await db.update(userSubscriptions).set({ status: "expired" }).where(eq(userSubscriptions.id, created.id));
+
+    const rows = await subs.listActiveSubscribers(alice.id, NOW);
+
+    expect(rows.length).toBe(0);
+  });
+
+  it("never lists another owner's subscriber", async () => {
+    const alice = await createUser("alice");
+    const rina = await createUser("rina");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: rina.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const created = await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: rina.id });
+    await subs.activate(created.id, FUTURE_PERIOD_END);
+
+    // bob subscribes to rina, not alice — alice's list must stay empty.
+    const rows = await subs.listActiveSubscribers(alice.id, NOW);
+
+    expect(rows.length).toBe(0);
+  });
+
+  it("lists multiple current subscribers, newest first", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const rina = await createUser("rina");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const bobSub = await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+    await subs.activate(bobSub.id, FUTURE_PERIOD_END);
+    await db
+      .update(userSubscriptions)
+      .set({ createdAt: new Date("2026-01-01T00:00:00.000Z") })
+      .where(eq(userSubscriptions.id, bobSub.id));
+
+    const rinaSub = await subs.create({ subscriberId: rina.id, tierId: tier.id, ownerId: alice.id });
+    await subs.activate(rinaSub.id, FUTURE_PERIOD_END);
+    await db
+      .update(userSubscriptions)
+      .set({ createdAt: new Date("2026-06-01T00:00:00.000Z") })
+      .where(eq(userSubscriptions.id, rinaSub.id));
+
+    const rows = await subs.listActiveSubscribers(alice.id, NOW);
+
+    expect(rows.map((r) => r.handle)).toEqual([rina.handle, bob.handle]);
+  });
+});

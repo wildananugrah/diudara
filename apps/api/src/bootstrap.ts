@@ -12,6 +12,7 @@ import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { IsMemberOf } from "./application/use-cases/is-member-of";
+import { ListSubscribers } from "./application/use-cases/list-subscribers";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -344,6 +345,15 @@ export interface Dependencies {
    * choice `POST /users/me/payout` already makes on this router.
    */
   startUserSubscription: StartUserSubscription | undefined;
+  /**
+   * Task 6 of Phase 5b (spec §8). `GET /users/me/subscribers` — a creator's
+   * own subscriber list, owner-only and closed to exactly
+   * `{ handle, displayName, since }`. NEVER `undefined`, unlike
+   * `startUserSubscription`: reading who currently subscribes needs no
+   * `PaymentProviderPort`, only `userSubscriptionRepository`, which exists
+   * unconditionally regardless of whether this box takes payments.
+   */
+  listSubscribers: ListSubscribers;
   getPublicCommunity: GetPublicCommunity;
   /**
    * `POST /c/:slug/checkout`. `undefined` EXACTLY when `payments` is `null` —
@@ -1884,6 +1894,12 @@ export function bootstrap(): Dependencies {
    * now`, one indexed read.
    */
   const isMemberOf = new IsMemberOf(userSubscriptionRepository, clock);
+  // Task 6 of Phase 5b (spec §8). `isMemberOf` above is untouched — this is a
+  // SEPARATE use-case over the same repository, mirroring its "currently
+  // subscribed" definition rather than calling it, because this one answers a
+  // per-owner LIST and `isMemberOf` answers a per-pair question. See
+  // `ListSubscribers`'s own docstring.
+  const listSubscribers = new ListSubscribers(userSubscriptionRepository, clock);
   // Task 5 of memberships-5a: `userTierRepository` (constructed above, Task 1)
   // is now GetUserProfile's third dependency too — the public profile's
   // `membership.tiers` read. Task 10 adds the fourth, `isMemberOf`, for the
@@ -2406,6 +2422,7 @@ export function bootstrap(): Dependencies {
     getUserPayoutStatus,
     manageUserTiers,
     startUserSubscription,
+    listSubscribers,
     getPublicCommunity,
     startCheckout,
     requestToJoin,
