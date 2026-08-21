@@ -70,15 +70,21 @@ async function createPost(
   a: ReturnType<typeof app>,
   token: string,
   body: string,
-  mediaIds?: string[]
+  mediaIds?: string[],
+  visibility?: "public" | "members"
 ) {
   return a.request("/users/posts", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authed(token) },
-    // `mediaIds` is OMITTED, not sent as undefined, when the caller passes
-    // nothing — an absent key is what a text-only client sends, and PATCH
-    // treats absent and empty differently (see its own tests below).
-    body: JSON.stringify(mediaIds === undefined ? { body } : { body, mediaIds }),
+    // `mediaIds` and `visibility` are OMITTED, not sent as undefined, when
+    // the caller passes nothing — an absent key is what a text-only client
+    // sends, and PATCH treats absent and empty differently (see its own
+    // tests below).
+    body: JSON.stringify({
+      body,
+      ...(mediaIds === undefined ? {} : { mediaIds }),
+      ...(visibility === undefined ? {} : { visibility }),
+    }),
   });
 }
 
@@ -86,7 +92,7 @@ async function patchPost(
   a: ReturnType<typeof app>,
   token: string,
   id: string,
-  payload: { body: string; mediaIds?: string[] }
+  payload: { body: string; mediaIds?: string[]; visibility?: "public" | "members" }
 ) {
   return a.request(`/users/posts/${id}`, {
     method: "PATCH",
@@ -1018,6 +1024,136 @@ describe("media on posts", () => {
 });
 
 /**
+ * Task 5, spec §7: `visibility = 'members'` requires at least one image, on
+ * create and edit alike, checked against the state the request is
+ * PRODUCING. `write-post.test.ts` covers the rule itself against fakes; these
+ * prove the real route wiring — the zod schema, `bootstrap()`'s real
+ * `CreatePost`/`EditPost`, and the real repository — agree with it end to end.
+ */
+describe("Task 5: a members-only post needs an image, enforced at the server", () => {
+  it("POST /users/posts: a members-only post with no image is a 400, in Bahasa", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await createPost(a, token, "tidak ada foto", undefined, "members");
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("foto");
+  });
+
+  it("POST /users/posts: a members-only post carrying an image succeeds, membersOnly true", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const mediaId = await uploadFixture(a, token);
+
+    const res = await createPost(a, token, "ada foto", [mediaId], "members");
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.membersOnly).toBe(true);
+    // The AUTHOR's own create response is never locked — this is the same
+    // `locked: false` rule `write-post.ts` documents at every `toPostView`
+    // call site in that file.
+    expect(body.media.map((image: { id: string }) => image.id)).toEqual([mediaId]);
+    expect(body.lockedMediaCount).toBe(0);
+  });
+
+  it("rejects a visibility value the server does not recognise, with 400", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/posts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ body: "halo", visibility: "premium" }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("PATCH /users/posts/:id: refuses to edit away the last image of a members-only post — 400", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const mediaId = await uploadFixture(a, token);
+    const post = await (
+      await createPost(a, token, "khusus anggota", [mediaId], "members")
+    ).json();
+
+    const res = await patchPost(a, token, post.id, { body: "halo lagi", mediaIds: [] });
+
+    expect(res.status).toBe(400);
+  });
+
+  /**
+   * The scenario the brief calls out by name: unlocking and clearing images
+   * must work in ONE request, or a creator needs two edits to undo one
+   * mistake.
+   */
+  it("PATCH /users/posts/:id: unlocking and clearing the last image together succeeds", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const mediaId = await uploadFixture(a, token);
+    const post = await (
+      await createPost(a, token, "khusus anggota", [mediaId], "members")
+    ).json();
+
+    const res = await patchPost(a, token, post.id, {
+      body: "sekarang publik",
+      mediaIds: [],
+      visibility: "public",
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.membersOnly).toBe(false);
+    expect(body.media).toEqual([]);
+  });
+
+  /**
+   * The central risk this task's brief calls out by name: `.optional()` on
+   * `visibility` must mean "leave it alone" on PATCH, never "make it
+   * public" — proven here by editing ONLY the body, through the real HTTP
+   * route, and confirming the members-only post stays gated. Checked both
+   * on the response this same request returns AND on a completely separate
+   * follow-up read, so a bug that only fixed the echoed response (but wrote
+   * `public` to the row) cannot pass.
+   */
+  it("PATCH /users/posts/:id: omitting visibility leaves a members-only post members-only", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const mediaId = await uploadFixture(a, token);
+    const post = await (
+      await createPost(a, token, "khusus anggota", [mediaId], "members")
+    ).json();
+
+    const res = await patchPost(a, token, post.id, { body: "hanya teks yang berubah" });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).membersOnly).toBe(true);
+
+    const reread = await (await a.request("/users/wildan/posts", { headers: authed(token) })).json();
+    expect(reread.posts[0].membersOnly).toBe(true);
+    expect(reread.posts[0].media.map((image: { id: string }) => image.id)).toEqual([mediaId]);
+  });
+
+  /**
+   * The mirror of the test above, for a PUBLIC post: omitting `visibility`
+   * must not accidentally gate it either. Proves `.optional()` is neutral in
+   * BOTH directions, not merely "never turns public".
+   */
+  it("PATCH /users/posts/:id: omitting visibility leaves a public post public", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const post = await (await createPost(a, token, "publik")).json();
+
+    const res = await patchPost(a, token, post.id, { body: "masih publik" });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).membersOnly).toBe(false);
+  });
+});
+
+/**
  * **BARRIER ONE, end to end through the real wiring** — `bootstrap()`'s own
  * `DrizzleUserSubscriptionRepository` and its one `SystemClock`, not a fake.
  * The use-case tests in `read-posts.test.ts` prove the gate's logic against a
@@ -1025,10 +1161,12 @@ describe("media on posts", () => {
  * actually handed that dependency over and that BOTH read routes resolve a
  * viewer to answer it for.
  *
- * The write path does not accept `visibility` yet — Task 5 of this phase adds
- * it — so a gated post is made by writing the column directly, the same
- * technique the reserved-handle helper above uses to reach a state the current
- * write path will not produce.
+ * The write path accepts `visibility` as of Task 5 (see the tests below and
+ * `write-post.test.ts`), but these tests are about BARRIER ONE — the read
+ * gate — not the write-time rule, so `gate()` keeps writing the column
+ * directly, the same technique the reserved-handle helper above uses:
+ * reaching the gated state without dragging the write path's own rules
+ * (one image minimum) into what is a read-side test.
  */
 describe("members-only posts: the projection never sends a media id to a non-member", () => {
   const RINA = { handle: "rina", email: "rina@example.com", displayName: "Rina" };

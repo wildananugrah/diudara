@@ -70,10 +70,14 @@ function newestFirstOrder() {
 export class DrizzlePostRepository implements PostRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
 
-  async create(authorId: string, body: string): Promise<PostRow> {
+  async create(authorId: string, body: string, visibility?: string): Promise<PostRow> {
     const [inserted] = await this.db
       .insert(posts)
-      .values({ authorId, body })
+      // `visibility` omitted entirely (not `visibility: undefined`) when the
+      // caller did not pass one, so the column's own `default('public')`
+      // decides — a spread with an explicit `undefined` value would instead
+      // ask drizzle to insert NULL into a `NOT NULL` column and throw.
+      .values(visibility === undefined ? { authorId, body } : { authorId, body, visibility })
       .returning({ id: posts.id });
     const row = await this.readOne(inserted!.id);
     // The row was just inserted inside this call; a null here means the
@@ -84,11 +88,21 @@ export class DrizzlePostRepository implements PostRepositoryPort {
 
   async ownershipOf(id: string): Promise<PostOwnership | null> {
     const [row] = await this.db
-      .select({ id: posts.id, authorId: posts.authorId, deletedAt: posts.deletedAt })
+      .select({
+        id: posts.id,
+        authorId: posts.authorId,
+        deletedAt: posts.deletedAt,
+        visibility: posts.visibility,
+      })
       .from(posts)
       .where(eq(posts.id, id));
     if (row === undefined) return null;
-    return { id: row.id, authorId: row.authorId, isDeleted: row.deletedAt !== null };
+    return {
+      id: row.id,
+      authorId: row.authorId,
+      isDeleted: row.deletedAt !== null,
+      visibility: row.visibility,
+    };
   }
 
   /**
@@ -110,10 +124,18 @@ export class DrizzlePostRepository implements PostRepositoryPort {
     return row ?? null;
   }
 
-  async updateBody(id: string, body: string): Promise<PostRow | null> {
+  async updateBody(id: string, body: string, visibility?: string): Promise<PostRow | null> {
     const [updated] = await this.db
       .update(posts)
-      .set({ body, editedAt: sql`now()` })
+      // `visibility` omitted (not spread as `undefined`) means "do not touch
+      // this column" — the same reasoning as `create` above, and the reason
+      // an omitted `visibility` on PATCH leaves a post's gating exactly as
+      // it was rather than resetting it to public.
+      .set(
+        visibility === undefined
+          ? { body, editedAt: sql`now()` }
+          : { body, editedAt: sql`now()`, visibility }
+      )
       .where(and(eq(posts.id, id), isNull(posts.deletedAt)))
       .returning({ id: posts.id });
     if (updated === undefined) return null;

@@ -95,6 +95,19 @@ describe("DrizzlePostRepository.create", () => {
     expect(post.authorId).toBe(author.id);
     expect(post.visibility).toBe("public");
   });
+
+  /**
+   * Task 5: `create`'s third argument is what `write-post.ts`'s `CreatePost`
+   * uses to persist `visibility = 'members'` — the LITERAL, never the
+   * `MEMBERS_ONLY` constant that checks against it.
+   */
+  it("persists an explicit visibility", async () => {
+    const author = await seedUser();
+
+    const post = await repo.create(author.id, "khusus anggota", "members");
+
+    expect(post.visibility).toBe("members");
+  });
 });
 
 /**
@@ -198,6 +211,33 @@ describe("DrizzlePostRepository.updateBody", () => {
 
     expect(updated?.body).toBe("sudah diubah");
     expect(updated?.editedAt instanceof Date).toBe(true);
+  });
+
+  /** Task 5: the third argument changes the column. */
+  it("changes visibility when given one", async () => {
+    const author = await seedUser();
+    const post = await repo.create(author.id, "asli");
+
+    const updated = await repo.updateBody(post.id, "asli", "members");
+
+    expect(updated?.visibility).toBe("members");
+  });
+
+  /**
+   * Task 5: an OMITTED third argument must leave the column exactly as it
+   * was — never reset it to the schema default. A two-argument call is
+   * exactly what an omitted `visibility` on `PATCH /users/posts/:id` turns
+   * into by the time it reaches this repository (see `EditPost.execute` in
+   * `write-post.ts`), so this is the real shape that request produces, not a
+   * synthetic one.
+   */
+  it("leaves visibility untouched when the third argument is omitted", async () => {
+    const author = await seedUser();
+    const post = await repo.create(author.id, "asli", "members");
+
+    const updated = await repo.updateBody(post.id, "teks berubah, visibilitas tidak");
+
+    expect(updated?.visibility).toBe("members");
   });
 });
 

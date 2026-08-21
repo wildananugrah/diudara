@@ -65,6 +65,23 @@ function buildPostBodySchema(maxPostImages: number) {
       .array(z.string().uuid())
       .max(maxPostImages, `maksimal ${maxPostImages} foto per kiriman`)
       .optional(),
+    /**
+     * Task 5 of exclusive content, spec §7. `.optional()` is load-bearing on
+     * PATCH for EXACTLY the reason given for `mediaIds` just above: an
+     * OMITTED `visibility` is an edit that says nothing about gating and
+     * must leave the post's current visibility alone, while an explicit
+     * value changes it. Defaulting the omitted case to `"public"` here (or
+     * anywhere downstream) would silently un-gate every post anyone edits
+     * without thinking about visibility — `write-post.ts`'s `EditPost` reads
+     * `undefined` as "leave it alone" and its own repository call carries the
+     * same contract one layer further down.
+     *
+     * The no-image rule itself (`members` requires at least one image, on
+     * create and edit alike) is `write-post.ts`'s to enforce, not this
+     * schema's — this layer only says the value is one of the two the
+     * server recognises.
+     */
+    visibility: z.enum(["public", "members"]).optional(),
   });
 }
 
@@ -125,11 +142,16 @@ export function postRoutes(
   const postBodySchema = buildPostBodySchema(deps.maxPostImages);
 
   app.post("/posts", requireAuth, validate(postBodySchema), async (c) => {
-    const input = c.get("validated") as { body: string; mediaIds?: string[] };
+    const input = c.get("validated") as {
+      body: string;
+      mediaIds?: string[];
+      visibility?: "public" | "members";
+    };
     const view = await deps.createPost.execute({
       authorId: c.get("userId"),
       body: input.body,
       mediaIds: input.mediaIds,
+      visibility: input.visibility,
     });
     return c.json(view, 201);
   });
@@ -147,12 +169,20 @@ export function postRoutes(
     validateParams(postIdParams),
     validate(postBodySchema),
     async (c) => {
-      const input = c.get("validated") as { body: string; mediaIds?: string[] };
+      const input = c.get("validated") as {
+        body: string;
+        mediaIds?: string[];
+        visibility?: "public" | "members";
+      };
       const view = await deps.editPost.execute({
         editorId: c.get("userId"),
         postId: c.req.param("id"),
         body: input.body,
         mediaIds: input.mediaIds,
+        // OMITTED here means "leave it alone" all the way down to the
+        // repository — see `buildPostBodySchema`'s docstring on `visibility`
+        // for why this must never collapse an absent field to `"public"`.
+        visibility: input.visibility,
       });
       return c.json(view);
     }

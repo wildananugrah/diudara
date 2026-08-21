@@ -44,10 +44,23 @@ export interface PostOwnership {
   id: string;
   authorId: string;
   isDeleted: boolean;
+  /**
+   * The CURRENT `public` | `members`, before this edit touches anything.
+   * Task 5's `EditPost` needs it to compute the visibility the edit is
+   * PRODUCING when the edit's own `visibility` is omitted — an omitted
+   * `visibility` means "leave it exactly as it is", and this is the only
+   * place that current value is available before the write happens.
+   */
+  visibility: string;
 }
 
 export interface PostRepositoryPort {
-  create(authorId: string, body: string): Promise<PostRow>;
+  /**
+   * `visibility` is OPTIONAL and, when omitted, leaves the column at
+   * whatever the schema default is (`public`) — every pre-Phase-6 caller of
+   * `create` still compiles and still means the same thing it always did.
+   */
+  create(authorId: string, body: string, visibility?: string): Promise<PostRow>;
   /** `null` when the id has never existed. A soft-deleted post still resolves, with `isDeleted: true`. */
   ownershipOf(id: string): Promise<PostOwnership | null>;
   /**
@@ -59,8 +72,17 @@ export interface PostRepositoryPort {
    * was deleted with. Deleting a post does not un-gate its images (spec §6.3).
    */
   gatingOf(id: string): Promise<PostGating | null>;
-  /** `null` if the post is missing or already deleted. Sets `edited_at`. */
-  updateBody(id: string, body: string): Promise<PostRow | null>;
+  /**
+   * `null` if the post is missing or already deleted. Sets `edited_at`
+   * unconditionally, on every call, visibility change or not.
+   *
+   * `visibility` is OPTIONAL: omitted means "leave the column exactly as it
+   * is", never "reset it to public" — the same omitted-means-unchanged
+   * contract `mediaIds` already carries at the route (`posts.ts:52`) and
+   * `EditPost` carries here. Getting this backwards would silently un-gate
+   * every post anyone edits without thinking about visibility.
+   */
+  updateBody(id: string, body: string, visibility?: string): Promise<PostRow | null>;
   /** Idempotent: deleting an already-deleted post is a no-op, not an error. */
   softDelete(id: string): Promise<void>;
   /** Newest first, across every author. Excludes deleted. */
