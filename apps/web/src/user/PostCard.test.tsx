@@ -353,6 +353,36 @@ describe("PostCard — the lock panel (Task 7, spec §5, §5.1)", () => {
   });
 
   /**
+   * Fix round 1 (Major, coordinator review): the previous version of this
+   * file pinned the caption, the count and the invitation with `toContain`
+   * ONLY — a substring check that stays green when text is APPENDED to any
+   * of the three (verified: mutating the count copy to
+   * `"3 foto terkunci ekstra"` left all 30 tests green before this fix).
+   * `1d8d133` already fixed exactly this shape for the invitation link's
+   * accessible name; these two tests give the other two strings the same
+   * standard of proof — exact `.textContent`, not `toContain`.
+   */
+  it("the locked count copy is EXACT, not merely present — catches text appended after it", () => {
+    const { container } = renderCard({ post: lockedPost });
+
+    const count = container.querySelector(".post-card-locked-count");
+    expect(count?.textContent ?? "").toBe("3 foto terkunci");
+  });
+
+  /**
+   * The property parent spec §5 actually cares about: "its caption
+   * readable" is why a visible lock converts at all. Scoped to the
+   * `.post-card-body` node's own `.textContent`, not the whole card's, so it
+   * cannot be satisfied by the count or the invitation text instead.
+   */
+  it("the locked post's caption survives into the locked view, EXACT and unmodified", () => {
+    const { container } = renderCard({ post: lockedPost });
+
+    const body = container.querySelector(".post-card-body");
+    expect(body?.textContent ?? "").toBe("Behind the scenes");
+  });
+
+  /**
    * The link target is the author's PUBLIC profile route, `/@handle` — the
    * SAME shape every other in-app link to a profile already uses (the
    * identity link above, `FollowListPage`, `JelajahPage`), and the ONLY shape
