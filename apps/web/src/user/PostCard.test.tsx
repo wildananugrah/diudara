@@ -364,8 +364,12 @@ describe("PostCard — the lock panel (Task 7, spec §5, §5.1)", () => {
   it("the lock links to the author's profile, where the offer lives", () => {
     renderCard({ post: lockedPost });
 
+    // A plain string TextMatch (not a regex) matches the accessible name
+    // EXACTLY, not as a substring — chosen over a regex on purpose, so a
+    // mutant that appends to "Jadi anggota untuk melihat" (e.g. "... foto")
+    // fails to resolve the link at all instead of silently matching.
     expect(
-      screen.getByRole("link", { name: /Jadi anggota untuk melihat/ }).getAttribute("href")
+      screen.getByRole("link", { name: "Jadi anggota untuk melihat" }).getAttribute("href")
     ).toBe("/@rina");
   });
 
