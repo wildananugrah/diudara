@@ -758,19 +758,27 @@ describe("DeletePost", () => {
  * with zero images:
  *
  *   1. Two concurrent edits on the same post (`the invariant survives
- *      concurrent edits` below).
+ *      concurrent edits` below) — proved against the REAL
+ *      `DrizzlePostEditUnitOfWork`, exactly as production wires it.
  *   2. A single edit whose own `claim` fails after `updateBody` already
  *      committed (`a failed claim rolls the visibility write back with it`
- *      below) — no concurrency machinery needed for this one at all.
+ *      below) — no concurrency machinery needed for this one at all. Proved
+ *      through a REAL `EditPost.execute()` call and a genuinely thrown
+ *      `ConflictError`, via a thin wrapper around `DrizzleMediaRepository`
+ *      that injects the exact race `requireFullyClaimed`'s own docstring
+ *      names (a row vanishing between the ownership check and the claim) —
+ *      the same technique the fake-based tests above use for the identical
+ *      race, now against real rows. That wrapper opens its OWN transaction
+ *      rather than going through `DrizzlePostEditUnitOfWork`, so it proves
+ *      `EditPost`'s own ordering (write, then claim, inside one transaction)
+ *      rather than that specific class; `drizzle-post-edit-unit-of-work.test.ts`
+ *      proves the SAME rollback property directly against
+ *      `DrizzlePostEditUnitOfWork` itself, which this file's wrapper does
+ *      not touch.
  *
  * A FAKE unit of work (used everywhere above) cannot prove either: fakes
  * mutate in place with no commit/rollback, and a single `bun:test` process
- * has no second connection to race. Both tests here run against the REAL
- * `DrizzlePostEditUnitOfWork`, the real `db`, and — for the second test — a
- * thin wrapper around the real `DrizzleMediaRepository` that injects the
- * exact race `requireFullyClaimed`'s own docstring names (a row vanishing
- * between the ownership check and the claim), using the SAME technique the
- * fake-based tests above use for the identical race, now against real rows.
+ * has no second connection to race.
  */
 describe("EditPost — real transaction (Task 5 fix round 1)", () => {
   beforeEach(resetDatabase);
