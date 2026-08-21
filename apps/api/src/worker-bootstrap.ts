@@ -2,10 +2,13 @@ import { db } from "./db/client";
 import {
   assertUsableStreamingSecret,
   resolveAppBaseUrl,
+  selectEmailProvider,
   selectMessagingProviders,
   type MessagingProviders,
 } from "./bootstrap";
 import type { ClockPort } from "./application/ports/clock.port";
+import type { EmailProviderPort } from "./application/ports/email-provider.port";
+import { RemindExpiringMembership } from "./application/use-cases/remind-expiring-membership";
 import { SystemClock } from "./infrastructure/clock/system.clock";
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
@@ -13,9 +16,12 @@ import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-
 import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
 import { DrizzleJoinRequestRepository } from "./infrastructure/repositories/drizzle-join-request.repository";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
+import { DrizzleMembershipReminderRepository } from "./infrastructure/repositories/drizzle-membership-reminder.repository";
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import { DrizzleRenewalReminderRepository } from "./infrastructure/repositories/drizzle-renewal-reminder.repository";
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
+import { DrizzleUserRepository } from "./infrastructure/repositories/drizzle-user.repository";
+import { DrizzleUserSubscriptionRepository } from "./infrastructure/repositories/drizzle-user-subscription.repository";
 import { ProcessChurn } from "./application/use-cases/process-churn";
 import { ProcessRenewals } from "./application/use-cases/process-renewals";
 import {
@@ -120,6 +126,25 @@ export interface WorkerDependencies {
    * notify an owner, not only that a handler is registered under the right string.
    */
   notifyJoinRequest: NotifyJoinRequest;
+  /**
+   * Task 4 of Phase 5b's SCHEDULED pass — the one that tells a member their membership
+   * is about to end.
+   *
+   * Exposed for the same reason as `processRenewals`, and for one specific to it:
+   * there is no recurring charge anywhere in this system, so nothing renews and this
+   * pass is the ONLY thing that tells a member to buy again. A root that failed to
+   * construct it would leave every membership ending in silence, and nothing else in
+   * the process would notice.
+   */
+  remindExpiringMemberships: RemindExpiringMembership;
+  /**
+   * The email adapter this root selected, or `null` when email is DISABLED on this box
+   * (see `selectEmailProvider`). Exposed for the same reason `messaging` is: a test
+   * has to be able to prove which adapters an environment actually chose — and here
+   * the `null` case is a behaviour, not an absence, because it is half of what makes
+   * `RemindExpiringMembership` record a skip instead of reaching nobody in silence.
+   */
+  email: EmailProviderPort | null;
   messaging: MessagingProviders;
 }
 
@@ -314,8 +339,44 @@ export function bootstrapWorker(): WorkerDependencies {
     handlers.set(OUTBOX_NOTIFY_STREAM_LIVE, notifyStreamLiveOutboxHandler(notifyStreamLive));
   }
 
+  // Task 4 of Phase 5b: reminding a member BEFORE their membership ends. Selected
+  // through the SAME allowlist the API root uses, and it may legitimately be `null` —
+  // a box with no `RESEND_API_KEY`/`EMAIL_FROM` outside development has no email
+  // channel at all. That is not a boot failure (see `selectEmailProvider`'s own
+  // docstring for why it degrades instead of throwing), and the reminder pass is built
+  // to see the absence and record the skip rather than reach nobody in silence.
+  const email = selectEmailProvider({
+    apiKey: process.env.RESEND_API_KEY,
+    from: process.env.EMAIL_FROM,
+    nodeEnv: process.env.NODE_ENV,
+  });
+
+  const remindExpiringMemberships = new RemindExpiringMembership(
+    new DrizzleUserSubscriptionRepository(db),
+    new DrizzleUserRepository(db),
+    new DrizzleMembershipReminderRepository(db),
+    email,
+    // The WhatsApp provider, never a gating one — the same rule every other notifier
+    // in this root follows: `TelegramBotAdapter.notify` throws, because it addresses a
+    // WhatsApp number it has no way to reach.
+    messaging.notifier,
+    // The SAME clock instance every other pass here shares — see
+    // `WorkerDependencies.clock` for why a second clock constructed here would be a
+    // bug and not a style choice. The window boundary this pass reads is a moment,
+    // not a WIB day, but two clocks in one worker is still two answers to "now".
+    clock,
+    {
+      appBaseUrl: resolveAppBaseUrl({
+        appBaseUrl: process.env.APP_BASE_URL,
+        nodeEnv: process.env.NODE_ENV,
+      }),
+    }
+  );
+
   return {
     processOutbox: new ProcessOutbox(new DrizzleOutboxRepository(db), handlers),
+    remindExpiringMemberships,
+    email,
     processRenewals,
     processChurn,
     clock,

@@ -3,6 +3,7 @@ import {
   createScheduledPassLoops,
   DEFAULT_RENEWAL_INTERVAL_MS,
   formatChurnPassLine,
+  formatMembershipReminderLine,
   formatMembershipSweepLine,
   formatOrphanSweepLine,
   formatPassFailure,
@@ -50,8 +51,16 @@ const NOTHING_HAPPENED_MEMBERSHIP_SWEEP = {
   failed: 0,
 };
 
+const NOTHING_HAPPENED_MEMBERSHIP_REMINDER = {
+  considered: 0,
+  reminded: 0,
+  alreadyReminded: 0,
+  skipped: 0,
+  failed: 0,
+};
+
 /** Counts, an optional stage-free label, `=` and spaces. Nothing else may appear. */
-const COUNTS_ONLY = /^\[(renewals|churn|media|memberships)\] (?:[a-z_]+=\d+ ?)+$/;
+const COUNTS_ONLY = /^\[(renewals|churn|media|memberships|membership-reminders)\] (?:[a-z_]+=\d+ ?)+$/;
 
 describe("formatRenewalPassLine", () => {
   it("says nothing when the pass had nothing to do", () => {
@@ -169,6 +178,56 @@ describe("formatMembershipSweepLine", () => {
   it("emits counts and nothing else — no subscriber id, no owner id", () => {
     expect(
       formatMembershipSweepLine({ considered: 1, retired: 1, skipped: 0, failed: 0 })
+    ).toMatch(COUNTS_ONLY);
+  });
+});
+
+describe("formatMembershipReminderLine", () => {
+  it("says nothing when the pass had nothing to do", () => {
+    expect(formatMembershipReminderLine(NOTHING_HAPPENED_MEMBERSHIP_REMINDER)).toBeNull();
+  });
+
+  it("reports every count when the pass did something", () => {
+    const line = formatMembershipReminderLine({
+      considered: 9,
+      reminded: 5,
+      alreadyReminded: 2,
+      skipped: 1,
+      failed: 1,
+    });
+
+    expect(line).toBe(
+      "[membership-reminders] considered=9 reminded=5 already_reminded=2 skipped=1 failed=1"
+    );
+  });
+
+  it("SPEAKS UP for a pass that reached nobody at all", () => {
+    // The failure this whole pass exists to prevent is "the member was never told",
+    // and the shape of it is `considered>0, reminded=0`. A line that stayed silent
+    // here would make a pass that reached nobody look exactly like a pass that had
+    // nothing to do.
+    const line = formatMembershipReminderLine({
+      considered: 4,
+      reminded: 0,
+      alreadyReminded: 0,
+      skipped: 4,
+      failed: 0,
+    });
+
+    expect(line).toBe(
+      "[membership-reminders] considered=4 reminded=0 already_reminded=0 skipped=4 failed=0"
+    );
+  });
+
+  it("emits counts and nothing else — no subscriber id, no email, no number", () => {
+    expect(
+      formatMembershipReminderLine({
+        considered: 1,
+        reminded: 1,
+        alreadyReminded: 0,
+        skipped: 0,
+        failed: 0,
+      })
     ).toMatch(COUNTS_ONLY);
   });
 });
@@ -759,12 +818,23 @@ describe("createScheduledPassLoops", () => {
     const processChurn = fakePass({ ...NOTHING_HAPPENED_CHURN, churned: 1 });
     const processOrphanSweep = fakePass({ ...NOTHING_HAPPENED_SWEEP, deleted: 1 });
     const processMembershipSweep = fakePass({ ...NOTHING_HAPPENED_MEMBERSHIP_SWEEP, retired: 1 });
+    const processMembershipReminder = fakePass({
+      ...NOTHING_HAPPENED_MEMBERSHIP_REMINDER,
+      reminded: 1,
+    });
     const lines: string[] = [];
-    const { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop } = createScheduledPassLoops({
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+    } = createScheduledPassLoops({
       processRenewals,
       processChurn,
       processOrphanSweep,
       processMembershipSweep,
+      processMembershipReminder,
       intervalMs: 60_000,
       log: (line) => lines.push(line),
     });
@@ -774,13 +844,15 @@ describe("createScheduledPassLoops", () => {
       churnLoop.run(),
       orphanSweepLoop.run(),
       membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
     ]);
     await waitUntil(
       () =>
         processRenewals.state.calls > 0 &&
         processChurn.state.calls > 0 &&
         processOrphanSweep.state.calls > 0 &&
-        processMembershipSweep.state.calls > 0,
+        processMembershipSweep.state.calls > 0 &&
+        processMembershipReminder.state.calls > 0,
       "the first pass of each type"
     );
     // Long enough that a 5s-ish interval — or no interval at all — would show up
@@ -790,11 +862,13 @@ describe("createScheduledPassLoops", () => {
     expect(processChurn.state.calls).toBe(1);
     expect(processOrphanSweep.state.calls).toBe(1);
     expect(processMembershipSweep.state.calls).toBe(1);
+    expect(processMembershipReminder.state.calls).toBe(1);
 
     renewalLoop.stop();
     churnLoop.stop();
     orphanSweepLoop.stop();
     membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
     const finished = await Promise.race([
       running.then(() => "stopped"),
       Bun.sleep(2_000).then(() => "still sleeping in the interval"),
@@ -806,6 +880,7 @@ describe("createScheduledPassLoops", () => {
       "[churn] considered=0 churned=1 already_churned=0 revocations_queued=0 skipped_revocation=0",
       "[media] considered=0 deleted=1 skipped=0 failed=0",
       "[memberships] considered=0 retired=1 skipped=0 failed=0",
+      "[membership-reminders] considered=0 reminded=1 already_reminded=0 skipped=0 failed=0",
     ]);
   });
 
@@ -819,11 +894,18 @@ describe("createScheduledPassLoops", () => {
     const processOrphanSweep = fakePass(NOTHING_HAPPENED_SWEEP);
     const processMembershipSweep = fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP);
     const errors: string[] = [];
-    const { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop } = createScheduledPassLoops({
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+    } = createScheduledPassLoops({
       processRenewals,
       processChurn,
       processOrphanSweep,
       processMembershipSweep,
+      processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -834,6 +916,7 @@ describe("createScheduledPassLoops", () => {
       churnLoop.run(),
       orphanSweepLoop.run(),
       membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
     ]);
     await waitUntil(
       () =>
@@ -847,6 +930,7 @@ describe("createScheduledPassLoops", () => {
     churnLoop.stop();
     orphanSweepLoop.stop();
     membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
@@ -861,11 +945,18 @@ describe("createScheduledPassLoops", () => {
     const processOrphanSweep = fakePass(NOTHING_HAPPENED_SWEEP);
     processOrphanSweep.state.throwOnCall = 1;
     const errors: string[] = [];
-    const { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop } = createScheduledPassLoops({
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+    } = createScheduledPassLoops({
       processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
       processOrphanSweep,
       processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
+      processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -876,12 +967,14 @@ describe("createScheduledPassLoops", () => {
       churnLoop.run(),
       orphanSweepLoop.run(),
       membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
     ]);
     await waitUntil(() => processOrphanSweep.state.calls >= 3, "the sweep to keep going after the throw");
     renewalLoop.stop();
     churnLoop.stop();
     orphanSweepLoop.stop();
     membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
@@ -896,11 +989,18 @@ describe("createScheduledPassLoops", () => {
     const processMembershipSweep = fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP);
     processMembershipSweep.state.throwOnCall = 1;
     const errors: string[] = [];
-    const { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop } = createScheduledPassLoops({
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+    } = createScheduledPassLoops({
       processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
       processOrphanSweep: fakePass(NOTHING_HAPPENED_SWEEP),
       processMembershipSweep,
+      processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -911,6 +1011,7 @@ describe("createScheduledPassLoops", () => {
       churnLoop.run(),
       orphanSweepLoop.run(),
       membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
     ]);
     await waitUntil(
       () => processMembershipSweep.state.calls >= 3,
@@ -920,10 +1021,60 @@ describe("createScheduledPassLoops", () => {
     churnLoop.stop();
     orphanSweepLoop.stop();
     membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain("[memberships] pass failed: database was briefly unreachable");
+  });
+
+  it("keeps running after the reminder pass itself throws, and keeps the other passes running too", async () => {
+    // A per-MEMBERSHIP failure is handled inside `RemindExpiringMembership` and never
+    // reaches here — this is the backstop for something the pass-level query itself
+    // could not survive. Its own loop, so a reminder query that fails every time
+    // cannot also stop the retirement sweep that frees members to buy again.
+    const processMembershipReminder = fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER);
+    processMembershipReminder.state.throwOnCall = 1;
+    const errors: string[] = [];
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+    } = createScheduledPassLoops({
+      processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
+      processChurn: fakePass(NOTHING_HAPPENED_CHURN),
+      processOrphanSweep: fakePass(NOTHING_HAPPENED_SWEEP),
+      processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
+      processMembershipReminder,
+      intervalMs: 1,
+      log: () => undefined,
+      logError: (line) => errors.push(line),
+    });
+
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
+    ]);
+    await waitUntil(
+      () => processMembershipReminder.state.calls >= 3,
+      "the reminder pass to keep going after the throw"
+    );
+    renewalLoop.stop();
+    churnLoop.stop();
+    orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
+    await running;
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain(
+      "[membership-reminders] pass failed: database was briefly unreachable"
+    );
   });
 
   it("never overlaps two passes of the same type", async () => {
@@ -943,11 +1094,18 @@ describe("createScheduledPassLoops", () => {
         return NOTHING_HAPPENED_RENEWAL;
       },
     };
-    const { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop } = createScheduledPassLoops({
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+    } = createScheduledPassLoops({
       processRenewals: slowRenewals,
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
       processOrphanSweep: fakePass(NOTHING_HAPPENED_SWEEP),
       processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
+      processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       intervalMs: 1,
       log: () => undefined,
     });
@@ -957,12 +1115,14 @@ describe("createScheduledPassLoops", () => {
       churnLoop.run(),
       orphanSweepLoop.run(),
       membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
     ]);
     await waitUntil(() => calls >= 3, "three renewal passes");
     renewalLoop.stop();
     churnLoop.stop();
     orphanSweepLoop.stop();
     membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
     await running;
 
     expect(maxInFlight).toBe(1);

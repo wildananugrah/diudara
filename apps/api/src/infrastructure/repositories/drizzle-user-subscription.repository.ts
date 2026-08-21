@@ -1,4 +1,4 @@
-import { and, desc, eq, isNotNull, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { userSubscriptions, userTransactions } from "../../db/schema";
 import type {
@@ -189,6 +189,58 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
       .where(and(eq(userSubscriptions.status, "active"), lte(userSubscriptions.currentPeriodEnd, now)))
       .orderBy(userSubscriptions.currentPeriodEnd)
       .limit(limit);
+  }
+
+  /**
+   * Task 4's reminder pass: whom to warn BEFORE their membership ends. See the port
+   * docstring for why `from` is exclusive and `to` inclusive, and why this is paged
+   * by keyset rather than capped.
+   *
+   * Served by `user_subscription_status_current_period_end_idx` — the same index
+   * Task 3 added for `listExpiredActive`, and for the same reason: `status` leads
+   * because the equality is what makes it selective, and `current_period_end` trails
+   * because both predicates on it here are ranges. Nothing new was needed.
+   *
+   * The keyset is a tuple comparison spelled out rather than a row constructor,
+   * exactly as `DrizzleSubscriptionRepository.findDueForRenewal` writes it, and it
+   * sorts in the SAME order it compares in — otherwise the walk can skip rows.
+   */
+  async listExpiringActive(input: {
+    from: Date;
+    to: Date;
+    limit: number;
+    after?: { currentPeriodEnd: Date; id: string };
+  }): Promise<UserSubscriptionRow[]> {
+    const { after } = input;
+    return this.db
+      .select()
+      .from(userSubscriptions)
+      .where(
+        and(
+          eq(userSubscriptions.status, "active"),
+          // Redundant with the two comparisons below in Postgres (NULL compared with
+          // anything is NULL, so the row is excluded either way), and kept because it
+          // states the intent: a subscription that never activated has no period to
+          // be near the end of.
+          isNotNull(userSubscriptions.currentPeriodEnd),
+          // EXCLUSIVE. A membership already past its end is the retirement sweep's,
+          // and `listExpiredActive`'s `<= now` is the exact complement of this — so
+          // no row can ever be in both result sets.
+          gt(userSubscriptions.currentPeriodEnd, input.from),
+          lte(userSubscriptions.currentPeriodEnd, input.to),
+          after === undefined
+            ? undefined
+            : or(
+                gt(userSubscriptions.currentPeriodEnd, after.currentPeriodEnd),
+                and(
+                  eq(userSubscriptions.currentPeriodEnd, after.currentPeriodEnd),
+                  gt(userSubscriptions.id, after.id)
+                )
+              )
+        )
+      )
+      .orderBy(asc(userSubscriptions.currentPeriodEnd), asc(userSubscriptions.id))
+      .limit(input.limit);
   }
 
   /**

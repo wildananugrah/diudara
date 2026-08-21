@@ -689,3 +689,81 @@ describe("DrizzleUserSubscriptionRepository", () => {
     expect(await subs.listExpiredActive(NOW, 10)).toEqual([]);
   });
 });
+
+/**
+ * Task 4 of Phase 5b: whom to warn BEFORE their membership ends. The window's two
+ * ends are tested in both directions, because a query with only clearly-inside rows
+ * passes against a window of any length — the same rule §11 of the spec sets for the
+ * pending-checkout cleanup.
+ */
+describe("DrizzleUserSubscriptionRepository.listExpiringActive", () => {
+  const WINDOW_END = new Date("2026-08-24T00:00:00.000Z");
+
+  it("returns an ACTIVE membership ending inside the window", async () => {
+    const { subscriberId } = await seedActiveSubscription({
+      periodEnd: new Date("2026-08-23T00:00:00.000Z"),
+    });
+    const rows = await subs.listExpiringActive({ from: NOW, to: WINDOW_END, limit: 10 });
+    expect(rows.length).toBe(1);
+    expect(rows[0].subscriberId).toBe(subscriberId);
+  });
+
+  it("EXCLUDES a membership whose period has already lapsed", async () => {
+    // `from` is exclusive: an already-lapsed membership belongs to the retirement
+    // sweep, and warning somebody about something that has already happened is not a
+    // warning. Placed exactly ON the boundary, so an inclusive `>=` would fail here.
+    await seedActiveSubscription({ periodEnd: NOW });
+    expect(
+      (await subs.listExpiringActive({ from: NOW, to: WINDOW_END, limit: 10 })).length
+    ).toBe(0);
+  });
+
+  it("INCLUDES a membership ending exactly at the far edge of the window", async () => {
+    await seedActiveSubscription({ periodEnd: WINDOW_END });
+    expect(
+      (await subs.listExpiringActive({ from: NOW, to: WINDOW_END, limit: 10 })).length
+    ).toBe(1);
+  });
+
+  it("EXCLUDES a membership ending one millisecond past the far edge", async () => {
+    await seedActiveSubscription({ periodEnd: new Date(WINDOW_END.getTime() + 1) });
+    expect(
+      (await subs.listExpiringActive({ from: NOW, to: WINDOW_END, limit: 10 })).length
+    ).toBe(0);
+  });
+
+  it("EXCLUDES a cancelled membership whose period ends inside the window", async () => {
+    // The predicate is `status = 'active'`, not merely the date — the same property
+    // `listExpiredActive` is pinned on.
+    await seedCancelledSubscription({ periodEnd: new Date("2026-08-23T00:00:00.000Z") });
+    expect(
+      (await subs.listExpiringActive({ from: NOW, to: WINDOW_END, limit: 10 })).length
+    ).toBe(0);
+  });
+
+  it("pages by keyset, so a reminded membership cannot starve the one behind it", async () => {
+    await seedActiveSubscription({ periodEnd: new Date("2026-08-22T00:00:00.000Z") });
+    await seedActiveSubscription({ periodEnd: new Date("2026-08-23T00:00:00.000Z") });
+
+    const first = await subs.listExpiringActive({ from: NOW, to: WINDOW_END, limit: 1 });
+    expect(first.length).toBe(1);
+    expect(first[0].currentPeriodEnd).toEqual(new Date("2026-08-22T00:00:00.000Z"));
+
+    const second = await subs.listExpiringActive({
+      from: NOW,
+      to: WINDOW_END,
+      limit: 1,
+      after: { currentPeriodEnd: first[0].currentPeriodEnd!, id: first[0].id },
+    });
+    expect(second.length).toBe(1);
+    expect(second[0].currentPeriodEnd).toEqual(new Date("2026-08-23T00:00:00.000Z"));
+
+    const third = await subs.listExpiringActive({
+      from: NOW,
+      to: WINDOW_END,
+      limit: 1,
+      after: { currentPeriodEnd: second[0].currentPeriodEnd!, id: second[0].id },
+    });
+    expect(third.length).toBe(0);
+  });
+});

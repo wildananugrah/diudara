@@ -1,9 +1,10 @@
 /**
- * Phase 5's two CLOCK-driven passes, plus Task 10's orphan-media sweep and Phase 5b
- * Task 3's expired-membership sweep, as loops this process can run.
+ * Phase 5's two CLOCK-driven passes, plus Task 10's orphan-media sweep and Phase 5b's
+ * expired-membership sweep (Task 3) and membership-reminder pass (Task 4), as loops
+ * this process can run.
  *
  * Everything in `apps/worker` before this file was request-triggered at one remove:
- * a payment wrote an outbox row and the worker delivered it. These four are triggered
+ * a payment wrote an outbox row and the worker delivered it. These five are triggered
  * by nothing but the passage of time, which is why they need a schedule at all — and
  * why this module exists separately from `main.ts`: the composition root cannot be
  * imported by a test (it reaches `db/client.ts`), and "a throwing pass does not take
@@ -14,11 +15,13 @@
  * `SweepOrphanMedia` and `SweepExpiredMemberships` are the exceptions to "the pass
  * lives in `apps/api`" — neither has domain logic worth the name (no WIB days, no
  * grace periods, just a cutoff/predicate and a try/catch), so unlike
- * `ProcessRenewals`/`ProcessChurn` each is defined and tested entirely IN this file,
- * against structural interfaces the caller supplies — never against a database.
+ * `ProcessRenewals`/`ProcessChurn`/`RemindExpiringMembership` each is defined and
+ * tested entirely IN this file, against structural interfaces the caller supplies —
+ * never against a database.
  */
 import { redactLinks, safeErrorSummary } from "../../api/src/application/log-safety";
 import type { ProcessChurnResult } from "../../api/src/application/use-cases/process-churn";
+import type { RemindExpiringMembershipResult } from "../../api/src/application/use-cases/remind-expiring-membership";
 import type { ProcessRenewalsResult } from "../../api/src/application/use-cases/process-renewals";
 import { PollLoop, resolveIntervalMs } from "./poll-loop";
 
@@ -125,7 +128,7 @@ export function formatChurnPassLine(result: ProcessChurnResult): string | null {
 
 /**
  * One log-safe line for a pass that threw — the worker's ONLY way of logging a thrown
- * value, which is why all three loops share it.
+ * value, which is why every loop shares it.
  *
  * `safeErrorSummary` walks the cause chain and drops a failed statement's bound
  * parameters — Phase 4 found drizzle's `params:` list, which is a member's phone
@@ -135,7 +138,7 @@ export function formatChurnPassLine(result: ProcessChurnResult): string | null {
  * credential. `pass` is one of our own literals, so it needs no sanitising.
  */
 export function formatPassFailure(
-  pass: "outbox" | "renewals" | "churn" | "media" | "memberships",
+  pass: "outbox" | "renewals" | "churn" | "media" | "memberships" | "membership-reminders",
   err: unknown
 ): string {
   return `[${pass}] pass failed: ${redactLinks(safeErrorSummary(err))}`;
@@ -473,6 +476,37 @@ export function formatMembershipSweepLine(result: MembershipSweepResult): string
   );
 }
 
+/**
+ * The reminder pass's summary line, or `null` when there is nothing to say. Counts
+ * only, as above — the rows this pass walks carry a member's EMAIL and WhatsApp
+ * number, and neither may ever appear in a log line.
+ *
+ * `skipped` is here and is the count that matters most: it is the number of members
+ * this pass deliberately did not tell, because no channel could reach them. A pass
+ * with `considered>0` and `reminded=0` is a pass that reached nobody, and it is
+ * exactly what "the member was never told" looks like from outside — so this line
+ * speaks whenever the pass did anything at all, and stays silent only on a genuinely
+ * empty window.
+ */
+export function formatMembershipReminderLine(
+  result: RemindExpiringMembershipResult
+): string | null {
+  if (
+    result.considered === 0 &&
+    result.reminded === 0 &&
+    result.alreadyReminded === 0 &&
+    result.skipped === 0 &&
+    result.failed === 0
+  ) {
+    return null;
+  }
+  return (
+    `[membership-reminders] considered=${result.considered} reminded=${result.reminded} ` +
+    `already_reminded=${result.alreadyReminded} skipped=${result.skipped} ` +
+    `failed=${result.failed}`
+  );
+}
+
 /** The orphan sweep's summary line, or `null` when there is nothing to say. Counts only, as above. */
 export function formatOrphanSweepLine(result: OrphanSweepResult): string | null {
   if (
@@ -507,30 +541,38 @@ export interface OrphanSweepPass {
 export interface MembershipSweepPass {
   execute(): Promise<MembershipSweepResult>;
 }
+/** Same shape, for `RemindExpiringMembership` — or any test double with a matching `execute()`. */
+export interface MembershipReminderPass {
+  execute(): Promise<RemindExpiringMembershipResult>;
+}
 
 export interface ScheduledPassLoopsOptions {
   processRenewals: RenewalPass;
   processChurn: ChurnPass;
   processOrphanSweep: OrphanSweepPass;
   processMembershipSweep: MembershipSweepPass;
+  processMembershipReminder: MembershipReminderPass;
   intervalMs: number;
   log?: (line: string) => void;
   logError?: (line: string) => void;
 }
 
 /**
- * The renewal, churn, orphan-sweep AND membership-retirement passes as four
- * `PollLoop`s — the SAME loop the outbox uses, so they inherit both of its properties
+ * The renewal, churn, orphan-sweep, membership-retirement AND membership-reminder
+ * passes as five `PollLoop`s — the SAME loop the outbox uses, so they inherit both of its properties
  * for free: passes of one type never overlap (each pass pages through the whole
  * backlog, and a second copy of itself would be reading the same rows), and `stop()`
  * wakes the loop immediately instead of sleeping out an interval, which is what makes
  * an hour-long interval survivable under SIGTERM.
  *
- * FOUR LOOPS, not one pass that does everything, for one reason: a renewal pass that
+ * FIVE LOOPS, not one pass that does everything, for one reason: a renewal pass that
  * throws every time — a query the schema no longer matches, say — must not also stop
- * churn, the orphan sweep, or the membership sweep from running, and vice versa. Each
+ * churn, the orphan sweep, the membership sweep or the reminders from running, and
+ * vice versa. That last pairing is the one that matters most in Phase 5b: the sweep
+ * frees a lapsed member to buy again and the reminder is what tells them to, so a
+ * shared failure would silently disable renewal in both directions at once. Each
  * loop's `onError` is its own, so a failing pass costs its own retries and nothing
- * else's. All four share an interval because they share a cadence — none of them is
+ * else's. All five share an interval because they share a cadence — none of them is
  * latency-sensitive the way the outbox's 5-second poll is — and they never share a
  * failure. The membership sweep is Task 3's hygiene pass (spec — Phase 5b): a member
  * who never returns must not sit `active` forever, but nothing about noticing that is
@@ -539,10 +581,10 @@ export interface ScheduledPassLoopsOptions {
  * `apps/worker/src/main.ts`'s own docstring for the same reasoning about the media
  * sweep.
  *
- * Both sweeps' per-row failures never reach this level at all: `SweepOrphanMedia` and
- * `SweepExpiredMemberships` each catch them internally (see their own docstrings), so
- * `onError` here only fires on something the pass-level query itself could not
- * survive, same as renewals/churn.
+ * Per-row failures never reach this level at all: `SweepOrphanMedia`,
+ * `SweepExpiredMemberships` and `RemindExpiringMembership` each catch them internally
+ * (see their own docstrings), so `onError` here only fires on something the
+ * pass-level query itself could not survive, same as renewals/churn.
  *
  * No loop is started here. The caller runs them alongside the outbox loop and decides
  * when they stop.
@@ -552,6 +594,7 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
   churnLoop: PollLoop;
   orphanSweepLoop: PollLoop;
   membershipSweepLoop: PollLoop;
+  membershipReminderLoop: PollLoop;
 } {
   const log = options.log ?? ((line: string) => console.log(line));
   const logError = options.logError ?? ((line: string) => console.error(line));
@@ -596,5 +639,22 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
     onError: (err) => logError(formatPassFailure("memberships", err)),
   });
 
-  return { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop };
+  const membershipReminderLoop = new PollLoop({
+    intervalMs: options.intervalMs,
+    poll: async () => {
+      const line = formatMembershipReminderLine(
+        await options.processMembershipReminder.execute()
+      );
+      if (line !== null) log(line);
+    },
+    onError: (err) => logError(formatPassFailure("membership-reminders", err)),
+  });
+
+  return {
+    renewalLoop,
+    churnLoop,
+    orphanSweepLoop,
+    membershipSweepLoop,
+    membershipReminderLoop,
+  };
 }

@@ -149,6 +149,32 @@ export interface UserSubscriptionRepositoryPort {
    * on it in turn. `limit` bounds a single pass.
    */
   listExpiredActive(now: Date, limit: number): Promise<UserSubscriptionRow[]>;
+  /**
+   * ACTIVE memberships whose period ends inside the reminder window — what Task
+   * 4's `RemindExpiringMembership` pass walks so a member is told BEFORE their
+   * membership ends rather than discovering it by losing access.
+   *
+   * `from` is EXCLUSIVE and `to` is INCLUSIVE, which is what keeps this method and
+   * `listExpiredActive` from ever returning the same row: `from` is `now`, and a
+   * membership whose period has already lapsed (`current_period_end <= now`)
+   * belongs to the retirement sweep, not to a warning about something that has
+   * already happened.
+   *
+   * KEYSET-PAGED, and that is load-bearing rather than tidy. A reminded membership
+   * does NOT leave this result set — the claim lives in `membership_reminder`, not
+   * in a status this query could filter on — so a caller that simply took the first
+   * `limit` rows every pass would return the same rows for ever and never reach
+   * anybody behind them. `ProcessRenewals` measured exactly that (a limit of 1 and
+   * two due members: the second was never reminded, and no pass ever would have).
+   * `after` is strictly-greater in the SAME order the query sorts by, so the walk
+   * terminates and no row is visited twice.
+   */
+  listExpiringActive(input: {
+    from: Date;
+    to: Date;
+    limit: number;
+    after?: { currentPeriodEnd: Date; id: string };
+  }): Promise<UserSubscriptionRow[]>;
   /** Task 8's membership check: is this subscriber an active member of this owner. */
   findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null>;
   createTransaction(input: {

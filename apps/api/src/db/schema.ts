@@ -1103,3 +1103,91 @@ export const userTransactions = pgTable("user_transaction", {
   paidAt: timestamp("paid_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Task 4 of Phase 5b: the "remind a member once before their membership ends"
+ * claim.
+ *
+ * THIS TABLE IS A LOCK FIRST AND A RECORD SECOND, and the order matters. Its
+ * reason to exist is the unique index below: the reminder pass INSERTS here as
+ * the act of claiming the right to send, and the database decides whether that
+ * claim is the first one. A pass that runs twice — two workers, a restart
+ * mid-pass, an hourly loop crossing a three-day reminder window twenty-four
+ * times a day — then messages the member exactly once.
+ *
+ * Doing it the other way round (select, decide, send, insert) is a TOCTOU under
+ * READ COMMITTED. `renewal_reminder`'s own docstring records the same shape and
+ * the same measurement (Phase 4's two live invite links for one paying member);
+ * Phase 5b has now reached "the database must arbitrate" in four separate tasks.
+ *
+ * WHY THERE IS NO `stage` COLUMN, unlike `renewal_reminder`. That table's key is
+ * `(subscription_id, stage)` because a community subscription is a LONG-LIVED row
+ * that lapses, is chased four times, renews, and can lapse again — so its claims
+ * have to be cleared on renewal by an explicit delete. A `user_subscription` never
+ * renews: there is no recurring charge anywhere in this system, so "renewal" means
+ * "buy again", and buying again retires the old row (`status = 'expired'`) and
+ * INSERTS A NEW ONE with a new id. One membership, one ending, one reminder — and a
+ * member who buys again gets a fresh row here for their fresh membership, with no
+ * cleanup pass to forget to write.
+ */
+export const membershipReminders = pgTable(
+  "membership_reminder",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userSubscriptionId: uuid("user_subscription_id").notNull(),
+    /**
+     * What became of the claim — the audit trail this table doubles as, because
+     * `activity_log` cannot serve here: its `community_id` is `NOT NULL` and
+     * references `community`, one of the untouchable `/dashboard/*` tables, and an
+     * `app_user` membership has no community at all.
+     *
+     * One of `MEMBERSHIP_REMINDER_OUTCOMES` in
+     * `application/ports/membership-reminder-repository.port.ts`; a varchar rather
+     * than an enum, for the same reason `user_subscription.status` is.
+     *
+     * IT DEFAULTS TO `claimed` AND THAT IS THE POINT: the claim is written before
+     * anything is sent, so `claimed` is what a row says when the process died
+     * between claiming and delivering. `no_channel` is the deliberate skip — "the
+     * member was never told" is the failure mode this whole pass exists to prevent,
+     * so the one case where it is intentional has to be visible rather than look
+     * identical to a pass that reached everybody.
+     */
+    outcome: varchar("outcome", { length: 24 }).notNull().default("claimed"),
+    /**
+     * Which channels actually took the message, comma-joined (`email`,
+     * `email,whatsapp`, `whatsapp`), or NULL when none did. Counts and channel
+     * names only — never an address, never a number, never the message body. Read
+     * by an operator asking "reached by what", which the outcome alone cannot say.
+     */
+    channels: varchar("channels", { length: 32 }),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // NAMED EXPLICITLY rather than left to drizzle's `references(...)` shorthand,
+    // which derives `membership_reminder_user_subscription_id_user_subscription_id_fk`
+    // — 64 characters, one past Postgres's identifier limit, so every migration of a
+    // fresh database emitted a `will be truncated` NOTICE and the constraint's real
+    // name differed from the one in the migration file.
+    foreignKey({
+      columns: [table.userSubscriptionId],
+      foreignColumns: [userSubscriptions.id],
+      name: "membership_reminder_subscription_fk",
+    }),
+    /**
+     * The remind-once mechanism, and it must be IN THE DATABASE rather than merely
+     * in this file: drizzle enforces nothing at runtime, so a definition that never
+     * reached Postgres would let a second send through in silence while the schema
+     * still looked correct. A missing — or merely non-unique — index turns "claim
+     * before send" into "send twice" and NOTHING FAILS.
+     *
+     * `schema-phase5b.test.ts` therefore reads `pg_indexes` for this name and
+     * asserts UNIQUE, and `drizzle-membership-reminder.repository.test.ts` proves
+     * the arbitration by making five callers claim the same subscription at once.
+     *
+     * Total, not partial: every membership is claimed at most once, ever, and there
+     * is no legitimate second send for the same row (see the table docstring for
+     * why a re-lapse is a different row).
+     */
+    uniqueIndex("membership_reminder_subscription_unique").on(table.userSubscriptionId),
+  ]
+);

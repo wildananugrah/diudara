@@ -247,6 +247,20 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
         .slice(0, limit)
         .map((r) => ({ ...r }));
     },
+    async listExpiringActive({ from, to, limit }) {
+      // `StartUserSubscription` never reads it; present so this object still satisfies
+      // the port, and honest so it cannot silently disagree with the real query.
+      return subscriptions
+        .filter(
+          (r) =>
+            r.status === "active" &&
+            r.currentPeriodEnd !== null &&
+            r.currentPeriodEnd > from &&
+            r.currentPeriodEnd <= to
+        )
+        .slice(0, limit)
+        .map((r) => ({ ...r }));
+    },
     async findActiveFor(subscriberId, ownerId) {
       const row = subscriptions.find(
         (r) => r.subscriberId === subscriberId && r.ownerId === ownerId && r.status === "active"

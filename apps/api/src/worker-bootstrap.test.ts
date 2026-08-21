@@ -10,11 +10,16 @@ import {
   joinRequests,
   members,
   membershipTiers,
+  appUsers,
+  membershipReminders,
   outbox,
   renewalReminders,
   subscriptions,
+  userSubscriptions,
+  userTiers,
 } from "./db/schema";
 import { resetDatabase } from "./db/test-helpers";
+import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import {
@@ -325,6 +330,51 @@ function fakeNotifierOf(worker: ReturnType<typeof bootstrapWorker>): FakeMessagi
  * confirmation page that was unreachable for a whole phase because no test
  * checked that an environment variable reached the composition root.
  */
+/**
+ * An ACTIVE `user_subscription` (Phase 5a/5b's own membership table, nothing to do
+ * with `/dashboard/*`'s `subscription`) whose period ends `days` from now — i.e.
+ * exactly what `RemindExpiringMembership` warns a member about.
+ *
+ * The subscriber has a `whatsapp_number`, so both channels are in play; the column is
+ * nullable and `remind-expiring-membership.test.ts` covers the other case.
+ */
+async function seedMembershipEndingInDays(days: number) {
+  const [owner] = await db
+    .insert(appUsers)
+    .values({
+      handle: "wildanbw",
+      email: "wildanbw@example.com",
+      passwordHash: "x",
+      displayName: "Wildan",
+    })
+    .returning();
+  const [subscriber] = await db
+    .insert(appUsers)
+    .values({
+      handle: "rinabw",
+      email: "rinabw@example.com",
+      whatsappNumber: "6281200000000",
+      passwordHash: "x",
+      displayName: "Rina",
+    })
+    .returning();
+  const [tier] = await db
+    .insert(userTiers)
+    .values({ ownerId: owner.id, name: "Anggota", priceAmount: 50_000, billingCycle: "monthly" })
+    .returning();
+  const [subscription] = await db
+    .insert(userSubscriptions)
+    .values({
+      subscriberId: subscriber.id,
+      tierId: tier.id,
+      ownerId: owner.id,
+      status: "active",
+      currentPeriodEnd: new Date(Date.now() + days * 86_400_000),
+    })
+    .returning();
+  return { owner, subscriber, tier, subscription };
+}
+
 describe("bootstrapWorker", () => {
   it("dispatches a real grant_access row to GrantChannelAccess, not to nothing", async () => {
     const repository = new DrizzleOutboxRepository(db);
@@ -652,6 +702,67 @@ describe("bootstrapWorker", () => {
     expect(updated.status).toBe("churned");
     const [row] = await db.select().from(outbox);
     expect(row.eventType).toBe(OUTBOX_REVOKE_SUBSCRIPTION_ACCESS);
+  });
+
+  /**
+   * Task 4 of Phase 5b. There is no recurring charge anywhere in this system, so a
+   * membership does not renew — it ends, and the member buys again. This pass is the
+   * only thing that tells them to, and until it is CONSTRUCTED here it is dead code
+   * reachable only from a test: exactly the state Phase 5's Task 7 found
+   * `ProcessRenewals` in.
+   */
+  it("constructs a reminder pass that actually reminds a real expiring membership", async () => {
+    const { subscription, subscriber } = await seedMembershipEndingInDays(2);
+    const worker = bootstrapWorker();
+
+    const result = await worker.remindExpiringMemberships.execute();
+
+    expect(result.considered).toBe(1);
+    expect(result.reminded).toBe(1);
+    expect(result.skipped).toBe(0);
+    // BOTH channels, because this member has a number on file — and the claim row
+    // says so, which is the audit trail an operator reads.
+    const [claim] = await db
+      .select()
+      .from(membershipReminders)
+      .where(eq(membershipReminders.userSubscriptionId, subscription.id));
+    expect(claim.outcome).toBe("sent");
+    expect(claim.channels).toBe("email,whatsapp");
+    const email = worker.email;
+    expect(email).toBeInstanceOf(FakeEmailAdapter);
+    expect((email as FakeEmailAdapter).sent).toHaveLength(1);
+    expect((email as FakeEmailAdapter).sent[0].to).toBe(subscriber.email);
+    expect(fakeNotifierOf(worker).notifications).toHaveLength(1);
+  });
+
+  it("builds the reminder's link from APP_BASE_URL, in THIS root", async () => {
+    // The same wiring `send_renewal_reminder` is pinned on above, for the same reason:
+    // a hardcoded host would send every member of every deployment to one developer's
+    // laptop, and no test on that laptop would notice.
+    await seedMembershipEndingInDays(2);
+    const worker = bootstrapWorker();
+
+    await worker.remindExpiringMemberships.execute();
+
+    const expected = resolveAppBaseUrl({
+      appBaseUrl: process.env.APP_BASE_URL,
+      nodeEnv: process.env.NODE_ENV,
+    });
+    expect((worker.email as FakeEmailAdapter).sent[0].body).toContain(`${expected}/@`);
+  });
+
+  it("reminds a lapsing membership exactly once, however many times the loop runs", async () => {
+    await seedMembershipEndingInDays(2);
+    const worker = bootstrapWorker();
+
+    const first = await worker.remindExpiringMemberships.execute();
+    const second = await worker.remindExpiringMemberships.execute();
+
+    expect(first.reminded).toBe(1);
+    expect(second.reminded).toBe(0);
+    expect(second.alreadyReminded).toBe(1);
+    expect((worker.email as FakeEmailAdapter).sent).toHaveLength(1);
+    expect(fakeNotifierOf(worker).notifications).toHaveLength(1);
   });
 
   it("injects the REAL clock into the passes, not a fixture", () => {
