@@ -3341,6 +3341,11 @@ describe("GET /users/me/subscribers (Task 6 of Phase 5b)", () => {
     });
   }
 
+  /** Same route, with a caller-supplied query string appended — Fix round 1, M-2. */
+  function getSubscribersWithQuery(a: ReturnType<typeof app>, token: string, query: string) {
+    return a.request(`/users/me/subscribers?${query}`, { headers: authed(token) });
+  }
+
   it("requires a session: a signed-out caller is a 401", async () => {
     const a = app();
 
@@ -3429,6 +3434,40 @@ describe("GET /users/me/subscribers (Task 6 of Phase 5b)", () => {
     // rina gets HER OWN list back — which is empty, since nobody subscribes
     // to her — never wildan's, and never a 403 that would confirm wildan
     // even has a list. There is no way for rina to ask for wildan's at all.
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ subscribers: [] });
+  });
+
+  /**
+   * Fix round 1, M-2 (review): the route's owner-only guarantee held only
+   * "by construction" — `deps.listSubscribers.execute(c.get("userId"))` has
+   * exactly one call site and no parameter for a different id — but nothing
+   * in this suite pinned that a REFACTOR preserving all 8 prior tests could
+   * not quietly widen it. The reviewer proved this by mutating the handler to
+   * `c.req.query("ownerId") ?? c.get("userId")`: every existing test, this
+   * one's predecessor included, stayed green because none of them ever SENT
+   * an `ownerId`.
+   *
+   * This test does. `rina` — signed in, a genuine session — asks for
+   * `wildan`'s subscribers by id, explicitly, on the query string. The route
+   * must still answer with rina's OWN list (empty), never wildan's (which
+   * holds `bob`) — proving the server never reads a caller-supplied owner
+   * identifier from anywhere on the request, not merely that ordinary callers
+   * happen not to send one.
+   */
+  it("OWNER-ONLY: a caller-supplied ?ownerId= is ignored — the session is the only source of identity", async () => {
+    const a = app();
+    const owner = await sellingOwner(a); // wildan
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, FUTURE);
+    const rina = await account(a, { handle: "rina", email: "rina@example.com" });
+
+    const res = await getSubscribersWithQuery(a, rina.token, `ownerId=${owner.userId}`);
+    const body = await res.json();
+
+    // Still rina's own (empty) list — never wildan's, despite naming his id
+    // explicitly. A route that honoured the query parameter would return
+    // bob here instead.
     expect(res.status).toBe(200);
     expect(body).toEqual({ subscribers: [] });
   });

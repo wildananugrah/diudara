@@ -123,6 +123,22 @@ describe("SubscriberList (Task 6 of Phase 5b)", () => {
    * `handle`/`displayName`/`since` off each row and renders nothing else, so
    * an extra field on the response could not reach the screen through this
    * path.
+   *
+   * Fix round 1, M-1 (review): the ORIGINAL version of this test asserted
+   * `queryAllByText("bob@example.com").length === 0`, which uses an EXACT
+   * text match against each element's own normalised text — so a component
+   * rendering `JSON.stringify(subscriber)` inside one `<span>` (email and
+   * all) left every element's text as one long JSON string, which does not
+   * exactly equal `"bob@example.com"`, and the assertion passed anyway. The
+   * reviewer proved this by planting exactly that mutation; all 6 tests in
+   * this file stayed green.
+   *
+   * Fixed by reading `textContent` off the list container — a STRING, never
+   * a DOM node, on either side of the assertion (`no-hanging-dom-assertions
+   * .test.ts`) — and asserting a SUBSTRING check in both directions: the
+   * three real fields are present, and a planted email/whatsapp number is
+   * absent. `.not.toContain(...)` sees an email embedded anywhere inside a
+   * longer string; `queryAllByText`'s exact matcher never could.
    */
   it("renders only handle, displayName, and since — an extra field on the wire cannot reach the screen", async () => {
     mockApi(() =>
@@ -141,8 +157,17 @@ describe("SubscriberList (Task 6 of Phase 5b)", () => {
 
     render(<SubscriberList now={NOW} />);
 
-    await screen.findByText("Bob");
-    expect(screen.queryAllByText("bob@example.com").length).toBe(0);
-    expect(screen.queryAllByText("+628123456789").length).toBe(0);
+    await screen.findByTestId("subscriber-list");
+    const listText = screen.getByTestId("subscriber-list").textContent ?? "";
+
+    // Present: the three fields the projection actually carries.
+    expect(listText).toContain("Bob");
+    expect(listText).toContain("bob");
+    expect(listText).toContain("Agu");
+
+    // Absent: an email or WhatsApp number, wherever in the markup it might
+    // have leaked — not merely as an exact standalone text node.
+    expect(listText).not.toContain("bob@example.com");
+    expect(listText).not.toContain("+628123456789");
   });
 });
