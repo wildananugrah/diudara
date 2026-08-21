@@ -565,8 +565,12 @@ test("a locked post shows the caption, the count, and the invitation", () => {
 
 test("the lock links to the author's profile, where the offer lives", () => {
   render(<PostCard post={lockedPost} />);
-  expect(screen.getByRole("link", { name: /Jadi anggota untuk melihat/ }).getAttribute("href"))
-    .toBe("/rina");
+  // `/@rina`, not `/rina` — every in-app profile link carries the `@`, and
+  // `App.tsx:136` explains why the route is `path="/:handleParam"` rather than
+  // `path="/@:handle"`. Match the link name EXACTLY: a `toContain` or a regex
+  // accepts a superstring, so appended copy would slip past.
+  expect(screen.getByRole("link", { name: "Jadi anggota untuk melihat" }).getAttribute("href"))
+    .toBe("/@rina");
 });
 
 test("an unlocked members-only post renders its images, not the lock", () => { /* … */ });
