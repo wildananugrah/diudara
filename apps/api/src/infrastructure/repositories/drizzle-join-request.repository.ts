@@ -146,10 +146,14 @@ export class DrizzleJoinRequestRepository implements JoinRequestRepositoryPort {
    * the ONLY join the schema offers. It is deterministic wherever it resolves —
    * `app_user.email` is NOT NULL and unique, `creator.email` is unique-when-not-
    * null (`creator_email_unique`, partial) — so it matches at most one account.
-   * Matched with plain `=`, case-sensitively, because that is already how both
-   * `DrizzleUserRepository.findByEmail` and `DrizzleCreatorRepository.findByEmail`
-   * decide which account an address belongs to; a looser join here could reach
-   * an account the owner cannot log into.
+   * Matched with plain `=`, case-sensitively, and that is not a hazard here:
+   * BOTH sides are already lowercased at write time by `normalizeEmail` —
+   * `RegisterCreator` and `RegisterUser` each call it before inserting — and
+   * both `DrizzleUserRepository.findByEmail` and
+   * `DrizzleCreatorRepository.findByEmail` then compare with the same plain
+   * `=`. So this join agrees exactly with the two logins it sits between; a
+   * looser one (`ilike`, a `lower()` on both sides) could reach an account the
+   * owner cannot actually log into.
    *
    * LEFT, never INNER: a creator with a `whatsapp_number` and no `app_user`
    * account is being notified TODAY, and an INNER JOIN would drop their row
