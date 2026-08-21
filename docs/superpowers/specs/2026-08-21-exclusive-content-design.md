@@ -80,8 +80,9 @@ After a feed page (or a profile's posts, or a single post) loads its rows, **one
 *of these authors, which is this viewer an active member of?* One indexed query per page, whatever the
 page size.
 
-The query is one port method — `activeMembershipsAmong(viewerId, authorIds) -> Set<authorId>` — and
-it answers for the whole page at once. It reads the same `status = 'active' AND current_period_end >
+The query is one port method — `listActiveOwnersAmong(subscriberId, ownerIds, now) -> string[]` — and
+it answers for the whole page at once. It takes an explicit `now` and returns an array, matching its
+neighbour `listActiveSubscribers(ownerId, now)`; the use case builds the Set. It reads the same `status = 'active' AND current_period_end >
 now()` predicate `isMemberOf` does, against the same partial unique index, **without changing
 `isMemberOf` itself**.
 
