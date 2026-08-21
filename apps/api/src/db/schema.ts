@@ -1042,6 +1042,37 @@ export const userSubscriptions = pgTable(
       .on(table.subscriberId, table.ownerId)
       .where(sql`${table.status} = 'pending'`),
     index("user_subscription_owner_idx").on(table.ownerId),
+    /**
+     * Task 3 of Phase 5b (the retirement sweep): the covering index Task 1's review
+     * flagged and deliberately deferred, because Task 1 was explicitly a no-migration
+     * task and the table held zero rows either way. Task 3 is the task that actually
+     * SCANS through `listExpiredActive` every hour — see
+     * `apps/worker/src/scheduled-passes.ts`'s `SweepExpiredMemberships` — so it is the
+     * one that owns the cost of not having this.
+     *
+     * COLUMN ORDER MIRRORS `subscription_status_next_billing_date_idx` (migration
+     * 0012, Phase 5's own hourly passes): `status` leads because the query's equality
+     * against it (`status = 'active'`) is what makes the index selective at all — most
+     * rows in this table are not `active` forever, they pass through it — and
+     * `current_period_end` trails because the query's other predicate on it is a
+     * RANGE (`<= now`), which only a trailing column can serve. Leading with the range
+     * column instead would make the index useless for the equality filter.
+     *
+     * NOT PARTIAL. A partial index `WHERE status = 'active'` would look tighter, but
+     * this project already carries two partial indexes on this exact table
+     * (`user_subscription_one_active`, `user_subscription_one_pending`) whose WHERE
+     * clauses are load-bearing security/correctness properties, not query-planner
+     * fuel — mixing a third, purely-for-speed partial index into the same list of
+     * `(table) => [...]` entries is exactly the kind of place this project has
+     * previously lost a day to drizzle silently dropping a `.where(...)` modifier
+     * nobody caught. A plain composite index needs no such trust: its presence and its
+     * column order are both directly legible from `pg_indexes`, which is what
+     * `schema-phase5b.test.ts` reads rather than trusting this comment.
+     */
+    index("user_subscription_status_current_period_end_idx").on(
+      table.status,
+      table.currentPeriodEnd
+    ),
   ]
 );
 

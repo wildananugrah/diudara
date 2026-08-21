@@ -3,11 +3,13 @@ import {
   createScheduledPassLoops,
   DEFAULT_RENEWAL_INTERVAL_MS,
   formatChurnPassLine,
+  formatMembershipSweepLine,
   formatOrphanSweepLine,
   formatPassFailure,
   formatRenewalPassLine,
   ORPHAN_SWEEP_WINDOW_MS,
   resolveRenewalIntervalMs,
+  SweepExpiredMemberships,
   SweepOrphanMedia,
 } from "./scheduled-passes";
 
@@ -41,8 +43,15 @@ const NOTHING_HAPPENED_SWEEP = {
   failed: 0,
 };
 
+const NOTHING_HAPPENED_MEMBERSHIP_SWEEP = {
+  considered: 0,
+  retired: 0,
+  skipped: 0,
+  failed: 0,
+};
+
 /** Counts, an optional stage-free label, `=` and spaces. Nothing else may appear. */
-const COUNTS_ONLY = /^\[(renewals|churn|media)\] (?:[a-z_]+=\d+ ?)+$/;
+const COUNTS_ONLY = /^\[(renewals|churn|media|memberships)\] (?:[a-z_]+=\d+ ?)+$/;
 
 describe("formatRenewalPassLine", () => {
   it("says nothing when the pass had nothing to do", () => {
@@ -138,6 +147,32 @@ describe("formatOrphanSweepLine", () => {
   });
 });
 
+describe("formatMembershipSweepLine", () => {
+  it("says nothing when the pass had nothing to do", () => {
+    expect(formatMembershipSweepLine(NOTHING_HAPPENED_MEMBERSHIP_SWEEP)).toBeNull();
+  });
+
+  it("reports every count when the pass did something", () => {
+    const line = formatMembershipSweepLine({ considered: 6, retired: 3, skipped: 1, failed: 2 });
+
+    expect(line).toBe("[memberships] considered=6 retired=3 skipped=1 failed=2");
+  });
+
+  it("speaks up when every row in the pass failed to retire", () => {
+    // `considered>0, retired=0` is the shape of a pass finding lapsed memberships and
+    // failing to retire them — the exact silent-failure mode this task exists to prevent.
+    expect(
+      formatMembershipSweepLine({ considered: 2, retired: 0, skipped: 0, failed: 2 })
+    ).toContain("failed=2");
+  });
+
+  it("emits counts and nothing else — no subscriber id, no owner id", () => {
+    expect(
+      formatMembershipSweepLine({ considered: 1, retired: 1, skipped: 0, failed: 0 })
+    ).toMatch(COUNTS_ONLY);
+  });
+});
+
 describe("formatPassFailure", () => {
   it("drops the bound parameters of a failed query", () => {
     // Exactly what Phase 4 found in the worker's log: drizzle formats a query
@@ -183,6 +218,12 @@ describe("formatPassFailure", () => {
     const line = formatPassFailure("media", new Error("bucket unreachable"));
 
     expect(line.startsWith("[media] pass failed: ")).toBe(true);
+  });
+
+  it("is wired for the membership sweep's own tag", () => {
+    const line = formatPassFailure("memberships", new Error("connection reset"));
+
+    expect(line.startsWith("[memberships] pass failed: ")).toBe(true);
   });
 });
 
@@ -418,6 +459,253 @@ describe("SweepOrphanMedia", () => {
   });
 });
 
+/**
+ * In-memory `ExpiredMembershipRepository`, for `SweepExpiredMemberships`'s own tests —
+ * no database, same reason as `FakeOrphanMediaRepository` above. `listExpiredActive`
+ * re-implements the same two conditions Task 1's real query enforces (`status =
+ * 'active'`, `current_period_end <= now`), which is what lets the boundary be pinned
+ * here without touching `DrizzleUserSubscriptionRepository` at all — that repository's
+ * own test already pins the SQL side. `retireExpired` re-implements the CONDITIONAL
+ * UPDATE, not a bare status flip, so a race that retires the pair between the list and
+ * this row's turn is observable here exactly as it is against the real database.
+ */
+class FakeExpiredMembershipRepository {
+  readonly rows = new Map<
+    string,
+    { subscriberId: string; ownerId: string; status: string; currentPeriodEnd: Date }
+  >();
+  readonly failFor = new Set<string>();
+
+  seed(row: {
+    id: string;
+    subscriberId: string;
+    ownerId: string;
+    status: string;
+    currentPeriodEnd: Date;
+  }): void {
+    this.rows.set(row.id, {
+      subscriberId: row.subscriberId,
+      ownerId: row.ownerId,
+      status: row.status,
+      currentPeriodEnd: row.currentPeriodEnd,
+    });
+  }
+
+  statusOf(id: string): string | undefined {
+    return this.rows.get(id)?.status;
+  }
+
+  async listExpiredActive(
+    now: Date,
+    limit: number
+  ): Promise<{ id: string; subscriberId: string; ownerId: string }[]> {
+    return [...this.rows.entries()]
+      .filter(([, row]) => row.status === "active" && row.currentPeriodEnd.getTime() <= now.getTime())
+      .sort((a, b) => a[1].currentPeriodEnd.getTime() - b[1].currentPeriodEnd.getTime())
+      .slice(0, limit)
+      .map(([id, row]) => ({ id, subscriberId: row.subscriberId, ownerId: row.ownerId }));
+  }
+
+  async retireExpired(subscriberId: string, ownerId: string, now: Date): Promise<boolean> {
+    const entry = [...this.rows.entries()].find(
+      ([, row]) => row.subscriberId === subscriberId && row.ownerId === ownerId
+    );
+    if (entry === undefined) return false;
+    const [id, row] = entry;
+    if (this.failFor.has(id)) {
+      // The real adapter's `retireExpired` is a single UPDATE against a live
+      // connection — a thrown error here stands in for the database being briefly
+      // unreachable, or the statement itself failing.
+      throw new Error(`retireExpired(${id}) failed: connection reset`);
+    }
+    if (row.status !== "active" || row.currentPeriodEnd.getTime() > now.getTime()) return false;
+    row.status = "expired";
+    return true;
+  }
+
+  /** The race, as a test can spell it: another caller retires this pair first — a
+   * concurrent sweep pass, or Task 2's lazy retirement on the purchase path. */
+  retireExternally(id: string): void {
+    const row = this.rows.get(id);
+    if (row !== undefined) row.status = "expired";
+  }
+}
+
+describe("SweepExpiredMemberships", () => {
+  const NOW = new Date("2026-08-18T12:00:00.000Z");
+  const secondsFromNow = (s: number) => new Date(NOW.getTime() + s * 1000);
+
+  it("retires an active membership one second past its period end", async () => {
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "sub-1",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-1),
+    });
+
+    const sweep = new SweepExpiredMemberships(subscriptions, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(subscriptions.statusOf("sub-1")).toBe("expired");
+    expect(result).toEqual({ considered: 1, retired: 1, skipped: 0, failed: 0 });
+  });
+
+  /**
+   * THE BOUNDARY, the other direction. A sweep that retired every active membership
+   * (or one that flipped the comparison) would pass every test above and this test
+   * catches it: one second BEFORE the period ends, the membership is still live and
+   * must not be touched.
+   */
+  it("does NOT retire an active membership one second before its period end", async () => {
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "sub-1",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(1),
+    });
+
+    const sweep = new SweepExpiredMemberships(subscriptions, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(subscriptions.statusOf("sub-1")).toBe("active");
+    expect(result).toEqual({ considered: 0, retired: 0, skipped: 0, failed: 0 });
+  });
+
+  it("leaves a live membership untouched however long ago it was created, as long as its period has not ended", async () => {
+    // "Live" here means "not yet lapsed" — a membership bought years ago with a
+    // period end far in the future must be untouched, exactly like a membership
+    // bought a minute ago whose period has not ended either.
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "sub-old",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: new Date(NOW.getTime() + 365 * 24 * 60 * 60_000),
+    });
+
+    const sweep = new SweepExpiredMemberships(subscriptions, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(subscriptions.statusOf("sub-old")).toBe("active");
+    expect(result).toEqual({ considered: 0, retired: 0, skipped: 0, failed: 0 });
+  });
+
+  it("counts a membership raced away by a concurrent retirement as skipped, not failed", async () => {
+    // The same race `SweepOrphanMedia` guards against, one layer down: `listExpiredActive`
+    // produced this id, and something else — another sweep pass, or Task 2's lazy
+    // retirement on the purchase path — retired the pair before this row's turn.
+    // `retireExpired`'s conditional UPDATE answers `false`, not an error.
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "raced",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-10),
+    });
+    subscriptions.seed({
+      id: "real",
+      subscriberId: "budi",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-9),
+    });
+
+    const listSpy = subscriptions.listExpiredActive.bind(subscriptions);
+    subscriptions.listExpiredActive = async (now, limit) => {
+      const page = await listSpy(now, limit);
+      subscriptions.retireExternally("raced");
+      return page;
+    };
+
+    const sweep = new SweepExpiredMemberships(subscriptions, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(subscriptions.statusOf("real")).toBe("expired");
+    expect(result).toEqual({ considered: 2, retired: 1, skipped: 1, failed: 0 });
+  });
+
+  it("does not abort the pass when one row's retireExpired throws, and that row is left active for the next pass", async () => {
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "a",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-30),
+    });
+    subscriptions.seed({
+      id: "b",
+      subscriberId: "budi",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-20),
+    });
+    subscriptions.seed({
+      id: "c",
+      subscriberId: "citra",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-10),
+    });
+    subscriptions.failFor.add("b");
+
+    const errors: string[] = [];
+    const sweep = new SweepExpiredMemberships(subscriptions, {
+      now: () => NOW,
+      logError: (line) => errors.push(line),
+    });
+    const result = await sweep.execute();
+
+    expect(result).toEqual({ considered: 3, retired: 2, skipped: 0, failed: 1 });
+    expect(subscriptions.statusOf("a")).toBe("expired");
+    expect(subscriptions.statusOf("c")).toBe("expired");
+    // THE row whose retireExpired threw is left ACTIVE — still expired-by-date, so the
+    // very next pass finds it again and retries it.
+    expect(subscriptions.statusOf("b")).toBe("active");
+    // …and the failure is VISIBLE, not just absorbed into a count nobody reads.
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("b");
+  });
+
+  it("does not loop forever when every row in a page fails", async () => {
+    // batchSize matches the number of failing rows exactly, so without a no-progress
+    // guard the pass would re-fetch the identical page forever: neither row is ever
+    // retired, so listExpiredActive keeps returning both.
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "x",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-30),
+    });
+    subscriptions.seed({
+      id: "y",
+      subscriberId: "budi",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-20),
+    });
+    subscriptions.failFor.add("x");
+    subscriptions.failFor.add("y");
+
+    const sweep = new SweepExpiredMemberships(subscriptions, {
+      now: () => NOW,
+      batchSize: 2,
+      logError: () => undefined,
+    });
+    const result = await sweep.execute();
+
+    expect(result).toEqual({ considered: 2, retired: 0, skipped: 0, failed: 2 });
+  });
+});
+
 describe("resolveRenewalIntervalMs", () => {
   it("defaults when the variable is unset or blank", () => {
     expect(resolveRenewalIntervalMs(undefined)).toBe(DEFAULT_RENEWAL_INTERVAL_MS);
@@ -470,21 +758,29 @@ describe("createScheduledPassLoops", () => {
     const processRenewals = fakePass({ ...NOTHING_HAPPENED_RENEWAL, reminded: 1 });
     const processChurn = fakePass({ ...NOTHING_HAPPENED_CHURN, churned: 1 });
     const processOrphanSweep = fakePass({ ...NOTHING_HAPPENED_SWEEP, deleted: 1 });
+    const processMembershipSweep = fakePass({ ...NOTHING_HAPPENED_MEMBERSHIP_SWEEP, retired: 1 });
     const lines: string[] = [];
-    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
+    const { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop } = createScheduledPassLoops({
       processRenewals,
       processChurn,
       processOrphanSweep,
+      processMembershipSweep,
       intervalMs: 60_000,
       log: (line) => lines.push(line),
     });
 
-    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+    ]);
     await waitUntil(
       () =>
         processRenewals.state.calls > 0 &&
         processChurn.state.calls > 0 &&
-        processOrphanSweep.state.calls > 0,
+        processOrphanSweep.state.calls > 0 &&
+        processMembershipSweep.state.calls > 0,
       "the first pass of each type"
     );
     // Long enough that a 5s-ish interval — or no interval at all — would show up
@@ -493,10 +789,12 @@ describe("createScheduledPassLoops", () => {
     expect(processRenewals.state.calls).toBe(1);
     expect(processChurn.state.calls).toBe(1);
     expect(processOrphanSweep.state.calls).toBe(1);
+    expect(processMembershipSweep.state.calls).toBe(1);
 
     renewalLoop.stop();
     churnLoop.stop();
     orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
     const finished = await Promise.race([
       running.then(() => "stopped"),
       Bun.sleep(2_000).then(() => "still sleeping in the interval"),
@@ -507,6 +805,7 @@ describe("createScheduledPassLoops", () => {
       "[renewals] considered=0 reminded=1 already_reminded=0 skipped=0 past_due=0",
       "[churn] considered=0 churned=1 already_churned=0 revocations_queued=0 skipped_revocation=0",
       "[media] considered=0 deleted=1 skipped=0 failed=0",
+      "[memberships] considered=0 retired=1 skipped=0 failed=0",
     ]);
   });
 
@@ -518,27 +817,36 @@ describe("createScheduledPassLoops", () => {
     processRenewals.state.throwOnCall = 1;
     const processChurn = fakePass(NOTHING_HAPPENED_CHURN);
     const processOrphanSweep = fakePass(NOTHING_HAPPENED_SWEEP);
+    const processMembershipSweep = fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP);
     const errors: string[] = [];
-    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
+    const { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop } = createScheduledPassLoops({
       processRenewals,
       processChurn,
       processOrphanSweep,
+      processMembershipSweep,
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
     });
 
-    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+    ]);
     await waitUntil(
       () =>
         processRenewals.state.calls >= 3 &&
         processChurn.state.calls >= 3 &&
-        processOrphanSweep.state.calls >= 3,
-      "all three passes to keep going after the throw"
+        processOrphanSweep.state.calls >= 3 &&
+        processMembershipSweep.state.calls >= 3,
+      "all four passes to keep going after the throw"
     );
     renewalLoop.stop();
     churnLoop.stop();
     orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
@@ -553,24 +861,69 @@ describe("createScheduledPassLoops", () => {
     const processOrphanSweep = fakePass(NOTHING_HAPPENED_SWEEP);
     processOrphanSweep.state.throwOnCall = 1;
     const errors: string[] = [];
-    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
+    const { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop } = createScheduledPassLoops({
       processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
       processOrphanSweep,
+      processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
     });
 
-    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+    ]);
     await waitUntil(() => processOrphanSweep.state.calls >= 3, "the sweep to keep going after the throw");
     renewalLoop.stop();
     churnLoop.stop();
     orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain("[media] pass failed: database was briefly unreachable");
+  });
+
+  it("keeps running after the membership sweep pass itself throws, and keeps the other passes running too", async () => {
+    // A per-ROW `retireExpired` failure is handled inside `SweepExpiredMemberships` and
+    // never reaches here (see its own describe block) — this is the backstop for
+    // something the pass-level query itself cannot survive, the same case the
+    // renewal/churn/media loops handle.
+    const processMembershipSweep = fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP);
+    processMembershipSweep.state.throwOnCall = 1;
+    const errors: string[] = [];
+    const { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop } = createScheduledPassLoops({
+      processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
+      processChurn: fakePass(NOTHING_HAPPENED_CHURN),
+      processOrphanSweep: fakePass(NOTHING_HAPPENED_SWEEP),
+      processMembershipSweep,
+      intervalMs: 1,
+      log: () => undefined,
+      logError: (line) => errors.push(line),
+    });
+
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+    ]);
+    await waitUntil(
+      () => processMembershipSweep.state.calls >= 3,
+      "the membership sweep to keep going after the throw"
+    );
+    renewalLoop.stop();
+    churnLoop.stop();
+    orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
+    await running;
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("[memberships] pass failed: database was briefly unreachable");
   });
 
   it("never overlaps two passes of the same type", async () => {
@@ -590,19 +943,26 @@ describe("createScheduledPassLoops", () => {
         return NOTHING_HAPPENED_RENEWAL;
       },
     };
-    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
+    const { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop } = createScheduledPassLoops({
       processRenewals: slowRenewals,
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
       processOrphanSweep: fakePass(NOTHING_HAPPENED_SWEEP),
+      processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
       intervalMs: 1,
       log: () => undefined,
     });
 
-    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+    ]);
     await waitUntil(() => calls >= 3, "three renewal passes");
     renewalLoop.stop();
     churnLoop.stop();
     orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
     await running;
 
     expect(maxInFlight).toBe(1);

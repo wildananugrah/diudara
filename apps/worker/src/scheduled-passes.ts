@@ -1,9 +1,9 @@
 /**
- * Phase 5's two CLOCK-driven passes, plus Task 10's orphan-media sweep, as loops this
- * process can run.
+ * Phase 5's two CLOCK-driven passes, plus Task 10's orphan-media sweep and Phase 5b
+ * Task 3's expired-membership sweep, as loops this process can run.
  *
  * Everything in `apps/worker` before this file was request-triggered at one remove:
- * a payment wrote an outbox row and the worker delivered it. These three are triggered
+ * a payment wrote an outbox row and the worker delivered it. These four are triggered
  * by nothing but the passage of time, which is why they need a schedule at all — and
  * why this module exists separately from `main.ts`: the composition root cannot be
  * imported by a test (it reaches `db/client.ts`), and "a throwing pass does not take
@@ -11,11 +11,11 @@
  *
  * It deliberately imports only the API's dependency-free `log-safety` helper at
  * runtime; the renewal/churn result shapes come in as TYPES, which erase.
- * `SweepOrphanMedia` is the one exception to "the pass lives in `apps/api`" — it has no
- * domain logic to speak of (no WIB days, no grace periods, just a cutoff and a
- * try/catch), so unlike `ProcessRenewals`/`ProcessChurn` it is defined and tested
- * entirely IN this file, against `MediaRepositoryPort`/`MediaStoragePort`-shaped
- * structural interfaces the caller supplies — never against a database.
+ * `SweepOrphanMedia` and `SweepExpiredMemberships` are the exceptions to "the pass
+ * lives in `apps/api`" — neither has domain logic worth the name (no WIB days, no
+ * grace periods, just a cutoff/predicate and a try/catch), so unlike
+ * `ProcessRenewals`/`ProcessChurn` each is defined and tested entirely IN this file,
+ * against structural interfaces the caller supplies — never against a database.
  */
 import { redactLinks, safeErrorSummary } from "../../api/src/application/log-safety";
 import type { ProcessChurnResult } from "../../api/src/application/use-cases/process-churn";
@@ -135,7 +135,7 @@ export function formatChurnPassLine(result: ProcessChurnResult): string | null {
  * credential. `pass` is one of our own literals, so it needs no sanitising.
  */
 export function formatPassFailure(
-  pass: "outbox" | "renewals" | "churn" | "media",
+  pass: "outbox" | "renewals" | "churn" | "media" | "memberships",
   err: unknown
 ): string {
   return `[${pass}] pass failed: ${redactLinks(safeErrorSummary(err))}`;
@@ -319,6 +319,160 @@ export class SweepOrphanMedia {
   }
 }
 
+/**
+ * Task 3's retirement sweep (spec — Phase 5b) — just enough of
+ * `UserSubscriptionRepositoryPort` to run it. Structural, like `OrphanMediaRepository`:
+ * `DrizzleUserSubscriptionRepository` satisfies this directly without being declared
+ * against it, and a test can supply an in-memory double with no database at all.
+ *
+ * `listExpiredActive` and `retireExpired` are both Task 1's — see their own docstrings
+ * on `UserSubscriptionRepositoryPort` for why `retireExpired` is a conditional UPDATE
+ * (the arbiter) and never a read followed by a write.
+ */
+export interface ExpiredMembershipRepository {
+  listExpiredActive(now: Date, limit: number): Promise<{ id: string; subscriberId: string; ownerId: string }[]>;
+  retireExpired(subscriberId: string, ownerId: string, now: Date): Promise<boolean>;
+}
+
+export interface MembershipSweepResult {
+  /** ACTIVE, lapsed rows this pass looked at. */
+  considered: number;
+  /** Rows this pass flipped `active` → `expired`. */
+  retired: number;
+  /**
+   * Rows another caller retired between the list and this row's turn — a concurrent
+   * sweep pass, or Task 2's lazy retirement on the purchase path. Never a failure:
+   * `retireExpired`'s conditional UPDATE is the guard doing its job, the same shape as
+   * `SweepOrphanMedia`'s "claimed since listed" skip.
+   */
+  skipped: number;
+  /** Rows whose `retireExpired` call threw and were left ACTIVE for the next pass to retry. */
+  failed: number;
+}
+
+export interface SweepExpiredMembershipsOptions {
+  batchSize?: number;
+  /** Defaults to the real clock. Overridden in tests to place the boundary precisely. */
+  now?: () => Date;
+  /**
+   * Where a single row's `retireExpired` failure is reported. Defaults to
+   * `console.error`, matching every other per-item failure this worker logs (e.g.
+   * `SweepOrphanMedia`'s own `logError`) — injectable here only so a test can capture
+   * the line without capturing the real console.
+   */
+  logError?: (line: string) => void;
+}
+
+/**
+ * Memberships read per QUERY, not per pass — same reasoning and same figure as
+ * `SweepOrphanMedia`'s `DEFAULT_ORPHAN_SWEEP_BATCH_SIZE`: it bounds one result set
+ * while leaving any realistic backlog's page count uninteresting.
+ */
+const DEFAULT_MEMBERSHIP_SWEEP_BATCH_SIZE = 500;
+
+/**
+ * Task 3's retirement sweep: the hygiene half of Phase 5b's lifecycle. A member who
+ * never returns must not sit `active` forever — that row holds
+ * `user_subscription_one_active`'s slot for the (subscriber, owner) pair, and Task 2
+ * already frees it the moment the member comes back to buy again. This pass is for the
+ * member who does not come back: nothing else in the system will ever retire that row.
+ *
+ * ONE ROW'S FAILURE MUST NOT ABORT THE PASS — the exact property `SweepOrphanMedia`
+ * exists to guarantee, and the reason this class is modelled on it rather than on
+ * `ProcessChurn`/`ProcessRenewals` (which have no per-row try/catch at all, because
+ * their own per-row work — an outbox enqueue, an activity-log write — is expected to
+ * succeed once the status flip already has). `retireExpired` is a single UPDATE against
+ * a live connection and CAN throw (the database briefly unreachable, a statement
+ * timeout), and a naive loop over rows would die on the first such throw and skip every
+ * lapsed membership after it — silently, and forever, since the next pass hits the very
+ * same row first. So each row is retired in its own try/catch: a failure is counted,
+ * logged, and the row is left ACTIVE for the next pass to retry, and the loop moves on.
+ *
+ * THE ARBITER IS `retireExpired` ITSELF, never a read here first. Task 1's own
+ * conditional UPDATE (`status = 'active' AND current_period_end <= now`) is what makes
+ * this loop's `skipped` count meaningful rather than a race window of its own: a `false`
+ * return means the pair was retired by someone else between the list and this row's
+ * turn, not that this pass read stale data and acted on it wrongly.
+ */
+export class SweepExpiredMemberships {
+  private readonly batchSize: number;
+  private readonly now: () => Date;
+  private readonly logError: (line: string) => void;
+
+  constructor(
+    private readonly subscriptions: ExpiredMembershipRepository,
+    options: SweepExpiredMembershipsOptions = {}
+  ) {
+    this.batchSize = options.batchSize ?? DEFAULT_MEMBERSHIP_SWEEP_BATCH_SIZE;
+    this.now = options.now ?? (() => new Date());
+    this.logError = options.logError ?? ((line) => console.error(line));
+  }
+
+  async execute(): Promise<MembershipSweepResult> {
+    // ONCE per pass, so every row is judged against the same instant — the same
+    // reasoning `ProcessChurn.execute` gives for reading its clock once.
+    const now = this.now();
+    const result: MembershipSweepResult = { considered: 0, retired: 0, skipped: 0, failed: 0 };
+
+    // PAGED. A retired OR skipped row leaves the result set — its status is no longer
+    // `active` — so this terminates the same way `SweepOrphanMedia.execute` does,
+    // including the same no-progress guard: without it, a page where every row FAILS
+    // would be re-fetched, identically, forever.
+    for (;;) {
+      const page = await this.subscriptions.listExpiredActive(now, this.batchSize);
+      if (page.length === 0) break;
+      result.considered += page.length;
+
+      const progressBefore = result.retired + result.skipped;
+      for (const row of page) {
+        await this.retireOne(row, now, result);
+      }
+      if (result.retired + result.skipped === progressBefore) break;
+      if (page.length < this.batchSize) break;
+    }
+
+    return result;
+  }
+
+  /** One expired-active row. Never throws — a per-row failure lands on `result.failed`, not on the pass. */
+  private async retireOne(
+    row: { id: string; subscriberId: string; ownerId: string },
+    now: Date,
+    result: MembershipSweepResult
+  ): Promise<void> {
+    try {
+      if (await this.subscriptions.retireExpired(row.subscriberId, row.ownerId, now)) {
+        result.retired += 1;
+        return;
+      }
+      // Raced away — see `MembershipSweepResult.skipped`'s own docstring.
+      result.skipped += 1;
+    } catch (err) {
+      result.failed += 1;
+      this.logError(
+        `[memberships] subscription=${row.id} was NOT retired and is left active for the ` +
+          `next pass — retireExpired failed: ${redactLinks(safeErrorSummary(err))}`
+      );
+    }
+  }
+}
+
+/** The membership sweep's summary line, or `null` when there is nothing to say. Counts only, as above. */
+export function formatMembershipSweepLine(result: MembershipSweepResult): string | null {
+  if (
+    result.considered === 0 &&
+    result.retired === 0 &&
+    result.skipped === 0 &&
+    result.failed === 0
+  ) {
+    return null;
+  }
+  return (
+    `[memberships] considered=${result.considered} retired=${result.retired} ` +
+    `skipped=${result.skipped} failed=${result.failed}`
+  );
+}
+
 /** The orphan sweep's summary line, or `null` when there is nothing to say. Counts only, as above. */
 export function formatOrphanSweepLine(result: OrphanSweepResult): string | null {
   if (
@@ -349,34 +503,46 @@ export interface ChurnPass {
 export interface OrphanSweepPass {
   execute(): Promise<OrphanSweepResult>;
 }
+/** Same shape, for `SweepExpiredMemberships` — or any test double with a matching `execute()`. */
+export interface MembershipSweepPass {
+  execute(): Promise<MembershipSweepResult>;
+}
 
 export interface ScheduledPassLoopsOptions {
   processRenewals: RenewalPass;
   processChurn: ChurnPass;
   processOrphanSweep: OrphanSweepPass;
+  processMembershipSweep: MembershipSweepPass;
   intervalMs: number;
   log?: (line: string) => void;
   logError?: (line: string) => void;
 }
 
 /**
- * The renewal, churn AND orphan-sweep passes as three `PollLoop`s — the SAME loop the
- * outbox uses, so they inherit both of its properties for free: passes of one type
- * never overlap (each pass pages through the whole backlog, and a second copy of
- * itself would be reading the same rows), and `stop()` wakes the loop immediately
- * instead of sleeping out an interval, which is what makes an hour-long interval
- * survivable under SIGTERM.
+ * The renewal, churn, orphan-sweep AND membership-retirement passes as four
+ * `PollLoop`s — the SAME loop the outbox uses, so they inherit both of its properties
+ * for free: passes of one type never overlap (each pass pages through the whole
+ * backlog, and a second copy of itself would be reading the same rows), and `stop()`
+ * wakes the loop immediately instead of sleeping out an interval, which is what makes
+ * an hour-long interval survivable under SIGTERM.
  *
- * THREE LOOPS, not one pass that does everything, for one reason: a renewal pass that
+ * FOUR LOOPS, not one pass that does everything, for one reason: a renewal pass that
  * throws every time — a query the schema no longer matches, say — must not also stop
- * churn or the orphan sweep from running, and vice versa. Each loop's `onError` is its
- * own, so a failing pass costs its own retries and nothing else's. All three share an
- * interval because they share a cadence — none of them is latency-sensitive the way
- * the outbox's 5-second poll is — and they never share a failure.
+ * churn, the orphan sweep, or the membership sweep from running, and vice versa. Each
+ * loop's `onError` is its own, so a failing pass costs its own retries and nothing
+ * else's. All four share an interval because they share a cadence — none of them is
+ * latency-sensitive the way the outbox's 5-second poll is — and they never share a
+ * failure. The membership sweep is Task 3's hygiene pass (spec — Phase 5b): a member
+ * who never returns must not sit `active` forever, but nothing about noticing that is
+ * urgent, so it shares the renewal/churn/media cadence rather than inventing a fifth
+ * interval knob nobody would ever have reason to set differently — see
+ * `apps/worker/src/main.ts`'s own docstring for the same reasoning about the media
+ * sweep.
  *
- * The orphan sweep's per-row failures never reach this level at all: `SweepOrphanMedia`
- * catches them itself (see its own docstring), so `onError` here only fires on
- * something the pass-level query itself could not survive, same as renewals/churn.
+ * Both sweeps' per-row failures never reach this level at all: `SweepOrphanMedia` and
+ * `SweepExpiredMemberships` each catch them internally (see their own docstrings), so
+ * `onError` here only fires on something the pass-level query itself could not
+ * survive, same as renewals/churn.
  *
  * No loop is started here. The caller runs them alongside the outbox loop and decides
  * when they stop.
@@ -385,6 +551,7 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
   renewalLoop: PollLoop;
   churnLoop: PollLoop;
   orphanSweepLoop: PollLoop;
+  membershipSweepLoop: PollLoop;
 } {
   const log = options.log ?? ((line: string) => console.log(line));
   const logError = options.logError ?? ((line: string) => console.error(line));
@@ -420,5 +587,14 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
     onError: (err) => logError(formatPassFailure("media", err)),
   });
 
-  return { renewalLoop, churnLoop, orphanSweepLoop };
+  const membershipSweepLoop = new PollLoop({
+    intervalMs: options.intervalMs,
+    poll: async () => {
+      const line = formatMembershipSweepLine(await options.processMembershipSweep.execute());
+      if (line !== null) log(line);
+    },
+    onError: (err) => logError(formatPassFailure("memberships", err)),
+  });
+
+  return { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop };
 }

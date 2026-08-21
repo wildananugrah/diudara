@@ -7,18 +7,22 @@
  * transaction, because an invite is an external HTTP call and a Telegram outage
  * must delay an invite, never roll back a payment (plan, Global Constraints).
  *
- * It runs FOUR loops, on two cadences:
+ * It runs FIVE loops, on two cadences:
  *
  *   - the OUTBOX, every 5 seconds, because that interval is the delay a paying member
  *     sees between their payment settling and their invite arriving;
- *   - RENEWALS, CHURN and the orphan MEDIA SWEEP, hourly. Renewals/churn decide whole
- *     Asia/Jakarta calendar days (see `DEFAULT_RENEWAL_INTERVAL_MS` for why hourly and
- *     not daily, and why not 5s); the media sweep shares that cadence for a simpler
- *     reason — spec §8's 24-hour window is generous on purpose, so it is no more
- *     latency-sensitive than the other two, and a fourth interval knob would be one
- *     more thing nobody would ever have reason to set differently.
+ *   - RENEWALS, CHURN, the orphan MEDIA SWEEP and the MEMBERSHIP SWEEP, hourly.
+ *     Renewals/churn decide whole Asia/Jakarta calendar days (see
+ *     `DEFAULT_RENEWAL_INTERVAL_MS` for why hourly and not daily, and why not 5s); the
+ *     media sweep shares that cadence for a simpler reason — spec §8's 24-hour window
+ *     is generous on purpose, so it is no more latency-sensitive than the other two.
+ *     The membership sweep (Task 3, Phase 5b) shares it for the same kind of reason: a
+ *     member who stops paying and never returns is not urgent to notice — Task 2
+ *     already retires them immediately if they DO come back to buy again — and a fifth
+ *     interval knob would be one more thing nobody would ever have reason to set
+ *     differently.
  *
- * All four are the same `PollLoop`, so all four inherit its two properties: passes of
+ * All five are the same `PollLoop`, so all five inherit its two properties: passes of
  * one kind never overlap, and a signal wakes them out of their interval instead of
  * letting it expire. They are separate loops rather than one pass doing everything so
  * that a renewal query that fails every time cannot also stop invites being delivered.
@@ -55,6 +59,7 @@ import {
   createScheduledPassLoops,
   formatPassFailure,
   resolveRenewalIntervalMs,
+  SweepExpiredMemberships,
   SweepOrphanMedia,
 } from "./scheduled-passes";
 
@@ -71,6 +76,13 @@ const { bootstrapWorker } = await import("../../api/src/worker-bootstrap");
 const { db, sql } = await import("../../api/src/db/client");
 const { DrizzleMediaRepository } = await import(
   "../../api/src/infrastructure/repositories/drizzle-media.repository"
+);
+// Task 3's membership sweep (Phase 5b). Same reasoning as `DrizzleMediaRepository`
+// above — constructed here rather than returned from `bootstrapWorker()` because
+// `SweepExpiredMemberships`, like `SweepOrphanMedia`, is defined in THIS package, not
+// the API's.
+const { DrizzleUserSubscriptionRepository } = await import(
+  "../../api/src/infrastructure/repositories/drizzle-user-subscription.repository"
 );
 // The SAME selector the API's own `bootstrap()` uses for `POST /users/media` and the
 // delivery routes — reused rather than re-derived so the worker and the API can never
@@ -94,6 +106,12 @@ const mediaStorage = selectMediaStorage({
 // `scheduled-passes.ts` for why this pass, unlike renewals/churn, is defined there
 // rather than in `apps/api`.
 const processOrphanSweep = new SweepOrphanMedia(new DrizzleMediaRepository(db), mediaStorage);
+// Task 3's retirement sweep (Phase 5b, spec — living with members): a member who never
+// returns must not sit `active` forever, holding `user_subscription_one_active`'s slot
+// against a purchase that will never come back to free it any other way. See
+// `scheduled-passes.ts` for why the per-row failure handling is modelled on
+// `SweepOrphanMedia` rather than `ProcessChurn`.
+const processMembershipSweep = new SweepExpiredMemberships(new DrizzleUserSubscriptionRepository(db));
 const intervalMs = resolvePollIntervalMs(process.env.WORKER_POLL_INTERVAL_MS);
 const renewalIntervalMs = resolveRenewalIntervalMs(process.env.WORKER_RENEWAL_INTERVAL_MS);
 
@@ -125,29 +143,43 @@ const outboxLoop = new PollLoop({
   },
 });
 
-// Phase 5's two clock-driven passes plus Task 10's orphan sweep, on their own much
-// longer, shared cadence. Three loops, not one: a renewal pass that throws every time
-// must not stop churn or the media sweep, and none of them must stop the outbox
-// delivering invites people have already paid for.
-const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
+// Phase 5's two clock-driven passes plus Task 10's orphan sweep and Task 3's
+// membership sweep, on their own much longer, shared cadence. Four loops, not one: a
+// renewal pass that throws every time must not stop churn, the media sweep or the
+// membership sweep, and none of them must stop the outbox delivering invites people
+// have already paid for.
+const { renewalLoop, churnLoop, orphanSweepLoop, membershipSweepLoop } = createScheduledPassLoops({
   processRenewals,
   processChurn,
   processOrphanSweep,
+  processMembershipSweep,
   intervalMs: renewalIntervalMs,
 });
 
-// ONE handler for all four loops, so there is no ordering in which some are stopped
+// ONE handler for all five loops, so there is no ordering in which some are stopped
 // and others keep polling — and the process cannot exit while any of them holds the
 // pool open.
-const uninstallSignals = installShutdownSignals(outboxLoop, renewalLoop, churnLoop, orphanSweepLoop);
+const uninstallSignals = installShutdownSignals(
+  outboxLoop,
+  renewalLoop,
+  churnLoop,
+  orphanSweepLoop,
+  membershipSweepLoop
+);
 
 console.log(
-  `[worker] polling the outbox every ${intervalMs}ms; running the renewal, churn and ` +
-    `media-sweep passes every ${renewalIntervalMs}ms`
+  `[worker] polling the outbox every ${intervalMs}ms; running the renewal, churn, ` +
+    `media-sweep and membership-sweep passes every ${renewalIntervalMs}ms`
 );
-// All four concurrently. `Promise.all` and not a sequential await: each loop runs until
+// All five concurrently. `Promise.all` and not a sequential await: each loop runs until
 // it is stopped, so awaiting one would never start the others.
-await Promise.all([outboxLoop.run(), renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
+await Promise.all([
+  outboxLoop.run(),
+  renewalLoop.run(),
+  churnLoop.run(),
+  orphanSweepLoop.run(),
+  membershipSweepLoop.run(),
+]);
 uninstallSignals();
 
 // Closing the pool is what actually ends the process. postgres.js keeps its

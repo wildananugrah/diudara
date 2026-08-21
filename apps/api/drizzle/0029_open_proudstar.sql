@@ -1,0 +1,1 @@
+CREATE INDEX "user_subscription_status_current_period_end_idx" ON "user_subscription" USING btree ("status","current_period_end");
