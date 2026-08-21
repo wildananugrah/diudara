@@ -381,14 +381,22 @@ describe("GET /users/media/:id and /thumb", () => {
     );
   });
 
-  // Review round 1, I3 (Important): deleting the `mediaRepository.findById`
-  // lookup from a handler used to leave the suite green, because
-  // `mediaStorage.get` also returns `null` for a plain unknown id — nothing
-  // distinguished "never existed" from "row gone, bytes orphaned". This test
-  // creates exactly that gap (delete the row, leave the bytes) so only the
-  // row lookup — not the storage lookup — can catch it. Also the anchor
-  // Phase 6's entitlement check will read from: without this row, there is
-  // nothing to check tier/ownership against.
+  /**
+   * Review round 1, I3 (Important): deleting the row lookup from a handler used
+   * to leave the suite green, because `mediaStorage.get` also returns `null`
+   * for a plain unknown id — nothing distinguished "never existed" from "row
+   * gone, bytes orphaned". These two create exactly that gap (delete the row,
+   * LEAVE the bytes) so only a row lookup, never the storage lookup, can
+   * produce the 404.
+   *
+   * **THEY ARE NOW THE ONLY PIN ON IT** — whole-branch review, MIN-3. The route
+   * used to do its own `mediaRepository.findById` + 404 ahead of the gate, so
+   * every image request paid two primary-key reads of the same row; that read
+   * is gone and `MediaEntitlement.decide`'s own `findById` is what answers here.
+   * Signed in as the uploader on purpose: since MAJ-1 an anonymous request to an
+   * unclaimed row 404s for being anonymous, and would keep passing with every
+   * row lookup in the process deleted.
+   */
   it("404s when the row has been deleted from the database but its bytes remain in storage (full route)", async () => {
     const id = await uploadFixture(a, token, "small.png");
     await mediaRepository.deleteIfUnclaimed(id);
@@ -765,9 +773,16 @@ describe("members-only media: the route refuses an id it never sent", () => {
    * A membership buys that creator's gated images and nothing else. The gate
    * answers per AUTHOR; a check keyed on "is this viewer a member of anybody"
    * would be exactly this bug.
+   *
+   * **BOTH SIDES, in one response each** — whole-branch review, MIN-1. These
+   * two used to assert only the refusal, and a gate that locked EVERYBODY out
+   * passed them unchanged (verified by mutation: making `MediaEntitlement`
+   * refuse every paying member left both of these green while six other tests
+   * reddened). Asserting that the PAID-FOR creator's image is served in the
+   * same scenario is what makes the name true: isolation, not a wall.
    */
   it("paying one creator does not unlock another creator's gated image", async () => {
-    await rinaWithAGatedImage();
+    const { mediaId: rinaMedia } = await rinaWithAGatedImage();
     const budi = await tokenForValidUser(a, VALID);
     const budiMedia = await upload(budi);
     const budiPost = await createPost(budi, "punya budi", [budiMedia]);
@@ -776,10 +791,12 @@ describe("members-only media: the route refuses an id it never sent", () => {
     await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
 
     await expectRefused(full(budiMedia), authed(buyer));
+    // The half that makes the refusal above mean something.
+    await expectServed(full(rinaMedia), "private, no-store", authed(buyer));
   });
 
   it("paying one creator does not unlock another creator's gated THUMBNAIL", async () => {
-    await rinaWithAGatedImage();
+    const { mediaId: rinaMedia } = await rinaWithAGatedImage();
     const budi = await tokenForValidUser(a, VALID);
     const budiMedia = await upload(budi);
     const budiPost = await createPost(budi, "punya budi", [budiMedia]);
@@ -788,6 +805,7 @@ describe("members-only media: the route refuses an id it never sent", () => {
     await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
 
     await expectRefused(thumb(budiMedia), authed(buyer));
+    await expectServed(thumb(rinaMedia), "private, no-store", authed(buyer));
   });
 
   /**

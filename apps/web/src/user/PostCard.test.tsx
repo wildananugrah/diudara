@@ -425,11 +425,17 @@ describe("PostCard — the lock panel (Task 7, spec §5, §5.1)", () => {
     expect(document.body.innerHTML).not.toContain("/users/media/");
   });
 
+  /**
+   * EXACT, like the plural case above. Whole-branch review, MIN-5: this was the
+   * last residual `toContain` on new copy — a superstring satisfies it, so a
+   * mutant rendering `"1 foto terkunci saja"` passed, and the plural test's
+   * exact assertion does not reach the singular branch.
+   */
   it("renders the singular count the same way — Indonesian 'foto' does not inflect for number", () => {
-    renderCard({ post: { ...lockedPost, lockedMediaCount: 1 } });
+    const { container } = renderCard({ post: { ...lockedPost, lockedMediaCount: 1 } });
 
-    const text = screen.getByTestId("post-card").textContent ?? "";
-    expect(text).toContain("1 foto terkunci");
+    const count = container.querySelector(".post-card-locked-count");
+    expect(count?.textContent ?? "").toBe("1 foto terkunci");
   });
 
   it("renders no media block at all for a locked post", () => {

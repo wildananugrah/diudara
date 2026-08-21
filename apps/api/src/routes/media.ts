@@ -90,7 +90,6 @@ export function mediaRoutes(
     | "userRepository"
     | "uploadMedia"
     | "mediaStorage"
-    | "mediaRepository"
     | "mediaEntitlement"
   >
 ) {
@@ -156,8 +155,6 @@ export function mediaRoutes(
   // Do not "optimise" this into a redirect — read why above before you do.
   app.get("/media/:id", validateParams(mediaIdParams), async (c) => {
     const { id } = c.get("validatedParams") as { id: string };
-    const row = await deps.mediaRepository.findById(id);
-    if (row === null) throw new NotFoundError(NOT_FOUND_MESSAGE);
 
     // BARRIER TWO, and it runs BEFORE a single byte is touched.
     //
@@ -166,12 +163,21 @@ export function mediaRoutes(
     // reader — so a missing, malformed or expired token resolves to `null`
     // (which locks every gated image) instead of turning a public image into
     // a 401.
-    // The gate is given the ID, not the `row` just fetched — it resolves the
-    // media row itself. That is one extra primary-key read, and it is the
-    // price of the barrier being independent of this handler: a gate that
-    // trusts a row its caller looked up would be opened by any later refactor
-    // that passed the wrong one. Do not "optimise" it by threading `row`
-    // through.
+    //
+    // **THE GATE RESOLVES THE ROW ITSELF, and it is the only read of it.**
+    // This handler used to do its own `mediaRepository.findById` + 404 first,
+    // which meant every image request paid TWO primary-key reads of the same
+    // row and the surviving line read like a gate it was not. Deleting it left
+    // 47/47 green (whole-branch review, MIN-3) because an id with no row is
+    // ALREADY refused by `MediaEntitlement.decide`, with the identical 404 —
+    // gated and absent are indistinguishable from outside either way (spec
+    // §6.2). Pinned by "404s when the row has been deleted from the database
+    // but its bytes remain in storage", which leaves the BYTES in place so only
+    // a row lookup can produce the 404.
+    //
+    // Give the gate the ID, never a row this handler looked up: a barrier that
+    // trusts its caller's row is opened by any later refactor that passes the
+    // wrong one.
     const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
     const gate = await deps.mediaEntitlement.decide({ mediaId: id, viewerId });
     // 404 rather than 403: media ids are stripped from the projection, so they
@@ -207,9 +213,12 @@ export function mediaRoutes(
   // not one line a future change could gate halfway.
   app.get("/media/:id/thumb", validateParams(mediaIdParams), async (c) => {
     const { id } = c.get("validatedParams") as { id: string };
-    const row = await deps.mediaRepository.findById(id);
-    if (row === null) throw new NotFoundError(NOT_FOUND_MESSAGE);
 
+    // Same single read as the full route above, and for the same reason — see
+    // that handler's comment (MIN-3). Pinned separately by "404s when the row
+    // has been deleted from the database but its bytes remain in storage (thumb
+    // route)".
+    //
     // BARRIER TWO on the thumbnail, WRITTEN OUT AGAIN rather than shared with
     // the route above. That is the point of there being two handlers: the
     // thumbnail is the variant the feed actually renders, so a gate factored

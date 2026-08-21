@@ -1343,10 +1343,17 @@ describe("members-only posts: the projection never sends a media id to a non-mem
    * A membership buys that creator's gated posts and nothing else. Paying Rina
    * must not unlock Budi — the gate answers per AUTHOR, and a set keyed on the
    * viewer alone would be exactly this bug.
+   *
+   * **BOTH SIDES, out of ONE feed response** — whole-branch review, MIN-1. This
+   * used to assert only that Budi's post was stripped, which a projection that
+   * locked EVERYBODY passed unchanged (verified by mutation: disabling the
+   * projection's membership removal left this test green). Rina's post carrying
+   * its media in the SAME page is what makes this a test of isolation rather
+   * than of a wall.
    */
   it("paying one creator does not unlock another creator's gated post", async () => {
     const a = app();
-    await rinaWithAGatedPost(a);
+    const rina = await rinaWithAGatedPost(a);
     const budiToken = await tokenForValidUser(a, VALID);
     const budiMedia = await uploadFixture(a, budiToken);
     const budiPost = await (await createPost(a, budiToken, "punya budi", [budiMedia])).json();
@@ -1365,6 +1372,9 @@ describe("members-only posts: the projection never sends a media id to a non-mem
       ])
     );
     expect(byId.get(budiPost.id)).toEqual([]);
+    // The half that makes the line above mean something: the creator this
+    // viewer actually pays for is unlocked, in the same response.
+    expect(byId.get(rina.postId)).toEqual([rina.mediaId]);
   });
 
   it("a public post is unaffected — media, membersOnly false, nothing hidden", async () => {
