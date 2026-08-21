@@ -41,6 +41,17 @@ export interface MediaRepositoryPort {
    * per id, so an id the sweep had deleted in the moment between the ownership
    * check and this call was a NO-OP — the post came back holding fewer photos
    * than its author sent, and nothing anywhere said so.
+   *
+   * **A row already held by a DIFFERENT post is NOT claimed, and is counted as
+   * a miss** (whole-branch review, MAJ-2). The ownership check that runs before
+   * this reads its rows unlocked, and two writes by the same author on
+   * different posts lock different post rows and never serialise — so without
+   * this rule one of them could steal the last image off the other's
+   * `visibility = 'members'` post and both would return 200. An implementation
+   * MUST enforce it in the write itself, not by reading first: a read-then-write
+   * is the very race this exists to close (the same rule, and the same reason,
+   * as `deleteIfUnclaimed` below). A post's OWN rows stay claimable, or every
+   * reorder would fail.
    */
   claim(postId: string, ids: string[]): Promise<number>;
   listForPost(postId: string): Promise<MediaRow[]>;

@@ -139,7 +139,10 @@ class FakeMedia implements MediaRepositoryPort {
     return this.rows.filter((row) => ids.includes(row.id));
   }
   /** Returns the number actually claimed, exactly as the real repository does — a
-      row that has vanished since the ownership check is simply not counted. */
+      row that has vanished since the ownership check is simply not counted, and
+      (whole-branch review, MAJ-2) neither is one already held by a DIFFERENT
+      post. A fake that re-parented such a row would let a use-case test pass
+      against the very theft the real `WHERE` clause now refuses. */
   async claim(postId: string, ids: string[]): Promise<number> {
     this.claims.push({ postId, ids: [...ids] });
     for (const row of this.rows) {
@@ -148,7 +151,7 @@ class FakeMedia implements MediaRepositoryPort {
     let claimed = 0;
     ids.forEach((id, position) => {
       const row = this.rows.find((candidate) => candidate.id === id);
-      if (row !== undefined) {
+      if (row !== undefined && (row.postId === null || row.postId === postId)) {
         row.postId = postId;
         row.position = position;
         claimed += 1;
@@ -978,6 +981,181 @@ describe("EditPost — real transaction (Task 5 fix round 1)", () => {
     // overlapping at the database.
     expect(outcomes).toContain("A-won");
     expect(outcomes).toContain("B-won");
+  });
+});
+
+/**
+ * **MAJ-2, the whole-branch review's third way into `visibility = 'members'`
+ * with zero images — and it returned 200.**
+ *
+ * `PostEditUnitOfWorkPort`'s docstring enumerates two paths and says the post
+ * ROW LOCK closes them. It cannot reach this one, and that is the point: the
+ * two writers here contend on a **media** row, not a post row. They are two
+ * writes by the SAME author on DIFFERENT posts, so `lockForEdit` takes locks on
+ * two different rows and they never serialise against each other. **A test that
+ * raced two edits on the same post would prove nothing about this.**
+ *
+ *   1. A edits post Q with `mediaIds: [M]`; `requireAttachable` reads M
+ *      unlocked (`findManyByIds`) and sees it unclaimed, so it passes.
+ *   2. B creates post P as `members` with `mediaIds: [M]`; it passes
+ *      `requireImageWhenLocked`, claims M and commits. P is `members` with one
+ *      image.
+ *   3. A's `claim(Q, [M])` re-parents M to Q — the UPDATE was UNCONDITIONAL —
+ *      and commits. **P is now `members` with zero images**, and A got a 200.
+ *
+ * A reader of P sees a caption with no lock panel at all (`media: []` AND
+ * `lockedMediaCount: 0`), so nothing surfaces the breakage: exactly the harm §7
+ * names — "the lock would protect nothing, and the creator would believe it
+ * did".
+ *
+ * **THE DATABASE ARBITRATES.** The fix is not a longer lock: it is
+ * `claim`'s per-id UPDATE carrying `AND (post_id IS NULL OR post_id = $postId)`,
+ * so the loser's UPDATE matches zero rows, `requireFullyClaimed` counts short,
+ * and the whole transaction rolls back as the 409 it already raises. This is
+ * Phase 5a's recurring lesson and Task 5's, applied to the one row Task 5's
+ * lock could not cover.
+ */
+describe("CreatePost/EditPost — cross-post media race (MAJ-2, real transaction)", () => {
+  beforeEach(resetDatabase);
+
+  /**
+   * PAIRS independent authors race SIMULTANEOUSLY, each pair a genuine 2-way
+   * contest over ONE media row: a create-as-members that needs it, and an edit
+   * of a DIFFERENT post that would steal it. Not PAIRS copies of one request —
+   * per-pair rows, so every pair is checked and both orderings can be observed.
+   *
+   * CONTENDER COUNT: 20 pairs = 40 concurrent requests, one shared latch,
+   * matching the count fix round 1's own race test settled on.
+   *
+   * WARMING THE POOL IS PART OF THE TEST, NOT SETUP NOISE — `postgres.js`
+   * connects lazily, and this project has a confirmed case of a race test
+   * measuring the driver queueing behind one live connection instead of the
+   * database arbitrating anything.
+   */
+  it("a create-as-members cannot be robbed of its last image by an edit on another post", async () => {
+    const PAIRS = 20;
+    const posts = new DrizzlePostRepository(db);
+    const media = new DrizzleMediaRepository(db);
+
+    const seeded = await Promise.all(
+      Array.from({ length: PAIRS }, async (_unused, index) => {
+        const author = await seedRealUser();
+        // Q is the OTHER post — public, and the thing whose edit would steal M.
+        const otherPost = await posts.create(author.id, "kiriman lain", "public");
+        const image = await media.create({
+          ownerId: author.id,
+          width: 10,
+          height: 10,
+          byteSize: 1,
+        });
+        return {
+          authorId: author.id,
+          otherPostId: otherPost.id,
+          mediaId: image.id,
+          // HALF THE PAIRS DISPATCH THE EDIT FIRST. Measured: with the create
+          // always enqueued first it won all 20 pairs on roughly one run in
+          // four, and an assertion that both orderings occurred was then flaky
+          // for a reason that had nothing to do with the fix. Alternating makes
+          // BOTH sides of the contest real in every run, which is the property
+          // this test is actually about — the loser loses safely whichever one
+          // it is.
+          editFirst: index % 2 === 1,
+        };
+      })
+    );
+
+    const contenders = PAIRS * 2;
+    await Promise.all(Array.from({ length: contenders }, () => sql`select 1`));
+    const latch = new ArrivalLatch(contenders);
+
+    const unitOfWork = new DrizzlePostEditUnitOfWork(db);
+    const createPost = new CreatePost(unitOfWork);
+    const editPost = new EditPost(unitOfWork);
+
+    const results = await Promise.all(
+      seeded.map(async ({ authorId, otherPostId, mediaId, editFirst }) => {
+        const runCreate = async (): Promise<string | null> => {
+          await latch.arriveAndWait();
+          try {
+            const view = await createPost.execute({
+              authorId,
+              body: "khusus anggota",
+              mediaIds: [mediaId],
+              visibility: "members",
+            });
+            return view.id;
+          } catch {
+            return null;
+          }
+        };
+        const runEdit = async (): Promise<boolean> => {
+          await latch.arriveAndWait();
+          try {
+            await editPost.execute({
+              editorId: authorId,
+              postId: otherPostId,
+              body: "ambil fotonya",
+              mediaIds: [mediaId],
+            });
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        // Started in the order this pair was assigned; the latch is what makes
+        // them arrive together regardless.
+        const [createdId, editWon] = editFirst
+          ? await (async () => {
+              const edit = runEdit();
+              const create = runCreate();
+              return [await create, await edit] as const;
+            })()
+          : await (async () => {
+              const create = runCreate();
+              const edit = runEdit();
+              return [await create, await edit] as const;
+            })();
+        return { mediaId, createdId, editWon };
+      })
+    );
+
+    expect(latch.arrived).toBe(contenders);
+
+    // THE INVARIANT, over every `members` post that survived anywhere in the
+    // database — not only over the ones this test remembered to look up.
+    const gatedPosts = await db
+      .select()
+      .from(postsTable)
+      .where(eq(postsTable.visibility, "members"));
+    const emptyGated: string[] = [];
+    for (const post of gatedPosts) {
+      const claimed = await db.select().from(postMedia).where(eq(postMedia.postId, post.id));
+      if (claimed.length === 0) emptyGated.push(post.id);
+    }
+    expect(emptyGated).toEqual([]);
+
+    // EXACTLY ONE WINNER PER PAIR, and the winner really holds the row. Two
+    // successes over one media row is the bug itself; two failures would mean
+    // the guard had started refusing writes that should have gone through.
+    for (const { mediaId, createdId, editWon } of results) {
+      expect([createdId !== null, editWon].filter(Boolean).length).toBe(1);
+      const [row] = await db.select().from(postMedia).where(eq(postMedia.id, mediaId));
+      expect(row!.postId).not.toBe(null);
+    }
+
+    // A create that reported success must still HAVE its image — a 200 that
+    // left nothing behind is the same lie in the other direction.
+    for (const { createdId } of results) {
+      if (createdId === null) continue;
+      const claimed = await db.select().from(postMedia).where(eq(postMedia.postId, createdId));
+      expect(claimed.length).toBe(1);
+    }
+
+    // Both sides of the contest really happened somewhere across the 20 pairs.
+    // A run where the create always won would be consistent with the two
+    // requests never overlapping at the database at all.
+    expect(results.some((result) => result.createdId !== null)).toBe(true);
+    expect(results.some((result) => result.editWon)).toBe(true);
   });
 });
 

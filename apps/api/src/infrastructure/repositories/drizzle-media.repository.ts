@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, lt } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, or } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { postMedia } from "../../db/schema";
 import type { MediaRepositoryPort, MediaRow } from "../../application/ports/media-repository.port";
@@ -48,6 +48,26 @@ export class DrizzleMediaRepository implements MediaRepositoryPort {
    * moment later, and — because both statements run inside one transaction —
    * no row is ever visible to another connection attached to two posts at
    * once, nor visible as unclaimed when it is really just being reordered.
+   *
+   * **THE PER-ID UPDATE IS GUARDED, and the guard is a paywall invariant, not
+   * a tidiness** (whole-branch review, MAJ-2). It used to be unconditional —
+   * `SET post_id = ? WHERE id = ?` — which re-parented a row whatever it
+   * currently belonged to. `requireAttachable` reads the rows UNLOCKED, so
+   * between that read and this write another request can claim the same id;
+   * and because the two requests are writes on DIFFERENT posts, `lockForEdit`
+   * takes locks on two different post rows and they never serialise. One could
+   * therefore steal the last image off the other's `visibility = 'members'`
+   * post and both returned 200 — the exact state spec §7 exists to prevent,
+   * surfacing as no lock panel at all.
+   *
+   * `AND (post_id IS NULL OR post_id = $postId)` makes the DATABASE arbitrate,
+   * which is this project's recurring answer: the loser's UPDATE matches zero
+   * rows, the count comes back short, and `requireFullyClaimed` turns that into
+   * the 409 it already raises — rolling the whole write back rather than
+   * leaving a gated post empty. `post_id = $postId` is what keeps a post's OWN
+   * rows re-claimable, so a reorder still works (the release statement above
+   * has already set them to NULL anyway; the clause covers the row this
+   * transaction has just re-parented within its own loop).
    */
   async claim(postId: string, ids: string[]): Promise<number> {
     return this.db.transaction(async (tx) => {
@@ -61,7 +81,12 @@ export class DrizzleMediaRepository implements MediaRepositoryPort {
         const updated = await tx
           .update(postMedia)
           .set({ postId, position })
-          .where(eq(postMedia.id, ids[position]!))
+          .where(
+            and(
+              eq(postMedia.id, ids[position]!),
+              or(isNull(postMedia.postId), eq(postMedia.postId, postId))
+            )
+          )
           .returning({ id: postMedia.id });
         claimed += updated.length;
       }

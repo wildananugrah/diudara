@@ -142,6 +142,42 @@ describe("DrizzleMediaRepository", () => {
     expect(claimed).toBe(1);
   });
 
+  /**
+   * **MAJ-2 at its source.** The per-id UPDATE used to be unconditional —
+   * `SET post_id = ? WHERE id = ?` — so it re-parented a row whatever it
+   * currently belonged to. Two writes by the SAME author on DIFFERENT posts
+   * lock different post rows and never serialise, so one could steal the last
+   * image off the other's members-only post and still return 200.
+   *
+   * The guard is `AND (post_id IS NULL OR post_id = $postId)`: the DATABASE
+   * arbitrates, the loser's UPDATE matches nothing, and the short count that
+   * comes back is what `requireFullyClaimed` turns into a 409.
+   */
+  it("refuses to steal a row that already belongs to a DIFFERENT post", async () => {
+    const owner = await createUser("wildan");
+    const holder = await createPost(owner.id);
+    const thief = await createPost(owner.id);
+    const image = await repo.create({ ownerId: owner.id, width: 10, height: 10, byteSize: 1 });
+    await repo.claim(holder.id, [image.id]);
+
+    const claimed = await repo.claim(thief.id, [image.id]);
+
+    expect(claimed).toBe(0);
+    expect((await repo.findById(image.id))!.postId).toBe(holder.id);
+  });
+
+  /** The guard must not cost a post its own images — a reorder re-claims rows this same post already holds. */
+  it("still re-claims a post's OWN rows, so reordering keeps working", async () => {
+    const owner = await createUser("wildan");
+    const post = await createPost(owner.id);
+    const a = await repo.create({ ownerId: owner.id, width: 10, height: 10, byteSize: 1 });
+    const b = await repo.create({ ownerId: owner.id, width: 10, height: 10, byteSize: 1 });
+    await repo.claim(post.id, [a.id, b.id]);
+
+    expect(await repo.claim(post.id, [b.id, a.id])).toBe(2);
+    expect((await repo.listForPost(post.id)).map((row) => row.id)).toEqual([b.id, a.id]);
+  });
+
   it("lists unclaimed rows older than a cutoff, for the sweep", async () => {
     const owner = await createUser("wildan");
     const old = await repo.create({ ownerId: owner.id, width: 10, height: 10, byteSize: 1 });
