@@ -40,20 +40,21 @@ async function seedPost(): Promise<{ authorId: string; postId: string }> {
  * Mirrors `drizzle-user-purchase.unit-of-work.test.ts` exactly: proves
  * `posts`/`media` are bound to the SAME transaction the unit of work opens,
  * not to the pool — the entire mechanism `PostEditUnitOfWorkPort`'s
- * docstring claims, and specifically fix round 1's path 2 (a claim that
- * fails after the visibility write already ran must not leave that write
- * standing).
+ * docstring claims, on BOTH the paths that depend on it: fix round 1's path
+ * 2 (`EditPost`'s claim failing after the visibility write already ran) and
+ * fix round 2 (`CreatePost`'s claim failing after the post row already
+ * committed).
  *
- * `write-post.test.ts`'s own real-transaction describe block proves the
- * SAME property through a genuine `EditPost.execute()` call and a REAL
- * `ConflictError` from a real vanished-media race — the test a reader will
- * find most convincing. This file proves it one layer down, directly against
- * `DrizzlePostEditUnitOfWork` itself, which that other test does not touch
- * (it opens its own ad hoc transaction to inject the race). Without this
- * file, a defect confined to `DrizzlePostEditUnitOfWork.run` alone — for
- * instance, constructing its repositories against the POOL instead of the
- * transaction handle it opens — would be invisible to every test that never
- * calls `run` directly.
+ * `write-post.test.ts`'s own real-transaction describe blocks prove the SAME
+ * property through genuine `EditPost.execute()`/`CreatePost.execute()` calls
+ * and a REAL `ConflictError` from a real vanished-media race — the tests a
+ * reader will find most convincing. This file proves it one layer down,
+ * directly against `DrizzlePostEditUnitOfWork` itself, which those other
+ * tests do not touch (they open their own ad hoc transaction to inject the
+ * race). Without this file, a defect confined to `DrizzlePostEditUnitOfWork.run`
+ * alone — for instance, constructing its repositories against the POOL
+ * instead of the transaction handle it opens — would be invisible to every
+ * test that never calls `run` directly.
  */
 describe("DrizzlePostEditUnitOfWork", () => {
   it("rolls the visibility write back when the work throws after it", async () => {
@@ -73,6 +74,29 @@ describe("DrizzlePostEditUnitOfWork", () => {
     const [row] = await db.select().from(postsTable).where(eq(postsTable.id, postId));
     expect(row!.visibility).toBe("public");
     expect(row!.body).toBe("asli");
+  });
+
+  /**
+   * Fix round 2's shape, one layer down from `write-post.test.ts`'s
+   * `CreatePost — real transaction` block: a post write followed by a
+   * throw, inside the SAME `run`, must leave no row at all — not merely an
+   * unchanged one, since a create has no prior state to fall back to.
+   */
+  it("rolls the post write back entirely when the work throws after it", async () => {
+    const author = await seedUser();
+
+    await expect(
+      unitOfWork().run(async ({ posts: tx }) => {
+        await tx.create(author.id, "khusus anggota, foto hilang", "members");
+        // Stands in for `requireFullyClaimed` throwing after `posts.create`
+        // has already run in the same `work` — fix round 2, reproduced at
+        // the level this class alone is responsible for.
+        throw new ConflictError("boom, simulating a failed claim after create");
+      })
+    ).rejects.toThrow("boom, simulating a failed claim after create");
+
+    const rows = await db.select().from(postsTable).where(eq(postsTable.authorId, author.id));
+    expect(rows).toEqual([]);
   });
 
   it("commits the visibility write when the work succeeds", async () => {

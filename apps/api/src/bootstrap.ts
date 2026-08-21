@@ -1952,12 +1952,14 @@ export function bootstrap(): Dependencies {
   // must fail boot everywhere, not just where some optional feature happens
   // to be enabled.
   const maxPostImages = resolveMaxPostImages(process.env.MAX_POST_IMAGES);
-  const createPost = new CreatePost(postRepository, mediaRepository);
-  // Task 5 fix round 1: the lock, the resulting-state check, the body/
-  // visibility write and the media claim all run in ONE transaction — see
-  // `PostEditUnitOfWorkPort`'s own docstring for the two paths that left a
-  // members-only post with zero images before this existed.
+  // Task 5 fix rounds 1 and 2: the post write and the media claim run in ONE
+  // transaction, for `CreatePost` and `EditPost` alike (`EditPost` also locks
+  // the row first) — see `PostEditUnitOfWorkPort`'s own docstring for the
+  // paths that left a members-only post with zero images before this
+  // existed on each side. ONE instance, shared by both, the same way
+  // `postRepository`/`mediaRepository` above are.
   const postEditUnitOfWork = new DrizzlePostEditUnitOfWork(db);
+  const createPost = new CreatePost(postEditUnitOfWork);
   const editPost = new EditPost(postEditUnitOfWork);
   const deletePost = new DeletePost(postRepository);
   // The SAME `userSubscriptionRepository` and the SAME `clock` `isMemberOf`

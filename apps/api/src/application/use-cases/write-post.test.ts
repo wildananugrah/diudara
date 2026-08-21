@@ -184,35 +184,44 @@ const FIRST_IMAGE = "cccccccc-0000-4000-8000-000000000000";
 const SECOND_IMAGE = "dddddddd-0000-4000-8000-000000000000";
 
 /**
- * `EditPost` now takes a `PostEditUnitOfWorkPort` (Task 5 fix round 1)
- * rather than the two repositories directly. Every existing test in this
- * file constructs one against the SAME fakes it already builds — this just
- * runs `work` inline, exactly as `fakeJoinRequestUnitOfWork` and friends do
- * in `bootstrap.test.ts` — so every assertion already written against
- * `posts.updated` / `media.claims` keeps meaning what it always meant. Real
- * transactional behaviour (the row lock, the rollback) is proved separately,
- * against a real Postgres transaction, in the `EditPost — real transaction`
- * describe block below.
+ * `CreatePost` and `EditPost` both take a `PostEditUnitOfWorkPort` now
+ * (Task 5 fix rounds 1 and 2) rather than the two repositories directly.
+ * Every existing test in this file constructs one against the SAME fakes it
+ * already builds — this just runs `work` inline, exactly as
+ * `fakeJoinRequestUnitOfWork` and friends do in `bootstrap.test.ts` — so
+ * every assertion already written against `posts.created` / `posts.updated`
+ * / `media.claims` keeps meaning what it always meant. Real transactional
+ * behaviour (the row lock, the rollback on both paths) is proved separately,
+ * against a real Postgres transaction, in the `— real transaction` describe
+ * blocks below.
  */
+function postWriteUnitOfWorkFor(
+  posts: PostRepositoryPort,
+  media: MediaRepositoryPort
+): PostEditUnitOfWorkPort {
+  return { run: (work) => work({ posts, media }) };
+}
+
+function createPostFor(posts: PostRepositoryPort, media: MediaRepositoryPort): CreatePost {
+  return new CreatePost(postWriteUnitOfWorkFor(posts, media));
+}
+
 function editPostFor(posts: PostRepositoryPort, media: MediaRepositoryPort): EditPost {
-  const unitOfWork: PostEditUnitOfWorkPort = {
-    run: (work) => work({ posts, media }),
-  };
-  return new EditPost(unitOfWork);
+  return new EditPost(postWriteUnitOfWorkFor(posts, media));
 }
 
 describe("CreatePost", () => {
   it("refuses an empty body", async () => {
     const posts = new FakePosts();
     await expect(
-      new CreatePost(posts, new FakeMedia()).execute({ authorId: AUTHOR, body: "" })
+      createPostFor(posts, new FakeMedia()).execute({ authorId: AUTHOR, body: "" })
     ).rejects.toBeInstanceOf(ValidationError);
   });
 
   it("refuses a body that is only whitespace", async () => {
     const posts = new FakePosts();
     await expect(
-      new CreatePost(posts, new FakeMedia()).execute({ authorId: AUTHOR, body: "   \n\t  " })
+      createPostFor(posts, new FakeMedia()).execute({ authorId: AUTHOR, body: "   \n\t  " })
     ).rejects.toBeInstanceOf(ValidationError);
   });
 
@@ -220,16 +229,16 @@ describe("CreatePost", () => {
     const posts = new FakePosts();
     const media = new FakeMedia();
     await expect(
-      new CreatePost(posts, media).execute({ authorId: AUTHOR, body: "a".repeat(1001) })
+      createPostFor(posts, media).execute({ authorId: AUTHOR, body: "a".repeat(1001) })
     ).rejects.toBeInstanceOf(ValidationError);
     await expect(
-      new CreatePost(posts, media).execute({ authorId: AUTHOR, body: "a".repeat(1000) })
+      createPostFor(posts, media).execute({ authorId: AUTHOR, body: "a".repeat(1000) })
     ).resolves.toBeDefined();
   });
 
   it("trims the body before storing it", async () => {
     const posts = new FakePosts();
-    const view = await new CreatePost(posts, new FakeMedia()).execute({
+    const view = await createPostFor(posts, new FakeMedia()).execute({
       authorId: AUTHOR,
       body: "  halo  ",
     });
@@ -238,7 +247,7 @@ describe("CreatePost", () => {
 
   it("a post with no mediaIds carries an empty media list and claims nothing", async () => {
     const media = new FakeMedia();
-    const view = await new CreatePost(new FakePosts(), media).execute({
+    const view = await createPostFor(new FakePosts(), media).execute({
       authorId: AUTHOR,
       body: "halo",
     });
@@ -252,7 +261,7 @@ describe("CreatePost", () => {
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR });
     media.seed({ id: SECOND_IMAGE, ownerId: AUTHOR });
 
-    const view = await new CreatePost(new FakePosts(), media).execute({
+    const view = await createPostFor(new FakePosts(), media).execute({
       authorId: AUTHOR,
       body: "halo",
       mediaIds: [SECOND_IMAGE, FIRST_IMAGE],
@@ -268,7 +277,7 @@ describe("CreatePost", () => {
     media.seed({ id: FIRST_IMAGE, ownerId: SOMEONE_ELSE });
 
     await expect(
-      new CreatePost(posts, media).execute({
+      createPostFor(posts, media).execute({
         authorId: AUTHOR,
         body: "halo",
         mediaIds: [FIRST_IMAGE],
@@ -281,7 +290,7 @@ describe("CreatePost", () => {
   it("refuses an id no media row has ever had", async () => {
     const posts = new FakePosts();
     await expect(
-      new CreatePost(posts, new FakeMedia()).execute({
+      createPostFor(posts, new FakeMedia()).execute({
         authorId: AUTHOR,
         body: "halo",
         mediaIds: [FIRST_IMAGE],
@@ -296,7 +305,7 @@ describe("CreatePost", () => {
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: OTHER_POST_ID });
 
     await expect(
-      new CreatePost(posts, media).execute({
+      createPostFor(posts, media).execute({
         authorId: AUTHOR,
         body: "halo",
         mediaIds: [FIRST_IMAGE],
@@ -318,7 +327,7 @@ describe("CreatePost", () => {
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR });
 
     await expect(
-      new CreatePost(posts, media).execute({
+      createPostFor(posts, media).execute({
         authorId: AUTHOR,
         body: "halo",
         mediaIds: [FIRST_IMAGE, FIRST_IMAGE],
@@ -353,7 +362,7 @@ describe("CreatePost", () => {
     };
 
     await expect(
-      new CreatePost(posts, media).execute({
+      createPostFor(posts, media).execute({
         authorId: AUTHOR,
         body: "halo",
         mediaIds: [FIRST_IMAGE],
@@ -369,7 +378,7 @@ describe("CreatePost", () => {
   it("refuses to create a members-only post with no image — the lock would protect nothing", async () => {
     const posts = new FakePosts();
     await expect(
-      new CreatePost(posts, new FakeMedia()).execute({
+      createPostFor(posts, new FakeMedia()).execute({
         authorId: AUTHOR,
         body: "halo",
         mediaIds: [],
@@ -387,7 +396,7 @@ describe("CreatePost", () => {
   it("refuses a members-only post whose mediaIds is omitted entirely, not just empty", async () => {
     const posts = new FakePosts();
     await expect(
-      new CreatePost(posts, new FakeMedia()).execute({
+      createPostFor(posts, new FakeMedia()).execute({
         authorId: AUTHOR,
         body: "halo",
         visibility: "members",
@@ -401,7 +410,7 @@ describe("CreatePost", () => {
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR });
 
-    const view = await new CreatePost(posts, media).execute({
+    const view = await createPostFor(posts, media).execute({
       authorId: AUTHOR,
       body: "halo",
       mediaIds: [FIRST_IMAGE],
@@ -412,7 +421,7 @@ describe("CreatePost", () => {
   });
 
   it("an omitted visibility defaults to public, unaffected by the no-image rule", async () => {
-    const view = await new CreatePost(new FakePosts(), new FakeMedia()).execute({
+    const view = await createPostFor(new FakePosts(), new FakeMedia()).execute({
       authorId: AUTHOR,
       body: "halo",
     });
@@ -780,25 +789,66 @@ describe("DeletePost", () => {
  * mutate in place with no commit/rollback, and a single `bun:test` process
  * has no second connection to race.
  */
+/**
+ * Shared by both `— real transaction` describe blocks below (fix rounds 1
+ * and 2 prove the identical property — a failed claim must not leave a
+ * write standing — on two different entry points, so the seeding and the
+ * race-injection wrapper are one copy, not two that could drift).
+ */
+let realTxSeedCounter = 0;
+
+async function seedRealUser() {
+  realTxSeedCounter += 1;
+  const [row] = await db
+    .insert(appUsers)
+    .values({
+      handle: `postuow${realTxSeedCounter}`,
+      email: `postuow${realTxSeedCounter}@example.com`,
+      whatsappNumber: null,
+      passwordHash: "irrelevant-hash",
+      displayName: `Post UoW ${realTxSeedCounter}`,
+      bio: null,
+    })
+    .returning();
+  return row!;
+}
+
+async function currentVisibilityAndMediaCount(
+  postId: string
+): Promise<{ visibility: string; mediaCount: number }> {
+  const [row] = await db.select().from(postsTable).where(eq(postsTable.id, postId));
+  const claimed = await db.select().from(postMedia).where(eq(postMedia.postId, postId));
+  return { visibility: row!.visibility, mediaCount: claimed.length };
+}
+
+/**
+ * `DrizzleMediaRepository.findManyByIds` (called by `requireAttachable`,
+ * BEFORE `claim`), wrapped to delete the row it just found the instant
+ * after reading it — the orphan sweep's exact timing, forced rather than
+ * hoped for. The delete runs on `tx`, the SAME transaction `claim` will
+ * run its own SAVEPOINT inside, so by the time `claim`'s UPDATE reaches
+ * that row it is gone and `claimed` comes back short.
+ */
+function raceDeletingMedia(tx: DatabaseExecutor): MediaRepositoryPort {
+  const real = new DrizzleMediaRepository(tx);
+  return {
+    create: (input) => real.create(input),
+    findById: (id) => real.findById(id),
+    async findManyByIds(ids) {
+      const rows = await real.findManyByIds(ids);
+      await tx.delete(postMedia).where(inArray(postMedia.id, ids));
+      return rows;
+    },
+    claim: (postId, ids) => real.claim(postId, ids),
+    listForPost: (postId) => real.listForPost(postId),
+    listForPosts: (postIds) => real.listForPosts(postIds),
+    listUnclaimedBefore: (cutoff, limit) => real.listUnclaimedBefore(cutoff, limit),
+    deleteIfUnclaimed: (id) => real.deleteIfUnclaimed(id),
+  };
+}
+
 describe("EditPost — real transaction (Task 5 fix round 1)", () => {
   beforeEach(resetDatabase);
-  let seedCounter = 0;
-
-  async function seedUser() {
-    seedCounter += 1;
-    const [row] = await db
-      .insert(appUsers)
-      .values({
-        handle: `edituow${seedCounter}`,
-        email: `edituow${seedCounter}@example.com`,
-        whatsappNumber: null,
-        passwordHash: "irrelevant-hash",
-        displayName: `Edit UoW ${seedCounter}`,
-        bio: null,
-      })
-      .returning();
-    return row!;
-  }
 
   /** One author, one post carrying exactly one image, both real rows. */
   async function seedPublicPostWithOneImage(): Promise<{
@@ -808,45 +858,11 @@ describe("EditPost — real transaction (Task 5 fix round 1)", () => {
   }> {
     const posts = new DrizzlePostRepository(db);
     const media = new DrizzleMediaRepository(db);
-    const author = await seedUser();
+    const author = await seedRealUser();
     const post = await posts.create(author.id, "asli", "public");
     const image = await media.create({ ownerId: author.id, width: 10, height: 10, byteSize: 1 });
     await media.claim(post.id, [image.id]);
     return { authorId: author.id, postId: post.id, mediaId: image.id };
-  }
-
-  async function currentVisibilityAndMediaCount(
-    postId: string
-  ): Promise<{ visibility: string; mediaCount: number }> {
-    const [row] = await db.select().from(postsTable).where(eq(postsTable.id, postId));
-    const claimed = await db.select().from(postMedia).where(eq(postMedia.postId, postId));
-    return { visibility: row!.visibility, mediaCount: claimed.length };
-  }
-
-  /**
-   * `DrizzleMediaRepository.findManyByIds` (called by `requireAttachable`,
-   * BEFORE `claim`), wrapped to delete the row it just found the instant
-   * after reading it — the orphan sweep's exact timing, forced rather than
-   * hoped for. The delete runs on `tx`, the SAME transaction `claim` will
-   * run its own SAVEPOINT inside, so by the time `claim`'s UPDATE reaches
-   * that row it is gone and `claimed` comes back short.
-   */
-  function raceDeletingMedia(tx: DatabaseExecutor): MediaRepositoryPort {
-    const real = new DrizzleMediaRepository(tx);
-    return {
-      create: (input) => real.create(input),
-      findById: (id) => real.findById(id),
-      async findManyByIds(ids) {
-        const rows = await real.findManyByIds(ids);
-        await tx.delete(postMedia).where(inArray(postMedia.id, ids));
-        return rows;
-      },
-      claim: (postId, ids) => real.claim(postId, ids),
-      listForPost: (postId) => real.listForPost(postId),
-      listForPosts: (postIds) => real.listForPosts(postIds),
-      listUnclaimedBefore: (cutoff, limit) => real.listUnclaimedBefore(cutoff, limit),
-      deleteIfUnclaimed: (id) => real.deleteIfUnclaimed(id),
-    };
   }
 
   /**
@@ -962,5 +978,51 @@ describe("EditPost — real transaction (Task 5 fix round 1)", () => {
     // overlapping at the database.
     expect(outcomes).toContain("A-won");
     expect(outcomes).toContain("B-won");
+  });
+});
+
+/**
+ * Task 5 fix round 2 (spec §7). `CreatePost` had the identical shape as
+ * `EditPost`'s path 2 from fix round 1: `posts.create(..., visibility)`
+ * committed BEFORE `media.claim(...)`, so a lost claim race on a
+ * `visibility: "members"` create left the SAME forbidden state behind —
+ * reached from the OTHER entry point, and never covered by round 1's tests,
+ * which only ever drove `EditPost`.
+ *
+ * There is no concurrent-CREATE analogue of path 1: two callers cannot race
+ * to create-then-claim the SAME post, because there is no post until
+ * `posts.create` returns, and nothing else can address it before then. The
+ * single-request test below is therefore the WHOLE proof for this path, as
+ * the review asked for — no `ArrivalLatch`, no `Promise.all`.
+ */
+describe("CreatePost — real transaction (Task 5 fix round 2)", () => {
+  beforeEach(resetDatabase);
+
+  it("a failed claim on a members-only create leaves NO post row at all", async () => {
+    const author = await seedRealUser();
+    const media = new DrizzleMediaRepository(db);
+    const image = await media.create({ ownerId: author.id, width: 10, height: 10, byteSize: 1 });
+    const raceUnitOfWork: PostEditUnitOfWorkPort = {
+      run: (work) =>
+        db.transaction((tx) =>
+          work({ posts: new DrizzlePostRepository(tx), media: raceDeletingMedia(tx) })
+        ),
+    };
+
+    await expect(
+      new CreatePost(raceUnitOfWork).execute({
+        authorId: author.id,
+        body: "khusus anggota, foto hilang",
+        mediaIds: [image.id],
+        visibility: "members",
+      })
+    ).rejects.toBeInstanceOf(ConflictError);
+
+    // Read through a FRESH connection, not `tx` (which no longer exists —
+    // the transaction rolled back). Before fix round 2, `posts.create` had
+    // already committed by this point, so this would find exactly one row:
+    // a `members` post with zero images, the exact forbidden state.
+    const rows = await db.select().from(postsTable).where(eq(postsTable.authorId, author.id));
+    expect(rows).toEqual([]);
   });
 });

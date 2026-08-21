@@ -34,17 +34,30 @@ function requireImageWhenLocked(visibility: string, mediaCount: number): void {
  * **A claim that attached fewer rows than it was given has LOST A RACE, and it
  * must not pass quietly.**
  *
- * Final whole-branch review, Important 4. `requireAttachable` reads the rows
- * and then `claim` writes them; between those two the orphan sweep can delete a
- * row it listed as unclaimed (a composer left open overnight, then used). Before
- * this, `claim` returned nothing and the missing id was a silent no-op — the
- * author's post came back with fewer photos than they sent, and nothing said so.
+ * Final whole-branch review, Important 4 (2026-08-18). `requireAttachable`
+ * reads the rows and then `claim` writes them; between those two the orphan
+ * sweep can delete a row it listed as unclaimed (a composer left open
+ * overnight, then used). Before this, `claim` returned nothing and the
+ * missing id was a silent no-op — the author's post came back with fewer
+ * photos than they sent, and nothing said so.
  *
  * A 409 rather than a 500 because the person can act on it: upload the photo
- * again. The post row DOES already exist by the time this fires on create,
- * which is the honest cost of the post write and the media claim not being one
- * unit of work — a known, separately recorded decision, and a loud wrong-ish
- * status is still strictly better than silent data loss.
+ * again.
+ *
+ * **UPDATED, Task 5 fix round 2.** This docstring used to record that "the
+ * post row DOES already exist by the time this fires on create... a loud
+ * wrong-ish status is still strictly better than silent data loss" — true on
+ * 2026-08-18, three days before `visibility` became writable, when the worst
+ * case this left behind was a PUBLIC post with fewer photos than sent: an
+ * annoyance. Task 5 changed what a lost claim race can leave behind on
+ * create: a `members` post whose claim never fully lands is the EXACT
+ * forbidden state the whole task exists to prevent, not an inconvenience,
+ * and the original trade-off was never weighed against that outcome because
+ * that outcome did not exist yet. So `CreatePost` and `EditPost` alike now
+ * run their post write and their media claim inside ONE transaction (see
+ * `PostEditUnitOfWorkPort`) — this error rolls BOTH back on either path, and
+ * a caller who sees it can retry knowing nothing was left half-written,
+ * gated or not.
  */
 function requireFullyClaimed(claimed: number, ids: string[]): void {
   if (claimed !== ids.length) throw new ConflictError(MEDIA_VANISHED_MESSAGE);
@@ -106,10 +119,14 @@ async function requireAttachable(
 }
 
 export class CreatePost {
-  constructor(
-    private readonly posts: PostRepositoryPort,
-    private readonly media: MediaRepositoryPort
-  ) {}
+  /**
+   * Task 5 fix round 2: takes the SAME unit of work `EditPost` does, and for
+   * the same reason — the post write and the media claim must land or fail
+   * together. Named for "edit" only because `EditPost` needed it first; see
+   * `PostEditUnitOfWorkPort`'s own docstring, which now documents both
+   * callers.
+   */
+  constructor(private readonly postWrite: PostEditUnitOfWorkPort) {}
 
   async execute(input: {
     authorId: string;
@@ -126,28 +143,35 @@ export class CreatePost {
     const body = requireBody(input.body);
     const mediaIds = input.mediaIds ?? [];
     const visibility = input.visibility ?? "public";
-    // Validated before the post row exists: a refused `mediaIds` must not
-    // leave a stray post behind.
-    await requireAttachable(this.media, input.authorId, mediaIds, null);
-    // Same reason, same place: spec §7's rule, checked against what THIS
-    // call is producing, before any row exists to leave behind.
-    requireImageWhenLocked(visibility, mediaIds.length);
+    return this.postWrite.run(async ({ posts, media }) => {
+      // Validated before the post row exists: a refused `mediaIds` must not
+      // leave a stray post behind.
+      await requireAttachable(media, input.authorId, mediaIds, null);
+      // Same reason, same place: spec §7's rule, checked against what THIS
+      // call is producing, before any row exists to leave behind.
+      requireImageWhenLocked(visibility, mediaIds.length);
 
-    const row = await this.posts.create(input.authorId, body, visibility);
-    // `locked: false` — NEVER copy this to a read path. Every `toPostView` in
-    // this file answers the post's OWN AUTHOR, who is the one person the
-    // paywall never applies to: `CreatePost` and `EditPost` have already
-    // proven ownership before reaching here. A read path must instead ask
-    // `read-posts.ts`'s gate, which needs a viewer id and a membership lookup
-    // that this file has neither of.
-    if (mediaIds.length === 0) return toPostView(row, [], false);
+      const row = await posts.create(input.authorId, body, visibility);
+      // `locked: false` — NEVER copy this to a read path. Every `toPostView` in
+      // this file answers the post's OWN AUTHOR, who is the one person the
+      // paywall never applies to: `CreatePost` and `EditPost` have already
+      // proven ownership before reaching here. A read path must instead ask
+      // `read-posts.ts`'s gate, which needs a viewer id and a membership lookup
+      // that this file has neither of.
+      if (mediaIds.length === 0) return toPostView(row, [], false);
 
-    requireFullyClaimed(await this.media.claim(row.id, mediaIds), mediaIds);
-    // Read back rather than echoing the ids: what the client gets is what a
-    // reload would show, ordered by the `position` that was actually stored.
-    // `locked: false` for the reason given at the call site above — this is
-    // the author's own post coming straight back to them.
-    return toPostView(row, await this.media.listForPost(row.id), false);
+      // Inside the SAME transaction as `posts.create` above: `claim` losing
+      // the sweep race and `requireFullyClaimed` throwing now rolls the post
+      // row back WITH it — see that function's own docstring (Task 5 fix
+      // round 2) for why this stopped being an accepted trade-off the
+      // instant `visibility` became writable.
+      requireFullyClaimed(await media.claim(row.id, mediaIds), mediaIds);
+      // Read back rather than echoing the ids: what the client gets is what a
+      // reload would show, ordered by the `position` that was actually stored.
+      // `locked: false` for the reason given at the call site above — this is
+      // the author's own post coming straight back to them.
+      return toPostView(row, await media.listForPost(row.id), false);
+    });
   }
 }
 
