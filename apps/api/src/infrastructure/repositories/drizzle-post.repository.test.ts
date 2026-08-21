@@ -65,7 +65,7 @@ function shuffledRanks(count: number, step = 7): number[] {
 }
 
 describe("DrizzlePostRepository.create", () => {
-  it("returns the row with the author's public fields and no authorId", async () => {
+  it("returns the row with the author's public fields, its id and visibility", async () => {
     const author = await seedUser();
 
     const row = await repo.create(author.id, "halo semua");
@@ -73,13 +73,27 @@ describe("DrizzlePostRepository.create", () => {
     expect(Object.keys(row).sort()).toEqual([
       "authorDisplayName",
       "authorHandle",
+      "authorId",
       "body",
       "createdAt",
       "editedAt",
       "id",
+      "visibility",
     ]);
     expect(row.authorHandle).toBe(author.handle);
     expect(row.editedAt === null).toBe(true);
+  });
+
+  it("carries the author's id and its visibility, defaulting to public", async () => {
+    const author = await seedUser();
+
+    const post = await repo.create(author.id, "halo");
+    const rows = await repo.listByAuthor(author.id, 10, null);
+
+    expect(rows[0]?.authorId).toBe(author.id);
+    expect(rows[0]?.visibility).toBe("public");
+    expect(post.authorId).toBe(author.id);
+    expect(post.visibility).toBe("public");
   });
 });
 
@@ -244,19 +258,24 @@ describe("DrizzlePostRepository limits", () => {
  * `DrizzlePostRepository.create` above only exercises `readOne` — the
  * `.map((row) => row.body)` idiom every list test uses, and `toEqual([])` on
  * the soft-delete test, cannot see an extra key at all. Verified by mutation:
- * adding `authorId`, `deletedAt` and `appUsers.email` to the select in
- * `page()` or in `listFollowing()` left the whole suite at 9 pass / 0 fail
- * before these existed. `postColumns` is shared by all three list paths, so
- * one row from each is enough to catch a leak introduced at either call site.
+ * adding `deletedAt` and `appUsers.email` to the select in `page()` or in
+ * `listFollowing()` left the whole suite at 9 pass / 0 fail before these
+ * existed. (`authorId` and `visibility` were later added to `postColumns`
+ * deliberately, in Phase 6 — the exact-key-set below was widened alongside
+ * them, not exempted from this check.) `postColumns` is shared by all three
+ * list paths, so one row from each is enough to catch a leak introduced at
+ * either call site.
  */
 describe("DrizzlePostRepository projection on every list path", () => {
   const POST_ROW_KEYS = [
     "authorDisplayName",
     "authorHandle",
+    "authorId",
     "body",
     "createdAt",
     "editedAt",
     "id",
+    "visibility",
   ].sort();
 
   it("listGlobal rows carry only the public post fields", async () => {

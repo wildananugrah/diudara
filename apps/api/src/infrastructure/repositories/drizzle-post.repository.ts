@@ -10,16 +10,21 @@ import type {
 import { clampLimit } from "./drizzle-follow.repository";
 
 /**
- * The ONE projection every read path selects. `author_id` and `deleted_at` are
- * absent by construction rather than stripped later — Phase 1's review found the
+ * The ONE projection every read path selects. `deleted_at` is absent by
+ * construction rather than stripped later — Phase 1's review found the
  * no-email invariant defended on only two of five repository paths precisely
- * because each path chose its own columns.
+ * because each path chose its own columns. `author_id` and `visibility` ARE
+ * selected (Phase 6): entitlement is a question about ids, not handles, and
+ * `toPostView` in `post-views.ts` is what keeps them off the wire, not their
+ * absence here.
  */
 const postColumns = {
   id: posts.id,
   body: posts.body,
   createdAt: posts.createdAt,
   editedAt: posts.editedAt,
+  authorId: posts.authorId,
+  visibility: posts.visibility,
   authorHandle: appUsers.handle,
   authorDisplayName: appUsers.displayName,
 } as const;

@@ -359,6 +359,9 @@ const fakePostRepository: PostRepositoryPort = {
       body,
       createdAt: new Date(0),
       editedAt: null,
+      // Distinct from any viewer id used in this file's smoke tests.
+      authorId: "fake-author",
+      visibility: "public",
       authorHandle: "fake",
       authorDisplayName: "Fake",
     };

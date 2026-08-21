@@ -17,6 +17,11 @@ function fakeRow(overrides: Partial<PostRow> = {}): PostRow {
     body: "halo",
     createdAt: new Date("2026-08-18T03:00:00.000Z"),
     editedAt: null,
+    // Distinct from AUTHOR and SOMEONE_ELSE (below) — a fixture where the
+    // author id happened to equal a viewer id would make a later gate test
+    // pass for the wrong reason.
+    authorId: "33333333-0000-4000-8000-000000000000",
+    visibility: "public",
     authorHandle: "budi",
     authorDisplayName: "Budi",
     ...overrides,

@@ -8,6 +8,8 @@ const row: PostRow = {
   body: "halo",
   createdAt: new Date("2026-08-18T03:00:00.000Z"),
   editedAt: null,
+  authorId: "77777777-0000-4000-8000-000000000000",
+  visibility: "public",
   authorHandle: "budi",
   authorDisplayName: "Budi",
 };

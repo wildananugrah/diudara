@@ -5,14 +5,19 @@ import type { KeysetCursor } from "../../domain/keyset-cursor";
  * joined in. The nesting into `{ author: { ... } }` happens in `post-views.ts`,
  * so the shape the wire sees is decided in exactly one place.
  *
- * `authorId` is deliberately ABSENT — nothing outside the ownership check needs
- * it, and a row shape that carries it is one `c.json(row)` away from leaking it.
+ * `authorId` IS present — entitlement (a gated post) is a question about ids,
+ * not handles, so the gate cannot be built without it here. `toPostView` in
+ * `post-views.ts` still picks its wire fields explicitly, which is what keeps
+ * it from leaking onto the client.
  */
 export interface PostRow {
   id: string;
   body: string;
   createdAt: Date;
   editedAt: Date | null;
+  authorId: string;
+  /** `public` | `members`. Widened here rather than in the DB so a new value needs no migration. */
+  visibility: string;
   authorHandle: string;
   authorDisplayName: string;
 }
