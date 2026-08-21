@@ -236,6 +236,48 @@ describe("RemindExpiringMembership", () => {
     expect(sent.body).not.toContain("Rp");
   });
 
+  /**
+   * **THE FINAL WHOLE-BRANCH REVIEW'S I-5.** This message goes out three days
+   * BEFORE the period ends (`MEMBERSHIP_REMINDER_LEAD_MS`), and for all three of
+   * those days the member's row is `active` and still inside its period — so
+   * `retireExpired`'s `current_period_end <= now` does not match it, the
+   * status-only guard still sees it, and `StartUserSubscription` answers 409
+   * ("Anda sudah menjadi anggota aktif… membayar lagi tidak menambah masa
+   * aktif"). The profile does not even offer the button for them.
+   *
+   * So the old call to action — "Ingin melanjutkan? Buka halaman berikut dan
+   * pilih paket keanggotaan" — invited an action the system refuses for the
+   * entire lead. A member told to act, who cannot, forgets: exactly the outcome
+   * this pass exists to prevent.
+   *
+   * It now says WHEN instead. The link stays, as something to keep rather than
+   * something to press today.
+   */
+  it("says WHEN they can subscribe again, and never invites an action the route refuses", async () => {
+    const email = new FakeEmailAdapter();
+    const useCase = build({
+      subscriptions: fakeSubscriptions([[subscriptionRow()]]).repository,
+      users: fakeUsers([subscriberRow(), ownerRow()]),
+      reminders: fakeReminders().port,
+      email,
+      notifier: null,
+    });
+
+    await useCase.execute();
+    const body = email.sent[0].body;
+
+    // WHEN: after the membership ends — and the date itself is already stated
+    // above, so this sentence does not have to re-derive it.
+    expect(body).toContain("Anda bisa berlangganan lagi setelah keanggotaan Anda berakhir");
+    // WHY NOT NOW, in the route's own terms: paying again today buys nothing.
+    expect(body).toContain("membayar lagi sekarang tidak menambah masa aktif");
+    // The invitation that could only collect a 409, gone.
+    expect(body).not.toContain("pilih paket keanggotaan");
+    expect(body).not.toContain("Ingin melanjutkan?");
+    // The link is still there — to keep, not to press today.
+    expect(body).toContain("https://diudara.test/@wildan");
+  });
+
   it("names the end date as the member's own WIB calendar day, not UTC's", async () => {
     // 22:00 WIB on the 23rd is still the 23rd to the member; in UTC it is already the
     // 22nd's evening... and an hour later it is the 24th. Getting this wrong tells a

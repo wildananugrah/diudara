@@ -445,9 +445,12 @@ function buildMembershipReminderSubject(ownerHandle: string): string {
  * `SendRenewalReminder`'s is: it is the entire member-visible surface of this feature,
  * and what may and may not appear in it is easier to check when it is all here.
  *
- * WHAT IS DELIBERATELY NOT IN IT: any amount, any tier name, and any promise that
- * something will renew. Nothing renews — saying so is the single most important thing
- * this message does, because a member who expects an automatic charge will not act.
+ * WHAT IS DELIBERATELY NOT IN IT: any amount, any tier name, any promise that
+ * something will renew, and — since the final whole-branch review's I-5 — any
+ * invitation to buy TODAY. Nothing renews, which is the single most important thing
+ * this message says, because a member who expects an automatic charge will not act;
+ * and nothing lets them act early either, which is why the message names WHEN
+ * instead of pointing at a button the route refuses for the whole three-day lead.
  */
 function buildMembershipReminder(input: {
   memberName: string;
@@ -479,7 +482,24 @@ function buildMembershipReminder(input: {
       "ke unggahan khusus anggota berhenti sampai Anda berlangganan lagi."
   );
   lines.push("");
-  lines.push("Ingin melanjutkan? Buka halaman berikut dan pilih paket keanggotaan:");
+  lines.push("");
+  // **WHEN, NOT "GO AND DO IT NOW"** — the final whole-branch review's I-5. This
+  // message goes out three days AHEAD (`MEMBERSHIP_REMINDER_LEAD_MS`), and for all
+  // three of them the member's row is `active` and still inside its period: the
+  // profile offers them no button (`viewerIsMember`), and if they reached the route
+  // anyway it answers 409 "Anda sudah menjadi anggota aktif… membayar lagi tidak
+  // menambah masa aktif". The old sentence here — "Ingin melanjutkan? Buka halaman
+  // berikut dan pilih paket keanggotaan" — therefore invited an action the system
+  // refuses for the entire lead, and a member told to act who cannot is a member who
+  // forgets. That is the outcome this pass exists to prevent.
+  lines.push(
+    "Anda bisa berlangganan lagi setelah keanggotaan Anda berakhir. Sampai saat itu " +
+      "keanggotaan Anda masih aktif, dan membayar lagi sekarang tidak menambah masa aktif."
+  );
+  lines.push("");
+  // The link stays — as something to KEEP, not something to press today. It is also
+  // the only place the member can act from once the date passes.
+  lines.push("Simpan tautan ini untuk berlangganan lagi nanti:");
   lines.push(input.profileUrl);
   lines.push("");
   lines.push("Terima kasih sudah mendukung karya di DIUDARA.");

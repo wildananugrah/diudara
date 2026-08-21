@@ -148,6 +148,12 @@ export interface UserSubscriptionRepositoryPort {
    * other half of what makes `user_subscription_one_active` a PARTIAL unique
    * index rather than a permanent one-and-done: cancelling here is what lets
    * the same (subscriber, owner) pair become active again later.
+   *
+   * **ONLY A LIVE ROW** — `pending` or `active`. A row already `expired` or
+   * `cancelled` is left exactly as it is and this answers `null`: since 5b there
+   * are two other actors that can end a row (`retireExpired` and
+   * `expireStalePending`), and a terminal status is a fact about WHY a membership
+   * stopped, not a slot for whoever writes last. Final whole-branch review, m-2.
    */
   cancel(id: string): Promise<UserSubscriptionRow | null>;
   /**

@@ -804,6 +804,46 @@ describe("DrizzleUserSubscriptionRepository.listStalePending / expireStalePendin
   it("returns false for an unknown id, rather than throwing", async () => {
     expect(await subs.expireStalePending("00000000-0000-4000-8000-000000000000")).toBe(false);
   });
+
+  /**
+   * **THE FINAL WHOLE-BRANCH REVIEW'S m-2.** `cancel` carried no status predicate,
+   * so it would rewrite a row this sweep had already moved to `expired` as
+   * `cancelled`. Both are terminal and nothing broke today — but an abandoned
+   * pending row now has TWO actors that can end it, and without a rule about which
+   * wins, what the row says afterwards depends on which one ran last. The rule is
+   * that a TERMINAL status is never rewritten: whoever ended it, ended it.
+   */
+  it("cancel does NOT rewrite a row the stale-pending sweep already expired", async () => {
+    const { id } = await seedPendingSubscription();
+    await backdate(id, PAST);
+    expect(await subs.expireStalePending(id)).toBe(true);
+
+    // No row moved, and it says so rather than handing back a row it did not change.
+    expect(await subs.cancel(id)).toBeNull();
+    expect((await subs.findById(id))?.status).toBe("expired");
+  });
+
+  /** The same rule the other way round: a cancelled row is not re-ended either. */
+  it("cancel does NOT rewrite an already-cancelled row", async () => {
+    const { id } = await seedPendingSubscription();
+    expect((await subs.cancel(id))?.status).toBe("cancelled");
+
+    expect(await subs.cancel(id)).toBeNull();
+    expect((await subs.findById(id))?.status).toBe("cancelled");
+  });
+
+  /** ...and the two LIVE statuses are still cancellable, which is what the method is for. */
+  it("cancel still ends a PENDING row and an ACTIVE one", async () => {
+    const pending = await seedPendingSubscription();
+    expect((await subs.cancel(pending.id))?.status).toBe("cancelled");
+
+    const { subscriberId } = await seedActiveSubscription({ periodEnd: FUTURE });
+    const [active] = await db
+      .select()
+      .from(userSubscriptions)
+      .where(eq(userSubscriptions.subscriberId, subscriberId));
+    expect((await subs.cancel(active!.id))?.status).toBe("cancelled");
+  });
 });
 
 /**

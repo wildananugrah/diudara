@@ -164,11 +164,31 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     return row ?? null;
   }
 
+  /**
+   * **A TERMINAL STATUS IS NEVER REWRITTEN** — the final whole-branch review's m-2.
+   * Before 5b nothing but this method ever ended a `user_subscription`, so an
+   * unconditional UPDATE was safe. Task 5's sweep now writes `expired` to abandoned
+   * pending rows and Task 2/3's retirement writes it to lapsed active ones, which
+   * gives an abandoned row two possible enders — and without this predicate what the
+   * row says afterwards would depend on which one ran last. Nothing breaks either way
+   * (both statuses are terminal and both free the partial indexes), but "cancelled"
+   * and "expired" are different facts about why a membership stopped, and the record
+   * is the only reason the row is kept rather than deleted.
+   *
+   * So only a LIVE row can be cancelled, and a caller is told when nothing moved —
+   * see `StartUserSubscription.releaseClaim`, which treats "already terminal" as the
+   * success it is rather than warning about a claim that is no longer held.
+   */
   async cancel(id: string): Promise<UserSubscriptionRow | null> {
     const [row] = await this.db
       .update(userSubscriptions)
       .set({ status: "cancelled" })
-      .where(eq(userSubscriptions.id, id))
+      .where(
+        and(
+          eq(userSubscriptions.id, id),
+          or(eq(userSubscriptions.status, "pending"), eq(userSubscriptions.status, "active"))
+        )
+      )
       .returning();
     return row ?? null;
   }

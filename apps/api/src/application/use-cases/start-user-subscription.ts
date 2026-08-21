@@ -458,13 +458,23 @@ export class StartUserSubscription {
   /**
    * THE ONE THING THAT MUST HAPPEN WHEN ANY OF THAT FAILS: RELEASE THE CLAIM.
    *
-   * The pending subscription is a claim on this pair's only pending slot, and
-   * nothing in 5a expires or clears one — there is no renewal pass, no cancel
-   * route and no operator path. So a failure that left the row `pending` would
-   * wedge this buyer out of this creator permanently, for a purchase nobody
-   * ever charged them for. Exactly the reasoning `ConnectUserPayout` records
-   * for `abandonXenditAccountProvisioning`, whose sentinel has the identical
-   * hazard.
+   * The pending subscription is a claim on this pair's only pending slot. There
+   * is no cancel route and no operator path, and until Phase 5b nothing expired
+   * one either — so a failure that left the row `pending` wedged this buyer out
+   * of this creator PERMANENTLY, for a purchase nobody ever charged them for.
+   * Exactly the reasoning `ConnectUserPayout` records for
+   * `abandonXenditAccountProvisioning`, whose sentinel has the identical hazard.
+   *
+   * Task 5's stale-pending sweep now clears such a row after two hours, so the
+   * worst case is two hours rather than for ever — which is a backstop, not a
+   * reason to skip this. Two hours is a long time to be unable to buy, and the
+   * sweep only runs if the worker is up.
+   *
+   * **A `null` FROM `cancel` NO LONGER MEANS THE CLAIM IS STILL HELD** (final
+   * review, m-2): `cancel` refuses to rewrite a TERMINAL row, so `null` also
+   * covers "the sweep already ended this one". The slot is free in that case, so
+   * the row is re-read before warning — a false "this buyer cannot start another
+   * checkout" is worse than silence, because it is the line an operator acts on.
    *
    * The transaction row is deliberately NOT touched: it stays, with a null
    * gateway reference, as the inspectable record that this attempt happened —
@@ -480,6 +490,12 @@ export class StartUserSubscription {
   private async releaseClaim(subscriptionId: string): Promise<void> {
     try {
       if ((await this.subscriptions.cancel(subscriptionId)) !== null) return;
+      // `null` — either the row is gone, or it is already TERMINAL because
+      // something else ended it first. Either way the pending slot is free and
+      // there is nothing to warn about. One extra read, and only on a path that
+      // has already failed.
+      const row = await this.subscriptions.findById(subscriptionId);
+      if (row !== null && row.status !== "pending") return;
     } catch {
       // Fall through to the same warning: "could not release" is the only fact
       // that matters here, and it is the same fact whether the statement

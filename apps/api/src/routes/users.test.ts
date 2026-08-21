@@ -3046,6 +3046,27 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
      * settled on against this same database, so the phase carries one number
      * rather than three. Do not lower this number.
      *
+     * **WHAT THIS TEST PROVES, AND WHAT IT DOES NOT** — measured by the final
+     * whole-branch review (I-2), and worth stating because the name promises
+     * more than the mechanism can deliver.
+     *
+     *  - **It proves THE RETIREMENT.** Against a `retireExpired` stubbed to a
+     *    no-op returning `true`, this test is RED (`Expected
+     *    ["expired","pending"], Received ["active"]`).
+     *  - **It does NOT prove the CLAIM's arbitration.** Against a `claimPending`
+     *    rewritten as a read-then-write (a `findPending` guard in front of a
+     *    plain INSERT) it is GREEN — 1 pass / 0 fail. The reason is structural
+     *    and no contender count or pool warm-up fixes it: all thirty
+     *    transactions call `retireExpired` on the SAME lapsed row as their first
+     *    statement, so they serialise on that row's write lock under READ
+     *    COMMITTED, and each `claimPending` therefore runs alone.
+     *
+     * The claim's arbitration IS defended, twice, and both are RED against that
+     * same mutant: `drizzle-user-subscription.repository.test.ts`'s "lets exactly
+     * ONE of thirty concurrent claims create the row", and 5a's "TWENTY
+     * CONCURRENT TAPS open exactly ONE invoice" below in this file. Look there,
+     * not here, if you are changing `claimPending`.
+     *
      * The latch fires BEFORE the unit of work opens its transaction, never
      * inside it. A contender parked at the latch while holding a transaction
      * holds a pooled connection too, and the pool is ten wide — thirty
@@ -3080,9 +3101,11 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
       const bodies = await Promise.all(responses.map((r) => r.json()));
 
       expect(latch.arrived).toBe(contenders);
-      // ONE retirement, ONE new claim, ONE new invoice. Two chargeable invoices
-      // for one membership is the defect this whole mechanism exists to prevent,
-      // and 5a left no refund path anywhere.
+      // ONE retirement, and the single new claim/invoice that follows from it.
+      // The retirement is what this assertion actually pins — the contenders
+      // serialise on the lapsed row's write lock, so the claim never faces a
+      // concurrent one here (see this test's own docstring, and the two tests
+      // named there that DO pin the claim).
       const rows = await db.select().from(userSubscriptions);
       expect(rows.map((r) => r.status).sort()).toEqual(["expired", "pending"]);
       expect(rows.find((r) => r.id === first.subscriptionId)?.status).toBe("expired");

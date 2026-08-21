@@ -221,9 +221,16 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
     async activate() {
       throw new Error("StartUserSubscription must never activate a subscription — Task 7 does");
     },
+    /**
+     * Mirrors the real conditional UPDATE since m-2: only a LIVE row is cancelled,
+     * and a terminal one is left exactly as it is and answers `null`. A fake that
+     * still flipped `expired` to `cancelled` would hide the very case
+     * `releaseClaim` now has to tell apart.
+     */
     async cancel(id) {
       const row = subscriptions.find((r) => r.id === id);
       if (!row) return null;
+      if (row.status !== "pending" && row.status !== "active") return null;
       row.status = "cancelled";
       return { ...row };
     },
@@ -1221,6 +1228,56 @@ describe("StartUserSubscription — every statement between the claim and the in
       await expect(buy(useCase)).rejects.toThrow(
         "simulated connection reset during createTransaction"
       );
+    } finally {
+      console.warn = realWarn;
+    }
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("could not release the pending claim");
+  });
+
+  /**
+   * **m-2's consequence here.** `cancel` now refuses to rewrite a TERMINAL row and
+   * answers `null` for one, so `releaseClaim` can be handed a `null` that does not
+   * mean "the claim is still held" — the stale-pending sweep may simply have got
+   * there first and set the row `expired`. The slot is free either way, so warning
+   * that "this buyer cannot start another checkout" would be false, and a false
+   * warning about a wedged buyer is worse than no warning: it is the line an
+   * operator would act on.
+   */
+  it("does not warn when the row was already ended by something else — the slot is free", async () => {
+    const { useCase, repository } = build({ failOnce: "createTransaction" });
+    // Exactly what the real `cancel` does for a row the sweep already expired.
+    const realCancel = repository.cancel.bind(repository);
+    repository.cancel = async (id) => {
+      await realCancel(id);
+      const row = await repository.findById(id);
+      if (row) row.status = "expired";
+      return null;
+    };
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args.join(" "));
+
+    try {
+      await expect(buy(useCase)).rejects.toThrow("simulated connection reset");
+    } finally {
+      console.warn = realWarn;
+    }
+
+    expect(warnings).toEqual([]);
+  });
+
+  /** ...and a row that IS still pending after a failed release still warns. */
+  it("still warns when the claim really is still held", async () => {
+    const { useCase, repository } = build({ failOnce: "createTransaction" });
+    repository.cancel = async () => null;
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args.join(" "));
+
+    try {
+      await expect(buy(useCase)).rejects.toThrow("simulated connection reset");
     } finally {
       console.warn = realWarn;
     }
