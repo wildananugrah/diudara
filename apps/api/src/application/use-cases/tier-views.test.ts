@@ -93,12 +93,10 @@ describe("toMembershipView", () => {
   });
 
   /**
-   * **THE STATE §9 GUARANTEES**, and the one a single boolean could not
-   * express: not a member, and not free to buy either, because 5a has no
-   * renewal path and `StartUserSubscription`'s status-only guard refuses the
-   * purchase. The two booleans must be the OPPOSITE way round from a live
-   * member, and they must never both be true — the profile would then claim
-   * both things about the same person on the same page.
+   * **THE STATE EVERY PAYING MEMBER REACHES**, and the one a single boolean
+   * could not express. The two booleans must be the OPPOSITE way round from a
+   * live member, and they must never both be true — the profile would then
+   * claim both things about the same person on the same page.
    */
   it("a LAPSED standing is not a member, and is not the same as a stranger", () => {
     const lapsed = toMembershipView([tierRow()], "lapsed");
@@ -109,13 +107,59 @@ describe("toMembershipView", () => {
     const stranger = toMembershipView([tierRow()], "none");
     expect(stranger.viewerMembershipEnded).toBe(false);
     // The distinction, stated as the thing that must not collapse: these two
-    // people get different screens, and the boolean that separates them is
+    // people read different sentences, and the boolean that separates them is
     // this one.
     expect(lapsed.viewerMembershipEnded).not.toBe(stranger.viewerMembershipEnded);
 
     // Never both. `MembershipStanding` is one value, so this is structural
     // rather than a rule a caller has to keep.
     expect(lapsed.viewerIsMember && lapsed.viewerMembershipEnded).toBe(false);
+  });
+
+  /**
+   * **THE SERVER HALF OF THE FINAL WHOLE-BRANCH REVIEW'S C-1.** Phase 5b's
+   * headline feature is that a lapsed member can buy again — `retireExpired`
+   * runs inside the purchase transaction, frees `user_subscription_one_active`'s
+   * slot and lets the same tap open a fresh invoice, with no worker pass in
+   * between. That feature is reachable only if this projection hands the lapsed
+   * viewer the OFFER as well as the news: `MembershipOffer` cannot render a
+   * "Jadi anggota" button for a tier it was never sent.
+   *
+   * So a lapsed viewer's `tiers` must be byte-for-byte what a stranger's is.
+   * The one thing that differs between the two of them is the SENTENCE, and
+   * that is `viewerMembershipEnded`'s whole remaining job.
+   */
+  it("still carries the full offer to a LAPSED viewer — identical tiers to a stranger's", () => {
+    const rows = [tierRow({ id: "tier-1", name: "Perak" }), tierRow({ id: "tier-2", name: "Emas" })];
+    const lapsed = toMembershipView(rows, "lapsed");
+    const stranger = toMembershipView(rows, "none");
+
+    expect(lapsed.tiers).toEqual([
+      { id: "tier-1", name: "Perak", priceAmount: 50_000, billingCycle: "monthly" },
+      { id: "tier-2", name: "Emas", priceAmount: 50_000, billingCycle: "monthly" },
+    ]);
+    expect(lapsed.tiers).toEqual(stranger.tiers);
+    // And the flag that decides whether a button is offered at all reads the
+    // same for both: neither of them is a member, and both may buy.
+    expect(lapsed.viewerIsMember).toBe(false);
+    expect(stranger.viewerIsMember).toBe(false);
+  });
+
+  /**
+   * The refusal that MUST still be expressible. A viewer still inside their
+   * paid period is `member`, and `StartUserSubscription` genuinely refuses them
+   * a second purchase (`retireExpired`'s `current_period_end <= now` does not
+   * touch a live row, so the status-only guard still sees it). C-1 opened the
+   * button for `lapsed` only; if `viewerIsMember` ever stopped separating the
+   * two, the profile would offer a purchase the route answers 409 to — the
+   * non-terminating loop 5a shipped, rebuilt.
+   */
+  it("a LIVE member is still the only standing that reports viewerIsMember", () => {
+    expect(toMembershipView([tierRow()], "member").viewerIsMember).toBe(true);
+    expect(toMembershipView([tierRow()], "lapsed").viewerIsMember).toBe(false);
+    expect(toMembershipView([tierRow()], "none").viewerIsMember).toBe(false);
+    // ...and it is the ONE standing that is not also reported as ended.
+    expect(toMembershipView([tierRow()], "member").viewerMembershipEnded).toBe(false);
   });
 
   /**

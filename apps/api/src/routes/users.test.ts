@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach } from "bun:test";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
@@ -13,6 +14,9 @@ import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import { clientIp } from "./users";
 import { isReservedHandle, isValidHandle } from "../domain/handle";
 import { DrizzleUserSubscriptionRepository } from "../infrastructure/repositories/drizzle-user-subscription.repository";
+import { DrizzleUserPurchaseUnitOfWork } from "../infrastructure/repositories/drizzle-user-purchase.unit-of-work";
+import type { UserPurchaseUnitOfWorkPort } from "../application/ports/user-purchase-unit-of-work.port";
+import { ArrivalLatch } from "../test-support/arrival-latch";
 import { StartUserSubscription } from "../application/use-cases/start-user-subscription";
 import { SystemClock } from "../infrastructure/clock/system.clock";
 import type { FakePaymentAdapter } from "../infrastructure/payments/fake-payment.adapter";
@@ -2821,52 +2825,309 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
   });
 
   /**
-   * **I1, THROUGH HTTP.** §9 guarantees every paying member lapses one billing
-   * cycle after their purchase and that nothing renews them. The row stays
-   * `status = 'active'` with a past `current_period_end`, so `IsMemberOf` says
-   * "not a member" while THIS route's status-only guard still refuses — and it
-   * must, since letting a lapsed row past it collides with
-   * `user_subscription_one_active` at activation time.
-   *
-   * What was wrong was the sentence: it told that person they were already an
-   * active member, which is false, and the web then advised a reload that
-   * re-rendered the same button.
+   * Wraps the REAL unit of work so every contender rendezvouses immediately
+   * BEFORE the transaction opens — never inside it. See the thirty-way race
+   * below for why that placement is load-bearing: a contender parked at the
+   * latch inside a transaction is a contender holding one of the pool's ten
+   * connections, and thirty of those deadlock.
    */
-  it("a LAPSED member is refused with a sentence about their membership ENDING, not about being active", async () => {
-    const deps = bootstrap();
-    const a = createApp(deps);
-    const { buyer, tier } = await seedOffer(a);
-    const first = await (await subscribe(a, buyer.token, "wildan", { tierId: tier.id })).json();
-    const subscriptions = new DrizzleUserSubscriptionRepository(db);
-    // Task 7's webhook is what activates this in production; here it is the
-    // precondition. The period ends in 2020 — over, and nothing in 5a moves the
-    // status off `active`.
-    await subscriptions.activate(first.subscriptionId, new Date("2020-01-01T00:00:00Z"));
+  function latchedUnitOfWork(
+    inner: UserPurchaseUnitOfWorkPort,
+    latch: ArrivalLatch
+  ): UserPurchaseUnitOfWorkPort {
+    return {
+      async run(work) {
+        await latch.arriveAndWait();
+        return inner.run(work);
+      },
+    };
+  }
 
-    const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+  /**
+   * Wraps the REAL unit of work so the CLAIM inside it rejects once, the way a
+   * dropped connection does — on the repository the transaction is bound to, so
+   * the rollback is Postgres's. The second attempt runs the real claim, which is
+   * what lets a test assert the retry SUCCEEDS from the untouched row.
+   */
+  function failingClaimUnitOfWork(inner: UserPurchaseUnitOfWorkPort): UserPurchaseUnitOfWorkPort {
+    let fired = false;
+    return {
+      async run(work) {
+        return inner.run((repositories) =>
+          work({
+            ...repositories,
+            subscriptions: Object.assign(Object.create(repositories.subscriptions), {
+              claimPending: async (...args: Parameters<typeof repositories.subscriptions.claimPending>) => {
+                if (!fired) {
+                  fired = true;
+                  throw new Error("simulated connection reset during claimPending");
+                }
+                return repositories.subscriptions.claimPending(...args);
+              },
+            }),
+          })
+        );
+      },
+    };
+  }
 
-    expect(res.status).toBe(409);
-    expect((await res.json()).error).toBe(
-      "Keanggotaan Anda untuk kreator ini sudah berakhir, dan perpanjangan belum " +
-        "tersedia — jadi keanggotaan baru pun belum bisa dibeli. Hubungi kreator " +
-        "tersebut jika Anda masih memerlukan akses."
-    );
-    // GUARD: the row really is in the state this test claims — still `active`,
-    // period in the past — so a repository that had quietly expired it would not
-    // let this pass for the wrong reason.
-    const stored = await subscriptions.findById(first.subscriptionId);
-    expect(stored?.status).toBe("active");
-    expect(stored?.currentPeriodEnd?.getUTCFullYear()).toBe(2020);
-    // And the profile agrees, on the same database, in the same run: this is the
-    // divergence the final review measured, now answered the same way by both.
-    const profile = await (
-      await a.request("/users/by-handle/wildan", { headers: authed(buyer.token) })
-    ).json();
-    expect(profile.membership.viewerIsMember).toBe(false);
-    expect(profile.membership.viewerMembershipEnded).toBe(true);
-    // Nothing was created for the refused attempt.
-    expect(await db.select().from(userSubscriptions)).toHaveLength(1);
-    expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(1);
+  /**
+   * **PHASE 5b, TASK 2 — THROUGH HTTP, AGAINST THE REAL DATABASE.**
+   *
+   * 5a's §9 guaranteed every paying member lapsed one billing cycle after their
+   * purchase and that nothing renewed them. The row stayed `status = 'active'`
+   * with a past `current_period_end`, so it kept holding
+   * `user_subscription_one_active`'s slot and this route refused the repeat
+   * purchase — truthfully, and permanently: the button was dead.
+   *
+   * 5b's renewal mechanism is *buy again*. `retireExpired` moves that row to
+   * `expired` inside the purchase itself, in the same transaction as the
+   * pending claim, so the member presses "Jadi anggota" once and gets a fresh
+   * checkout. This is that request, end to end.
+   */
+  describe("a lapsed member buys again (Phase 5b, Task 2)", () => {
+    /** A member of `wildan` whose paid period ended in 2020 — 5a's own end state. */
+    async function lapsedMember(a: ReturnType<typeof app>) {
+      const seeded = await seedOffer(a);
+      const first = await (
+        await subscribe(a, seeded.buyer.token, "wildan", { tierId: seeded.tier.id })
+      ).json();
+      const subscriptions = new DrizzleUserSubscriptionRepository(db);
+      // Task 7's webhook is what activates this in production; here it is the
+      // precondition. The period ends in 2020 — over.
+      await subscriptions.activate(first.subscriptionId, new Date("2020-01-01T00:00:00Z"));
+      return { ...seeded, first, subscriptions };
+    }
+
+    it("a member whose period has ENDED can buy again, in ONE request", async () => {
+      const deps = bootstrap();
+      const a = createApp(deps);
+      const { owner, buyer, tier, first, subscriptions } = await lapsedMember(a);
+
+      const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.invoiceUrl).toBe("https://fake-checkout.local/fake-inv-2");
+      expect(body.subscriptionId).not.toBe(first.subscriptionId);
+
+      // The old row RETIRED, the new one PENDING — never two rows both claiming
+      // to be active, which `user_subscription_one_active` would refuse when
+      // Task 7's webhook came to activate this purchase.
+      const stored = await subscriptions.findById(first.subscriptionId);
+      expect(stored?.status).toBe("expired");
+      expect(stored?.currentPeriodEnd?.getUTCFullYear()).toBe(2020);
+      expect((await subscriptions.findById(body.subscriptionId))?.status).toBe("pending");
+      // The slot is genuinely free: this is the read the guard makes and the
+      // predicate the partial unique index arbitrates on.
+      expect(await subscriptions.findActiveFor(buyer.userId, owner.userId)).toBeNull();
+      expect(await db.select().from(userSubscriptions)).toHaveLength(2);
+      expect(await db.select().from(userTransactions)).toHaveLength(2);
+      expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(2);
+    });
+
+    it("and the profile agrees, on the same database, in the same run", async () => {
+      const deps = bootstrap();
+      const a = createApp(deps);
+      const { buyer, tier } = await lapsedMember(a);
+
+      await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+      // Nothing has been PAID yet — the invoice is open, not settled — so the
+      // profile must still say "not a member". What changed is that the offer is
+      // buyable again rather than permanently refused.
+      const profile = await (
+        await a.request("/users/by-handle/wildan", { headers: authed(buyer.token) })
+      ).json();
+      expect(profile.membership.viewerIsMember).toBe(false);
+    });
+
+    it("a member whose period is STILL RUNNING is refused, in Bahasa, and their row is untouched", async () => {
+      const deps = bootstrap();
+      const a = createApp(deps);
+      const { buyer, tier } = await seedOffer(a);
+      const first = await (
+        await subscribe(a, buyer.token, "wildan", { tierId: tier.id })
+      ).json();
+      const subscriptions = new DrizzleUserSubscriptionRepository(db);
+      await subscriptions.activate(first.subscriptionId, new Date("2099-01-01T00:00:00Z"));
+
+      const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe(
+        "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah " +
+          "masa aktif — jika Anda belum bisa melihat kontennya, hubungi kreator tersebut."
+      );
+      // Retiring a LIVE membership would take away access somebody paid for.
+      const stored = await subscriptions.findById(first.subscriptionId);
+      expect(stored?.status).toBe("active");
+      expect(await db.select().from(userSubscriptions)).toHaveLength(1);
+      expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(1);
+    });
+
+    /**
+     * **THE RETIREMENT AND THE CLAIM COMMIT TOGETHER, OR NEITHER DOES.**
+     *
+     * A retirement that committed on its own and a claim that then failed would
+     * leave this person holding neither an active membership nor a pending
+     * checkout: their row says `expired` and nothing was opened in its place.
+     * The failure is injected on the repository the unit of work hands to the
+     * use case — the one bound to the open transaction — so the rollback under
+     * test is a real Postgres rollback and not a fake's bookkeeping.
+     *
+     * THIS is the test that reddens if the retirement is moved out of the
+     * claim's transaction. The concurrency test below cannot see that move:
+     * `retireExpired` is a conditional UPDATE and arbitrates correctly on its
+     * own connection too, so concurrency alone never exposes the split. Only a
+     * failure between the two writes does.
+     */
+    it("a dropped claim ROLLS THE RETIREMENT BACK — never neither", async () => {
+      const deps = bootstrap();
+      const a = createApp(deps);
+      const { buyer, tier, first, subscriptions } = await lapsedMember(a);
+      const wired = createApp({
+        ...deps,
+        startUserSubscription: new StartUserSubscription(
+          deps.userRepository,
+          deps.userTierRepository,
+          deps.userPayoutRepository,
+          new DrizzleUserSubscriptionRepository(db),
+          // The REAL unit of work — a real transaction — with the claim inside
+          // it made to reject once.
+          failingClaimUnitOfWork(new DrizzleUserPurchaseUnitOfWork(db)),
+          deps.payments!,
+          new SystemClock(),
+          { appBaseUrl: "https://diudara.test" }
+        ),
+      });
+
+      const res = await subscribe(wired, buyer.token, "wildan", { tierId: tier.id });
+      expect(res.status).toBe(500);
+
+      // Exactly as the buyer left it: still active, still carrying the period
+      // that ran out. Nothing was retired into nothing.
+      const stored = await subscriptions.findById(first.subscriptionId);
+      expect(stored?.status).toBe("active");
+      expect(stored?.currentPeriodEnd?.getUTCFullYear()).toBe(2020);
+      expect(await db.select().from(userSubscriptions)).toHaveLength(1);
+
+      // And the very next attempt works, from that same unchanged row.
+      const second = await subscribe(wired, buyer.token, "wildan", { tierId: tier.id });
+      expect(second.status).toBe(201);
+      expect((await subscriptions.findById(first.subscriptionId))?.status).toBe("expired");
+    });
+
+    /**
+     * **THE CONCURRENT TAP BY A LAPSED MEMBER** — the interleaving this task
+     * actually introduces, since retiring and claiming now happen inside one
+     * transaction on a row every contender wants to move.
+     *
+     * THIRTY CONTENDERS, and the number is part of the assertion. Measured
+     * against this database on the implementation's own mutants:
+     *
+     *  - Claim by `try/catch (23505)` instead of `ON CONFLICT DO NOTHING` —
+     *    what `claimPending` did before this task, and poison inside a
+     *    transaction because Postgres aborts it before the catch runs. Every
+     *    loser 500s on `25P02`. Measured, two runs each: at 4 contenders,
+     *    `{201: 1, 500: 3}` both times; at 30, `{201: 1, 500: 29}` both times.
+     *    Deterministic at both counts — but three failures is a number a person
+     *    can read as flake, and twenty-nine is not. That is what thirty buys
+     *    here: not detection, legibility of the failure.
+     *  - Retirement moved OUT of the claim's transaction: GREEN at 4, 10 and
+     *    30, three runs each. That defect is invisible to concurrency by
+     *    construction — `retireExpired` is a conditional UPDATE and arbitrates
+     *    correctly on its own connection too — and no contender count fixes
+     *    that. The rollback test above is what catches it (measured red:
+     *    expected "active", received "expired"). Recorded here so the next
+     *    person does not go looking for it in this test.
+     *
+     * Thirty is also what the payout race and the repository's own claim race
+     * settled on against this same database, so the phase carries one number
+     * rather than three. Do not lower this number.
+     *
+     * **WHAT THIS TEST PROVES, AND WHAT IT DOES NOT** — measured by the final
+     * whole-branch review (I-2), and worth stating because the name promises
+     * more than the mechanism can deliver.
+     *
+     *  - **It proves THE RETIREMENT.** Against a `retireExpired` stubbed to a
+     *    no-op returning `true`, this test is RED (`Expected
+     *    ["expired","pending"], Received ["active"]`).
+     *  - **It does NOT prove the CLAIM's arbitration.** Against a `claimPending`
+     *    rewritten as a read-then-write (a `findPending` guard in front of a
+     *    plain INSERT) it is GREEN — 1 pass / 0 fail. The reason is structural
+     *    and no contender count or pool warm-up fixes it: all thirty
+     *    transactions call `retireExpired` on the SAME lapsed row as their first
+     *    statement, so they serialise on that row's write lock under READ
+     *    COMMITTED, and each `claimPending` therefore runs alone.
+     *
+     * The claim's arbitration IS defended, twice, and both are RED against that
+     * same mutant: `drizzle-user-subscription.repository.test.ts`'s "lets exactly
+     * ONE of thirty concurrent claims create the row", and 5a's "TWENTY
+     * CONCURRENT TAPS open exactly ONE invoice" below in this file. Look there,
+     * not here, if you are changing `claimPending`.
+     *
+     * The latch fires BEFORE the unit of work opens its transaction, never
+     * inside it. A contender parked at the latch while holding a transaction
+     * holds a pooled connection too, and the pool is ten wide — thirty
+     * contenders would then deadlock waiting for arrivals that cannot happen,
+     * and `ArrivalLatch` would report a timeout rather than the defect.
+     */
+    it("THIRTY CONCURRENT TAPS by a lapsed member retire the row ONCE and open ONE new invoice", async () => {
+      const deps = bootstrap();
+      const a = createApp(deps);
+      const { owner, buyer, tier, first, subscriptions } = await lapsedMember(a);
+      const contenders = 30;
+      const latch = new ArrivalLatch(contenders);
+      const wired = createApp({
+        ...deps,
+        startUserSubscription: new StartUserSubscription(
+          deps.userRepository,
+          deps.userTierRepository,
+          deps.userPayoutRepository,
+          new DrizzleUserSubscriptionRepository(db),
+          latchedUnitOfWork(new DrizzleUserPurchaseUnitOfWork(db), latch),
+          deps.payments!,
+          new SystemClock(),
+          { appBaseUrl: "https://diudara.test" }
+        ),
+      });
+
+      const responses = await Promise.all(
+        Array.from({ length: contenders }, () =>
+          subscribe(wired, buyer.token, "wildan", { tierId: tier.id })
+        )
+      );
+      const bodies = await Promise.all(responses.map((r) => r.json()));
+
+      expect(latch.arrived).toBe(contenders);
+      // ONE retirement, and the single new claim/invoice that follows from it.
+      // The retirement is what this assertion actually pins — the contenders
+      // serialise on the lapsed row's write lock, so the claim never faces a
+      // concurrent one here (see this test's own docstring, and the two tests
+      // named there that DO pin the claim).
+      const rows = await db.select().from(userSubscriptions);
+      expect(rows.map((r) => r.status).sort()).toEqual(["expired", "pending"]);
+      expect(rows.find((r) => r.id === first.subscriptionId)?.status).toBe("expired");
+      expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(2);
+      expect(await db.select().from(userTransactions)).toHaveLength(2);
+
+      // Every caller got either THE new invoice or a clean Bahasa refusal —
+      // never a 500. A 500 here is the tell that a loser's unique violation
+      // poisoned the transaction it was raised in.
+      const invoiceUrls = new Set<string>();
+      for (const [i, res] of responses.entries()) {
+        expect([201, 409]).toContain(res.status);
+        if (res.status === 201) {
+          invoiceUrls.add(bodies[i].invoiceUrl);
+        } else {
+          expect(bodies[i].error).toMatch(/^Pembayaran /);
+        }
+      }
+      expect(invoiceUrls.size).toBe(1);
+      expect([...invoiceUrls][0]).toBe("https://fake-checkout.local/fake-inv-2");
+      expect(await subscriptions.findActiveFor(buyer.userId, owner.userId)).toBeNull();
+    });
   });
 
   /**
@@ -2909,6 +3170,11 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
           deps.userTierRepository,
           deps.userPayoutRepository,
           repository,
+          // The real transaction. The failure under test is injected on
+          // `repository`, whose `createTransaction`/`attachGatewayReference`
+          // run OUTSIDE this unit of work — deliberately, since neither may
+          // share a transaction with an outbound provider call.
+          new DrizzleUserPurchaseUnitOfWork(db),
           deps.payments!,
           new SystemClock(),
           { appBaseUrl: "https://diudara.test" }
@@ -2936,4 +3202,325 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
       expect((await third.json()).invoiceUrl).toBe(body.invoiceUrl);
     }
   );
+
+  /**
+   * **PHASE 5b, TASK 5 — THROUGH HTTP, AGAINST THE REAL DATABASE.**
+   *
+   * 5a's final review named this the phase's most likely real-world money loss, and
+   * one that needs NO FAILURE AT ALL to reach: an ordinary abandoned cart, returned
+   * to a day later, is handed back the same now-expired invoice with a dead payment
+   * page — permanently, because nothing in 5a ever expires a `pending` row.
+   *
+   * Expiring the row is the MECHANISM. The PROPERTY this task exists to deliver is
+   * that a returning buyer gets a working invoice, so the test below asserts the
+   * fresh invoice url actually DIFFERS — never merely that the old row's status
+   * changed, which a sweep that frees nothing could still make true.
+   */
+  describe("the pending-checkout cleanup frees a stale row (Phase 5b, Task 5)", () => {
+    it("a fresh purchase mints a NEW invoice once the stale pending row is expired", async () => {
+      const deps = bootstrap();
+      const a = createApp(deps);
+      const { buyer, tier } = await seedOffer(a);
+      const subscriptions = new DrizzleUserSubscriptionRepository(db);
+
+      const first = await (
+        await subscribe(a, buyer.token, "wildan", { tierId: tier.id })
+      ).json();
+
+      // Backdated three hours — well past ANY reasonable checkout, so this test
+      // does not depend on the exact `STALE_PENDING_CHECKOUT_WINDOW_MS` value
+      // (that boundary is pinned precisely, to the millisecond, in
+      // `drizzle-user-subscription.repository.test.ts` and
+      // `apps/worker/src/scheduled-passes.test.ts`). This is what Task 5's worker
+      // sweep does to a row this old: `listStalePending` would return it, and
+      // `expireStalePending` is what actually moves it.
+      await db
+        .update(userSubscriptions)
+        .set({ createdAt: new Date(Date.now() - 3 * 60 * 60_000) })
+        .where(eq(userSubscriptions.id, first.subscriptionId));
+      expect(await subscriptions.expireStalePending(first.subscriptionId)).toBe(true);
+
+      const second = await (
+        await subscribe(a, buyer.token, "wildan", { tierId: tier.id })
+      ).json();
+
+      // THE POINT OF THE TASK. Not a status assertion — a NEW invoice.
+      expect(second.invoiceUrl).not.toBe(first.invoiceUrl);
+      expect(second.subscriptionId).not.toBe(first.subscriptionId);
+
+      const oldRow = await subscriptions.findById(first.subscriptionId);
+      expect(oldRow?.status).toBe("expired");
+      expect((await subscriptions.findById(second.subscriptionId))?.status).toBe("pending");
+      expect(await db.select().from(userSubscriptions)).toHaveLength(2);
+      expect(await db.select().from(userTransactions)).toHaveLength(2);
+      expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(2);
+    });
+
+    /**
+     * THE BOUNDARY, the other direction — spec §11: "a row just inside it
+     * survives". A test with only the clearly-stale row above would pass against
+     * a cleanup that expires every pending row regardless of age, which would
+     * cancel a purchase somebody is mid-payment on. This is what catches that.
+     */
+    it("a pending row still INSIDE the window is invisible to listStalePending, and the next tap gets the SAME invoice", async () => {
+      const deps = bootstrap();
+      const a = createApp(deps);
+      const { buyer, tier } = await seedOffer(a);
+      const subscriptions = new DrizzleUserSubscriptionRepository(db);
+
+      const first = await (
+        await subscribe(a, buyer.token, "wildan", { tierId: tier.id })
+      ).json();
+
+      // The same three-hour cutoff a worker pass would use against a row this
+      // old — except this row's `created_at` is genuinely `now`, nowhere near
+      // three hours old, so the cleanup's own listing must not see it.
+      const cutoff = new Date(Date.now() - 3 * 60 * 60_000);
+      const stale = await subscriptions.listStalePending(cutoff, 100);
+      expect(stale.find((row) => row.id === first.subscriptionId)).toBeUndefined();
+
+      const second = await (
+        await subscribe(a, buyer.token, "wildan", { tierId: tier.id })
+      ).json();
+
+      // The ORDINARY reuse path — the SAME invoice, never a fresh one and never a
+      // refusal, because nothing expired the row out from under this buyer.
+      expect(second.invoiceUrl).toBe(first.invoiceUrl);
+      expect(second.subscriptionId).toBe(first.subscriptionId);
+      expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(1);
+    });
+  });
+});
+
+/**
+ * Task 6 of Phase 5b (spec §8) — `GET /users/me/subscribers`, a creator's
+ * own subscriber list.
+ *
+ * A subscriber list is NOT public information: the route is owner-only
+ * (behind `requireAuth`, and scoped to `c.get("userId")` alone — there is no
+ * handle parameter for another caller to name), and the wire projection is
+ * CLOSED — `{ handle, displayName, since }`, never an email, a
+ * `whatsapp_number`, a payout id, or a subscriber's own memberships to
+ * anyone else.
+ *
+ * Seeded with the repository directly, exactly as
+ * `describe("GET /users/by-handle/:handle — viewerIsMember (Task 10)")`
+ * above does: what activates a subscription in production is Task 7's
+ * webhook, and faking a payment gateway here would test the wrong thing.
+ */
+describe("GET /users/me/subscribers (Task 6 of Phase 5b)", () => {
+  const FUTURE = new Date("2099-01-01T00:00:00.000Z");
+  const PAST = new Date("2020-01-01T00:00:00.000Z");
+
+  async function account(a: ReturnType<typeof app>, overrides: Partial<typeof VALID> = {}) {
+    const acc = { ...VALID, ...overrides };
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(acc),
+    });
+    const res = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: acc.email, password: acc.password }),
+    });
+    const body = (await res.json()) as { token: string; user: { id: string } };
+    return { token: body.token, userId: body.user.id };
+  }
+
+  /** An owner with a connected payout account and one published tier. */
+  async function sellingOwner(a: ReturnType<typeof app>, overrides: Partial<typeof VALID> = {}) {
+    const owner = await account(a, overrides);
+    await a.request("/users/me/payout", { method: "POST", headers: authed(owner.token) });
+    const tier = await (
+      await a.request("/users/me/tiers", {
+        method: "POST",
+        headers: { ...authed(owner.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Anggota", priceAmount: 50_000 }),
+      })
+    ).json();
+    return { ...owner, tierId: tier.id as string };
+  }
+
+  /** An ACTIVE subscription from `subscriberId` to `owner`, its period ending at `periodEnd`. */
+  async function seedMembership(
+    owner: { userId: string; tierId: string },
+    subscriberId: string,
+    periodEnd: Date
+  ) {
+    const subscriptions = new DrizzleUserSubscriptionRepository(db);
+    const created = await subscriptions.create({
+      subscriberId,
+      tierId: owner.tierId,
+      ownerId: owner.userId,
+    });
+    await subscriptions.activate(created.id, periodEnd);
+    return created;
+  }
+
+  function getSubscribers(a: ReturnType<typeof app>, token: string | null) {
+    return a.request("/users/me/subscribers", {
+      headers: token === null ? {} : authed(token),
+    });
+  }
+
+  /** Same route, with a caller-supplied query string appended — Fix round 1, M-2. */
+  function getSubscribersWithQuery(a: ReturnType<typeof app>, token: string, query: string) {
+    return a.request(`/users/me/subscribers?${query}`, { headers: authed(token) });
+  }
+
+  it("requires a session: a signed-out caller is a 401", async () => {
+    const a = app();
+
+    const res = await getSubscribers(a, null);
+
+    expect(res.status).toBe(401);
+  });
+
+  it("lists a currently active subscriber", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, FUTURE);
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.subscribers).toEqual([
+      { handle: "bob", displayName: "Bob", since: expect.any(String) },
+    ]);
+  });
+
+  it("returns an empty list for an owner with no subscribers, not an error", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ subscribers: [] });
+  });
+
+  /**
+   * §9's honest limitation, and Task 3's own retirement sweep: nothing
+   * guarantees a lapsed row has been flipped to `expired` by the time this
+   * route reads it, so the SAME `current_period_end > now` boundary
+   * `IsMemberOf` uses is what keeps a past subscriber off this list — a
+   * status-only read would show them forever.
+   */
+  it("excludes a subscriber whose period has already lapsed — a past subscriber, not a current one", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, PAST);
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ subscribers: [] });
+  });
+
+  it("excludes a subscriber whose subscription is still pending — never activated", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    const subscriptions = new DrizzleUserSubscriptionRepository(db);
+    await subscriptions.create({ subscriberId: bob.userId, tierId: owner.tierId, ownerId: owner.userId });
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ subscribers: [] });
+  });
+
+  /**
+   * OWNER-ONLY, proved rather than assumed. `rina` is signed in and has a
+   * real, valid session — an ordinary authenticated caller, not an attacker
+   * with a forged token — and still cannot see `wildan`'s subscribers,
+   * because this route never accepts a handle: it can only ever answer for
+   * the caller's OWN session.
+   */
+  it("OWNER-ONLY: another signed-in user cannot read this creator's subscriber list", async () => {
+    const a = app();
+    const owner = await sellingOwner(a); // wildan
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, FUTURE);
+    const rina = await account(a, { handle: "rina", email: "rina@example.com" });
+
+    const res = await getSubscribers(a, rina.token);
+    const body = await res.json();
+
+    // rina gets HER OWN list back — which is empty, since nobody subscribes
+    // to her — never wildan's, and never a 403 that would confirm wildan
+    // even has a list. There is no way for rina to ask for wildan's at all.
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ subscribers: [] });
+  });
+
+  /**
+   * Fix round 1, M-2 (review): the route's owner-only guarantee held only
+   * "by construction" — `deps.listSubscribers.execute(c.get("userId"))` has
+   * exactly one call site and no parameter for a different id — but nothing
+   * in this suite pinned that a REFACTOR preserving all 8 prior tests could
+   * not quietly widen it. The reviewer proved this by mutating the handler to
+   * `c.req.query("ownerId") ?? c.get("userId")`: every existing test, this
+   * one's predecessor included, stayed green because none of them ever SENT
+   * an `ownerId`.
+   *
+   * This test does. `rina` — signed in, a genuine session — asks for
+   * `wildan`'s subscribers by id, explicitly, on the query string. The route
+   * must still answer with rina's OWN list (empty), never wildan's (which
+   * holds `bob`) — proving the server never reads a caller-supplied owner
+   * identifier from anywhere on the request, not merely that ordinary callers
+   * happen not to send one.
+   */
+  it("OWNER-ONLY: a caller-supplied ?ownerId= is ignored — the session is the only source of identity", async () => {
+    const a = app();
+    const owner = await sellingOwner(a); // wildan
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, FUTURE);
+    const rina = await account(a, { handle: "rina", email: "rina@example.com" });
+
+    const res = await getSubscribersWithQuery(a, rina.token, `ownerId=${owner.userId}`);
+    const body = await res.json();
+
+    // Still rina's own (empty) list — never wildan's, despite naming his id
+    // explicitly. A route that honoured the query parameter would return
+    // bob here instead.
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ subscribers: [] });
+  });
+
+  it("the projection is CLOSED: exactly handle, displayName, since — never an email, a whatsapp_number, or a payout id", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, FUTURE);
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    expect(Object.keys(body).sort()).toEqual(["subscribers"]);
+    // Object.keys, not a spot-check — a spot-check against `toMatchObject`
+    // or reading three named fields would pass unchanged if a fourth field
+    // (an email, a whatsapp_number, a payout id) were added beside them.
+    expect(Object.keys(body.subscribers[0]).sort()).toEqual(["displayName", "handle", "since"]);
+  });
+
+  it("`since` is an ISO string on the wire, not a raw Date", async () => {
+    const a = app();
+    const owner = await sellingOwner(a);
+    const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
+    await seedMembership(owner, bob.userId, FUTURE);
+
+    const res = await getSubscribers(a, owner.token);
+    const body = await res.json();
+
+    const since = body.subscribers[0].since as string;
+    expect(new Date(since).toISOString()).toBe(since);
+  });
 });

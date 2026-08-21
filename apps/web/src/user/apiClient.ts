@@ -532,21 +532,20 @@ export interface TierView {
  * reasoning on the other side of the wire.
  *
  * `viewerIsMember` comes from `IsMemberOf` — `status = 'active'` AND
- * `current_period_end > now` — so a LAPSED membership reads `false`. **That
- * used to be the whole story here, and the story was wrong.** This docstring
- * said such a person "is offered the tier again"; the final whole-branch review
- * measured what happened when they took the offer up. `POST
- * /users/:handle/subscribe` refuses them 409, because ITS guard reads the
- * status alone and must — a lapsed row let past it collides with
- * `user_subscription_one_active` at activation time, which is money taken and
- * nothing granted. So the offer could never be completed, one billing cycle
- * after every purchase, for every paying member.
+ * `current_period_end > now` — so a LAPSED membership reads `false`, and that
+ * one boolean cannot say which kind of "not a member" it is looking at.
  *
- * `viewerMembershipEnded` is the missing half: `true` for exactly that person.
- * Not a member, and not free to buy either. 5a has no renewal (spec §9), and
- * this is what being honest about it looks like — no renew button, because
- * there is no renew endpoint, and no buy button either, because there is no
- * purchase the server would accept.
+ * `viewerMembershipEnded` is the other half: `true` for somebody whose row has
+ * run out. **What it MEANS changed with Phase 5b, and the change is the whole
+ * point of that phase.** In 5a it meant "and they cannot buy either" — the
+ * route refused them 409 for ever, because its guard reads the status alone
+ * (it must: a lapsed row let past it collides with
+ * `user_subscription_one_active` at activation time, which is money taken and
+ * nothing granted) and nothing in 5a ever moved such a row. 5b's purchase
+ * retires it INSIDE the transaction, so the refusal is gone and this field now
+ * selects a SENTENCE — "your membership ended", above the same offer everybody
+ * else sees — rather than withholding the button. See `MembershipOffer`, and
+ * the final whole-branch review's C-1 for what the withheld button cost.
  *
  * Never both `true`: the API projects them from one `MembershipStanding`.
  */
@@ -1187,4 +1186,34 @@ export function startSubscription(handle: string, tierId: string): Promise<Start
     `/users/${encodeURIComponent(handle)}/subscribe`,
     { method: "POST", body: JSON.stringify({ tierId }) }
   );
+}
+
+/**
+ * `GET /users/me/subscribers` — Task 6 of Phase 5b (spec §8). ONE subscriber
+ * as this CLOSED wire projection carries it: never an email, a
+ * `whatsappNumber`, a payout id, and never anything about that person's OWN
+ * memberships elsewhere. See the API's own `SubscriberRow`/`ListSubscribers`
+ * docstrings for the full reasoning — this type only mirrors the shape the
+ * server actually sends, and does not widen it.
+ *
+ * `since` is a STRING here and a `Date` on the server (`SubscriberRow`) —
+ * same convention as `UserTier.createdAt` above: JSON has no date type, and
+ * nothing on this side parses it back into one before handing it to
+ * `formatRelativeTime`, which itself takes an ISO string.
+ */
+export interface SubscriberEntry {
+  handle: string;
+  displayName: string;
+  since: string;
+}
+
+/**
+ * The caller's OWN subscriber list, and only the people CURRENTLY
+ * subscribed to them — a past subscriber whose period lapsed is not among
+ * these rows, the exact same "currently subscribed" boundary `viewerIsMember`
+ * on a profile already uses. Owner-only server-side: there is no handle to
+ * pass here, because the server answers only for the session's own id.
+ */
+export function listSubscribers(): Promise<{ subscribers: SubscriberEntry[] }> {
+  return apiFetch<{ subscribers: SubscriberEntry[] }>("/users/me/subscribers");
 }

@@ -478,20 +478,22 @@ describe("GetUserProfile.execute — viewerIsMember (Task 10)", () => {
 
     expect(profile.membership.viewerIsMember).toBe(false);
     // ...and the SECOND boolean is what makes that honest rather than a lie by
-    // omission. `StartUserSubscription` refuses this person's purchase — its
-    // guard reads the status alone and must — so a profile that reported only
-    // `viewerIsMember: false` would have the web offer a button whose only
-    // possible answer is a 409, permanently. Final review, I1.
+    // omission: this person is not a stranger, and the page owes them the news.
+    // Since Phase 5b it is only the NEWS — `StartUserSubscription` retires the
+    // lapsed row inside the purchase transaction, so they may buy again — which
+    // is why the tiers below must still arrive. Final review, C-1.
     expect(profile.membership.viewerMembershipEnded).toBe(true);
     expect(profile.membership.tiers).toHaveLength(1);
   });
 
   /**
    * The two `false` answers above are NOT the same answer, and this is what
-   * says so: a stranger may buy, a lapsed member may not. Collapsing them is
-   * exactly the defect the final review measured.
+   * says so: a stranger is pitched, a lapsed member is told their membership
+   * ended. Both may buy — since Phase 5b the lapsed row is retired inside the
+   * purchase — so the difference is the sentence, and collapsing it would leave
+   * a returning member with no explanation of why they lost access.
    */
-  it("distinguishes a stranger from a lapsed member — both are non-members, only one may buy", async () => {
+  it("distinguishes a stranger from a lapsed member — both non-members, and both offered the tier", async () => {
     const table = [
       { subscriberId: "lapsed-1", ownerId: "user-1", currentPeriodEnd: PAST },
       { subscriberId: "member-1", ownerId: "user-1", currentPeriodEnd: FUTURE },
@@ -516,6 +518,12 @@ describe("GetUserProfile.execute — viewerIsMember (Task 10)", () => {
 
     expect(member.membership.viewerIsMember).toBe(true);
     expect(member.membership.viewerMembershipEnded).toBe(false);
+
+    // C-1: the lapsed viewer is handed the SAME offer as the stranger. The web
+    // cannot render a "Jadi anggota" button for a tier it was never sent, and
+    // that button is the only thing that reaches Phase 5b's lazy retirement.
+    expect(lapsed.membership.tiers).toEqual(stranger.membership.tiers);
+    expect(lapsed.membership.tiers).toHaveLength(1);
   });
 
   it("is false on your OWN profile — nobody is a member of themselves", async () => {

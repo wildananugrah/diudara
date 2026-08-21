@@ -248,6 +248,7 @@ export function userRoutes(
     | "getUserPayoutStatus"
     | "manageUserTiers"
     | "startUserSubscription"
+    | "listSubscribers"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -433,6 +434,32 @@ export function userRoutes(
       return c.json(updated, 200);
     }
   );
+
+  /**
+   * Task 6 of Phase 5b (spec §8) — a creator's own subscriber list.
+   *
+   * **THIS IS PRIVATE DATA.** Owner-only by construction rather than by a
+   * check: there is no handle parameter on this route, only `requireAuth`
+   * and `c.get("userId")`, so the only list a caller can ever ask for is
+   * their own. `ListSubscribers.execute` is never given anything else.
+   *
+   * The wire projection is CLOSED — `{ handle, displayName, since }`, and
+   * only CURRENTLY subscribed members: `status = 'active'` AND
+   * `current_period_end > now`, the same definition `IsMemberOf` uses. See
+   * `ListSubscribers`'s own docstring and
+   * `UserSubscriptionRepositoryPort.listActiveSubscribers`'s for the full
+   * reasoning — neither `isMemberOf` nor `IsMemberOf` itself is touched by
+   * this route.
+   *
+   * Static (`me/subscribers`), like `me/payout` and `me/tiers` above it:
+   * `me` is 2 characters, already unregisterable under `HANDLE_PATTERN`
+   * before this route existed, so `RESERVED_HANDLES` gains nothing from it
+   * — see the route-derived guard in `users.test.ts`.
+   */
+  app.get<"/me/subscribers">("/me/subscribers", requireAuth, async (c) => {
+    const result = await deps.listSubscribers.execute(c.get("userId"));
+    return c.json(result);
+  });
 
   /**
    * Task 7 of images (design spec §6). Public and cheap — no auth, no

@@ -117,6 +117,36 @@ save an owner's own number. `creator.whatsapp_number` exists and is unreachable;
 **This is unrelated to memberships** and shares nothing with them except a cell in the parent spec's
 table. It is here because §8 assigned it to Phase 5 and it is small — not because it belongs.
 
+### 9.1 Not built — and why (decided during implementation, 2026-08-21)
+
+It was built, reviewed, and **reverted**. The machinery in `NotifyJoinRequest` was never the problem:
+it already resolves context fresh at delivery, sends one message to one person, and records a skip in
+`activity_log` rather than dropping it. Three facts found during implementation kill the fix as scoped:
+
+1. **There is no foreign key between `creator` and `app_user`.** The only available link is
+   `creator.email = app_user.email`.
+2. **That email is unverified.** `RegisterUser` checks uniqueness only within `app_user`, and email
+   verification is not built — so anyone who knows a creator's dashboard email can register a member
+   account on it and receive that creator's join requests: community name, member name, tier name.
+   The two login systems were previously unlinked, so this disclosure **would have been new**.
+3. **The dashboard creator signup collects no WhatsApp number at all** (`{name, email, password}`), so
+   `creator.whatsapp_number` is unwritable for anyone who registered through the app. The fix could
+   reach a real creator only if they had *separately* registered a member account on the byte-identical
+   lowercase email — and nothing asks them to.
+
+So the change bought a standing disclosure vector in exchange for a notification that reaches almost
+nobody. Reverted in `5db3e07`, `754549e`; the tree is byte-identical to the commit before it.
+
+**What this actually needs**, whenever it is picked up again — none of it in 5b's scope:
+
+- an editor for the owner's own WhatsApp number, **or** a real link between the two identities;
+- email verification, before anything trusts an email match as identity;
+- confirmation that the pending-requests dashboard shipped, since the class docstring names it as the
+  fallback for an owner who is never messaged.
+
+Until then a join request is recorded and visible, never messaged — which is the behaviour that was
+already there.
+
 ## 10. What Phase 6 gets
 
 **Nothing changes.** `isMemberOf(viewerId, ownerId)` keeps its exact semantics and its single indexed

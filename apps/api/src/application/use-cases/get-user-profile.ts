@@ -58,7 +58,7 @@ export interface PublicUserProfile extends UserProfileCore {
   /**
    * What this creator is selling, plus where the CALLER stands with them
    * (Task 10, widened by the final review): a live membership, a membership
-   * that has ENDED with no renewal in 5a, or neither. `tiers` is always an
+   * that has ENDED — buyable again since Phase 5b — or neither. `tiers` is always an
    * array, even when the owner has never published a tier or has no connected
    * payout account (both cases mean `listActiveByOwner` returns no rows) — see
    * `toMembershipView`'s own docstring for why the field itself must never
@@ -152,8 +152,11 @@ export class GetUserProfile {
       this.tiers.listActiveByOwner(user.id),
       // `describe`, not `execute`: the boolean cannot tell a stranger apart
       // from somebody whose membership has ENDED, and the page owes those two
-      // opposite things — an offer, and the news that renewal does not exist
-      // yet. Same single indexed read either way; see `MembershipStanding`.
+      // people the same offer with different words over it — a stranger is
+      // pitched, a lapsed member is told their membership ended and then handed
+      // the same tiers to buy again (Phase 5b retires the old row inside the
+      // purchase). Same single indexed read either way; see
+      // `MembershipStanding`.
       //
       // ANONYMOUS SHORT-CIRCUITS to `"none"`, which projects as `false`/`false`
       // rather than `null`: there is no viewer to hold a membership, so there

@@ -440,40 +440,81 @@ describe("MembershipOffer — somebody who is already a member", () => {
 });
 
 /**
- * **THE FINAL WHOLE-BRANCH REVIEW'S I1.** §9 leaves every 5a membership
- * `status = 'active'` with a past `current_period_end` forever, so
- * `viewerIsMember` goes `false` one billing cycle after every purchase — and
- * this file used to answer that by rendering the offer and a "Jadi anggota"
- * button. `StartUserSubscription` refuses that purchase with a 409 (its guard
- * reads the status alone, and must), the screen advised a reload, and the
- * reload re-rendered the same button: a loop that cannot terminate, reached by
- * 100% of paying members.
+ * **THE FINAL WHOLE-BRANCH REVIEW'S C-1.** Phase 5b built renewal — Task 2
+ * retires the lapsed row INSIDE the purchase transaction, so pressing "Jadi
+ * anggota" once frees `user_subscription_one_active`'s slot and opens a fresh
+ * invoice. This screen never learned. It kept rendering 5a's dead end —
+ * *"Perpanjangan belum tersedia untuk saat ini"*, with no button — for exactly
+ * the window the lazy retirement was built to serve, and for ever if the
+ * worker's hourly sweep is not running.
  *
- * `viewerMembershipEnded` is the server telling this screen which kind of
- * "not a member" it is looking at.
+ * So the ended panel stopped being a REFUSAL and became a NOTICE: the member is
+ * told their membership ended, and then offered the tiers, because buying again
+ * is what renewal is here.
+ *
+ * `viewerMembershipEnded` is still the server telling this screen which kind of
+ * "not a member" it is looking at — it just no longer means "and you cannot
+ * buy".
  */
 describe("MembershipOffer — somebody whose membership has ENDED", () => {
-  it("says the membership ended and that renewal is not available, with no way to buy", () => {
+  it("tells them it ended and OFFERS the tier, with a pressable Jadi anggota", () => {
     setUserSession("jwt-abc", VIEWER);
     renderOffer([tier()], "budi", false, true);
 
     const panel = screen.getByTestId("membership-ended");
     expect(panel.textContent).toContain("sudah berakhir");
-    expect(panel.textContent).toContain("Perpanjangan belum tersedia");
-    // THE POINT: no button at all, so there is nothing to press and no loop to
-    // enter. Not a disabled button either — a disabled control still says "this
-    // is a thing you could do", and it is not.
-    expect(screen.queryAllByRole("button").length).toBe(0);
-    expect(screen.queryAllByTestId("membership-tier-tier-1").length).toBe(0);
+    // The sentence 5b exists to make untrue. It must not survive anywhere on
+    // this screen.
+    expect(document.body.textContent).not.toContain("Perpanjangan belum tersedia");
+    // THE POINT of C-1: there is something to press, it is not disabled, and it
+    // is the ordinary buy button — no separate "renew" control, because there is
+    // no separate renew endpoint. Buying again IS the renewal.
+    const button = screen.getByRole("button", { name: "Jadi anggota — Anggota" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    expect(screen.getByTestId("membership-tier-tier-1").textContent).toContain("Rp 50.000");
   });
 
   /**
-   * The distinction that must not collapse: BOTH of these people are
-   * `viewerIsMember: false`, and only one of them may buy. If the lapsed
-   * branch is ever removed, this reddens with a "Jadi anggota" button standing
-   * in front of somebody the server will refuse.
+   * The gate checklist's §2 step, at this layer: *"Press Jadi anggota again. It
+   * must offer you the tier and let you buy… you should not have to wait for any
+   * worker pass."* The request actually leaves, and the browser actually follows
+   * the invoice — nothing here waits for the hourly sweep to retire the old row,
+   * because `StartUserSubscription` does it inside the purchase transaction.
    */
-  it("a NON-member with the same viewerIsMember: false still gets the button", () => {
+  it("pressing it starts a real purchase and follows the invoice — no worker pass involved", async () => {
+    setUserSession("jwt-abc", VIEWER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return jsonResponse(
+        {
+          invoiceUrl: "https://checkout.xendit.co/web/inv_renew",
+          subscriptionId: "sub-2",
+          transactionId: "txn-2",
+          externalId: "usub_txn-2",
+        },
+        201
+      );
+    }) as unknown as typeof fetch;
+
+    renderOffer([tier()], "budi", false, true);
+    fireEvent.click(screen.getByRole("button", { name: "Jadi anggota — Anggota" }));
+
+    await waitFor(() => {
+      expect(followed.length).toBe(1);
+    });
+    expect(followed[0]).toBe("https://checkout.xendit.co/web/inv_renew");
+    expect(calls[0]!.url).toBe("/users/budi/subscribe");
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ tierId: "tier-1" });
+  });
+
+  /**
+   * The distinction that must not collapse in the OTHER direction. A viewer with
+   * no history gets the offer with no notice standing over it — being told a
+   * membership of theirs ended when they never held one is a false claim about
+   * the caller, the same class of defect `viewerIsMember` guards.
+   */
+  it("a NON-member with the same viewerIsMember: false gets the button and NO ended notice", () => {
     setUserSession("jwt-abc", VIEWER);
     renderOffer([tier()], "budi", false, false);
 
@@ -481,8 +522,15 @@ describe("MembershipOffer — somebody whose membership has ENDED", () => {
     expect(screen.queryAllByTestId("membership-ended").length).toBe(0);
   });
 
-  /** A live member is told they ARE one — never that theirs ended. */
-  it("a LIVE member is not shown the ended panel", () => {
+  /**
+   * **THE REFUSAL THAT MUST STILL FIRE.** A CURRENTLY ACTIVE member is not
+   * offered a second purchase: `StartUserSubscription` answers that 409 (its
+   * guard is status-only, and `retireExpired`'s `current_period_end <= now`
+   * deliberately does not touch a row still inside its period), and an offer the
+   * server refuses is the non-terminating loop 5a shipped. C-1 opened the button
+   * for the LAPSED member only.
+   */
+  it("a LIVE member is still offered NO button and no tiers", () => {
     setUserSession("jwt-abc", VIEWER);
     renderOffer([tier()], "budi", true, false);
 
@@ -490,18 +538,24 @@ describe("MembershipOffer — somebody whose membership has ENDED", () => {
       "Anda sudah menjadi anggota"
     );
     expect(screen.queryAllByTestId("membership-ended").length).toBe(0);
+    expect(screen.queryAllByRole("button").length).toBe(0);
+    expect(screen.queryAllByTestId("membership-tier-tier-1").length).toBe(0);
   });
 
   /**
    * A creator who has since withdrawn every tier still owes this person the
-   * news — same reasoning as the member panel, which also sits ahead of the
-   * empty-tiers return.
+   * news — and here there genuinely IS nothing to press, so the sentence says
+   * why. It does not say renewal is unavailable: renewal exists; this creator's
+   * offer does not.
    */
-  it("still says so when the creator has withdrawn every tier", () => {
+  it("says the creator is not selling anything when every tier has been withdrawn", () => {
     setUserSession("jwt-abc", VIEWER);
     renderOffer([], "budi", false, true);
 
-    expect(screen.getByTestId("membership-ended").textContent).toContain("sudah berakhir");
+    const panel = screen.getByTestId("membership-ended");
+    expect(panel.textContent).toContain("sudah berakhir");
+    expect(panel.textContent).toContain("tidak menawarkan paket keanggotaan");
+    expect(screen.queryAllByRole("button").length).toBe(0);
   });
 
   /** Your own profile still renders NOTHING, ended flag or not. */
@@ -517,7 +571,7 @@ describe("MembershipOffer — somebody whose membership has ENDED", () => {
    * server answers `false` by construction, and this pins the client half the
    * same way the member panel's is pinned.
    */
-  it("a signed-out browser handed `true` still gets the Masuk link, not the ended panel", () => {
+  it("a signed-out browser handed `true` still gets the Masuk link, not the ended notice", () => {
     localStorage.clear();
     renderOffer([tier()], "budi", false, true);
 

@@ -234,8 +234,8 @@ export default function ProfilePage() {
         viewerIsMember={profile.membership?.viewerIsMember ?? false}
         // `?? false` again, and here the safe half is the OTHER direction:
         // an API that predates this field says nothing about a lapsed
-        // membership, and defaulting to `true` would hide the offer from
-        // everybody on that deploy.
+        // membership, and defaulting to `true` would tell every signed-in
+        // visitor on that deploy that a membership of theirs had ended.
         viewerMembershipEnded={profile.membership?.viewerMembershipEnded ?? false}
       />
 

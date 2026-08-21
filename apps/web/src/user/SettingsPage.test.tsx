@@ -84,6 +84,39 @@ describe("SettingsPage", () => {
     expect(screen.getByText("wildan@example.com")).toBeTruthy();
   });
 
+  /**
+   * Fix round 1, M-3 (review): `<SubscriberList />` is mounted by
+   * `SettingsPage.tsx` but nothing in this file ever referenced it — deleting
+   * the line from `SettingsPage.tsx` left all 831 web tests green, this file
+   * included. `SubscriberList.test.tsx` proves the COMPONENT works in
+   * isolation; it cannot prove `SettingsPage` actually renders it.
+   *
+   * Routed (not blanket) mock, so this is a genuine end-to-end check: real
+   * data from `GET /users/me/subscribers` has to travel through
+   * `apiClient.listSubscribers` and `SubscriberList`'s own fetch effect and
+   * reach the screen, not merely a heading string that would render even if
+   * the fetch were removed entirely.
+   */
+  it("mounts the subscriber list and renders what GET /users/me/subscribers sends", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) => {
+      if (url === "/users/me/subscribers") {
+        return jsonResponse({
+          subscribers: [
+            { handle: "bob", displayName: "Bob", since: "2026-08-01T00:00:00.000Z" },
+          ],
+        });
+      }
+      return jsonResponse(OWN_PROFILE);
+    }) as unknown as typeof fetch;
+
+    renderSettings();
+
+    expect(await screen.findByText("Pelanggan Anda")).toBeTruthy();
+    expect(await screen.findByText("Bob")).toBeTruthy();
+    expect(screen.getByText("@bob")).toBeTruthy();
+  });
+
   it("updates the display name and shows a confirmation", async () => {
     setUserSession("jwt-abc", USER);
     const calls: Array<{ url: string; init: RequestInit }> = [];

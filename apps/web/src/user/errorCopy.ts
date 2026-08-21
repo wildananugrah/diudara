@@ -165,9 +165,13 @@ export function describeUploadFailure(err: unknown): string {
  *  2. the tier is no longer offered;
  *  3. the creator's payout account is not connected;
  *  4. the viewer already holds a LIVE membership to this creator;
- *  5. the viewer's membership has ENDED and 5a has no renewal — a different
- *     refusal from 4, and a different sentence server-side, because "you are
- *     already an active member" is simply false for that person;
+ *  5. the viewer holds an `active` row with a NULL `current_period_end` — the
+ *     only "ended" shape `retireExpired` cannot move (`NULL <= now` is not
+ *     true), so it is the residue of what used to be EVERY lapsed member. An
+ *     ordinary lapsed member is not refused any more: since Phase 5b the
+ *     purchase retires their row inside its own transaction and sells them a
+ *     new membership. Unreachable through `activate`, which always writes a
+ *     period end;
  *  6. a PENDING checkout for this pair is open against a different tier;
  *  7. a PENDING checkout for this pair is being prepared right now — the
  *     transient one, milliseconds wide, and **the only one where pressing the
@@ -185,11 +189,19 @@ export function describeUploadFailure(err: unknown): string {
  * wrong six times out of seven, and vague is honest where confidently wrong is
  * not, which is the ruling `describeUploadFailure`'s own rewrite recorded.
  *
- * Reloading is still named, but for what it actually does now: it re-reads
- * `membership`, and the profile carries `viewerMembershipEnded`, so the page a
- * lapsed member comes back to says their membership ended instead of offering
- * the button again. That is a look at the current state, not a retry — the
- * loop is closed by the profile, and this sentence simply stops re-opening it.
+ * **AND IT NO LONGER SAYS RENEWAL IS UNAVAILABLE** (the final whole-branch
+ * review's C-1). 5a's version of this sentence ended "...atau keanggotaan Anda
+ * sudah berakhir dan perpanjangan belum tersedia", which was true when it was
+ * written and is the one sentence Phase 5b exists to make false: a lapsed
+ * member now presses the button and buys. Naming a refusal that has been fixed
+ * is worse than vagueness — it is the product denying its own feature — so the
+ * clause was removed rather than softened, and what replaced it is (4), which
+ * IS still refused.
+ *
+ * Reloading is still named, for what it actually does: it re-reads
+ * `membership`, so the page a lapsed member comes back to shows them the offer
+ * with a notice that their membership ended, and a live member the panel that
+ * says they are one. That is a look at the current state, not a retry.
  *
  * Note that this route's 409 body is itself Bahasa, which makes it the most
  * tempting place in the app to print the wire's text. The rule is not
@@ -204,8 +216,8 @@ export function describeSubscribeFailure(err: unknown): string {
     return (
       "Keanggotaan ini belum bisa dibeli sekarang — tingkatannya mungkin sudah ditutup, " +
       "kreatornya belum siap menerima pembayaran, pembayaran sebelumnya masih diproses, " +
-      "atau keanggotaan Anda sudah berakhir dan perpanjangan belum tersedia. Muat ulang " +
-      "halaman ini untuk melihat keadaan terbaru."
+      "atau Anda masih menjadi anggota aktif kreator ini. Muat ulang halaman ini untuk " +
+      "melihat keadaan terbaru."
     );
   }
   return describeRequestFailure(err);

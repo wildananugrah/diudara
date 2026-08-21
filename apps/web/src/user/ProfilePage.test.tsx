@@ -876,13 +876,14 @@ describe("ProfilePage — the membership offer (Task 10)", () => {
   });
 
   /**
-   * The final whole-branch review's I1, wired: the profile also carries
-   * `membership.viewerMembershipEnded`, and this is the plumbing that reads
-   * it. Without it the page rendered a "Jadi anggota" button for somebody the
-   * server refuses permanently — 5a has no renewal, and §9 puts every paying
-   * member in this state one billing cycle after their purchase.
+   * `membership.viewerMembershipEnded`, wired end to end — and since the final
+   * whole-branch review's C-1 it selects a SENTENCE, not a dead end. Phase 5b's
+   * purchase retires the lapsed row inside its own transaction, so this person
+   * may buy again; the page must say their membership ended AND hand them the
+   * button, with no worker pass in between. It used to render the notice and
+   * nothing else, which left the headline feature unreachable from the product.
    */
-  it("tells somebody whose membership ended that it ended, instead of offering the button", async () => {
+  it("tells somebody whose membership ended that it ended, and still offers the button", async () => {
     setUserSession("jwt-abc", USER);
     global.fetch = mock(async (url: string) =>
       url.includes("/posts")
@@ -899,8 +900,8 @@ describe("ProfilePage — the membership offer (Task 10)", () => {
 
     const panel = await screen.findByTestId("membership-ended");
     expect(panel.textContent).toContain("sudah berakhir");
-    expect(screen.queryAllByRole("button", { name: /Jadi anggota/ }).length).toBe(0);
-    expect(screen.queryAllByTestId("membership-tier-tier-1").length).toBe(0);
+    expect(screen.getByRole("button", { name: "Jadi anggota — Anggota" })).toBeTruthy();
+    expect(screen.getByTestId("membership-tier-tier-1")).toBeTruthy();
   });
 
   /**

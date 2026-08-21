@@ -3,12 +3,18 @@ import {
   createScheduledPassLoops,
   DEFAULT_RENEWAL_INTERVAL_MS,
   formatChurnPassLine,
+  formatMembershipReminderLine,
+  formatMembershipSweepLine,
   formatOrphanSweepLine,
   formatPassFailure,
   formatRenewalPassLine,
+  formatStalePendingSweepLine,
   ORPHAN_SWEEP_WINDOW_MS,
   resolveRenewalIntervalMs,
+  STALE_PENDING_CHECKOUT_WINDOW_MS,
+  SweepExpiredMemberships,
   SweepOrphanMedia,
+  SweepStalePendingCheckouts,
 } from "./scheduled-passes";
 
 /**
@@ -41,8 +47,31 @@ const NOTHING_HAPPENED_SWEEP = {
   failed: 0,
 };
 
+const NOTHING_HAPPENED_MEMBERSHIP_SWEEP = {
+  considered: 0,
+  retired: 0,
+  skipped: 0,
+  failed: 0,
+};
+
+const NOTHING_HAPPENED_MEMBERSHIP_REMINDER = {
+  considered: 0,
+  reminded: 0,
+  alreadyReminded: 0,
+  skipped: 0,
+  failed: 0,
+};
+
+const NOTHING_HAPPENED_STALE_PENDING_SWEEP = {
+  considered: 0,
+  expired: 0,
+  skipped: 0,
+  failed: 0,
+};
+
 /** Counts, an optional stage-free label, `=` and spaces. Nothing else may appear. */
-const COUNTS_ONLY = /^\[(renewals|churn|media)\] (?:[a-z_]+=\d+ ?)+$/;
+const COUNTS_ONLY =
+  /^\[(renewals|churn|media|memberships|membership-reminders|pending-checkouts)\] (?:[a-z_]+=\d+ ?)+$/;
 
 describe("formatRenewalPassLine", () => {
   it("says nothing when the pass had nothing to do", () => {
@@ -138,6 +167,110 @@ describe("formatOrphanSweepLine", () => {
   });
 });
 
+describe("formatMembershipSweepLine", () => {
+  it("says nothing when the pass had nothing to do", () => {
+    expect(formatMembershipSweepLine(NOTHING_HAPPENED_MEMBERSHIP_SWEEP)).toBeNull();
+  });
+
+  it("reports every count when the pass did something", () => {
+    const line = formatMembershipSweepLine({ considered: 6, retired: 3, skipped: 1, failed: 2 });
+
+    expect(line).toBe("[memberships] considered=6 retired=3 skipped=1 failed=2");
+  });
+
+  it("speaks up when every row in the pass failed to retire", () => {
+    // `considered>0, retired=0` is the shape of a pass finding lapsed memberships and
+    // failing to retire them — the exact silent-failure mode this task exists to prevent.
+    expect(
+      formatMembershipSweepLine({ considered: 2, retired: 0, skipped: 0, failed: 2 })
+    ).toContain("failed=2");
+  });
+
+  it("emits counts and nothing else — no subscriber id, no owner id", () => {
+    expect(
+      formatMembershipSweepLine({ considered: 1, retired: 1, skipped: 0, failed: 0 })
+    ).toMatch(COUNTS_ONLY);
+  });
+});
+
+describe("formatMembershipReminderLine", () => {
+  it("says nothing when the pass had nothing to do", () => {
+    expect(formatMembershipReminderLine(NOTHING_HAPPENED_MEMBERSHIP_REMINDER)).toBeNull();
+  });
+
+  it("reports every count when the pass did something", () => {
+    const line = formatMembershipReminderLine({
+      considered: 9,
+      reminded: 5,
+      alreadyReminded: 2,
+      skipped: 1,
+      failed: 1,
+    });
+
+    expect(line).toBe(
+      "[membership-reminders] considered=9 reminded=5 already_reminded=2 skipped=1 failed=1"
+    );
+  });
+
+  it("SPEAKS UP for a pass that reached nobody at all", () => {
+    // The failure this whole pass exists to prevent is "the member was never told",
+    // and the shape of it is `considered>0, reminded=0`. A line that stayed silent
+    // here would make a pass that reached nobody look exactly like a pass that had
+    // nothing to do.
+    const line = formatMembershipReminderLine({
+      considered: 4,
+      reminded: 0,
+      alreadyReminded: 0,
+      skipped: 4,
+      failed: 0,
+    });
+
+    expect(line).toBe(
+      "[membership-reminders] considered=4 reminded=0 already_reminded=0 skipped=4 failed=0"
+    );
+  });
+
+  it("emits counts and nothing else — no subscriber id, no email, no number", () => {
+    expect(
+      formatMembershipReminderLine({
+        considered: 1,
+        reminded: 1,
+        alreadyReminded: 0,
+        skipped: 0,
+        failed: 0,
+      })
+    ).toMatch(COUNTS_ONLY);
+  });
+});
+
+describe("formatStalePendingSweepLine", () => {
+  it("says nothing when the pass had nothing to do", () => {
+    expect(formatStalePendingSweepLine(NOTHING_HAPPENED_STALE_PENDING_SWEEP)).toBeNull();
+  });
+
+  it("reports every count when the pass did something", () => {
+    const line = formatStalePendingSweepLine({ considered: 5, expired: 3, skipped: 1, failed: 1 });
+
+    expect(line).toBe("[pending-checkouts] considered=5 expired=3 skipped=1 failed=1");
+  });
+
+  it("speaks up when every row in the pass failed to expire", () => {
+    // `considered>0, expired=0` is the shape of a pass finding stale checkouts and
+    // failing to clear them — the exact silent-failure mode this task exists to
+    // prevent, and the one that keeps the dead-invoice gap open even though the
+    // pass ran.
+    expect(
+      formatStalePendingSweepLine({ considered: 2, expired: 0, skipped: 0, failed: 2 })
+    ).toContain("failed=2");
+  });
+
+  it("emits counts and nothing else — no subscriber id, no owner id, no invoice url", () => {
+    expect(
+      formatStalePendingSweepLine({ considered: 1, expired: 1, skipped: 0, failed: 0 })
+    ).toMatch(COUNTS_ONLY);
+  });
+});
+
 describe("formatPassFailure", () => {
   it("drops the bound parameters of a failed query", () => {
     // Exactly what Phase 4 found in the worker's log: drizzle formats a query
@@ -184,11 +317,33 @@ describe("formatPassFailure", () => {
 
     expect(line.startsWith("[media] pass failed: ")).toBe(true);
   });
+
+  it("is wired for the membership sweep's own tag", () => {
+    const line = formatPassFailure("memberships", new Error("connection reset"));
+
+    expect(line.startsWith("[memberships] pass failed: ")).toBe(true);
+  });
+
+  it("is wired for the pending-checkout cleanup's own tag", () => {
+    const line = formatPassFailure("pending-checkouts", new Error("connection reset"));
+
+    expect(line.startsWith("[pending-checkouts] pass failed: ")).toBe(true);
+  });
 });
 
 describe("ORPHAN_SWEEP_WINDOW_MS", () => {
   it("is 24 hours — spec §8's generous window, a person may leave a composer open for an hour", () => {
     expect(ORPHAN_SWEEP_WINDOW_MS).toBe(24 * 60 * 60_000);
+  });
+});
+
+describe("STALE_PENDING_CHECKOUT_WINDOW_MS", () => {
+  it("is 2 hours — longer than a checkout, and well inside Xendit's 24-hour default invoice life", () => {
+    expect(STALE_PENDING_CHECKOUT_WINDOW_MS).toBe(2 * 60 * 60_000);
+  });
+
+  it("leaves a wide margin under 24 hours, so a live invoice at the provider is never expired here first", () => {
+    expect(STALE_PENDING_CHECKOUT_WINDOW_MS).toBeLessThan(24 * 60 * 60_000);
   });
 });
 
@@ -418,6 +573,729 @@ describe("SweepOrphanMedia", () => {
   });
 });
 
+/**
+ * In-memory `ExpiredMembershipRepository`, for `SweepExpiredMemberships`'s own tests —
+ * no database, same reason as `FakeOrphanMediaRepository` above. `listExpiredActive`
+ * re-implements the same two conditions Task 1's real query enforces (`status =
+ * 'active'`, `current_period_end <= now`), which is what lets the boundary be pinned
+ * here without touching `DrizzleUserSubscriptionRepository` at all — that repository's
+ * own test already pins the SQL side. `retireExpired` re-implements the CONDITIONAL
+ * UPDATE, not a bare status flip, so a race that retires the pair between the list and
+ * this row's turn is observable here exactly as it is against the real database.
+ */
+class FakeExpiredMembershipRepository {
+  readonly rows = new Map<
+    string,
+    { subscriberId: string; ownerId: string; status: string; currentPeriodEnd: Date }
+  >();
+  readonly failFor = new Set<string>();
+
+  seed(row: {
+    id: string;
+    subscriberId: string;
+    ownerId: string;
+    status: string;
+    currentPeriodEnd: Date;
+  }): void {
+    this.rows.set(row.id, {
+      subscriberId: row.subscriberId,
+      ownerId: row.ownerId,
+      status: row.status,
+      currentPeriodEnd: row.currentPeriodEnd,
+    });
+  }
+
+  statusOf(id: string): string | undefined {
+    return this.rows.get(id)?.status;
+  }
+
+  async listExpiredActive(
+    now: Date,
+    limit: number
+  ): Promise<{ id: string; subscriberId: string; ownerId: string }[]> {
+    return [...this.rows.entries()]
+      .filter(([, row]) => row.status === "active" && row.currentPeriodEnd.getTime() <= now.getTime())
+      .sort((a, b) => a[1].currentPeriodEnd.getTime() - b[1].currentPeriodEnd.getTime())
+      .slice(0, limit)
+      .map(([id, row]) => ({ id, subscriberId: row.subscriberId, ownerId: row.ownerId }));
+  }
+
+  async retireExpired(subscriberId: string, ownerId: string, now: Date): Promise<boolean> {
+    const entry = [...this.rows.entries()].find(
+      ([, row]) => row.subscriberId === subscriberId && row.ownerId === ownerId
+    );
+    if (entry === undefined) return false;
+    const [id, row] = entry;
+    if (this.failFor.has(id)) {
+      // The real adapter's `retireExpired` is a single UPDATE against a live
+      // connection — a thrown error here stands in for the database being briefly
+      // unreachable, or the statement itself failing.
+      throw new Error(`retireExpired(${id}) failed: connection reset`);
+    }
+    if (row.status !== "active" || row.currentPeriodEnd.getTime() > now.getTime()) return false;
+    row.status = "expired";
+    return true;
+  }
+
+  /** The race, as a test can spell it: another caller retires this pair first — a
+   * concurrent sweep pass, or Task 2's lazy retirement on the purchase path. */
+  retireExternally(id: string): void {
+    const row = this.rows.get(id);
+    if (row !== undefined) row.status = "expired";
+  }
+}
+
+describe("SweepExpiredMemberships", () => {
+  const NOW = new Date("2026-08-18T12:00:00.000Z");
+  const secondsFromNow = (s: number) => new Date(NOW.getTime() + s * 1000);
+
+  it("retires an active membership one second past its period end", async () => {
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "sub-1",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-1),
+    });
+
+    const sweep = new SweepExpiredMemberships(subscriptions, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(subscriptions.statusOf("sub-1")).toBe("expired");
+    expect(result).toEqual({ considered: 1, retired: 1, skipped: 0, failed: 0 });
+  });
+
+  /**
+   * THE BOUNDARY, the other direction. A sweep that retired every active membership
+   * (or one that flipped the comparison) would pass every test above and this test
+   * catches it: one second BEFORE the period ends, the membership is still live and
+   * must not be touched.
+   */
+  it("does NOT retire an active membership one second before its period end", async () => {
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "sub-1",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(1),
+    });
+
+    const sweep = new SweepExpiredMemberships(subscriptions, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(subscriptions.statusOf("sub-1")).toBe("active");
+    expect(result).toEqual({ considered: 0, retired: 0, skipped: 0, failed: 0 });
+  });
+
+  it("leaves a live membership untouched however long ago it was created, as long as its period has not ended", async () => {
+    // "Live" here means "not yet lapsed" — a membership bought years ago with a
+    // period end far in the future must be untouched, exactly like a membership
+    // bought a minute ago whose period has not ended either.
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "sub-old",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: new Date(NOW.getTime() + 365 * 24 * 60 * 60_000),
+    });
+
+    const sweep = new SweepExpiredMemberships(subscriptions, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(subscriptions.statusOf("sub-old")).toBe("active");
+    expect(result).toEqual({ considered: 0, retired: 0, skipped: 0, failed: 0 });
+  });
+
+  it("counts a membership raced away by a concurrent retirement as skipped, not failed", async () => {
+    // The same race `SweepOrphanMedia` guards against, one layer down: `listExpiredActive`
+    // produced this id, and something else — another sweep pass, or Task 2's lazy
+    // retirement on the purchase path — retired the pair before this row's turn.
+    // `retireExpired`'s conditional UPDATE answers `false`, not an error.
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "raced",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-10),
+    });
+    subscriptions.seed({
+      id: "real",
+      subscriberId: "budi",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-9),
+    });
+
+    const listSpy = subscriptions.listExpiredActive.bind(subscriptions);
+    subscriptions.listExpiredActive = async (now, limit) => {
+      const page = await listSpy(now, limit);
+      subscriptions.retireExternally("raced");
+      return page;
+    };
+
+    const sweep = new SweepExpiredMemberships(subscriptions, { now: () => NOW });
+    const result = await sweep.execute();
+
+    expect(subscriptions.statusOf("real")).toBe("expired");
+    expect(result).toEqual({ considered: 2, retired: 1, skipped: 1, failed: 0 });
+  });
+
+  it("does not abort the pass when one row's retireExpired throws, and that row is left active for the next pass", async () => {
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "a",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-30),
+    });
+    subscriptions.seed({
+      id: "b",
+      subscriberId: "budi",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-20),
+    });
+    subscriptions.seed({
+      id: "c",
+      subscriberId: "citra",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-10),
+    });
+    subscriptions.failFor.add("b");
+
+    const errors: string[] = [];
+    const sweep = new SweepExpiredMemberships(subscriptions, {
+      now: () => NOW,
+      logError: (line) => errors.push(line),
+    });
+    const result = await sweep.execute();
+
+    expect(result).toEqual({ considered: 3, retired: 2, skipped: 0, failed: 1 });
+    expect(subscriptions.statusOf("a")).toBe("expired");
+    expect(subscriptions.statusOf("c")).toBe("expired");
+    // THE row whose retireExpired threw is left ACTIVE — still expired-by-date, so the
+    // very next pass finds it again and retries it.
+    expect(subscriptions.statusOf("b")).toBe("active");
+    // …and the failure is VISIBLE, not just absorbed into a count nobody reads.
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("b");
+  });
+
+  it("does not loop forever when every row in a page fails", async () => {
+    // batchSize matches the number of failing rows exactly, so without a no-progress
+    // guard the pass would re-fetch the identical page forever: neither row is ever
+    // retired, so listExpiredActive keeps returning both.
+    const subscriptions = new FakeExpiredMembershipRepository();
+    subscriptions.seed({
+      id: "x",
+      subscriberId: "alice",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-30),
+    });
+    subscriptions.seed({
+      id: "y",
+      subscriberId: "budi",
+      ownerId: "rina",
+      status: "active",
+      currentPeriodEnd: secondsFromNow(-20),
+    });
+    subscriptions.failFor.add("x");
+    subscriptions.failFor.add("y");
+
+    const sweep = new SweepExpiredMemberships(subscriptions, {
+      now: () => NOW,
+      batchSize: 2,
+      logError: () => undefined,
+    });
+    const result = await sweep.execute();
+
+    expect(result).toEqual({ considered: 2, retired: 0, skipped: 0, failed: 2 });
+  });
+});
+
+/**
+ * In-memory `StalePendingCheckoutRepository`, for `SweepStalePendingCheckouts`'s own
+ * tests — no database, same reason as `FakeExpiredMembershipRepository` above.
+ * `listStalePending` re-implements the same two conditions the real query enforces
+ * (`status = 'pending'`, `created_at <= cutoff`), which is what lets the window
+ * boundary be pinned here without touching `DrizzleUserSubscriptionRepository` at
+ * all — that repository's own test already pins the SQL side. `expireStalePending`
+ * re-implements the CONDITIONAL UPDATE, not a bare status flip, so a race that moves
+ * the row between the list and this row's turn is observable here exactly as it is
+ * against the real database.
+ */
+class FakeStalePendingCheckoutRepository {
+  readonly rows = new Map<string, { status: string; createdAt: Date }>();
+  readonly failFor = new Set<string>();
+  /** subscription id -> the live invoice its pending transaction still points at. */
+  readonly invoices = new Map<string, { invoiceId: string; forAccountId: string }>();
+  /** Subscription ids whose `findExpirableInvoice` throws — a database blip on the lookup. */
+  readonly failInvoiceLookupFor = new Set<string>();
+  /** Every call, in order, so a test can prove the ROW moved before the provider was called. */
+  readonly calls: string[] = [];
+
+  seed(id: string, status: string, createdAt: Date): void {
+    this.rows.set(id, { status, createdAt });
+  }
+
+  /** Gives this row a live invoice at the provider, the way a real claim-then-invoice does. */
+  seedInvoice(id: string, invoiceId: string, forAccountId = "acct-budi"): void {
+    this.invoices.set(id, { invoiceId, forAccountId });
+  }
+
+  async findExpirableInvoice(
+    id: string
+  ): Promise<{ invoiceId: string; forAccountId: string } | null> {
+    this.calls.push(`find:${id}`);
+    if (this.failInvoiceLookupFor.has(id)) {
+      throw new Error(`findExpirableInvoice(${id}) failed: connection reset`);
+    }
+    return this.invoices.get(id) ?? null;
+  }
+
+  statusOf(id: string): string | undefined {
+    return this.rows.get(id)?.status;
+  }
+
+  async listStalePending(cutoff: Date, limit: number): Promise<{ id: string }[]> {
+    return [...this.rows.entries()]
+      .filter(([, row]) => row.status === "pending" && row.createdAt.getTime() <= cutoff.getTime())
+      .sort((a, b) => a[1].createdAt.getTime() - b[1].createdAt.getTime())
+      .slice(0, limit)
+      .map(([id]) => ({ id }));
+  }
+
+  async expireStalePending(id: string): Promise<boolean> {
+    this.calls.push(`expire-row:${id}`);
+    if (this.failFor.has(id)) {
+      // The real adapter's `expireStalePending` is a single UPDATE against a live
+      // connection — a thrown error here stands in for the database being briefly
+      // unreachable, or the statement itself failing.
+      throw new Error(`expireStalePending(${id}) failed: connection reset`);
+    }
+    const row = this.rows.get(id);
+    if (row === undefined || row.status !== "pending") return false;
+    row.status = "expired";
+    return true;
+  }
+
+  /**
+   * The race, as a test can spell it: another caller moves this row's status first —
+   * paid via the webhook, cancelled, or a concurrent sweep already expiring it.
+   */
+  moveExternally(id: string, status: string): void {
+    const row = this.rows.get(id);
+    if (row !== undefined) row.status = status;
+  }
+}
+
+/**
+ * In-memory `InvoiceExpiryProvider` — the sweep's half of `PaymentProviderPort`,
+ * structurally. `FakePaymentAdapter` in `apps/api` satisfies the same shape; this
+ * one lives here so the worker's tests need no composition root, exactly as
+ * `FakeStalePendingCheckoutRepository` does for the database.
+ */
+class FakeInvoiceExpiryProvider {
+  readonly expired: { invoiceId: string; forAccountId: string }[] = [];
+  readonly failFor = new Set<string>();
+  /** Shared with the repository fake so ORDER across the two is observable. */
+  constructor(private readonly calls: string[] = []) {}
+
+  async expireInvoice(input: { invoiceId: string; forAccountId: string }): Promise<void> {
+    this.calls.push(`expire-invoice:${input.invoiceId}`);
+    if (this.failFor.has(input.invoiceId)) {
+      throw new Error(`xendit expireInvoice failed with status 500`);
+    }
+    this.expired.push(input);
+  }
+}
+
+/**
+ * Task 5 of Phase 5b (spec §7). The window is tested at its boundary in BOTH
+ * directions — spec §11's own rule: a test with only clearly-stale rows would pass
+ * against a window of any length, including one short enough to expire a buyer
+ * sitting on Xendit's payment page mid-checkout.
+ */
+describe("SweepStalePendingCheckouts", () => {
+  const NOW = new Date("2026-08-18T12:00:00.000Z");
+  /**
+   * A LITERAL, deliberately NOT `STALE_PENDING_CHECKOUT_WINDOW_MS` — that constant
+   * has its own dedicated test above pinning it to a real 2-hour value. Deriving
+   * these boundary tests from the imported constant would make them pass against
+   * ANY value it holds, including one shrunk to a minute, which is exactly the
+   * defect spec §11 warns a boundary test must not let through. 90 minutes is
+   * picked to be unmistakably distinct from the real 2-hour default, so a reader
+   * cannot mistake this for testing the production value.
+   */
+  const TEST_WINDOW_MS = 90 * 60_000;
+  // Offsets are stated relative to the WINDOW's own cutoff (`NOW - TEST_WINDOW_MS`),
+  // not to `NOW` itself — "past the window" and "inside the window" are what this
+  // pass actually decides on.
+  const pastWindowBy = (ms: number) => new Date(NOW.getTime() - TEST_WINDOW_MS - ms);
+  const insideWindowBy = (ms: number) => new Date(NOW.getTime() - TEST_WINDOW_MS + ms);
+
+  it("expires a pending checkout ONE SECOND past the window, freeing the pending slot", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("pending-1", "pending", pastWindowBy(1_000));
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(checkouts.statusOf("pending-1")).toBe("expired");
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 0 });
+  });
+
+  /**
+   * THE BOUNDARY, the other direction. Somebody may be mid-payment — a checkout one
+   * second inside the window is not abandoned, and there is no way in 5a to hand
+   * that buyer a fresh invoice once this row is gone. A sweep that expired every
+   * pending row (or one that flipped the comparison) would pass every test above and
+   * this test catches it.
+   */
+  it("leaves a pending checkout ONE SECOND inside the window alone — somebody may be mid-payment", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("pending-1", "pending", insideWindowBy(1_000));
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(checkouts.statusOf("pending-1")).toBe("pending");
+    expect(result).toEqual({ considered: 0, expired: 0, skipped: 0, failed: 0 });
+  });
+
+  it("expires a pending checkout created EXACTLY AT the cutoff — inclusive, like retireExpired's <=", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("pending-1", "pending", pastWindowBy(0));
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(checkouts.statusOf("pending-1")).toBe("expired");
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 0 });
+  });
+
+  it("counts a checkout raced away (paid, cancelled, or already swept) as skipped, not failed", async () => {
+    // The same race `SweepExpiredMemberships` guards against, one layer down:
+    // `listStalePending` produced this id, and something else — the buyer paying
+    // via the webhook, or a concurrent sweep — moved it off `pending` before this
+    // row's turn. `expireStalePending`'s conditional UPDATE answers `false`, not an
+    // error.
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("raced", "pending", pastWindowBy(10_000));
+    checkouts.seed("real", "pending", pastWindowBy(9_000));
+
+    const listSpy = checkouts.listStalePending.bind(checkouts);
+    checkouts.listStalePending = async (cutoff, limit) => {
+      const page = await listSpy(cutoff, limit);
+      checkouts.moveExternally("raced", "paid");
+      return page;
+    };
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(checkouts.statusOf("real")).toBe("expired");
+    expect(checkouts.statusOf("raced")).toBe("paid");
+    expect(result).toEqual({ considered: 2, expired: 1, skipped: 1, failed: 0 });
+  });
+
+  it("does not abort the pass when one row's expireStalePending throws, and that row is left pending for the next pass", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("a", "pending", pastWindowBy(30_000));
+    checkouts.seed("b", "pending", pastWindowBy(20_000));
+    checkouts.seed("c", "pending", pastWindowBy(10_000));
+    checkouts.failFor.add("b");
+
+    const errors: string[] = [];
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+      logError: (line) => errors.push(line),
+    });
+    const result = await sweep.execute();
+
+    expect(result).toEqual({ considered: 3, expired: 2, skipped: 0, failed: 1 });
+    expect(checkouts.statusOf("a")).toBe("expired");
+    expect(checkouts.statusOf("c")).toBe("expired");
+    // THE row whose expireStalePending threw is left PENDING — still stale-by-age,
+    // so the very next pass finds it again and retries it. A buyer who returns in
+    // between still gets `findPendingCheckout`'s dead-invoice answer, exactly as
+    // before this pass ran — never worse.
+    expect(checkouts.statusOf("b")).toBe("pending");
+    // …and the failure is VISIBLE, not just absorbed into a count nobody reads.
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("b");
+  });
+
+  it("does not loop forever when every row in a page fails", async () => {
+    // batchSize matches the number of failing rows exactly, so without a
+    // no-progress guard the pass would re-fetch the identical page forever: neither
+    // row is ever expired, so listStalePending keeps returning both.
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("x", "pending", pastWindowBy(30_000));
+    checkouts.seed("y", "pending", pastWindowBy(20_000));
+    checkouts.failFor.add("x");
+    checkouts.failFor.add("y");
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+      batchSize: 2,
+      logError: () => undefined,
+    });
+    const result = await sweep.execute();
+
+    expect(result).toEqual({ considered: 2, expired: 0, skipped: 0, failed: 2 });
+  });
+
+  /**
+   * **THE FINAL WHOLE-BRANCH REVIEW'S I-1 — the money one.** Freeing the pending
+   * slot after two hours is only half the job: the invoice this row opened lives
+   * 24 hours at Xendit and nothing used to cancel it. The buyer returns at T+2h05,
+   * taps, gets a fresh invoice I2 — and the abandoned I1 is still payable, sitting
+   * in their WhatsApp. Paying both is a DOUBLE CHARGE (detected and alerted by the
+   * webhook's duplicate branch, no second membership granted, and no refund path
+   * anywhere in this product). So the row and its invoice are retired together.
+   */
+  it("expires the invoice AT THE PROVIDER too, so the abandoned one cannot still be paid", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("pending-1", "pending", pastWindowBy(1_000));
+    checkouts.seedInvoice("pending-1", "inv_1", "acct-budi");
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(checkouts.statusOf("pending-1")).toBe("expired");
+    expect(payments.expired).toEqual([{ invoiceId: "inv_1", forAccountId: "acct-budi" }]);
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 0 });
+  });
+
+  /**
+   * **THE ORDER, AND IT IS THE WHOLE SAFETY ARGUMENT.** The row is freed FIRST and
+   * the provider is called after.
+   *
+   * Row-then-provider: if the provider call fails, the buyer's slot is already free,
+   * so they can buy again immediately — the abandoned invoice stays payable, which
+   * is exactly the state this branch was already in before I-1, never worse.
+   *
+   * Provider-then-row: a provider call that SUCCEEDS and a row update that then
+   * fails leaves the buyer holding the pending slot AND a dead invoice —
+   * `findPendingCheckout` hands back a URL Xendit has killed and there is no way to
+   * mint another until a later pass gets the row moved. That is the abandoned-cart
+   * trap Task 5 exists to close, re-opened by the fix for it.
+   *
+   * So a buyer can never be stranded by this pass, in either direction.
+   */
+  it("expires the ROW BEFORE the provider — a provider failure can never strand the buyer", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("pending-1", "pending", pastWindowBy(1_000));
+    checkouts.seedInvoice("pending-1", "inv_1");
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+    payments.failFor.add("inv_1");
+
+    const errors: string[] = [];
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+      logError: (line) => errors.push(line),
+    });
+    const result = await sweep.execute();
+
+    // The order, stated as the assertion rather than inferred from a mock.
+    expect(checkouts.calls).toEqual([
+      "expire-row:pending-1",
+      "find:pending-1",
+      "expire-invoice:inv_1",
+    ]);
+    // THE ROW IS FREE regardless of what the provider did. This buyer taps once and
+    // buys; nothing about the failure above reaches them.
+    expect(checkouts.statusOf("pending-1")).toBe("expired");
+    // Counted and visible, never thrown: the pass keeps going. `expired` and
+    // `failed` both name this row on purpose — the slot moved, the invoice did not.
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 1 });
+    expect(errors).toHaveLength(1);
+  });
+
+  /**
+   * NO INVOICE URL, NO EMAIL, NO WHATSAPP NUMBER — the rule this whole repository
+   * holds, and this log line is written on a path that has a live payment page's id
+   * in hand. It names the SUBSCRIPTION and the counts, and nothing the provider
+   * handed us.
+   */
+  it("never puts the invoice id or its url in the failure log line", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("sub-77", "pending", pastWindowBy(1_000));
+    checkouts.seedInvoice("sub-77", "inv_secret_1", "acct-budi");
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+    payments.failFor.add("inv_secret_1");
+
+    const errors: string[] = [];
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+      logError: (line) => errors.push(line),
+    });
+    await sweep.execute();
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("sub-77");
+    expect(errors[0]).not.toContain("inv_secret_1");
+    expect(errors[0]).not.toContain("acct-budi");
+    expect(errors[0]).not.toContain("https://");
+  });
+
+  /**
+   * A row whose provider call fails must not take the pass down with it, exactly as
+   * a row whose UPDATE throws does not. Both neighbours are still swept AND still
+   * cancelled at the provider.
+   */
+  it("does not abort the pass when one row's provider call throws", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    for (const [id, ms] of [["a", 30_000], ["b", 20_000], ["c", 10_000]] as const) {
+      checkouts.seed(id, "pending", pastWindowBy(ms));
+      checkouts.seedInvoice(id, `inv_${id}`);
+    }
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+    payments.failFor.add("inv_b");
+
+    const errors: string[] = [];
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+      logError: (line) => errors.push(line),
+    });
+    const result = await sweep.execute();
+
+    expect(result).toEqual({ considered: 3, expired: 3, skipped: 0, failed: 1 });
+    expect(payments.expired.map((i) => i.invoiceId)).toEqual(["inv_a", "inv_c"]);
+    expect(["a", "b", "c"].map((id) => checkouts.statusOf(id))).toEqual([
+      "expired",
+      "expired",
+      "expired",
+    ]);
+    expect(errors).toHaveLength(1);
+  });
+
+  /**
+   * A lookup that throws is the same shape of failure as a provider that throws —
+   * the row is already free, so it is counted and logged and the pass moves on.
+   */
+  it("survives a findExpirableInvoice that throws", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("pending-1", "pending", pastWindowBy(1_000));
+    checkouts.seedInvoice("pending-1", "inv_1");
+    checkouts.failInvoiceLookupFor.add("pending-1");
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+      logError: () => undefined,
+    });
+    const result = await sweep.execute();
+
+    expect(checkouts.statusOf("pending-1")).toBe("expired");
+    expect(payments.expired).toEqual([]);
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 1 });
+  });
+
+  /**
+   * The row a failed `createInvoice` left behind — 5a's own recorded case. There is
+   * nothing at the provider to cancel, so nothing is called and nothing is counted
+   * as a failure. Calling the provider with an empty reference would be a request
+   * that can only be refused.
+   */
+  it("calls nothing at the provider for a row that never opened an invoice", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("no-invoice", "pending", pastWindowBy(1_000));
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(payments.expired).toEqual([]);
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 0 });
+  });
+
+  /**
+   * A row this pass did NOT move — paid via the webhook, cancelled, or already swept
+   * — must not have its invoice cancelled. The clearest case is the one that would
+   * cost real money: the buyer paid it between the listing and this row's turn.
+   */
+  it("never cancels the invoice of a row it did not move", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("raced", "pending", pastWindowBy(10_000));
+    checkouts.seedInvoice("raced", "inv_paid");
+    const payments = new FakeInvoiceExpiryProvider(checkouts.calls);
+
+    const listSpy = checkouts.listStalePending.bind(checkouts);
+    checkouts.listStalePending = async (cutoff, limit) => {
+      const page = await listSpy(cutoff, limit);
+      checkouts.moveExternally("raced", "paid");
+      return page;
+    };
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, payments, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(payments.expired).toEqual([]);
+    expect(checkouts.calls).toEqual(["expire-row:raced"]);
+    expect(result).toEqual({ considered: 1, expired: 0, skipped: 1, failed: 0 });
+  });
+
+  /**
+   * A box with no payment provider at all — `selectPaymentProvider` answers `null`
+   * for one, and `bootstrap()` does not register a checkout route there. The sweep
+   * still has to free pending slots (rows can predate the configuration change), and
+   * it must not pretend a cancellation happened.
+   */
+  it("still frees the slot on a box with no payment provider configured", async () => {
+    const checkouts = new FakeStalePendingCheckoutRepository();
+    checkouts.seed("pending-1", "pending", pastWindowBy(1_000));
+    checkouts.seedInvoice("pending-1", "inv_1");
+
+    const sweep = new SweepStalePendingCheckouts(checkouts, null, {
+      now: () => NOW,
+      windowMs: TEST_WINDOW_MS,
+    });
+    const result = await sweep.execute();
+
+    expect(checkouts.statusOf("pending-1")).toBe("expired");
+    // Not even looked up: there is nobody to ask.
+    expect(checkouts.calls).toEqual(["expire-row:pending-1"]);
+    expect(result).toEqual({ considered: 1, expired: 1, skipped: 0, failed: 0 });
+  });
+});
+
 describe("resolveRenewalIntervalMs", () => {
   it("defaults when the variable is unset or blank", () => {
     expect(resolveRenewalIntervalMs(undefined)).toBe(DEFAULT_RENEWAL_INTERVAL_MS);
@@ -470,21 +1348,50 @@ describe("createScheduledPassLoops", () => {
     const processRenewals = fakePass({ ...NOTHING_HAPPENED_RENEWAL, reminded: 1 });
     const processChurn = fakePass({ ...NOTHING_HAPPENED_CHURN, churned: 1 });
     const processOrphanSweep = fakePass({ ...NOTHING_HAPPENED_SWEEP, deleted: 1 });
+    const processMembershipSweep = fakePass({ ...NOTHING_HAPPENED_MEMBERSHIP_SWEEP, retired: 1 });
+    const processMembershipReminder = fakePass({
+      ...NOTHING_HAPPENED_MEMBERSHIP_REMINDER,
+      reminded: 1,
+    });
+    const processStalePendingSweep = fakePass({
+      ...NOTHING_HAPPENED_STALE_PENDING_SWEEP,
+      expired: 1,
+    });
     const lines: string[] = [];
-    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+      stalePendingSweepLoop,
+    } = createScheduledPassLoops({
       processRenewals,
       processChurn,
       processOrphanSweep,
+      processMembershipSweep,
+      processMembershipReminder,
+      processStalePendingSweep,
       intervalMs: 60_000,
       log: (line) => lines.push(line),
     });
 
-    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
+      stalePendingSweepLoop.run(),
+    ]);
     await waitUntil(
       () =>
         processRenewals.state.calls > 0 &&
         processChurn.state.calls > 0 &&
-        processOrphanSweep.state.calls > 0,
+        processOrphanSweep.state.calls > 0 &&
+        processMembershipSweep.state.calls > 0 &&
+        processMembershipReminder.state.calls > 0 &&
+        processStalePendingSweep.state.calls > 0,
       "the first pass of each type"
     );
     // Long enough that a 5s-ish interval — or no interval at all — would show up
@@ -493,10 +1400,16 @@ describe("createScheduledPassLoops", () => {
     expect(processRenewals.state.calls).toBe(1);
     expect(processChurn.state.calls).toBe(1);
     expect(processOrphanSweep.state.calls).toBe(1);
+    expect(processMembershipSweep.state.calls).toBe(1);
+    expect(processMembershipReminder.state.calls).toBe(1);
+    expect(processStalePendingSweep.state.calls).toBe(1);
 
     renewalLoop.stop();
     churnLoop.stop();
     orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
+    stalePendingSweepLoop.stop();
     const finished = await Promise.race([
       running.then(() => "stopped"),
       Bun.sleep(2_000).then(() => "still sleeping in the interval"),
@@ -507,6 +1420,9 @@ describe("createScheduledPassLoops", () => {
       "[renewals] considered=0 reminded=1 already_reminded=0 skipped=0 past_due=0",
       "[churn] considered=0 churned=1 already_churned=0 revocations_queued=0 skipped_revocation=0",
       "[media] considered=0 deleted=1 skipped=0 failed=0",
+      "[memberships] considered=0 retired=1 skipped=0 failed=0",
+      "[membership-reminders] considered=0 reminded=1 already_reminded=0 skipped=0 failed=0",
+      "[pending-checkouts] considered=0 expired=1 skipped=0 failed=0",
     ]);
   });
 
@@ -518,27 +1434,49 @@ describe("createScheduledPassLoops", () => {
     processRenewals.state.throwOnCall = 1;
     const processChurn = fakePass(NOTHING_HAPPENED_CHURN);
     const processOrphanSweep = fakePass(NOTHING_HAPPENED_SWEEP);
+    const processMembershipSweep = fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP);
     const errors: string[] = [];
-    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+      stalePendingSweepLoop,
+    } = createScheduledPassLoops({
       processRenewals,
       processChurn,
       processOrphanSweep,
+      processMembershipSweep,
+      processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
+      processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
     });
 
-    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
+      stalePendingSweepLoop.run(),
+    ]);
     await waitUntil(
       () =>
         processRenewals.state.calls >= 3 &&
         processChurn.state.calls >= 3 &&
-        processOrphanSweep.state.calls >= 3,
-      "all three passes to keep going after the throw"
+        processOrphanSweep.state.calls >= 3 &&
+        processMembershipSweep.state.calls >= 3,
+      "all four passes to keep going after the throw"
     );
     renewalLoop.stop();
     churnLoop.stop();
     orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
+    stalePendingSweepLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
@@ -553,24 +1491,201 @@ describe("createScheduledPassLoops", () => {
     const processOrphanSweep = fakePass(NOTHING_HAPPENED_SWEEP);
     processOrphanSweep.state.throwOnCall = 1;
     const errors: string[] = [];
-    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+      stalePendingSweepLoop,
+    } = createScheduledPassLoops({
       processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
       processOrphanSweep,
+      processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
+      processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
+      processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
     });
 
-    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
+      stalePendingSweepLoop.run(),
+    ]);
     await waitUntil(() => processOrphanSweep.state.calls >= 3, "the sweep to keep going after the throw");
     renewalLoop.stop();
     churnLoop.stop();
     orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
+    stalePendingSweepLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain("[media] pass failed: database was briefly unreachable");
+  });
+
+  it("keeps running after the membership sweep pass itself throws, and keeps the other passes running too", async () => {
+    // A per-ROW `retireExpired` failure is handled inside `SweepExpiredMemberships` and
+    // never reaches here (see its own describe block) — this is the backstop for
+    // something the pass-level query itself cannot survive, the same case the
+    // renewal/churn/media loops handle.
+    const processMembershipSweep = fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP);
+    processMembershipSweep.state.throwOnCall = 1;
+    const errors: string[] = [];
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+      stalePendingSweepLoop,
+    } = createScheduledPassLoops({
+      processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
+      processChurn: fakePass(NOTHING_HAPPENED_CHURN),
+      processOrphanSweep: fakePass(NOTHING_HAPPENED_SWEEP),
+      processMembershipSweep,
+      processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
+      processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
+      intervalMs: 1,
+      log: () => undefined,
+      logError: (line) => errors.push(line),
+    });
+
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
+      stalePendingSweepLoop.run(),
+    ]);
+    await waitUntil(
+      () => processMembershipSweep.state.calls >= 3,
+      "the membership sweep to keep going after the throw"
+    );
+    renewalLoop.stop();
+    churnLoop.stop();
+    orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
+    stalePendingSweepLoop.stop();
+    await running;
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("[memberships] pass failed: database was briefly unreachable");
+  });
+
+  it("keeps running after the reminder pass itself throws, and keeps the other passes running too", async () => {
+    // A per-MEMBERSHIP failure is handled inside `RemindExpiringMembership` and never
+    // reaches here — this is the backstop for something the pass-level query itself
+    // could not survive. Its own loop, so a reminder query that fails every time
+    // cannot also stop the retirement sweep that frees members to buy again.
+    const processMembershipReminder = fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER);
+    processMembershipReminder.state.throwOnCall = 1;
+    const errors: string[] = [];
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+      stalePendingSweepLoop,
+    } = createScheduledPassLoops({
+      processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
+      processChurn: fakePass(NOTHING_HAPPENED_CHURN),
+      processOrphanSweep: fakePass(NOTHING_HAPPENED_SWEEP),
+      processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
+      processMembershipReminder,
+      processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
+      intervalMs: 1,
+      log: () => undefined,
+      logError: (line) => errors.push(line),
+    });
+
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
+      stalePendingSweepLoop.run(),
+    ]);
+    await waitUntil(
+      () => processMembershipReminder.state.calls >= 3,
+      "the reminder pass to keep going after the throw"
+    );
+    renewalLoop.stop();
+    churnLoop.stop();
+    orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
+    stalePendingSweepLoop.stop();
+    await running;
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain(
+      "[membership-reminders] pass failed: database was briefly unreachable"
+    );
+  });
+
+  it("keeps running after the pending-checkout cleanup pass itself throws, and keeps the other passes running too", async () => {
+    // A per-ROW `expireStalePending` failure is handled inside
+    // `SweepStalePendingCheckouts` and never reaches here (see its own describe
+    // block) — this is the backstop for something the pass-level query itself
+    // cannot survive. Its own loop, so a query that fails every time cannot also
+    // stop the outbox or any other pass — including the retirement sweep, which is
+    // a DIFFERENT failure from this one even though both touch `user_subscription`.
+    const processStalePendingSweep = fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP);
+    processStalePendingSweep.state.throwOnCall = 1;
+    const errors: string[] = [];
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+      stalePendingSweepLoop,
+    } = createScheduledPassLoops({
+      processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
+      processChurn: fakePass(NOTHING_HAPPENED_CHURN),
+      processOrphanSweep: fakePass(NOTHING_HAPPENED_SWEEP),
+      processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
+      processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
+      processStalePendingSweep,
+      intervalMs: 1,
+      log: () => undefined,
+      logError: (line) => errors.push(line),
+    });
+
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
+      stalePendingSweepLoop.run(),
+    ]);
+    await waitUntil(
+      () => processStalePendingSweep.state.calls >= 3,
+      "the pending-checkout cleanup to keep going after the throw"
+    );
+    renewalLoop.stop();
+    churnLoop.stop();
+    orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
+    stalePendingSweepLoop.stop();
+    await running;
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("[pending-checkouts] pass failed: database was briefly unreachable");
   });
 
   it("never overlaps two passes of the same type", async () => {
@@ -590,19 +1705,39 @@ describe("createScheduledPassLoops", () => {
         return NOTHING_HAPPENED_RENEWAL;
       },
     };
-    const { renewalLoop, churnLoop, orphanSweepLoop } = createScheduledPassLoops({
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+      stalePendingSweepLoop,
+    } = createScheduledPassLoops({
       processRenewals: slowRenewals,
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
       processOrphanSweep: fakePass(NOTHING_HAPPENED_SWEEP),
+      processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
+      processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
+      processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
       intervalMs: 1,
       log: () => undefined,
     });
 
-    const running = Promise.all([renewalLoop.run(), churnLoop.run(), orphanSweepLoop.run()]);
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
+      stalePendingSweepLoop.run(),
+    ]);
     await waitUntil(() => calls >= 3, "three renewal passes");
     renewalLoop.stop();
     churnLoop.stop();
     orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
+    stalePendingSweepLoop.stop();
     await running;
 
     expect(maxInFlight).toBe(1);

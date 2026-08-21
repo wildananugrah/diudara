@@ -44,6 +44,7 @@ import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { IsMemberOf } from "./application/use-cases/is-member-of";
+import { ListSubscribers } from "./application/use-cases/list-subscribers";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -114,6 +115,7 @@ import type { MessagingProviderPort } from "./application/ports/messaging-provid
 import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
 import type { EventRepositoryPort } from "./application/ports/event-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
+import type { UserPurchaseUnitOfWorkPort } from "./application/ports/user-purchase-unit-of-work.port";
 import type { JoinRequestRepositoryPort } from "./application/ports/join-request-repository.port";
 import type { JoinRequestUnitOfWorkPort } from "./application/ports/join-request-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
@@ -283,8 +285,29 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   async cancel() {
     return null;
   },
+  async retireExpired() {
+    return false;
+  },
+  async listExpiredActive() {
+    return [];
+  },
+  async listStalePending() {
+    return [];
+  },
+  async expireStalePending() {
+    return false;
+  },
+  async findExpirableInvoice() {
+    return null;
+  },
+  async listExpiringActive() {
+    return [];
+  },
   async findActiveFor() {
     return null;
+  },
+  async listActiveSubscribers() {
+    return [];
   },
   async createTransaction() {
     throw new Error("not used");
@@ -610,6 +633,13 @@ const fakeOutboxRepository: OutboxRepositoryPort = {
 };
 
 /** Runs the work inline — no real transaction is needed to satisfy the type. */
+/** Pass-through, like the others here: bootstrap wiring, not atomicity, is what this file pins. */
+const fakeUserPurchaseUnitOfWork: UserPurchaseUnitOfWorkPort = {
+  async run(work) {
+    return work({ subscriptions: fakeUserSubscriptionRepository });
+  },
+};
+
 const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
   async run(work) {
     return work({
@@ -708,6 +738,9 @@ const fakePaymentProvider: PaymentProviderPort = {
     return { accountId: "fake-acct" };
   },
   async createInvoice() {
+    throw new Error("not used");
+  },
+  async expireInvoice() {
     throw new Error("not used");
   },
 };
@@ -849,10 +882,12 @@ describe("Dependencies (composition root contract)", () => {
         fakeUserTierRepository,
         fakeUserPayoutRepository,
         fakeUserSubscriptionRepository,
+        fakeUserPurchaseUnitOfWork,
         fakePaymentProvider,
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
+      listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository
@@ -1088,10 +1123,12 @@ describe("Dependencies (composition root contract)", () => {
         fakeUserTierRepository,
         fakeUserPayoutRepository,
         fakeUserSubscriptionRepository,
+        fakeUserPurchaseUnitOfWork,
         fakePaymentProvider,
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
+      listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
       getPublicCommunity: new GetPublicCommunity(
         fakeCommunityRepository,
         fakeMembershipTierRepository

@@ -12,6 +12,7 @@ import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { IsMemberOf } from "./application/use-cases/is-member-of";
+import { ListSubscribers } from "./application/use-cases/list-subscribers";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -64,6 +65,7 @@ import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter"
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
+import { DrizzleUserPurchaseUnitOfWork } from "./infrastructure/repositories/drizzle-user-purchase.unit-of-work";
 import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleAnalyticsRepository } from "./infrastructure/repositories/drizzle-analytics.repository";
@@ -343,6 +345,15 @@ export interface Dependencies {
    * choice `POST /users/me/payout` already makes on this router.
    */
   startUserSubscription: StartUserSubscription | undefined;
+  /**
+   * Task 6 of Phase 5b (spec §8). `GET /users/me/subscribers` — a creator's
+   * own subscriber list, owner-only and closed to exactly
+   * `{ handle, displayName, since }`. NEVER `undefined`, unlike
+   * `startUserSubscription`: reading who currently subscribes needs no
+   * `PaymentProviderPort`, only `userSubscriptionRepository`, which exists
+   * unconditionally regardless of whether this box takes payments.
+   */
+  listSubscribers: ListSubscribers;
   getPublicCommunity: GetPublicCommunity;
   /**
    * `POST /c/:slug/checkout`. `undefined` EXACTLY when `payments` is `null` —
@@ -1883,6 +1894,12 @@ export function bootstrap(): Dependencies {
    * now`, one indexed read.
    */
   const isMemberOf = new IsMemberOf(userSubscriptionRepository, clock);
+  // Task 6 of Phase 5b (spec §8). `isMemberOf` above is untouched — this is a
+  // SEPARATE use-case over the same repository, mirroring its "currently
+  // subscribed" definition rather than calling it, because this one answers a
+  // per-owner LIST and `isMemberOf` answers a per-pair question. See
+  // `ListSubscribers`'s own docstring.
+  const listSubscribers = new ListSubscribers(userSubscriptionRepository, clock);
   // Task 5 of memberships-5a: `userTierRepository` (constructed above, Task 1)
   // is now GetUserProfile's third dependency too — the public profile's
   // `membership.tiers` read. Task 10 adds the fourth, `isMemberOf`, for the
@@ -2057,6 +2074,10 @@ export function bootstrap(): Dependencies {
         userTierRepository,
         userPayoutRepository,
         userSubscriptionRepository,
+        // Retiring a lapsed membership and claiming this pair's pending slot in
+        // ONE transaction — Phase 5b, Task 2. See `UserPurchaseUnitOfWorkPort`
+        // for the "neither active nor pending" state a split commit leaves.
+        new DrizzleUserPurchaseUnitOfWork(db),
         payments,
         // The SAME clock `isMemberOf` above reads, so the two cannot disagree
         // about whether a subscription's period has passed — the divergence
@@ -2401,6 +2422,7 @@ export function bootstrap(): Dependencies {
     getUserPayoutStatus,
     manageUserTiers,
     startUserSubscription,
+    listSubscribers,
     getPublicCommunity,
     startCheckout,
     requestToJoin,

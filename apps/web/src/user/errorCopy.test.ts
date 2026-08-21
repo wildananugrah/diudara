@@ -252,9 +252,13 @@ describe("describeUploadFailure", () => {
  * carries no machine-readable `code` for any of them — see the function's own
  * docstring for the list. Six cannot be fixed by pressing again and one can,
  * so the sentence promises nothing about pressing again at all: it names the
- * possibilities, including the one this phase cannot resolve (a membership
- * that has ended, with no renewal until 5b), and points at the page rather
- * than at the button.
+ * REACHABLE possibilities and points at the page rather than at the button.
+ *
+ * "A membership that has ended, with no renewal" WAS on that list and is not
+ * any more (the final whole-branch review's C-1): Phase 5b retires the lapsed
+ * row inside the purchase transaction, so an ordinary lapsed member is no
+ * longer refused at all — they buy. Leaving the clause in would have told a
+ * buyer that a feature this branch shipped does not exist.
  */
 describe("describeSubscribeFailure", () => {
   it("answers a 409 with a remedy that is not 'try again'", () => {
@@ -263,29 +267,31 @@ describe("describeSubscribeFailure", () => {
     expect(describeSubscribeFailure(new UserApiError(server, 409))).toBe(
       "Keanggotaan ini belum bisa dibeli sekarang — tingkatannya mungkin sudah ditutup, " +
         "kreatornya belum siap menerima pembayaran, pembayaran sebelumnya masih diproses, " +
-        "atau keanggotaan Anda sudah berakhir dan perpanjangan belum tersedia. Muat ulang " +
-        "halaman ini untuk melihat keadaan terbaru."
+        "atau Anda masih menjadi anggota aktif kreator ini. Muat ulang halaman ini untuk " +
+        "melihat keadaan terbaru."
     );
   });
 
   /**
-   * **THE LOOP, PINNED SHUT.** The previous sentence advised reloading "untuk
-   * melihat penawaran terbaru" — the latest OFFER — which for a lapsed member
-   * is a promise that cannot come true: 5a has no renewal, the server refuses
-   * the purchase forever, and the reload re-rendered the same button. The
-   * final whole-branch review measured it happening to 100% of paying members
-   * one billing cycle after their purchase.
+   * **THE LOOP, PINNED SHUT — AND THE DEAD COPY, PINNED OUT.** The sentence
+   * before 5a's fix advised reloading "untuk melihat penawaran terbaru", which
+   * re-rendered the very same refused button; the sentence 5a replaced it with
+   * then named "perpanjangan belum tersedia", which Phase 5b made false. A
+   * lapsed member is not refused by this route any more — `retireExpired` runs
+   * inside the purchase transaction — so telling them renewal is unavailable
+   * would be the product denying its own headline feature.
    */
-  it("promises no fresh offer, and does not tell the buyer to press the button again", () => {
+  it("promises no fresh offer, and no longer claims renewal is unavailable", () => {
     const copy = describeSubscribeFailure(new UserApiError("apa pun", 409));
 
     expect(copy.includes("penawaran terbaru")).toBe(false);
     expect(copy.includes("coba lagi")).toBe(false);
     expect(copy.includes("Coba lagi")).toBe(false);
-    // ...and it DOES name the state this phase cannot resolve, rather than
-    // leaving a lapsed member to infer it from silence.
-    expect(copy.includes("sudah berakhir")).toBe(true);
-    expect(copy.includes("perpanjangan belum tersedia")).toBe(true);
+    // The clause 5b made untrue, gone — in either casing.
+    expect(copy.toLowerCase().includes("perpanjangan belum tersedia")).toBe(false);
+    // ...and what it names instead is a refusal that IS still reachable: a
+    // viewer who already holds a live membership.
+    expect(copy.includes("masih menjadi anggota aktif")).toBe(true);
   });
 
   it("never repeats what the server sent, even though this route's 409 is already Bahasa", () => {

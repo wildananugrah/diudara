@@ -30,6 +30,7 @@ import {
   userTiers,
   userSubscriptions,
   userTransactions,
+  membershipReminders,
 } from "./schema";
 
 /**
@@ -116,6 +117,10 @@ export async function resetDatabase() {
   // userTransactions, then userSubscriptions, then userTiers, then app_user —
   // Task 2 of Phase 5a.
   await db.delete(userTransactions);
+  // membershipReminders references userSubscriptions (Task 4 of Phase 5b), so it
+  // must clear before it — the same FK-ordering rule, and the same failure mode, as
+  // renewalReminders above.
+  await db.delete(membershipReminders);
   await db.delete(userSubscriptions);
   // userTiers references app_user (owner) — Task 1 of Phase 5a — so it must
   // clear before app_user too.

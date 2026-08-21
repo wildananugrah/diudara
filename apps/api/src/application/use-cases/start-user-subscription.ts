@@ -8,6 +8,7 @@ import type { UserRepositoryPort } from "../ports/user-repository.port";
 import type { UserTierRepositoryPort } from "../ports/user-tier-repository.port";
 import type { UserPayoutRepositoryPort } from "../ports/user-payout-repository.port";
 import type { UserSubscriptionRepositoryPort } from "../ports/user-subscription-repository.port";
+import type { UserPurchaseUnitOfWorkPort } from "../ports/user-purchase-unit-of-work.port";
 import type { PaymentProviderPort } from "../ports/payment-provider.port";
 
 export interface StartUserSubscriptionResult {
@@ -28,8 +29,20 @@ export interface StartUserSubscriptionResult {
 /**
  * `POST /users/:handle/subscribe` — buying a membership from a person, spec §6.
  *
- * This is the moment money actually moves in Phase 5a, and two things about it
- * are load-bearing enough to state before the code says them.
+ * This is the moment money actually moves, and several things about it are
+ * load-bearing enough to state before the code says them.
+ *
+ * **A LAPSED MEMBERSHIP IS RETIRED HERE, AND THAT IS WHAT RENEWAL IS** (Phase
+ * 5b, Task 2). Nothing in this system charges anybody twice on its own — the
+ * Xendit adapter has two operations and no tokenisation — so "renew" means "buy
+ * again", and the only thing that stood in the way was the buyer's own expired
+ * row: still `status = 'active'`, still holding
+ * `user_subscription_one_active`'s slot, refused by the guard below forever. A
+ * member whose period has ended now presses the button once and gets a fresh
+ * checkout. The retirement and the pending claim commit TOGETHER — see
+ * `UserPurchaseUnitOfWorkPort` — because a retirement that committed alone and
+ * a claim that then failed would leave that person with neither an active
+ * membership nor a pending checkout.
  *
  * **THE PAYOUT GATE IS `isConnectedPaymentAccount`, NEVER TRUTHINESS.**
  * `app_user.xendit_account_id` has three states — NULL, the
@@ -65,9 +78,11 @@ export interface StartUserSubscriptionResult {
  * database and got two live invoices, two subscriptions and two transactions for
  * one pair in one run out of five. A double tap on a phone is CONCURRENT. So the
  * INSERT is the claim — `user_subscription_one_pending` — and the loser is
- * routed into the reuse path by the violation, never by a read. See
- * `claimPending`, and `releaseClaim` for why ANY failure between the claim and
- * the invoice reference must give the claim back.
+ * routed into the reuse path by the conflict, never by a read. See
+ * `claimPending` (whose arbitration is `ON CONFLICT DO NOTHING` and must stay
+ * that, now that it runs inside a transaction), and `releaseClaim` for why ANY
+ * failure between the claim and the invoice reference must give the claim
+ * back.
  *
  * The `external_id` is namespaced (`domain/user-payment.ts`): Xendit delivers ONE
  * webhook stream and the community handler resolves its own invoices by treating
@@ -84,6 +99,10 @@ export class StartUserSubscription {
     private readonly tiers: UserTierRepositoryPort,
     private readonly payouts: UserPayoutRepositoryPort,
     private readonly subscriptions: UserSubscriptionRepositoryPort,
+    /**
+     * Retirement + claim, atomically. See `UserPurchaseUnitOfWorkPort`.
+     */
+    private readonly purchase: UserPurchaseUnitOfWorkPort,
     private readonly payments: PaymentProviderPort,
     /**
      * Only to word the refusal below, never to decide one. A lapsed
@@ -165,53 +184,24 @@ export class StartUserSubscription {
       );
     }
 
-    // The CLEAN refusal of a double purchase. `user_subscription_one_active`
-    // (the partial unique index) would reject the second ACTIVE row anyway, but
-    // only at the moment Task 7's webhook tried to activate it — by which point
-    // the buyer has already paid for something they already hold. Refusing here
-    // costs one indexed read and is the only place this can be refused for free.
-    // The index stays the backstop for the genuine race this read cannot see.
+    // Read BEFORE the unit of work opens, and this position is load-bearing
+    // twice over.
     //
-    // **STATUS-ONLY, AND IT MUST STAY STATUS-ONLY.** `findActiveFor` does not
-    // look at `current_period_end`, so it refuses a LAPSED row too — and
-    // narrowing it to "active and still in period" is the obvious fix that is
-    // the dangerous one: §9 leaves every lapsed subscription sitting at
-    // `status = 'active'` forever, so letting one past this guard puts the
-    // purchase on a collision course with `user_subscription_one_active` at
-    // activation time. That converts a button that refuses into money taken
-    // and no membership granted. Task 8's re-review established this; it is
-    // not up for rediscovery here.
-    const existing = await this.subscriptions.findActiveFor(input.subscriberId, owner.id);
-    if (existing) {
-      // **ONE REFUSAL, TWO DIFFERENT PIECES OF NEWS**, and the row itself is
-      // what says which. Both are a 409 and neither creates anything; the
-      // guard above is untouched. Only the sentence differs, because only the
-      // sentence was wrong.
-      //
-      // Measured by the final whole-branch review: one billing cycle after
-      // EVERY purchase, `IsMemberOf` (period-aware) answers `false` while this
-      // guard (status-only) answers "refused" — so the profile rendered the
-      // offer, this route answered "Anda sudah menjadi anggota aktif", which
-      // is FALSE for that person, and the web advised a reload that
-      // re-rendered the very same button. `MembershipView.viewerMembershipEnded`
-      // is what stops the button being offered at all; this is what the route
-      // says when one is pressed anyway, from a page that predates the answer.
-      //
-      // NOTHING HERE INVITES A RETRY. 5a has no renewal path — no pass moves a
-      // subscription out of `active` when its period ends, and there is no
-      // endpoint to renew one — so "try again" and "reload for a fresh offer"
-      // are both advice that cannot come true, which is the loop
-      // `describeUploadFailure`'s own rewrite exists to forbid.
-      throw new ConflictError(
-        membershipStanding(existing, this.clock.now()) === "member"
-          ? "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah " +
-            "masa aktif — jika Anda belum bisa melihat kontennya, hubungi kreator tersebut."
-          : "Keanggotaan Anda untuk kreator ini sudah berakhir, dan perpanjangan belum " +
-            "tersedia — jadi keanggotaan baru pun belum bisa dibeli. Hubungi kreator " +
-            "tersebut jika Anda masih memerlukan akses."
-      );
-    }
-
+    // FIRST, IT IS WHAT MAKES THE IDS SAFE. `retireExpired` skips uuid-shape
+    // validation, matching `activate`/`cancel`'s precedent for internal callers
+    // — which Task 1's review allowed on the condition that this call site
+    // resolve both ids through a prior lookup. So the owner id below comes off
+    // the row `findByHandle` returned and the subscriber id off the row this
+    // read returns; a raw session or route value reaching that query would turn
+    // a malformed id into an unhandled 500 on a path a buyer reaches, instead of
+    // the clean 404 below.
+    //
+    // SECOND, IT MUST NOT HAPPEN INSIDE THE TRANSACTION. This repository is
+    // bound to the POOL, so calling it from inside `purchase.run` would check
+    // out a second connection while the first is still held. The pool is ten
+    // wide; ten concurrent buyers each holding a transaction and each waiting
+    // for a second connection is a deadlock nothing resolves but a timeout. See
+    // `UserPurchaseRepositories.subscriptions`.
     const subscriber = await this.users.findById(input.subscriberId);
     if (!subscriber) {
       // The caller authenticated as this id one middleware ago, so this is
@@ -219,27 +209,113 @@ export class StartUserSubscription {
       throw new NotFoundError("user not found");
     }
 
-    // ---- Everything below this line changes state. Rows FIRST, provider last.
+    // ---- RETIRE, THEN GUARD, THEN CLAIM — ONE TRANSACTION.
     //
-    // AND THE CLAIM IS FIRST OF ALL. `claimPending` INSERTS, and
-    // `user_subscription_one_pending` is what decides whether this caller or
-    // another one gets to open an invoice — never a read taken beforehand. Two
-    // concurrent taps used to pass a read-then-write check together and open two
-    // live invoices for one membership; measured on this endpoint, one run in
-    // five. See the port's own docstring.
-    const claim = await this.subscriptions.claimPending({
-      subscriberId: input.subscriberId,
-      tierId: tier.id,
-      // DENORMALISED, and taken from the TIER's owner rather than from the
-      // handle lookup, so the value written is the one the composite foreign key
-      // checks. They are equal — the tier was just matched against `owner.id` —
-      // and taking it from here keeps them equal by construction.
-      ownerId: tier.ownerId,
+    // **THE RETIREMENT IS WHAT MAKES RENEWAL POSSIBLE AT ALL.** There is no
+    // recurring charge anywhere in this system, so 5b's renewal is "buy again",
+    // and the only thing standing between a lapsed member and a second
+    // membership is their old row still sitting at `status = 'active'` holding
+    // `user_subscription_one_active`'s slot. `retireExpired` moves it — and only
+    // it: the WHERE clause is `status = 'active' AND current_period_end <= now`,
+    // so a membership still inside its paid period is untouched and is refused
+    // by the guard below exactly as before.
+    //
+    // **THAT IS ALSO WHY THE GUARD DID NOT HAVE TO CHANGE.** It is still
+    // status-only, and it still refuses everything it sees; what changed is that
+    // the lapsed row is no longer there for it to see. Teaching the guard about
+    // periods instead is the fix 5a explicitly ruled against — a row that still
+    // holds the unique-index slot would then reach a purchase that collides at
+    // activation time, which is money taken and no membership granted.
+    //
+    // **AND BOTH WRITES COMMIT TOGETHER.** A retirement that committed on its
+    // own and a claim that then failed would leave this person holding neither
+    // an active membership nor a pending checkout. See
+    // `UserPurchaseUnitOfWorkPort`, and `claimPending` for the one thing that
+    // had to change to survive being called in here.
+    const claim = await this.purchase.run(async ({ subscriptions }) => {
+      await subscriptions.retireExpired(subscriber.id, owner.id, this.clock.now());
+
+      // The CLEAN refusal of a double purchase. `user_subscription_one_active`
+      // (the partial unique index) would reject the second ACTIVE row anyway, but
+      // only at the moment Task 7's webhook tried to activate it — by which point
+      // the buyer has already paid for something they already hold. Refusing here
+      // costs one indexed read and is the only place this can be refused for free.
+      // The index stays the backstop for the genuine race this read cannot see.
+      //
+      // **STATUS-ONLY, AND IT MUST STAY STATUS-ONLY.** `findActiveFor` does not
+      // look at `current_period_end`, so it refuses a LAPSED row too — and
+      // narrowing it to "active and still in period" is the obvious fix that is
+      // the dangerous one: a lapsed row still holds `user_subscription_one_active`'s
+      // slot, so letting one past this guard puts the purchase on a collision
+      // course with that index at activation time. That converts a button that
+      // refuses into money taken and no membership granted. Task 8's re-review
+      // established this; it is not up for rediscovery here.
+      //
+      // 5b did not narrow it and did not need to: `retireExpired` above has
+      // already moved the lapsed row out of `active`, so this read no longer
+      // SEES one. The guard kept its predicate; the row stopped matching it.
+      const existing = await subscriptions.findActiveFor(subscriber.id, owner.id);
+      if (existing) {
+        // **ONE REFUSAL, TWO DIFFERENT PIECES OF NEWS**, and the row itself is
+        // what says which. Both are a 409 and neither creates anything; the
+        // guard above is untouched. Only the sentence differs, because only the
+        // sentence was wrong.
+        //
+        // Measured by the final whole-branch review: one billing cycle after
+        // EVERY purchase, `IsMemberOf` (period-aware) answers `false` while this
+        // guard (status-only) answers "refused" — so the profile rendered the
+        // offer, this route answered "Anda sudah menjadi anggota aktif", which
+        // is FALSE for that person, and the web advised a reload that
+        // re-rendered the very same button. `MembershipView.viewerMembershipEnded`
+        // is what stops the button being offered at all; this is what the route
+        // says when one is pressed anyway, from a page that predates the answer.
+        //
+        // WHICH BRANCH IS STILL REACHABLE, AFTER 5b. The "member" one, for
+        // anybody still inside their paid period — the ordinary refusal. The
+        // "ended" one now only for an `active` row with a NULL
+        // `current_period_end`: `retireExpired`'s predicate is
+        // `current_period_end <= now`, and `NULL <= now` is not true, so such a
+        // row survives the retirement and lands here. It is unreachable through
+        // `activate`, which always writes a period end, but it is the one shape
+        // that grants nothing while still holding the unique-index slot — and
+        // telling that person they are an active member would be the one answer
+        // that is definitely false. NEITHER sentence invites a retry that cannot
+        // work, which is the loop `describeUploadFailure`'s own rewrite forbids.
+        throw new ConflictError(
+          membershipStanding(existing, this.clock.now()) === "member"
+            ? "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah " +
+              "masa aktif — jika Anda belum bisa melihat kontennya, hubungi kreator tersebut."
+            : "Keanggotaan Anda untuk kreator ini sudah berakhir, dan perpanjangan belum " +
+              "tersedia — jadi keanggotaan baru pun belum bisa dibeli. Hubungi kreator " +
+              "tersebut jika Anda masih memerlukan akses."
+        );
+      }
+
+      // ---- Everything from here changes state. Rows FIRST, provider last.
+      //
+      // AND THE CLAIM IS FIRST OF ALL. `claimPending` INSERTS, and
+      // `user_subscription_one_pending` is what decides whether this caller or
+      // another one gets to open an invoice — never a read taken beforehand. Two
+      // concurrent taps used to pass a read-then-write check together and open two
+      // live invoices for one membership; measured on this endpoint, one run in
+      // five. See the port's own docstring.
+      return subscriptions.claimPending({
+        subscriberId: subscriber.id,
+        tierId: tier.id,
+        // DENORMALISED, and taken from the TIER's owner rather than from the
+        // handle lookup, so the value written is the one the composite foreign key
+        // checks. They are equal — the tier was just matched against `owner.id` —
+        // and taking it from here keeps them equal by construction.
+        ownerId: tier.ownerId,
+      });
     });
+    // ---- The transaction has COMMITTED. Everything below is on the pool: the
+    // provider call must never happen inside a database transaction, and
+    // `createTransaction`/`attachGatewayReference` sit either side of it.
     if (!claim.created) {
       // Somebody else holds this pair's pending slot: the winner of a double
       // tap, or an earlier tap of our own that is still being paid.
-      return this.resolveExistingCheckout(input.subscriberId, owner.id, tier.id);
+      return this.resolveExistingCheckout(subscriber.id, owner.id, tier.id);
     }
     const subscription = claim.subscription;
 
@@ -382,13 +458,23 @@ export class StartUserSubscription {
   /**
    * THE ONE THING THAT MUST HAPPEN WHEN ANY OF THAT FAILS: RELEASE THE CLAIM.
    *
-   * The pending subscription is a claim on this pair's only pending slot, and
-   * nothing in 5a expires or clears one — there is no renewal pass, no cancel
-   * route and no operator path. So a failure that left the row `pending` would
-   * wedge this buyer out of this creator permanently, for a purchase nobody
-   * ever charged them for. Exactly the reasoning `ConnectUserPayout` records
-   * for `abandonXenditAccountProvisioning`, whose sentinel has the identical
-   * hazard.
+   * The pending subscription is a claim on this pair's only pending slot. There
+   * is no cancel route and no operator path, and until Phase 5b nothing expired
+   * one either — so a failure that left the row `pending` wedged this buyer out
+   * of this creator PERMANENTLY, for a purchase nobody ever charged them for.
+   * Exactly the reasoning `ConnectUserPayout` records for
+   * `abandonXenditAccountProvisioning`, whose sentinel has the identical hazard.
+   *
+   * Task 5's stale-pending sweep now clears such a row after two hours, so the
+   * worst case is two hours rather than for ever — which is a backstop, not a
+   * reason to skip this. Two hours is a long time to be unable to buy, and the
+   * sweep only runs if the worker is up.
+   *
+   * **A `null` FROM `cancel` NO LONGER MEANS THE CLAIM IS STILL HELD** (final
+   * review, m-2): `cancel` refuses to rewrite a TERMINAL row, so `null` also
+   * covers "the sweep already ended this one". The slot is free in that case, so
+   * the row is re-read before warning — a false "this buyer cannot start another
+   * checkout" is worse than silence, because it is the line an operator acts on.
    *
    * The transaction row is deliberately NOT touched: it stays, with a null
    * gateway reference, as the inspectable record that this attempt happened —
@@ -404,6 +490,12 @@ export class StartUserSubscription {
   private async releaseClaim(subscriptionId: string): Promise<void> {
     try {
       if ((await this.subscriptions.cancel(subscriptionId)) !== null) return;
+      // `null` — either the row is gone, or it is already TERMINAL because
+      // something else ended it first. Either way the pending slot is free and
+      // there is nothing to warn about. One extra read, and only on a path that
+      // has already failed.
+      const row = await this.subscriptions.findById(subscriptionId);
+      if (row !== null && row.status !== "pending") return;
     } catch {
       // Fall through to the same warning: "could not release" is the only fact
       // that matters here, and it is the same fact whether the statement

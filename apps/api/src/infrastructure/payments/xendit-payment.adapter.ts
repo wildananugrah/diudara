@@ -1,6 +1,7 @@
 import type {
   CreateInvoiceInput,
   CreateInvoiceResult,
+  ExpireInvoiceInput,
   PaymentProviderPort,
 } from "../../application/ports/payment-provider.port";
 
@@ -113,6 +114,52 @@ export class XenditPaymentAdapter implements PaymentProviderPort {
       invoiceId: this.requireString(body, "id", "createInvoice"),
       invoiceUrl: this.requireUrl(body, "invoice_url", "createInvoice"),
     };
+  }
+
+  /**
+   * Kills an invoice so it can no longer be paid — the port's own docstring has
+   * the money reasoning; this is the wire shape.
+   *
+   * `POST /invoices/{id}/expire!` — the bang is part of Xendit's documented path,
+   * not a typo. It carries **`for-user-id` and no split rule**: the invoice was
+   * created against the creator's sub-account, so a cancellation without that
+   * header addresses the platform account, where the invoice does not exist and the
+   * provider answers "not found" — a silent success for the caller, and an abandoned
+   * invoice left payable. `with-split-rule` is about how a PAYMENT is divided and
+   * has nothing to say about cancelling one.
+   *
+   * The id goes into the PATH, encoded: `expireInvoice` is called with a value read
+   * out of `user_transaction.gateway_reference_id`, and while that value came from
+   * this adapter, a stored `../accounts` would otherwise address a different
+   * endpoint entirely. Empty is refused before the request rather than POSTing to
+   * the collection endpoint.
+   *
+   * Returns nothing and reads no body: the only useful answer is "it did not throw".
+   * A non-2xx THROWS through `readJson`, and the caller
+   * (`SweepStalePendingCheckouts.cancelInvoiceFor`) has already freed the row by
+   * then, so it counts and logs the failure rather than retrying — swallowing it
+   * here would report a double-charge window as closed while it is open.
+   */
+  async expireInvoice(input: ExpireInvoiceInput): Promise<void> {
+    if (input.invoiceId.length === 0) {
+      throw new Error(
+        "xendit expireInvoice was given an empty invoice id. Refusing to send it: " +
+          "the request would address the invoice COLLECTION rather than one invoice."
+      );
+    }
+    const response = await this.fetchFn(
+      `${this.baseUrl}/invoices/${encodeURIComponent(input.invoiceId)}/expire!`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: this.authHeader(),
+          "Content-Type": "application/json",
+          "for-user-id": input.forAccountId,
+        },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      }
+    );
+    await this.readJson(response, "expireInvoice");
   }
 
   /**

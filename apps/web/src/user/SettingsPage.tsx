@@ -11,6 +11,7 @@ import {
 } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
 import MembershipSettings from "./MembershipSettings";
+import SubscriberList from "./SubscriberList";
 
 type LoadState =
   | { status: "loading" }
@@ -230,6 +231,16 @@ function SettingsForm() {
         cannot be read must not be able to take the profile form down with it.
       */}
       <MembershipSettings />
+
+      {/*
+        Task 6 of Phase 5b (spec §8): who currently subscribes to YOU. A
+        separate component from `MembershipSettings` — see `SubscriberList`'s
+        own docstring for why — that loads its own list independently, for
+        the same reason `MembershipSettings` loads its own payout status
+        independently: a failure here must not be able to take the rest of
+        this page down with it.
+      */}
+      <SubscriberList />
     </main>
   );
 }
