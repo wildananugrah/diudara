@@ -300,6 +300,25 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
       );
       return row ? { ...row } : null;
     },
+    /**
+     * Task 2 of Phase 6. Mirrors the real query's predicate exactly — `status
+     * = 'active'` AND `current_period_end > now`, strict — not merely
+     * `status`: a fake that ignored the date would make a lapsed-member test
+     * pass against what would be a broken paywall gate.
+     */
+    async listActiveOwnersAmong(subscriberId, ownerIds, now) {
+      const owners = new Set(ownerIds);
+      return subscriptions
+        .filter(
+          (r) =>
+            r.subscriberId === subscriberId &&
+            owners.has(r.ownerId) &&
+            r.status === "active" &&
+            r.currentPeriodEnd !== null &&
+            r.currentPeriodEnd > now
+        )
+        .map((r) => r.ownerId);
+    },
     async createTransaction(input) {
       const row: UserTransactionRow = {
         id: `txn-${transactions.length + 1}`,

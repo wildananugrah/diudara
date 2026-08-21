@@ -309,6 +309,9 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   async listActiveSubscribers() {
     return [];
   },
+  async listActiveOwnersAmong() {
+    return [];
+  },
   async createTransaction() {
     throw new Error("not used");
   },
