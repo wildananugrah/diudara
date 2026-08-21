@@ -6,7 +6,7 @@ import type { PostRepositoryPort, PostRow } from "../ports/post-repository.port"
 import type { UserRepositoryPort } from "../ports/user-repository.port";
 import type { UserSubscriptionRepositoryPort } from "../ports/user-subscription-repository.port";
 import { normalizeHandle } from "../../domain/handle";
-import { toFeedPage, type FeedPage } from "./post-views";
+import { MEMBERS_ONLY, toFeedPage, type FeedPage } from "./post-views";
 
 /**
  * The fallback when a caller passes no limit. `routes/posts.ts` always passes one,
@@ -15,9 +15,6 @@ import { toFeedPage, type FeedPage } from "./post-views";
 const DEFAULT_FEED_PAGE_SIZE = 20;
 
 export type FeedTab = "untuk-anda" | "mengikuti";
-
-/** The one `visibility` value that gates a post. Mirrors `post-views.ts`. */
-const MEMBERS_ONLY = "members";
 
 /**
  * **THE GATE, and it is deliberately a step you can read here** rather than a

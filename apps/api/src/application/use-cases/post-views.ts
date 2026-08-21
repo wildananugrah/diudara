@@ -69,8 +69,13 @@ export interface FeedPage {
  * file does not recognise — a typo, a future tier name — reads as NOT gated.
  * That is the safe direction only because the write path is the authority on
  * what may be stored; see `post-repository.port.ts`.
+ *
+ * EXPORTED so `read-posts.ts` decides which rows are gated using the very
+ * value this file locks on. Two copies of the literal could drift, and the
+ * drift would be silent in the dangerous direction: the gate would build a
+ * set of locked authors that `toFeedPage` then never consults.
  */
-const MEMBERS_ONLY = "members";
+export const MEMBERS_ONLY = "members";
 
 function toMediaView(row: MediaRow): MediaView {
   return { id: row.id, width: row.width, height: row.height };
