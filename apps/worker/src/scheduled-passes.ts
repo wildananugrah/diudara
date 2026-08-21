@@ -1,10 +1,10 @@
 /**
  * Phase 5's two CLOCK-driven passes, plus Task 10's orphan-media sweep and Phase 5b's
- * expired-membership sweep (Task 3) and membership-reminder pass (Task 4), as loops
- * this process can run.
+ * expired-membership sweep (Task 3), membership-reminder pass (Task 4) and
+ * pending-checkout cleanup (Task 5), as loops this process can run.
  *
  * Everything in `apps/worker` before this file was request-triggered at one remove:
- * a payment wrote an outbox row and the worker delivered it. These five are triggered
+ * a payment wrote an outbox row and the worker delivered it. These six are triggered
  * by nothing but the passage of time, which is why they need a schedule at all — and
  * why this module exists separately from `main.ts`: the composition root cannot be
  * imported by a test (it reaches `db/client.ts`), and "a throwing pass does not take
@@ -12,12 +12,12 @@
  *
  * It deliberately imports only the API's dependency-free `log-safety` helper at
  * runtime; the renewal/churn result shapes come in as TYPES, which erase.
- * `SweepOrphanMedia` and `SweepExpiredMemberships` are the exceptions to "the pass
- * lives in `apps/api`" — neither has domain logic worth the name (no WIB days, no
- * grace periods, just a cutoff/predicate and a try/catch), so unlike
- * `ProcessRenewals`/`ProcessChurn`/`RemindExpiringMembership` each is defined and
- * tested entirely IN this file, against structural interfaces the caller supplies —
- * never against a database.
+ * `SweepOrphanMedia`, `SweepExpiredMemberships` and `SweepStalePendingCheckouts` are
+ * the exceptions to "the pass lives in `apps/api`" — none has domain logic worth the
+ * name (no WIB days, no grace periods, just a cutoff/predicate and a try/catch), so
+ * unlike `ProcessRenewals`/`ProcessChurn`/`RemindExpiringMembership` each is defined
+ * and tested entirely IN this file, against structural interfaces the caller
+ * supplies — never against a database.
  */
 import { redactLinks, safeErrorSummary } from "../../api/src/application/log-safety";
 import type { ProcessChurnResult } from "../../api/src/application/use-cases/process-churn";
@@ -138,7 +138,14 @@ export function formatChurnPassLine(result: ProcessChurnResult): string | null {
  * credential. `pass` is one of our own literals, so it needs no sanitising.
  */
 export function formatPassFailure(
-  pass: "outbox" | "renewals" | "churn" | "media" | "memberships" | "membership-reminders",
+  pass:
+    | "outbox"
+    | "renewals"
+    | "churn"
+    | "media"
+    | "memberships"
+    | "membership-reminders"
+    | "pending-checkouts",
   err: unknown
 ): string {
   return `[${pass}] pass failed: ${redactLinks(safeErrorSummary(err))}`;
@@ -477,6 +484,191 @@ export function formatMembershipSweepLine(result: MembershipSweepResult): string
 }
 
 /**
+ * Task 5 of Phase 5b (spec §7) — the pending-checkout cleanup: the gap 5a's final
+ * review named as the phase's most likely real-world money loss, and one that needs
+ * NO FAILURE AT ALL to reach. Nothing in 5a ever expires a `pending` subscription, so
+ * an ordinary abandoned cart returned to later is handed back the same now-dead
+ * invoice by `findPendingCheckout` — forever, since nothing clears the row. This pass
+ * expires stale ones, which frees `user_subscription_one_pending`'s slot so the next
+ * attempt mints a fresh invoice instead. It also closes two narrower gaps for free: a
+ * crash between `claimPending` and the invoice reference being attached (5a's own
+ * record), and the row `attachGatewayReference` failure leaves behind — both are just
+ * pending rows that never got an invoice, indistinguishable by age from an ordinary
+ * abandoned cart.
+ *
+ * `Repository` and `Result` are separate generic-free interfaces, structural like
+ * `OrphanMediaRepository`: `DrizzleUserSubscriptionRepository` satisfies
+ * `StalePendingCheckoutRepository` directly without being declared against it, and a
+ * test can supply an in-memory double with no database at all.
+ */
+export interface StalePendingCheckoutRepository {
+  listStalePending(cutoff: Date, limit: number): Promise<{ id: string }[]>;
+  /**
+   * Expires ONE stale pending row, answering whether it actually moved — see
+   * `UserSubscriptionRepositoryPort.expireStalePending`'s own docstring for why
+   * `status = 'pending'` alone is the whole arbiter.
+   */
+  expireStalePending(id: string): Promise<boolean>;
+}
+
+export interface StalePendingSweepResult {
+  /** Stale pending rows this pass looked at. */
+  considered: number;
+  /** Rows this pass flipped `pending` → `expired`. */
+  expired: number;
+  /**
+   * Rows that were no longer pending by the time this pass reached them — paid via
+   * the webhook, cancelled, or already expired by a concurrent sweep — between being
+   * listed and this row's turn. Never a failure: `expireStalePending`'s conditional
+   * UPDATE is the guard doing its job, the same shape as `SweepExpiredMemberships`'s
+   * own `skipped`.
+   */
+  skipped: number;
+  /** Rows whose `expireStalePending` call threw and were left pending for the next pass to retry. */
+  failed: number;
+}
+
+export interface SweepStalePendingCheckoutsOptions {
+  windowMs?: number;
+  batchSize?: number;
+  /** Defaults to the real clock. Overridden in tests to place the window precisely. */
+  now?: () => Date;
+  /**
+   * Where a single row's `expireStalePending` failure is reported. Defaults to
+   * `console.error`, matching every other per-item failure this worker logs — see
+   * `SweepExpiredMemberships`'s own `logError`.
+   */
+  logError?: (line: string) => void;
+}
+
+/**
+ * Stale-pending rows read per QUERY, not per pass — same reasoning and same figure
+ * as `DEFAULT_MEMBERSHIP_SWEEP_BATCH_SIZE`/`DEFAULT_ORPHAN_SWEEP_BATCH_SIZE`: it
+ * bounds one result set while leaving any realistic backlog's page count
+ * uninteresting.
+ */
+const DEFAULT_STALE_PENDING_SWEEP_BATCH_SIZE = 500;
+
+/**
+ * The pending-checkout cleanup window (Task 5, Phase 5b — spec §7): how long a
+ * `pending` subscription is left alone before this pass expires it.
+ *
+ * BOUNDED ON BOTH SIDES, and both bounds are load-bearing in opposite directions.
+ * TOO SHORT and a buyer sitting on Xendit's payment page — mid-checkout, having
+ * pressed "Jadi anggota" and gone to pay — has their row expired out from under
+ * them: `findActiveFor`/`findPendingCheckout` would then see nothing pending, a
+ * second tap would mint a SECOND invoice for the same purchase, and a webhook that
+ * later arrives for the first (now-expired) row's transaction would settle a
+ * subscription this pass had already declared dead. TOO LONG and the gap this task
+ * exists to close stays open: `findPendingCheckout` keeps handing back an invoice
+ * Xendit has already killed, for as long as this window allows.
+ *
+ * TWO HOURS. `XenditPaymentAdapter.createInvoice` never sets `invoice_duration`
+ * (see its own docstring's "UNVERIFIED AGAINST THE LIVE XENDIT API" warning), so
+ * this relies on Xendit's documented default invoice lifetime of 24 hours — itself
+ * unverified against a live account, like the rest of that adapter. Two hours
+ * leaves a 12x margin against ever expiring a row whose invoice is still alive at
+ * the provider, while comfortably covering "a person's checkout": a WhatsApp OTP, a
+ * bank redirect, someone stepping away and coming back. The return visit this task
+ * exists for — the spec's own example, "a day later" — is 12x past it.
+ */
+export const STALE_PENDING_CHECKOUT_WINDOW_MS = 2 * 60 * 60_000;
+
+/**
+ * Task 5's stale-pending sweep: the other half of Phase 5b's pending-checkout
+ * lifecycle, alongside Task 2's lazy claim-then-retire. Modelled on
+ * `SweepExpiredMemberships` rather than on `ProcessRenewals`/`ProcessChurn`, for the
+ * identical reason that class's own docstring gives: `expireStalePending` is a
+ * single UPDATE against a live connection and CAN throw, and a naive loop over rows
+ * would die on the first such throw and skip every stale row after it — silently,
+ * and forever, since the next pass hits the very same row first. So each row is
+ * expired in its own try/catch: a failure is counted, logged, and the row is left
+ * pending for the next pass to retry, and the loop moves on.
+ *
+ * THE ARBITER IS `expireStalePending` ITSELF, never a read here first — same
+ * reasoning as `SweepExpiredMemberships`'s own `retireExpired` call: a `false`
+ * return means the row was no longer pending by this row's turn, not that this
+ * pass read stale data and acted on it wrongly.
+ */
+export class SweepStalePendingCheckouts {
+  private readonly windowMs: number;
+  private readonly batchSize: number;
+  private readonly now: () => Date;
+  private readonly logError: (line: string) => void;
+
+  constructor(
+    private readonly subscriptions: StalePendingCheckoutRepository,
+    options: SweepStalePendingCheckoutsOptions = {}
+  ) {
+    this.windowMs = options.windowMs ?? STALE_PENDING_CHECKOUT_WINDOW_MS;
+    this.batchSize = options.batchSize ?? DEFAULT_STALE_PENDING_SWEEP_BATCH_SIZE;
+    this.now = options.now ?? (() => new Date());
+    this.logError = options.logError ?? ((line) => console.error(line));
+  }
+
+  async execute(): Promise<StalePendingSweepResult> {
+    // ONCE per pass, so every row is judged against the same instant and the same
+    // cutoff — same reasoning `SweepOrphanMedia.execute` and `SweepExpiredMemberships`
+    // both give for reading the clock exactly once.
+    const cutoff = new Date(this.now().getTime() - this.windowMs);
+    const result: StalePendingSweepResult = { considered: 0, expired: 0, skipped: 0, failed: 0 };
+
+    // PAGED, with the same no-progress guard `SweepExpiredMemberships`/`SweepOrphanMedia`
+    // both carry: an expired OR skipped row leaves the result set (it is no longer
+    // `pending`), so without the guard a page where every row FAILS would be
+    // re-fetched, identically, forever.
+    for (;;) {
+      const page = await this.subscriptions.listStalePending(cutoff, this.batchSize);
+      if (page.length === 0) break;
+      result.considered += page.length;
+
+      const progressBefore = result.expired + result.skipped;
+      for (const row of page) {
+        await this.expireOne(row.id, result);
+      }
+      if (result.expired + result.skipped === progressBefore) break;
+      if (page.length < this.batchSize) break;
+    }
+
+    return result;
+  }
+
+  /** One stale-pending row. Never throws — a per-row failure lands on `result.failed`, not on the pass. */
+  private async expireOne(id: string, result: StalePendingSweepResult): Promise<void> {
+    try {
+      if (await this.subscriptions.expireStalePending(id)) {
+        result.expired += 1;
+        return;
+      }
+      // No longer pending — see `StalePendingSweepResult.skipped`'s own docstring.
+      result.skipped += 1;
+    } catch (err) {
+      result.failed += 1;
+      this.logError(
+        `[pending-checkouts] subscription=${id} was NOT expired and is left pending for ` +
+          `the next pass — expireStalePending failed: ${redactLinks(safeErrorSummary(err))}`
+      );
+    }
+  }
+}
+
+/** The stale-pending sweep's summary line, or `null` when there is nothing to say. Counts only, as above. */
+export function formatStalePendingSweepLine(result: StalePendingSweepResult): string | null {
+  if (
+    result.considered === 0 &&
+    result.expired === 0 &&
+    result.skipped === 0 &&
+    result.failed === 0
+  ) {
+    return null;
+  }
+  return (
+    `[pending-checkouts] considered=${result.considered} expired=${result.expired} ` +
+    `skipped=${result.skipped} failed=${result.failed}`
+  );
+}
+
+/**
  * The reminder pass's summary line, or `null` when there is nothing to say. Counts
  * only, as above — the rows this pass walks carry a member's EMAIL and WhatsApp
  * number, and neither may ever appear in a log line.
@@ -545,6 +737,10 @@ export interface MembershipSweepPass {
 export interface MembershipReminderPass {
   execute(): Promise<RemindExpiringMembershipResult>;
 }
+/** Same shape, for `SweepStalePendingCheckouts` — or any test double with a matching `execute()`. */
+export interface StalePendingSweepPass {
+  execute(): Promise<StalePendingSweepResult>;
+}
 
 export interface ScheduledPassLoopsOptions {
   processRenewals: RenewalPass;
@@ -552,39 +748,43 @@ export interface ScheduledPassLoopsOptions {
   processOrphanSweep: OrphanSweepPass;
   processMembershipSweep: MembershipSweepPass;
   processMembershipReminder: MembershipReminderPass;
+  processStalePendingSweep: StalePendingSweepPass;
   intervalMs: number;
   log?: (line: string) => void;
   logError?: (line: string) => void;
 }
 
 /**
- * The renewal, churn, orphan-sweep, membership-retirement AND membership-reminder
- * passes as five `PollLoop`s — the SAME loop the outbox uses, so they inherit both of its properties
- * for free: passes of one type never overlap (each pass pages through the whole
- * backlog, and a second copy of itself would be reading the same rows), and `stop()`
- * wakes the loop immediately instead of sleeping out an interval, which is what makes
- * an hour-long interval survivable under SIGTERM.
+ * The renewal, churn, orphan-sweep, membership-retirement, membership-reminder AND
+ * stale-pending-checkout passes as six `PollLoop`s — the SAME loop the outbox uses,
+ * so they inherit both of its properties for free: passes of one type never overlap
+ * (each pass pages through the whole backlog, and a second copy of itself would be
+ * reading the same rows), and `stop()` wakes the loop immediately instead of
+ * sleeping out an interval, which is what makes an hour-long interval survivable
+ * under SIGTERM.
  *
- * FIVE LOOPS, not one pass that does everything, for one reason: a renewal pass that
+ * SIX LOOPS, not one pass that does everything, for one reason: a renewal pass that
  * throws every time — a query the schema no longer matches, say — must not also stop
- * churn, the orphan sweep, the membership sweep or the reminders from running, and
- * vice versa. That last pairing is the one that matters most in Phase 5b: the sweep
- * frees a lapsed member to buy again and the reminder is what tells them to, so a
- * shared failure would silently disable renewal in both directions at once. Each
- * loop's `onError` is its own, so a failing pass costs its own retries and nothing
- * else's. All five share an interval because they share a cadence — none of them is
- * latency-sensitive the way the outbox's 5-second poll is — and they never share a
- * failure. The membership sweep is Task 3's hygiene pass (spec — Phase 5b): a member
- * who never returns must not sit `active` forever, but nothing about noticing that is
- * urgent, so it shares the renewal/churn/media cadence rather than inventing a fifth
- * interval knob nobody would ever have reason to set differently — see
+ * churn, the orphan sweep, the membership sweep, the reminders, or the pending-checkout
+ * cleanup from running, and vice versa. That last pairing is the one that matters most
+ * in Phase 5b: the sweep frees a lapsed member to buy again and the reminder is what
+ * tells them to, so a shared failure would silently disable renewal in both directions
+ * at once. Each loop's `onError` is its own, so a failing pass costs its own retries
+ * and nothing else's. All six share an interval because they share a cadence — none
+ * of them is latency-sensitive the way the outbox's 5-second poll is, INCLUDING the
+ * pending-checkout cleanup: its own window (`STALE_PENDING_CHECKOUT_WINDOW_MS`, two
+ * hours) is what actually protects a live checkout, not this cadence — and they never
+ * share a failure. The membership sweep is Task 3's hygiene pass (spec — Phase 5b): a
+ * member who never returns must not sit `active` forever, but nothing about noticing
+ * that is urgent, so it shares the renewal/churn/media cadence rather than inventing a
+ * fifth interval knob nobody would ever have reason to set differently — see
  * `apps/worker/src/main.ts`'s own docstring for the same reasoning about the media
- * sweep.
+ * sweep, and Task 5's pending-checkout cleanup shares it for the identical reason.
  *
  * Per-row failures never reach this level at all: `SweepOrphanMedia`,
- * `SweepExpiredMemberships` and `RemindExpiringMembership` each catch them internally
- * (see their own docstrings), so `onError` here only fires on something the
- * pass-level query itself could not survive, same as renewals/churn.
+ * `SweepExpiredMemberships`, `RemindExpiringMembership` and `SweepStalePendingCheckouts`
+ * each catch them internally (see their own docstrings), so `onError` here only fires
+ * on something the pass-level query itself could not survive, same as renewals/churn.
  *
  * No loop is started here. The caller runs them alongside the outbox loop and decides
  * when they stop.
@@ -595,6 +795,7 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
   orphanSweepLoop: PollLoop;
   membershipSweepLoop: PollLoop;
   membershipReminderLoop: PollLoop;
+  stalePendingSweepLoop: PollLoop;
 } {
   const log = options.log ?? ((line: string) => console.log(line));
   const logError = options.logError ?? ((line: string) => console.error(line));
@@ -650,11 +851,21 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
     onError: (err) => logError(formatPassFailure("membership-reminders", err)),
   });
 
+  const stalePendingSweepLoop = new PollLoop({
+    intervalMs: options.intervalMs,
+    poll: async () => {
+      const line = formatStalePendingSweepLine(await options.processStalePendingSweep.execute());
+      if (line !== null) log(line);
+    },
+    onError: (err) => logError(formatPassFailure("pending-checkouts", err)),
+  });
+
   return {
     renewalLoop,
     churnLoop,
     orphanSweepLoop,
     membershipSweepLoop,
     membershipReminderLoop,
+    stalePendingSweepLoop,
   };
 }

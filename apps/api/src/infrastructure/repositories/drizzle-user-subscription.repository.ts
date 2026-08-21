@@ -192,6 +192,45 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
   }
 
   /**
+   * Task 5's stale-pending sweep: what the worker sweep pages through, expiring each
+   * row it gets back by calling `expireStalePending` on it. Oldest first, so a
+   * backlog of abandoned carts drains in the order they were abandoned.
+   *
+   * Served by `user_subscription_status_current_period_end_idx` for its leading
+   * `status` equality — the same index Task 3 added and the same reasoning: the
+   * planner can use a leading column of a composite btree index for an equality
+   * filter even though `current_period_end` (its trailing column) plays no part
+   * here. No new index was needed: `pending` rows are a small, fast-turning slice
+   * of this table by construction (`user_subscription_one_pending` allows at most
+   * one per pair), unlike `active`, which is why Task 3's covering index mattered
+   * enough to add and this does not.
+   */
+  async listStalePending(cutoff: Date, limit: number): Promise<UserSubscriptionRow[]> {
+    return this.db
+      .select()
+      .from(userSubscriptions)
+      .where(and(eq(userSubscriptions.status, "pending"), lte(userSubscriptions.createdAt, cutoff)))
+      .orderBy(userSubscriptions.createdAt)
+      .limit(limit);
+  }
+
+  /**
+   * THE CONDITIONAL UPDATE — see the port's own docstring for why `status = 'pending'`
+   * alone is the whole arbiter here, unlike `retireExpired`'s two-predicate WHERE.
+   */
+  async expireStalePending(id: string): Promise<boolean> {
+    if (!UUID_PATTERN.test(id)) {
+      return false;
+    }
+    const rows = await this.db
+      .update(userSubscriptions)
+      .set({ status: "expired" })
+      .where(and(eq(userSubscriptions.id, id), eq(userSubscriptions.status, "pending")))
+      .returning({ id: userSubscriptions.id });
+    return rows.length > 0;
+  }
+
+  /**
    * Task 4's reminder pass: whom to warn BEFORE their membership ends. See the port
    * docstring for why `from` is exclusive and `to` inclusive, and why this is paged
    * by keyset rather than capped.

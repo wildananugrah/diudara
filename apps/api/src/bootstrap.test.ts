@@ -290,6 +290,12 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   async listExpiredActive() {
     return [];
   },
+  async listStalePending() {
+    return [];
+  },
+  async expireStalePending() {
+    return false;
+  },
   async listExpiringActive() {
     return [];
   },

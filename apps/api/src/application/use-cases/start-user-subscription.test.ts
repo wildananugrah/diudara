@@ -247,6 +247,24 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
         .slice(0, limit)
         .map((r) => ({ ...r }));
     },
+    /** Mirrors Task 5's real query: `status = 'pending' AND created_at <= cutoff`. */
+    async listStalePending(cutoff, limit) {
+      return subscriptions
+        .filter((r) => r.status === "pending" && r.createdAt <= cutoff)
+        .slice(0, limit)
+        .map((r) => ({ ...r }));
+    },
+    /**
+     * Mirrors the conditional UPDATE: `status = 'pending'` alone is the whole
+     * arbiter — see `UserSubscriptionRepositoryPort.expireStalePending`'s own
+     * docstring for why this method is never re-given the cutoff.
+     */
+    async expireStalePending(id) {
+      const row = subscriptions.find((r) => r.id === id);
+      if (!row || row.status !== "pending") return false;
+      row.status = "expired";
+      return true;
+    },
     async listExpiringActive({ from, to, limit }) {
       // `StartUserSubscription` never reads it; present so this object still satisfies
       // the port, and honest so it cannot silently disagree with the real query.
@@ -736,6 +754,85 @@ describe("StartUserSubscription — a second tap must not mint a second invoice"
     expect(subscriptions).toHaveLength(1);
     expect(transactions).toEqual([]);
     expect(payments.invoices).toEqual([]);
+  });
+});
+
+/**
+ * Task 5 of Phase 5b (spec §7) — the pending-checkout cleanup. 5a's final review
+ * named this the phase's most likely real-world money loss: nothing in 5a ever
+ * expires a `pending` subscription, so an abandoned cart returned to later is
+ * handed back the SAME now-dead invoice by `findPendingCheckout` — forever, since
+ * nothing frees the slot. Expiring the stale row is the mechanism; the PROPERTY
+ * this task exists to deliver is that a returning buyer gets a working invoice, so
+ * these tests assert the fresh invoice url differs, never merely that the row's
+ * status changed — a status-only assertion would pass against an implementation
+ * that expires the row but leaves the buyer with nothing purchasable.
+ */
+describe("StartUserSubscription — the pending-checkout cleanup frees a stale row (Phase 5b, Task 5)", () => {
+  /**
+   * What Task 5's worker sweep does, one pass: list stale rows against a cutoff,
+   * then expire each by id. Reimplemented here rather than imported — `apps/worker`
+   * depends on `apps/api`, never the other way round, so `SweepStalePendingCheckouts`
+   * cannot be imported from this file. `scheduled-passes.test.ts` is where THAT
+   * class's own list/expire/boundary/per-row-failure contract is pinned; this test is
+   * the layer above it: given a row the sweep decided to expire, does the NEXT
+   * purchase actually get a fresh invoice — the property no amount of testing
+   * `SweepStalePendingCheckouts` on its own, against fakes with no purchase flow at
+   * all, could ever prove.
+   */
+  async function sweepStalePending(
+    repository: UserSubscriptionRepositoryPort,
+    cutoff: Date
+  ): Promise<void> {
+    for (const row of await repository.listStalePending(cutoff, 100)) {
+      await repository.expireStalePending(row.id);
+    }
+  }
+
+  it("expires a pending subscription older than the window, freeing the pending slot", async () => {
+    const { useCase, payments, repository, subscriptions } = build();
+    const first = await buy(useCase);
+    const staleRow = subscriptions.find((r) => r.id === first.subscriptionId)!;
+
+    // A cutoff one millisecond AFTER this row's created_at — it is exactly the
+    // row the sweep is deciding to expire, the same inclusive `<=` boundary
+    // `listStalePending` itself uses.
+    await sweepStalePending(repository, new Date(staleRow.createdAt.getTime() + 1));
+    expect(subscriptions.find((r) => r.id === first.subscriptionId)?.status).toBe("expired");
+
+    const second = await buy(useCase);
+
+    // THE POINT OF THE TASK. After expiry, a fresh purchase mints a NEW invoice
+    // rather than handing back the dead one — a status-only assertion above would
+    // pass against a sweep that expires rows and frees nothing at all.
+    expect(second.invoiceUrl).not.toBe(first.invoiceUrl);
+    expect(second.subscriptionId).not.toBe(first.subscriptionId);
+    expect(payments.invoices).toHaveLength(2);
+  });
+
+  /**
+   * THE BOUNDARY, the other direction. A test with only clearly-stale rows (above)
+   * passes against a sweep that expires every pending row regardless of its age —
+   * this is what catches that, and it is the case that matters most in production:
+   * somebody genuinely mid-payment must not have their invoice pulled dead from
+   * under them.
+   */
+  it("leaves a pending subscription INSIDE the window alone — somebody is mid-payment", async () => {
+    const { useCase, payments, repository, subscriptions } = build();
+    const first = await buy(useCase);
+    const pendingRow = subscriptions.find((r) => r.id === first.subscriptionId)!;
+
+    // A cutoff one millisecond BEFORE this row's created_at — the sweep's own
+    // `listStalePending` does not even return it.
+    await sweepStalePending(repository, new Date(pendingRow.createdAt.getTime() - 1));
+    expect(subscriptions.find((r) => r.id === first.subscriptionId)?.status).toBe("pending");
+
+    const second = await buy(useCase);
+
+    // Untouched: the second tap takes the ordinary reuse path and hands back the
+    // SAME invoice — never a fresh one, and never a refusal.
+    expect(second).toEqual(first);
+    expect(payments.invoices).toHaveLength(1);
   });
 });
 

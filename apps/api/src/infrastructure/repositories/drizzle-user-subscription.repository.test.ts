@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach } from "bun:test";
+import { eq } from "drizzle-orm";
 import { db, type DatabaseExecutor } from "../../db/client";
 import { appUsers, userSubscriptions } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
@@ -70,6 +71,34 @@ async function seedCancelledSubscription({ periodEnd }: { periodEnd: Date }) {
   await subs.activate(created.id, periodEnd);
   await subs.cancel(created.id);
   return { subscriberId: bob.id, ownerId: alice.id, id: created.id };
+}
+
+/**
+ * A fresh (subscriber, owner) pair with one PENDING subscription — the starting
+ * shape `listStalePending`/`expireStalePending` act on. Never activated, so
+ * `status` stays at its `create` default.
+ */
+async function seedPendingSubscription() {
+  const alice = await createUser("alice");
+  const bob = await createUser("bob");
+  const tier = await tiers.create({
+    ownerId: alice.id,
+    name: "Anggota",
+    priceAmount: 50_000,
+    billingCycle: "monthly",
+  });
+  const created = await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+  return { subscriberId: bob.id, ownerId: alice.id, tierId: tier.id, id: created.id };
+}
+
+/**
+ * Updates `created_at` directly via drizzle — a row that "arrived" in the past,
+ * for the stale-pending sweep's own tests. Mirrors `drizzle-media.repository.test.ts`'s
+ * `backdate` exactly: `create()` always writes `defaultNow()`, so this is the only
+ * way to place a row on either side of a cutoff without waiting for real time to pass.
+ */
+async function backdate(id: string, createdAt: Date) {
+  await db.update(userSubscriptions).set({ createdAt }).where(eq(userSubscriptions.id, id));
 }
 
 // Literal, not derived from the implementation — PAST and FUTURE straddle NOW
@@ -687,6 +716,92 @@ describe("DrizzleUserSubscriptionRepository", () => {
     await seedCancelledSubscription({ periodEnd: PAST });
 
     expect(await subs.listExpiredActive(NOW, 10)).toEqual([]);
+  });
+});
+
+/**
+ * Task 5 of Phase 5b (spec §7): the pending-checkout cleanup. The window's two ends
+ * are tested in both directions here for the same reason `listExpiringActive`'s own
+ * comment gives — a query with only clearly-stale rows passes against a cutoff of any
+ * value — but this suite tests the SQL predicate against a `cutoff` it is simply
+ * handed; the window's own reasoning (why it sits where it does between a person's
+ * checkout and an invoice's life at the provider) belongs to
+ * `apps/worker/src/scheduled-passes.ts`'s `STALE_PENDING_CHECKOUT_WINDOW_MS`, and that
+ * suite is where its own boundary is pinned as a real duration.
+ */
+describe("DrizzleUserSubscriptionRepository.listStalePending / expireStalePending", () => {
+  const CUTOFF = new Date("2026-08-21T12:00:00.000Z");
+
+  it("lists a pending row whose created_at is exactly AT the cutoff — inclusive, like retireExpired's <=", async () => {
+    const { id } = await seedPendingSubscription();
+    await backdate(id, CUTOFF);
+
+    const result = await subs.listStalePending(CUTOFF, 10);
+
+    expect(result.map((row) => row.id)).toEqual([id]);
+  });
+
+  /**
+   * THE BOUNDARY. One millisecond on the live side of the cutoff and the row must
+   * not appear — a query with only clearly-stale rows in its test suite would pass
+   * against a cutoff computed from a window of any length at all, including one
+   * short enough to expire a buyer mid-checkout.
+   */
+  it("excludes a pending row created ONE MILLISECOND after the cutoff", async () => {
+    const { id } = await seedPendingSubscription();
+    await backdate(id, new Date(CUTOFF.getTime() + 1));
+
+    expect(await subs.listStalePending(CUTOFF, 10)).toEqual([]);
+  });
+
+  it("includes a pending row created ONE MILLISECOND before the cutoff", async () => {
+    const { id } = await seedPendingSubscription();
+    await backdate(id, new Date(CUTOFF.getTime() - 1));
+
+    const result = await subs.listStalePending(CUTOFF, 10);
+
+    expect(result.map((row) => row.id)).toEqual([id]);
+  });
+
+  it("excludes an ACTIVE subscription even when its created_at is far older than the cutoff", async () => {
+    // The date predicate alone is not enough — mirrors the CANCELLED test above for
+    // `listExpiredActive`. An active row has already cleared checkout; expiring it
+    // by age would be the exact mistake this task exists not to make.
+    const { subscriberId } = await seedActiveSubscription({ periodEnd: FUTURE });
+    const [active] = await db
+      .select()
+      .from(userSubscriptions)
+      .where(eq(userSubscriptions.subscriberId, subscriberId));
+    await backdate(active!.id, PAST);
+
+    expect(await subs.listStalePending(CUTOFF, 10)).toEqual([]);
+  });
+
+  it("expires a stale pending row, freeing user_subscription_one_pending's slot for a fresh claim", async () => {
+    const { id, subscriberId, ownerId, tierId } = await seedPendingSubscription();
+    await backdate(id, PAST);
+
+    expect(await subs.expireStalePending(id)).toBe(true);
+    expect((await subs.findById(id))?.status).toBe("expired");
+
+    // THE WHOLE POINT: the partial unique index no longer holds the slot — a
+    // fresh claim for the same pair succeeds. Mirrors `retireExpired`'s own
+    // "frees the active slot" test.
+    const claim = await subs.claimPending({ subscriberId, tierId, ownerId });
+    expect(claim.created).toBe(true);
+    expect(claim.subscription.id).not.toBe(id);
+  });
+
+  it("returns false, and leaves the row untouched, when the row is no longer pending", async () => {
+    const { id } = await seedPendingSubscription();
+    await subs.activate(id, FUTURE);
+
+    expect(await subs.expireStalePending(id)).toBe(false);
+    expect((await subs.findById(id))?.status).toBe("active");
+  });
+
+  it("returns false for an unknown id, rather than throwing", async () => {
+    expect(await subs.expireStalePending("00000000-0000-4000-8000-000000000000")).toBe(false);
   });
 });
 

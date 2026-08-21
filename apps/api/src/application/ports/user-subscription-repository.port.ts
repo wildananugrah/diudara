@@ -150,6 +150,45 @@ export interface UserSubscriptionRepositoryPort {
    */
   listExpiredActive(now: Date, limit: number): Promise<UserSubscriptionRow[]>;
   /**
+   * `pending` subscriptions whose `created_at` is at or before `cutoff` — what
+   * Task 5's worker sweep pages through, expiring each one by calling
+   * `expireStalePending` on it in turn. `limit` bounds a single pass.
+   *
+   * This is 5a's most likely real-world money loss (final review): nothing in
+   * 5a ever expires a pending row, so an abandoned cart returned to later is
+   * handed back the same now-dead invoice — `findPendingCheckout` requires
+   * only `status = 'pending'` plus a recorded invoice url, and neither of
+   * those goes stale on its own. Expiring the row here is what frees
+   * `user_subscription_one_pending`'s slot so the next attempt mints a fresh
+   * one, exactly as `retireExpired` frees `user_subscription_one_active`.
+   *
+   * `cutoff` carries the window; this method does not know its own reasoning
+   * — see `STALE_PENDING_CHECKOUT_WINDOW_MS` in
+   * `apps/worker/src/scheduled-passes.ts` for why it sits where it does,
+   * between a person's checkout and an invoice's life at the provider.
+   */
+  listStalePending(cutoff: Date, limit: number): Promise<UserSubscriptionRow[]>;
+  /**
+   * Expires ONE stale pending subscription — flips `status` to `expired`,
+   * which is what frees `user_subscription_one_pending`'s slot for a fresh
+   * purchase. See `retireExpired`'s own docstring for why "expired" rather
+   * than deleting the row: it stays for the record the same way a lapsed
+   * membership does.
+   *
+   * THE ARBITER is a conditional UPDATE — `status = 'pending'` in the WHERE
+   * clause — never a read followed by a write, same reasoning as
+   * `retireExpired`. Unlike that method this one is NOT re-given the cutoff:
+   * `created_at` cannot change after the row is listed, so the only thing
+   * that can have moved between `listStalePending` producing this id and this
+   * call is its STATUS — paid via the webhook, cancelled, or already expired
+   * by a concurrent sweep or by Task 2's own claim-then-retire path — and
+   * `status = 'pending'` alone is what catches every one of those.
+   *
+   * Returns whether a row actually moved: false when it was no longer
+   * pending by the time this call reached it.
+   */
+  expireStalePending(id: string): Promise<boolean>;
+  /**
    * ACTIVE memberships whose period ends inside the reminder window — what Task
    * 4's `RemindExpiringMembership` pass walks so a member is told BEFORE their
    * membership ends rather than discovering it by losing access.

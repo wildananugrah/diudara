@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach } from "bun:test";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
@@ -3178,4 +3179,92 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
       expect((await third.json()).invoiceUrl).toBe(body.invoiceUrl);
     }
   );
+
+  /**
+   * **PHASE 5b, TASK 5 — THROUGH HTTP, AGAINST THE REAL DATABASE.**
+   *
+   * 5a's final review named this the phase's most likely real-world money loss, and
+   * one that needs NO FAILURE AT ALL to reach: an ordinary abandoned cart, returned
+   * to a day later, is handed back the same now-expired invoice with a dead payment
+   * page — permanently, because nothing in 5a ever expires a `pending` row.
+   *
+   * Expiring the row is the MECHANISM. The PROPERTY this task exists to deliver is
+   * that a returning buyer gets a working invoice, so the test below asserts the
+   * fresh invoice url actually DIFFERS — never merely that the old row's status
+   * changed, which a sweep that frees nothing could still make true.
+   */
+  describe("the pending-checkout cleanup frees a stale row (Phase 5b, Task 5)", () => {
+    it("a fresh purchase mints a NEW invoice once the stale pending row is expired", async () => {
+      const deps = bootstrap();
+      const a = createApp(deps);
+      const { buyer, tier } = await seedOffer(a);
+      const subscriptions = new DrizzleUserSubscriptionRepository(db);
+
+      const first = await (
+        await subscribe(a, buyer.token, "wildan", { tierId: tier.id })
+      ).json();
+
+      // Backdated three hours — well past ANY reasonable checkout, so this test
+      // does not depend on the exact `STALE_PENDING_CHECKOUT_WINDOW_MS` value
+      // (that boundary is pinned precisely, to the millisecond, in
+      // `drizzle-user-subscription.repository.test.ts` and
+      // `apps/worker/src/scheduled-passes.test.ts`). This is what Task 5's worker
+      // sweep does to a row this old: `listStalePending` would return it, and
+      // `expireStalePending` is what actually moves it.
+      await db
+        .update(userSubscriptions)
+        .set({ createdAt: new Date(Date.now() - 3 * 60 * 60_000) })
+        .where(eq(userSubscriptions.id, first.subscriptionId));
+      expect(await subscriptions.expireStalePending(first.subscriptionId)).toBe(true);
+
+      const second = await (
+        await subscribe(a, buyer.token, "wildan", { tierId: tier.id })
+      ).json();
+
+      // THE POINT OF THE TASK. Not a status assertion — a NEW invoice.
+      expect(second.invoiceUrl).not.toBe(first.invoiceUrl);
+      expect(second.subscriptionId).not.toBe(first.subscriptionId);
+
+      const oldRow = await subscriptions.findById(first.subscriptionId);
+      expect(oldRow?.status).toBe("expired");
+      expect((await subscriptions.findById(second.subscriptionId))?.status).toBe("pending");
+      expect(await db.select().from(userSubscriptions)).toHaveLength(2);
+      expect(await db.select().from(userTransactions)).toHaveLength(2);
+      expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(2);
+    });
+
+    /**
+     * THE BOUNDARY, the other direction — spec §11: "a row just inside it
+     * survives". A test with only the clearly-stale row above would pass against
+     * a cleanup that expires every pending row regardless of age, which would
+     * cancel a purchase somebody is mid-payment on. This is what catches that.
+     */
+    it("a pending row still INSIDE the window is invisible to listStalePending, and the next tap gets the SAME invoice", async () => {
+      const deps = bootstrap();
+      const a = createApp(deps);
+      const { buyer, tier } = await seedOffer(a);
+      const subscriptions = new DrizzleUserSubscriptionRepository(db);
+
+      const first = await (
+        await subscribe(a, buyer.token, "wildan", { tierId: tier.id })
+      ).json();
+
+      // The same three-hour cutoff a worker pass would use against a row this
+      // old — except this row's `created_at` is genuinely `now`, nowhere near
+      // three hours old, so the cleanup's own listing must not see it.
+      const cutoff = new Date(Date.now() - 3 * 60 * 60_000);
+      const stale = await subscriptions.listStalePending(cutoff, 100);
+      expect(stale.find((row) => row.id === first.subscriptionId)).toBeUndefined();
+
+      const second = await (
+        await subscribe(a, buyer.token, "wildan", { tierId: tier.id })
+      ).json();
+
+      // The ORDINARY reuse path — the SAME invoice, never a fresh one and never a
+      // refusal, because nothing expired the row out from under this buyer.
+      expect(second.invoiceUrl).toBe(first.invoiceUrl);
+      expect(second.subscriptionId).toBe(first.subscriptionId);
+      expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(1);
+    });
+  });
 });
