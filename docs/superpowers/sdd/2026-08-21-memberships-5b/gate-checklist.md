@@ -77,8 +77,14 @@ UPDATE user_subscription
 ```
 
 - [ ] Reload the creator's profile. **Access is gone immediately** — no grace, by design.
+- [ ] The offer is still there, with **"Keanggotaan Anda di @… sudah berakhir. Pilih paket di bawah
+      untuk memperpanjang."** above it. It must NOT say *"Perpanjangan belum tersedia"* — that is 5a's
+      dead end, and a screen showing it is the C-1 defect back (the final whole-branch review found
+      the profile hiding the button for exactly the window this task exists to serve).
 - [ ] Press **Jadi anggota** again. It must offer you the tier and **let you buy**. In 5a this is
       where you were refused and stuck.
+- [ ] Do this with the **worker stopped**. It must still work — that is the whole point of the
+      retirement being inside the purchase transaction.
 - [ ] After paying, confirm exactly **one** active row, and the old one now reads `expired`:
 
 ```sql

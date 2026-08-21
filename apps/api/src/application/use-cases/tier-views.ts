@@ -45,17 +45,35 @@ export interface TierView {
  * knows whether it has a session — it renders "Masuk untuk jadi anggota" from
  * its OWN token, not from this field.
  *
- * **`viewerMembershipEnded` is the second half of the same answer, and it is
- * the fix for the loop the final review measured.** §9 guarantees every
- * paying member lapses one billing cycle after their purchase and that
- * nothing renews them, so `viewerIsMember` goes `false` — and the profile
- * used to respond by rendering the offer and a "Jadi anggota" button that
- * `StartUserSubscription` answers 409 to, permanently, because ITS refusal
- * reads the status alone (and must: a lapsed row let past that guard collides
- * with `user_subscription_one_active` at activation). One boolean cannot
- * carry "no, and you can buy" and "no, and you cannot" at once, so there are
- * two — and they come from one `MembershipStanding`, which makes the
- * contradictory pair (`true`/`true`) unrepresentable rather than merely
+ * **`viewerMembershipEnded` is the second half of the same answer, and what it
+ * MEANS changed with Phase 5b.** Every paying member lapses one billing cycle
+ * after their purchase, so `viewerIsMember` goes `false` — and one boolean
+ * cannot say which kind of "not a member" that is.
+ *
+ * In 5a the second boolean meant "no, and you cannot buy": the profile used to
+ * render the offer and a "Jadi anggota" button that `StartUserSubscription`
+ * answered 409 to, permanently, because ITS refusal reads the status alone (and
+ * must: a lapsed row let past that guard collides with
+ * `user_subscription_one_active` at activation), and nothing in 5a ever moved
+ * such a row. So the web withheld the button.
+ *
+ * **5b made the lapsed row buyable, and the web kept withholding it** — the
+ * final whole-branch review's C-1, and the reason this docstring is worth
+ * reading before touching either side. `StartUserSubscription` now calls
+ * `retireExpired` INSIDE the purchase transaction, which frees the partial
+ * unique index's slot and lets the same tap open a fresh invoice; there is no
+ * renewal endpoint because buying again IS the renewal here. So this boolean no
+ * longer withholds anything. It selects a SENTENCE — "your membership ended",
+ * standing above the offer every other non-member sees — and the offer itself
+ * is decided by `viewerIsMember` alone.
+ *
+ * That is why the projection still carries the tiers for a `lapsed` viewer, and
+ * why it must keep doing so: withholding them here is the server-side shape of
+ * the same defect. `MembershipOffer` cannot render a button for a tier it was
+ * never sent.
+ *
+ * The pair still comes from one `MembershipStanding`, which makes the
+ * contradictory combination (`true`/`true`) unrepresentable rather than merely
  * unlikely.
  *
  * Also `false`, never `null`, for an anonymous visitor, for the identical

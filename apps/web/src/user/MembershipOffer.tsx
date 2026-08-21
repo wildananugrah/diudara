@@ -26,9 +26,10 @@ export interface MembershipOfferProps {
    * `PublicUserProfile.membership.viewerMembershipEnded` — the OTHER half of
    * the same server answer, and the reason `viewerIsMember: false` is not
    * enough to decide anything here. `true` means this viewer holds a
-   * subscription row that has run out: not a member, and — because 5a has no
-   * renewal path — not able to buy either. Also `false` for a signed-out
-   * visitor, by the same construction.
+   * subscription row that has run out: not a member, and — since Phase 5b —
+   * free to buy again, because the purchase retires that row on its way past.
+   * It selects a SENTENCE, never whether there is a button. Also `false` for a
+   * signed-out visitor, by the same construction.
    *
    * The two are never both `true`: they are projected from one
    * `MembershipStanding` server-side.
@@ -71,23 +72,31 @@ export interface MembershipOfferProps {
  * (Task 8) — the same question Phase 6's paywall asks, and the public profile
  * is the only thing in 5a that puts it on a request path.
  *
- * AND ONE MORE THING INSTEAD OF THE BUTTON, WHICH THIS FILE USED TO GET WRONG.
- * The comment here used to say that a LAPSED member "simply sees the offer
- * again", and that "the tier they are shown is a fresh purchase, which is what
- * actually exists". **Both halves were false, and the final whole-branch review
- * measured it.** §9 leaves every 5a membership `status = 'active'` with a past
- * `current_period_end` forever, and `StartUserSubscription`'s refusal reads that
- * status ALONE — it has to, since a lapsed row let past it collides with
- * `user_subscription_one_active` at activation time and turns a refused button
- * into money taken with nothing granted. So the fresh purchase did not exist:
- * pressing the button returned 409, the screen advised a reload, and the reload
- * re-rendered the same button. One billing cycle after every purchase, for
- * every paying member.
+ * AND ONE NOTICE THAT SITS ABOVE THE OFFER RATHER THAN REPLACING IT — the part
+ * this file has now got wrong twice, in opposite directions.
  *
- * So a viewer whose membership has ENDED is told that, and offered nothing.
- * Still nothing here offers to *renew* — there is no endpoint behind such a
- * button, and inventing one is not the fix. 5b brings renewals; until then the
- * honest screen says so.
+ * 5a offered a LAPSED member the tier and a button `StartUserSubscription`
+ * answered 409 to, permanently: its guard reads the status alone (it has to — a
+ * lapsed row let past it collides with `user_subscription_one_active` at
+ * activation time, which is money taken and nothing granted), and 5a had nothing
+ * that moved such a row. The screen then advised a reload, and the reload
+ * re-rendered the same button. So the button was taken away and the screen said
+ * *"Perpanjangan belum tersedia untuk saat ini"*.
+ *
+ * **Phase 5b built the renewal, and this screen did not learn** (the final
+ * whole-branch review's C-1). `StartUserSubscription` now retires the lapsed row
+ * INSIDE the purchase transaction, so one press frees the unique index's slot and
+ * opens a fresh invoice — there is no separate renew endpoint because buying
+ * again IS the renewal here (nothing in this system charges anybody twice on its
+ * own). A screen with no button meant the only thing that could rescue a lapsed
+ * member was the worker's hourly sweep moving the row to `expired`, and if the
+ * worker was down, nothing ever could.
+ *
+ * So the ended state is a NOTICE, not a refusal: the member is told their
+ * membership ended, and then offered the tiers underneath it. The one case that
+ * still has nothing to press is a creator who has withdrawn every tier — and the
+ * sentence there says exactly that, rather than blaming a renewal feature that
+ * now exists.
  *
  * Every failure becomes a Bahasa sentence through `errorCopy.ts`
  * (`src/test/no-raw-server-errors.test.ts`), except the 401 — the one failure
@@ -136,33 +145,36 @@ export default function MembershipOffer({
     );
   }
 
-  // A membership that has ENDED, which is neither of the two states this file
-  // used to know about. The server refuses this person's purchase — see the
-  // docstring — so rendering the offer would render a button whose only
-  // possible answer is a 409, permanently. It comes BEFORE the empty-tiers
-  // check for the same reason the member branch does: a creator can withdraw
-  // every tier while people still hold (and have held) memberships bought
-  // against them, and that person is still owed the news.
+  // A membership that has ENDED. Not a state that replaces the offer any more —
+  // see the docstring: 5b's purchase retires the lapsed row inside its own
+  // transaction, so this person may buy, and the only thing standing between
+  // them and a renewal used to be this screen.
   //
   // Gated on `signedIn` as belt-and-braces, exactly as above: the API answers
   // `false` for an anonymous request by construction, so this can only fire on
-  // a response that contradicts its own contract.
-  if (viewerMembershipEnded && signedIn) {
+  // a response that contradicts its own contract — and the failure it prevents
+  // is telling a signed-out stranger that a membership of theirs ended.
+  const membershipEnded = viewerMembershipEnded && signedIn;
+
+  // The one case that still has nothing to press, and it comes BEFORE the plain
+  // empty-tiers return for the same reason the member branch does: a creator can
+  // withdraw every tier while people still hold (and have held) memberships
+  // bought against them, and that person is still owed the news. The sentence
+  // names the actual obstacle — this creator is not selling anything today —
+  // rather than saying renewal is unavailable, which is the one thing Phase 5b
+  // made untrue.
+  if (tiers.length === 0) {
+    if (!membershipEnded) return null;
     return (
       <section className="card stack membership-offer" aria-labelledby="membership-offer-heading">
         <h2 id="membership-offer-heading">Keanggotaan</h2>
-        {/* No button, and no advice to retry: there is nothing to press. 5a
-            genuinely has no way to renew or to buy again, and saying otherwise
-            is what produced the loop this branch exists to end. */}
         <p data-testid="membership-ended">
-          Keanggotaan Anda di @{handle} sudah berakhir. Perpanjangan belum tersedia untuk saat
-          ini.
+          Keanggotaan Anda di @{handle} sudah berakhir. Kreator ini sedang tidak menawarkan
+          paket keanggotaan.
         </p>
       </section>
     );
   }
-
-  if (tiers.length === 0) return null;
 
   async function buy(tierId: string) {
     setError(null);
@@ -200,7 +212,17 @@ export default function MembershipOffer({
   return (
     <section className="card stack membership-offer" aria-labelledby="membership-offer-heading">
       <h2 id="membership-offer-heading">Keanggotaan</h2>
-      <p className="muted">Dukung @{handle} dengan menjadi anggota berbayar.</p>
+      {membershipEnded ? (
+        // ABOVE the list, and it replaces the "dukung" line rather than joining
+        // it: this person already supported this creator, and being pitched as
+        // though they never had is the wrong thing to read on the way back in.
+        <p data-testid="membership-ended">
+          Keanggotaan Anda di @{handle} sudah berakhir. Pilih paket di bawah untuk
+          memperpanjang.
+        </p>
+      ) : (
+        <p className="muted">Dukung @{handle} dengan menjadi anggota berbayar.</p>
+      )}
       <ul className="membership-tiers">
         {tiers.map((tier) => (
           <li key={tier.id} className="membership-tier" data-testid={`membership-tier-${tier.id}`}>
