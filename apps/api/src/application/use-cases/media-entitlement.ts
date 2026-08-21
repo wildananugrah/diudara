@@ -35,7 +35,7 @@ export interface MediaGateDecision {
  */
 const REFUSED: MediaGateDecision = Object.freeze({ allowed: false, gated: true });
 
-/** Served, and freely cacheable — a public post's image, or one on no post at all. */
+/** Served, and freely cacheable — a public post's image. */
 const OPEN: MediaGateDecision = Object.freeze({ allowed: true, gated: false });
 
 /** Served to somebody entitled to it, and never publicly cacheable. */
@@ -98,13 +98,37 @@ export class MediaEntitlement {
    * let a caller omit it and be answered as if somebody were signed in.
    * `null` is the caller saying "signed out", which locks every gated image.
    *
-   * **Unclaimed media (`post_id is null`) is ALLOWED and UNGATED, exactly as
-   * before this phase.** Bytes uploaded but not yet attached to a post have no
-   * post, and therefore no visibility to read; there is nothing to gate on and
-   * inventing an answer would break the composer, which previews an image
-   * between the upload and the post that claims it. The id is known only to
-   * its uploader, who is the only person who could have received it (spec
-   * §6.3).
+   * **Unclaimed media (`post_id is null`) is served to ITS OWNER ONLY, and is
+   * gated** (spec §6.3, rewritten by the whole-branch review — MAJ-1).
+   *
+   * It used to be `OPEN`, on §6.3's stated ground that "the id is known only to
+   * its uploader, who is the only person who could have received it". That
+   * sentence is true of a NEVER-CLAIMED upload and **false of a released row**.
+   * `MediaRepositoryPort.claim` releases the rows a post no longer names by
+   * setting `post_id = NULL` (spec §8 — removal unclaims, it does not delete),
+   * so editing an image out of a members-only post produced an unclaimed row
+   * whose id had ALREADY been sent to every paying member who loaded that post.
+   * The gate answered `OPEN` for it, the route stamped `public,
+   * max-age=31536000, immutable` on it, and a gated image became freely
+   * fetchable — and freely cacheable for a year — for the up-to-25 hours before
+   * the orphan sweep (which measures from `created_at`, not from release) got
+   * to it.
+   *
+   * A released row and a never-claimed row are both `post_id IS NULL` and the
+   * database cannot tell them apart. So rather than guess, this ENFORCES the
+   * rationale §6.3 only assumed: if the id is meaningful only to its uploader,
+   * only its uploader gets bytes for it.
+   *
+   * **No legitimate flow loses anything.** The composer previews a fresh upload
+   * from a local object URL (`PostComposer.previewFor` /
+   * `MediaStrip.previewUrl`), never from this route; it asks this route only
+   * for media already claimed by the post it is editing (`seedImages` →
+   * `mediaThumbUrl`), and that caller is the owner anyway. The orphan sweep
+   * reads bytes through `MediaStoragePort`, not over HTTP.
+   *
+   * `gated: true` — never `public, immutable` — because a row that is unclaimed
+   * now may be claimed by a members-only post a second later. A response that
+   * can turn private must not license a year in a shared cache.
    *
    * **Media on a soft-deleted post stays gated as it was.** The route keeps
    * serving such an image exactly as it does today; this phase does not change
@@ -119,7 +143,13 @@ export class MediaEntitlement {
     // with the same answer — the route turns both into the identical 404, so
     // gated and absent are indistinguishable from outside (spec §6.2).
     if (row === null) return REFUSED;
-    if (row.postId === null) return OPEN;
+    // Owner-only, and checked against the MEDIA row's own `ownerId` — there is
+    // no post to ask about an author. A signed-out caller is `null` and can
+    // never match a uuid, but the explicit null test is what makes that true of
+    // the LOGIC rather than of the types.
+    if (row.postId === null) {
+      return input.viewerId !== null && input.viewerId === row.ownerId ? ENTITLED : REFUSED;
+    }
 
     const post = await this.posts.gatingOf(row.postId);
     // Unreachable today — posts are soft-deleted, never removed — and refused

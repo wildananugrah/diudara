@@ -363,20 +363,66 @@ describe("MediaEntitlement — barrier two", () => {
   });
 
   /**
-   * Spec §6.3. Bytes uploaded but not yet attached to a post have no post and
-   * therefore no visibility to read. The id is known only to its uploader, and
-   * the composer previews the image between the upload and the post that
-   * claims it — gating this would break that with nothing to gain.
+   * Spec §6.3, REWRITTEN by the whole-branch review (MAJ-1). An unclaimed row
+   * has no post and therefore no visibility to read — but "no visibility"
+   * cannot mean "open", because `claim` produces unclaimed rows too: removing
+   * an image from a members-only post sets `post_id = NULL`, and that row's id
+   * was already sent to every paying member who loaded the post.
+   *
+   * So the rule the old §6.3 only ASSUMED — "the id is known only to its
+   * uploader" — is now ENFORCED: the owner gets the bytes, nobody else does.
+   * The composer is unaffected; it previews a fresh upload from a local object
+   * URL (`PostComposer.previewFor`) and only ever asks this route for media
+   * already claimed by the post it is editing.
    */
-  it("allows UNCLAIMED media, ungated, and never looks for a post", async () => {
+  it("serves UNCLAIMED media to its OWNER, gated, and never looks for a post", async () => {
     const { gate, posts, media } = build();
     media.row = mediaRow({ postId: null });
 
-    expect(await gate.decide({ mediaId: MEDIA_ID, viewerId: null })).toEqual({
+    expect(await gate.decide({ mediaId: MEDIA_ID, viewerId: RINA })).toEqual({
       allowed: true,
-      gated: false,
+      gated: true,
     });
     expect(posts.gatingCalls).toEqual([]);
+  });
+
+  it("refuses UNCLAIMED media to a signed-out caller", async () => {
+    const { gate, media } = build();
+    media.row = mediaRow({ postId: null });
+
+    expect(await gate.decide({ mediaId: MEDIA_ID, viewerId: null })).toEqual({
+      allowed: false,
+      gated: true,
+    });
+  });
+
+  /**
+   * **THE MAJ-1 CASE ITSELF.** RINA's image was on a members-only post; BUYER
+   * paid, loaded the post and legitimately received this id. RINA then edits
+   * the image out, which releases the row to `post_id = NULL`. BUYER — who
+   * still holds the id, and who was entitled to it a second ago — is now
+   * refused, because entitlement follows the row's owner once there is no post
+   * left to ask.
+   */
+  it("refuses a RELEASED image to the paying member who legitimately held its id", async () => {
+    const { gate, media, subscriptions } = build();
+    media.row = mediaRow({ postId: null });
+    subscriptions.rows = [subscriptionRow()];
+
+    expect(await gate.decide({ mediaId: MEDIA_ID, viewerId: BUYER })).toEqual({
+      allowed: false,
+      gated: true,
+    });
+  });
+
+  it("refuses a RELEASED image to a stranger", async () => {
+    const { gate, media } = build();
+    media.row = mediaRow({ postId: null });
+
+    expect(await gate.decide({ mediaId: MEDIA_ID, viewerId: STRANGER })).toEqual({
+      allowed: false,
+      gated: true,
+    });
   });
 
   it("refuses an id with no media row at all — absent and gated answer alike", async () => {

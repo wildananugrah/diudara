@@ -259,7 +259,7 @@ describe("GET /users/media/:id and /thumb", () => {
   it("streams the full image as bytes, with an image content type", async () => {
     const id = await uploadFixture(a, token, "small.png");
 
-    const res = await a.request(`/users/media/${id}`);
+    const res = await a.request(`/users/media/${id}`, { headers: authed(token) });
 
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/webp");
@@ -272,7 +272,7 @@ describe("GET /users/media/:id and /thumb", () => {
   it("streams the thumbnail as bytes, with an image content type", async () => {
     const id = await uploadFixture(a, token, "small.png");
 
-    const res = await a.request(`/users/media/${id}/thumb`);
+    const res = await a.request(`/users/media/${id}/thumb`, { headers: authed(token) });
 
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/webp");
@@ -282,8 +282,10 @@ describe("GET /users/media/:id and /thumb", () => {
   it("streams the thumbnail, and it is SMALLER than the full image", async () => {
     const id = await uploadFixture(a, token, "photo-with-gps.jpg");
 
-    const full = await (await a.request(`/users/media/${id}`)).bytes();
-    const thumb = await (await a.request(`/users/media/${id}/thumb`)).bytes();
+    const full = await (await a.request(`/users/media/${id}`, { headers: authed(token) })).bytes();
+    const thumb = await (
+      await a.request(`/users/media/${id}/thumb`, { headers: authed(token) })
+    ).bytes();
 
     // Proves the two routes serve different variants rather than the same object
     // twice — an assertion on status alone passes against that bug. NOTE this
@@ -304,7 +306,7 @@ describe("GET /users/media/:id and /thumb", () => {
    * apart from the real bytes.
    */
   async function expectProxiesRealBytes(path: string) {
-    const res = await a.request(path, { redirect: "manual" });
+    const res = await a.request(path, { redirect: "manual", headers: authed(token) });
 
     expect(res.status).toBe(200);
     expect(res.status).not.toBe(302);
@@ -333,13 +335,30 @@ describe("GET /users/media/:id and /thumb", () => {
     await expectProxiesRealBytes(`/users/media/${id}/thumb`);
   });
 
+  /**
+   * SIGNED IN, as every byte-fetching test in this block now is. Since MAJ-1
+   * an unclaimed row is served to its owner ONLY, so an anonymous request here
+   * would 404 for being anonymous — and would keep passing with the row lookup
+   * deleted. Authenticating as the uploader is what keeps each of these tests
+   * failing for its own reason.
+   */
   it("404s an unknown id", async () => {
-    expect((await a.request("/users/media/8a1f0e6e-0000-4000-8000-000000000000")).status).toBe(404);
+    expect(
+      (
+        await a.request("/users/media/8a1f0e6e-0000-4000-8000-000000000000", {
+          headers: authed(token),
+        })
+      ).status
+    ).toBe(404);
   });
 
   it("404s an unknown id on the thumb route", async () => {
     expect(
-      (await a.request("/users/media/8a1f0e6e-0000-4000-8000-000000000000/thumb")).status
+      (
+        await a.request("/users/media/8a1f0e6e-0000-4000-8000-000000000000/thumb", {
+          headers: authed(token),
+        })
+      ).status
     ).toBe(404);
   });
 
@@ -347,7 +366,7 @@ describe("GET /users/media/:id and /thumb", () => {
     const id = await uploadFixture(a, token, "small.png");
     await storage.remove(id);
 
-    expect((await a.request(`/users/media/${id}`)).status).toBe(404);
+    expect((await a.request(`/users/media/${id}`, { headers: authed(token) })).status).toBe(404);
   });
 
   // Review round 1, I2: same guard as the full route's test above, pinned
@@ -357,7 +376,9 @@ describe("GET /users/media/:id and /thumb", () => {
     const id = await uploadFixture(a, token, "small.png");
     await storage.remove(id);
 
-    expect((await a.request(`/users/media/${id}/thumb`)).status).toBe(404);
+    expect((await a.request(`/users/media/${id}/thumb`, { headers: authed(token) })).status).toBe(
+      404
+    );
   });
 
   // Review round 1, I3 (Important): deleting the `mediaRepository.findById`
@@ -372,14 +393,16 @@ describe("GET /users/media/:id and /thumb", () => {
     const id = await uploadFixture(a, token, "small.png");
     await mediaRepository.deleteIfUnclaimed(id);
 
-    expect((await a.request(`/users/media/${id}`)).status).toBe(404);
+    expect((await a.request(`/users/media/${id}`, { headers: authed(token) })).status).toBe(404);
   });
 
   it("404s when the row has been deleted from the database but its bytes remain in storage (thumb route)", async () => {
     const id = await uploadFixture(a, token, "small.png");
     await mediaRepository.deleteIfUnclaimed(id);
 
-    expect((await a.request(`/users/media/${id}/thumb`)).status).toBe(404);
+    expect((await a.request(`/users/media/${id}/thumb`, { headers: authed(token) })).status).toBe(
+      404
+    );
   });
 
   // Not in the brief's own list, but called out in its prose: the precedent
@@ -394,22 +417,36 @@ describe("GET /users/media/:id and /thumb", () => {
     expect((await a.request("/users/media/not-a-uuid/thumb")).status).toBe(400);
   });
 
-  it("sets long-lived, immutable caching on the bytes it returns", async () => {
+  /**
+   * REWRITTEN by the whole-branch review (MAJ-1). This used to upload one image
+   * and assert `public, max-age=31536000, immutable` on it — but the row it
+   * uploads is UNCLAIMED, and an unclaimed row is exactly the one that can turn
+   * private a moment later, either by being claimed by a members-only post or
+   * by having been RELEASED from one. A year in a shared cache is not something
+   * this response may license.
+   *
+   * The `public, immutable` header is still pinned, twice per handler, where it
+   * is now actually correct: "a public post's image keeps the immutable cache"
+   * in the barrier-two block below.
+   */
+  it("never gives an UNCLAIMED row a year-long public cache, even to its owner", async () => {
     const id = await uploadFixture(a, token, "small.png");
 
-    const res = await a.request(`/users/media/${id}`);
+    const res = await a.request(`/users/media/${id}`, { headers: authed(token) });
 
-    expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
   });
 
   // Review round 1, I2: same as the content-type/missing-bytes pair above —
   // the full route had this assertion, the thumb route did not.
-  it("sets long-lived, immutable caching on the thumbnail bytes it returns", async () => {
+  it("never gives an UNCLAIMED thumbnail a year-long public cache, even to its owner", async () => {
     const id = await uploadFixture(a, token, "small.png");
 
-    const res = await a.request(`/users/media/${id}/thumb`);
+    const res = await a.request(`/users/media/${id}/thumb`, { headers: authed(token) });
 
-    expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
   });
 });
 
@@ -499,6 +536,24 @@ describe("members-only media: the route refuses an id it never sent", () => {
       body: JSON.stringify({ body, mediaIds }),
     });
     return (await res.json()) as { id: string };
+  }
+
+  /**
+   * Edits a post down to zero images — the release path (`post_id = NULL`,
+   * spec §8), driven through the REAL route rather than by writing the column,
+   * so what this exercises is what a creator actually does.
+   *
+   * `visibility: "public"` travels with it because §7 refuses a members-only
+   * post with no images, which is exactly the composer's own behaviour
+   * (`PostComposer.resolveVisibility`) when the last photo is removed.
+   */
+  async function removeImages(token: string, postId: string): Promise<void> {
+    const res = await a.request(`/users/posts/${postId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ body: "tanpa foto", mediaIds: [], visibility: "public" }),
+    });
+    expect(res.status).toBe(200);
   }
 
   /** Rina, one MEMBERS-ONLY post holding one image. */
@@ -736,23 +791,91 @@ describe("members-only media: the route refuses an id it never sent", () => {
   });
 
   /**
-   * Spec §6.3. Unclaimed media (`post_id is null`) has no post and therefore
-   * no visibility to read: it stays ungated and publicly cacheable, exactly as
-   * before this phase. The id is known only to its uploader, who is the only
-   * person who could have received it.
+   * Spec §6.3, as REWRITTEN by the whole-branch review (MAJ-1). An unclaimed
+   * row (`post_id is null`) has no post and therefore no visibility to read —
+   * and it is served to ITS OWNER ONLY, with the gated header, because the old
+   * rule ("it stays ungated; the id is known only to its uploader") was true of
+   * a never-claimed upload and FALSE of a row released by an edit. See the
+   * released-image pair below for the case that forced this.
    */
-  it("unclaimed media — no post, so no visibility — is served ungated to a signed-out caller", async () => {
+  it("unclaimed media is served to its uploader, and never publicly cacheable", async () => {
     const token = await tokenForValidUser(a, RINA);
     const mediaId = await upload(token);
 
-    await expectServed(full(mediaId), "public, max-age=31536000, immutable");
+    await expectServed(full(mediaId), "private, no-store", authed(token));
   });
 
-  it("an unclaimed THUMBNAIL is served ungated to a signed-out caller", async () => {
+  it("an unclaimed THUMBNAIL is served to its uploader, and never publicly cacheable", async () => {
     const token = await tokenForValidUser(a, RINA);
     const mediaId = await upload(token);
 
-    await expectServed(thumb(mediaId), "public, max-age=31536000, immutable");
+    await expectServed(thumb(mediaId), "private, no-store", authed(token));
+  });
+
+  it("unclaimed media is refused to a signed-out caller", async () => {
+    const token = await tokenForValidUser(a, RINA);
+    const mediaId = await upload(token);
+
+    await expectRefused(full(mediaId));
+  });
+
+  it("an unclaimed THUMBNAIL is refused to a signed-out caller", async () => {
+    const token = await tokenForValidUser(a, RINA);
+    const mediaId = await upload(token);
+
+    await expectRefused(thumb(mediaId));
+  });
+
+  it("unclaimed media is refused to a signed-in caller who is not its owner", async () => {
+    const token = await tokenForValidUser(a, RINA);
+    const mediaId = await upload(token);
+    const stranger = await tokenForValidUser(a, STRANGER);
+
+    await expectRefused(full(mediaId), authed(stranger));
+  });
+
+  /**
+   * **MAJ-1, THE WHOLE POINT.** Andi pays Rina, loads the gated post and
+   * legitimately receives this media id. Rina then edits the image out of the
+   * post — which does not delete it, it RELEASES it (`post_id = NULL`, spec
+   * §8) — and for up to 25 hours the orphan sweep has not collected it yet.
+   *
+   * Before this fix that release turned a gated image into a freely fetchable
+   * one carrying `public, max-age=31536000, immutable`: a year in every shared
+   * cache that touched it. The member's own held id must still be refused.
+   */
+  it("an image REMOVED from a members-only post is refused to the member who held its id", async () => {
+    const { token, mediaId, postId } = await rinaWithAGatedImage();
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+    // The member really could fetch it while it was on the post — otherwise
+    // the refusal below would prove nothing about the release.
+    await expectServed(full(mediaId), "private, no-store", authed(buyer));
+
+    await removeImages(token, postId);
+
+    await expectRefused(full(mediaId), authed(buyer));
+  });
+
+  it("a THUMBNAIL removed from a members-only post is refused to the member who held its id", async () => {
+    const { token, mediaId, postId } = await rinaWithAGatedImage();
+    const buyer = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+    await expectServed(thumb(mediaId), "private, no-store", authed(buyer));
+
+    await removeImages(token, postId);
+
+    await expectRefused(thumb(mediaId), authed(buyer));
+  });
+
+  it("a released image is refused to a signed-out caller and never handed a year-long cache", async () => {
+    const { token, mediaId, postId } = await rinaWithAGatedImage();
+
+    await removeImages(token, postId);
+
+    const res = await a.request(full(mediaId));
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).not.toBe("public, max-age=31536000, immutable");
   });
 
   /**
