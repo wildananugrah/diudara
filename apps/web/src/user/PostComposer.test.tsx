@@ -1348,3 +1348,150 @@ describe("PostComposer — the strip while the post is being sent", () => {
     });
   });
 });
+
+/* ------------------------------------------------------------------------ *
+ * Task 6 — "Khusus anggota" (spec §7).
+ *
+ * `visibility = 'members'` requires at least one image, ENFORCED ON THE
+ * SERVER (Task 5). The checkbox here is a courtesy that explains the rule
+ * before the creator hits it, not the rule itself — so these tests pin the
+ * courtesy: disabled-with-a-reason, enabled-once-attached, and un-checked
+ * again the moment the last image is gone, so a creator can never submit a
+ * members-only post this composer knows has no image.
+ * ------------------------------------------------------------------------ */
+
+function membersOnlyBox(): HTMLInputElement {
+  return screen.getByLabelText("Khusus anggota") as HTMLInputElement;
+}
+
+describe("PostComposer — Khusus anggota (spec §7)", () => {
+  it("is unavailable until an image is attached, and says why", () => {
+    renderComposer();
+
+    expect(membersOnlyBox().disabled).toBe(true);
+    expect(screen.getByTestId("members-only-hint").textContent).toContain(
+      "Tambahkan foto dulu"
+    );
+  });
+
+  it("shows the hint verbatim, in Bahasa Indonesia", () => {
+    renderComposer();
+
+    expect(screen.getByTestId("members-only-hint").textContent).toBe(
+      "Tambahkan foto dulu — teks selalu bisa dibaca semua orang."
+    );
+  });
+
+  it("attaching an image enables it", async () => {
+    mockSuccessfulUploads();
+    renderComposer();
+
+    choose("satu.jpg");
+    await uploadsSettled();
+
+    expect(membersOnlyBox().disabled).toBe(false);
+    expect(screen.queryAllByTestId("members-only-hint").length).toBe(0);
+  });
+
+  it("removing the last image un-checks it rather than leaving an unenforceable lock armed", async () => {
+    mockSuccessfulUploads();
+    renderComposer();
+
+    choose("satu.jpg");
+    await uploadsSettled();
+    fireEvent.click(membersOnlyBox());
+    expect(membersOnlyBox().checked).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus foto 1" }));
+
+    expect(membersOnlyBox().checked).toBe(false);
+    expect(membersOnlyBox().disabled).toBe(true);
+    expect(screen.getByTestId("members-only-hint").textContent).toContain(
+      "Tambahkan foto dulu"
+    );
+  });
+
+  it("leaves it checked, and the box still enabled, when a DIFFERENT image is removed", async () => {
+    mockSuccessfulUploads();
+    renderComposer();
+
+    choose("satu.jpg", "dua.jpg");
+    await uploadsSettled();
+    fireEvent.click(membersOnlyBox());
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus foto 1" }));
+
+    expect(membersOnlyBox().checked).toBe(true);
+    expect(membersOnlyBox().disabled).toBe(false);
+  });
+
+  it("sends visibility: members when checked, alongside the photo and the caption", async () => {
+    mockSuccessfulUploads();
+    const onSubmit = mock(async () => {});
+    renderComposer({ onSubmit });
+
+    choose("satu.jpg");
+    await uploadsSettled();
+    fireEvent.click(membersOnlyBox());
+    type("hanya untuk anggota");
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit).toHaveBeenCalledWith("hanya untuk anggota", ["media-1"], "members");
+  });
+
+  it("does not send a visibility at all when left unchecked — existing posts stay public by default", async () => {
+    mockSuccessfulUploads();
+    const onSubmit = mock(async () => {});
+    renderComposer({ onSubmit });
+
+    choose("satu.jpg");
+    await uploadsSettled();
+    type("teks biasa");
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit).toHaveBeenCalledWith("teks biasa", ["media-1"]);
+  });
+
+  it("un-checking after checking it also stops sending members on submit", async () => {
+    mockSuccessfulUploads();
+    const onSubmit = mock(async () => {});
+    renderComposer({ onSubmit });
+
+    choose("satu.jpg");
+    await uploadsSettled();
+    fireEvent.click(membersOnlyBox());
+    fireEvent.click(membersOnlyBox());
+    type("berubah pikiran");
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit).toHaveBeenCalledWith("berubah pikiran", ["media-1"]);
+  });
+
+  it("resets to unchecked once the post is sent, along with the box and the strip", async () => {
+    mockSuccessfulUploads();
+    renderComposer();
+
+    choose("satu.jpg");
+    await uploadsSettled();
+    fireEvent.click(membersOnlyBox());
+    type("halo");
+    fireEvent.click(submitButton());
+
+    await waitFor(() => {
+      expect(textarea().value).toBe("");
+    });
+    expect(membersOnlyBox().disabled).toBe(true);
+    expect(screen.getByTestId("members-only-hint").textContent).toContain(
+      "Tambahkan foto dulu"
+    );
+  });
+});
