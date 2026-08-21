@@ -774,4 +774,25 @@ describe("members-only media: the route refuses an id it never sent", () => {
 
     await expectRefused(thumb(mediaId));
   });
+
+  /**
+   * The other half of §6.3, and the one that pins `gatingOf` having NO
+   * `deleted_at` filter. Without this test, a filter added there would answer
+   * `null` for every deleted post, the gate would refuse them all, and the two
+   * tests above would still be green — a change to deletion semantics that
+   * looks like tightening the paywall.
+   */
+  it("a soft-deleted PUBLIC post's image is still served, ungated, exactly as before", async () => {
+    const { token, mediaId, postId } = await rinaWithAPublicImage();
+    await a.request(`/users/posts/${postId}`, { method: "DELETE", headers: authed(token) });
+
+    await expectServed(full(mediaId), "public, max-age=31536000, immutable");
+  });
+
+  it("a soft-deleted PUBLIC post's THUMBNAIL is still served, ungated", async () => {
+    const { token, mediaId, postId } = await rinaWithAPublicImage();
+    await a.request(`/users/posts/${postId}`, { method: "DELETE", headers: authed(token) });
+
+    await expectServed(thumb(mediaId), "public, max-age=31536000, immutable");
+  });
 });
