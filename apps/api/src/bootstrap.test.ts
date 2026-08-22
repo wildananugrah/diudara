@@ -31,6 +31,12 @@ import { FAKE_AI_BEHAVIOURS, FakeAiAdapter } from "./infrastructure/ai/fake-ai.a
 import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
 import { SendAiMessage } from "./application/use-cases/send-ai-message";
 import { ListLiveSessions } from "./application/use-cases/schedule-live-session";
+import {
+  StartUserStream,
+  ListLiveStreams,
+  EndOwnUserStream,
+} from "./application/use-cases/start-user-stream";
+import type { UserStreamRepositoryPort } from "./application/ports/user-stream-repository.port";
 import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
 import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
 import { createApp } from "./app";
@@ -478,6 +484,34 @@ const fakeEventRepository: EventRepositoryPort = {
   },
   async findLiveByCommunityId() {
     return null;
+  },
+};
+
+/**
+ * Phase 7's `user_stream`. Every method answers "nothing here" — these two
+ * tests are about which PROVIDERS `bootstrap()` selects, not about streams,
+ * and `listLiveStreams`/`endOwnUserStream` are never `undefined` on a real
+ * `Dependencies` (see their field docstrings) so the type needs a real fake
+ * rather than the `undefined` the provider-shaped fields get.
+ */
+const fakeUserStreamRepository: UserStreamRepositoryPort = {
+  async startLive() {
+    throw new Error("not used");
+  },
+  async findByStreamKey() {
+    return null;
+  },
+  async findById() {
+    return null;
+  },
+  async listLive() {
+    return [];
+  },
+  async endById() {
+    return null;
+  },
+  async listStaleLive() {
+    return [];
   },
 };
 
@@ -1014,6 +1048,17 @@ describe("Dependencies (composition root contract)", () => {
       // though these tests are not about the streaming path either.
       scheduleLiveSession: undefined,
       listLiveSessions: new ListLiveSessions(fakeEventRepository),
+      // Task 3 of Phase 7's Siaran. `startUserStream` mirrors
+      // `scheduleLiveSession`'s undefined-ness (both need a real
+      // `streamingProvider`, which is `undefined` here); the other two are
+      // never undefined on a real `Dependencies`, so they need fakes.
+      startUserStream: undefined,
+      listLiveStreams: new ListLiveStreams(
+        fakeUserStreamRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
+      ),
+      endOwnUserStream: new EndOwnUserStream(fakeUserStreamRepository, fakeClock),
       // Task 4's authorisation webhook. `authoriseStream` mirrors
       // `scheduleLiveSession`'s undefined-ness for the same reason (needs
       // STREAM_TOKEN_SECRET, which is absent here); these tests are not
@@ -1272,6 +1317,17 @@ describe("Dependencies (composition root contract)", () => {
       // though these tests are not about the streaming path either.
       scheduleLiveSession: undefined,
       listLiveSessions: new ListLiveSessions(fakeEventRepository),
+      // Task 3 of Phase 7's Siaran. `startUserStream` mirrors
+      // `scheduleLiveSession`'s undefined-ness (both need a real
+      // `streamingProvider`, which is `undefined` here); the other two are
+      // never undefined on a real `Dependencies`, so they need fakes.
+      startUserStream: undefined,
+      listLiveStreams: new ListLiveStreams(
+        fakeUserStreamRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
+      ),
+      endOwnUserStream: new EndOwnUserStream(fakeUserStreamRepository, fakeClock),
       // Task 4's authorisation webhook. `authoriseStream` mirrors
       // `scheduleLiveSession`'s undefined-ness for the same reason (needs
       // STREAM_TOKEN_SECRET, which is absent here); these tests are not
@@ -3589,6 +3645,51 @@ describe("bootstrap() streaming provider wiring", () => {
               deps = bootstrap();
             }).not.toThrow();
             expect(deps!.streamingProvider).toBeUndefined();
+          });
+        }
+      );
+    });
+  });
+
+  /**
+   * Task 3 of Phase 7. `startUserStream` must be `undefined` in LOCKSTEP with
+   * `streamingProvider` — it requires a real provider — while
+   * `listLiveStreams` and `endOwnUserStream` must be constructed either way.
+   * A listing that vanished with the provider would take Siaran down for
+   * every reader on a box where nobody configured MediaMTX, over a WRITER's
+   * dependency, and a creator who went live before streaming was switched
+   * off must still be able to stop.
+   */
+  it("wires POST /streams' use-case only when a provider exists, and the listing always", () => {
+    withJwtSecret("x".repeat(32), () => {
+      const deps = bootstrap();
+      expect(deps.startUserStream).toBeInstanceOf(StartUserStream);
+      expect(deps.listLiveStreams).toBeInstanceOf(ListLiveStreams);
+      expect(deps.endOwnUserStream).toBeInstanceOf(EndOwnUserStream);
+    });
+  });
+
+  it("leaves POST /streams' use-case undefined with no MediaMTX config, but never the listing", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          NODE_ENV: "production",
+          APP_BASE_URL: "http://localhost:5173",
+          XENDIT_SECRET_KEY: "sk_live_x",
+          XENDIT_SPLIT_RULE_ID: "splitrule_1",
+          XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
+          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+          FONNTE_API_TOKEN: "real-fonnte-token",
+          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
+          ...REAL_S3_CONFIG,
+        },
+        () => {
+          captureConsoleLog(() => {
+            const deps = bootstrap();
+            expect(deps.streamingProvider).toBeUndefined();
+            expect(deps.startUserStream).toBeUndefined();
+            expect(deps.listLiveStreams).toBeInstanceOf(ListLiveStreams);
+            expect(deps.endOwnUserStream).toBeInstanceOf(EndOwnUserStream);
           });
         }
       );
