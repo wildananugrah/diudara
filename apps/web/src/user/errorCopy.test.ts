@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { describeRequestFailure, describeSubscribeFailure, describeUploadFailure } from "./errorCopy";
+import {
+  describeRequestFailure,
+  describeStreamStartFailure,
+  describeSubscribeFailure,
+  describeUploadFailure,
+} from "./errorCopy";
 import { SESSION_EXPIRED_MESSAGE, UserApiError } from "./apiClient";
 
 /**
@@ -318,5 +323,46 @@ describe("describeSubscribeFailure", () => {
 
   it("delegates the 401, whose message this codebase authored and which is already Bahasa", () => {
     expect(describeSubscribeFailure(new UserApiError("ignored", 401))).toBe(SESSION_EXPIRED_MESSAGE);
+  });
+});
+
+/**
+ * `POST /streams`'s own 503 — task 8's own instruction: "handle that
+ * honestly," never the generic 5xx "coba lagi sebentar lagi," which would be
+ * a false promise here (`routes/streams.ts`'s 503 fires only when this box
+ * has no streaming provider configured, a condition no retry clears).
+ */
+describe("describeStreamStartFailure", () => {
+  it("tells the creator honestly that streaming is not configured, never the generic retry sentence", () => {
+    const copy = describeStreamStartFailure(
+      new UserApiError("siaran langsung belum tersedia di server ini", 503)
+    );
+    expect(copy).toBe("Siaran langsung belum dikonfigurasi di server ini. Coba lagi nanti atau hubungi admin.");
+    // The generic 5xx sentence would tell the creator to retry — wrong here,
+    // since no retry clears a missing provider.
+    expect(copy).not.toBe("Server sedang bermasalah. Coba lagi sebentar lagi.");
+  });
+
+  it("never repeats the wire's own English string", () => {
+    const copy = describeStreamStartFailure(
+      new UserApiError("siaran langsung belum tersedia di server ini", 503)
+    );
+    expect(copy.includes("siaran langsung belum tersedia di server ini")).toBe(false);
+  });
+
+  it("delegates every other shape unchanged — a 500", () => {
+    expect(describeStreamStartFailure(new UserApiError("internal server error", 500))).toBe(
+      "Server sedang bermasalah. Coba lagi sebentar lagi."
+    );
+  });
+
+  it("delegates a dropped connection, which is not a UserApiError at all", () => {
+    expect(describeStreamStartFailure(new TypeError("Failed to fetch"))).toBe(
+      "Tidak dapat menghubungi server. Coba lagi."
+    );
+  });
+
+  it("delegates the 401, whose message this codebase authored and which is already Bahasa", () => {
+    expect(describeStreamStartFailure(new UserApiError("ignored", 401))).toBe(SESSION_EXPIRED_MESSAGE);
   });
 });

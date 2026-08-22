@@ -1,8 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import StreamPlayer, { type AttachHls } from "./StreamPlayer";
-import { describeRequestFailure } from "./errorCopy";
-import { listStreams, type StreamView, type WatchTokenResult } from "./apiClient";
+import { describeRequestFailure, describeStreamStartFailure } from "./errorCopy";
+import {
+  endOwnStream,
+  isUserSignedIn,
+  listStreams,
+  startOwnStream,
+  subscribeToUserAuth,
+  type StartedStream,
+  type StreamView,
+  type WatchTokenResult,
+} from "./apiClient";
+import { publishToWhip, type PublishHandle } from "./whip-publisher";
 
 /**
  * `/siaran` — who is live, and a lock where a stranger cannot watch (design
@@ -25,14 +35,13 @@ import { listStreams, type StreamView, type WatchTokenResult } from "./apiClient
  * already calls this component.
  *
  * **Creator controls — a title, the *Khusus anggota* checkbox, *Mulai
- * siaran* (design spec §8's second half) — are DELIBERATELY NOT built
- * here.** This task's own brief scopes Siaran to "who is live, and a lock
- * where a stranger cannot watch" and lists exactly three files to touch,
- * none of them a composer; no task in this phase's dispatch plan owns a
- * `POST /streams` form despite the route existing since Task 3. Recorded
- * here rather than silently — a future task will need to add it, and this
- * page's own history should say why it did not arrive with the rest of
- * Siaran.
+ * siaran* — are `StreamComposer` below** (design spec §8's second half;
+ * split from this component's own first half, "who is live and a lock,"
+ * which is Task 7). Signed-in only: `POST /streams` requires a session, and
+ * `useSyncExternalStore(subscribeToUserAuth, isUserSignedIn, ...)` is the
+ * same gate `BerandaPage` already uses to show `PostComposer` only to a
+ * signed-in visitor, for the identical reason — there is nothing for a
+ * signed-out one to do here but collect `SESSION_EXPIRED_MESSAGE`.
  */
 export default function SiaranPage({
   attachHls,
@@ -44,6 +53,7 @@ export default function SiaranPage({
   const [streams, setStreams] = useState<StreamView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const signedIn = useSyncExternalStore(subscribeToUserAuth, isUserSignedIn, () => false);
 
   useEffect(() => {
     let cancelled = false;
@@ -111,6 +121,253 @@ export default function SiaranPage({
           )}
         </article>
       ))}
+
+      {/* Below the list, per design spec §8's own words. Signed-in only —
+          see this component's own docstring. */}
+      {signedIn ? <StreamComposer /> : null}
     </main>
+  );
+}
+
+/**
+ * The creator's own controls (design spec §8's second half; task brief):
+ * a title, *Khusus anggota*, and *Mulai siaran* — then, once live, *Akhiri
+ * siaran* and a collapsed *Pakai OBS* block.
+ *
+ * ============================ THE STREAM KEY'S LIFETIME ============================
+ * `startOwnStream`'s response is the ONLY place `streamKey` ever reaches
+ * this browser (`StartedStream`'s own docstring in `apiClient.ts`) — it is
+ * held in `liveStream`, THIS COMPONENT'S OWN local state, for exactly as
+ * long as the broadcast it belongs to: never logged, never put in a URL
+ * (`whipUrl`/`rtmpUrl` are separate fields the server derives from it, and
+ * neither is ever built by concatenating the key onto anything here), and
+ * `endStream` below sets `liveStream` back to `null` in every case —
+ * success AND failure of the `DELETE` itself — so *Akhiri siaran* always
+ * unmounts the OBS block and takes the key out of the DOM with it, whether
+ * or not the network call that ended the row server-side actually
+ * succeeded. See `SiaranPage.test.tsx`'s own test for what this promises,
+ * and `DELETE /streams/:id`'s own docstring in `apiClient.ts` for why
+ * ending locally even on a failed request is the right call: that route
+ * works even on a box with no streaming provider configured, specifically
+ * so a creator can never be left unable to end their own stream.
+ * =======================================================================
+ *
+ * ==================== BROWSER PUBLISH, WITH OBS ALWAYS AS A FALLBACK ====================
+ * Design spec §7: "The browser publishes over WHIP." The moment `POST
+ * /streams` succeeds, `goLiveOverWhip` attempts exactly that —
+ * `navigator.mediaDevices.getUserMedia` for a default camera+mic, then
+ * `publishToWhip` (moved into this same directory from
+ * `dashboard/whip-publisher.ts` by this task, since Phase 8 deletes that
+ * directory — see that module's own docstring, unchanged by the move).
+ *
+ * Neither an unsupported browser, a denied/missing camera, nor a failed WHIP
+ * negotiation takes the stream down: the row is already `live` server-side
+ * the moment `startOwnStream` resolves, and the RTMP URL/key are shown
+ * regardless, so a creator whose browser cannot publish can still go live
+ * from OBS without starting over. `browserPublishNotice` says so in one
+ * Bahasa sentence rather than `EventsPage.tsx`'s own five-way
+ * `DEVICE_STATUS_MESSAGE` table — this screen's own copy list (task brief)
+ * names nothing beyond `Mulai siaran`/`Akhiri siaran`/`Khusus
+ * anggota`/`Pakai OBS`/`Judul`, so the camera/mic picker, the local preview,
+ * and the "don't close this tab" unload warning all stay exactly where they
+ * are, in the directory this phase does not touch.
+ *
+ * Nothing here reads `.message` off a caught error (`no-raw-server-errors`
+ * guard, scoped to `src/user/`) — a failed `getUserMedia`/`publishToWhip`
+ * call is reported with this component's OWN Bahasa sentence, never the
+ * browser's or `WhipNegotiationError`'s own text.
+ * =======================================================================
+ */
+function StreamComposer() {
+  const [title, setTitle] = useState("");
+  const [membersOnly, setMembersOnly] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [startFailure, setStartFailure] = useState<string | null>(null);
+  const [liveStream, setLiveStream] = useState<StartedStream | null>(null);
+  const [ending, setEnding] = useState(false);
+  const [browserPublishNotice, setBrowserPublishNotice] = useState<string | null>(null);
+
+  /** The live WHIP publish, if the browser managed to start one. `null` whenever there is none to close. */
+  const handleRef = useRef<PublishHandle | null>(null);
+  /**
+   * Set the instant this component unmounts — checked before ANY async step
+   * (`goLiveOverWhip`) touches state, the same guard `EventsPage.tsx`'s own
+   * `cancelledRef` uses and for the identical reason: a promise that settles
+   * after the component is gone must close what it opened rather than call
+   * a setter nobody will ever read.
+   */
+  const cancelledRef = useRef(false);
+
+  useEffect(() => {
+    cancelledRef.current = false;
+    return () => {
+      cancelledRef.current = true;
+      // Unmounting mid-broadcast (navigating away) must not leave a camera
+      // light on or a publish running with nothing left able to stop it —
+      // the row itself stays `live` server-side either way; only the
+      // BROWSER'S OWN publish is closed here.
+      handleRef.current?.close();
+      handleRef.current = null;
+    };
+  }, []);
+
+  const canSubmit = title.trim().length > 0 && !submitting;
+
+  /** Attempts the browser-WHIP half of going live. Never throws — every failure is absorbed into `browserPublishNotice`. */
+  async function goLiveOverWhip(whipUrl: string): Promise<void> {
+    if (typeof navigator === "undefined" || navigator.mediaDevices === undefined) {
+      if (!cancelledRef.current) {
+        setBrowserPublishNotice(
+          "Siaran dari browser tidak didukung di peramban ini — gunakan detail OBS di bawah."
+        );
+      }
+      return;
+    }
+
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch {
+      if (!cancelledRef.current) {
+        setBrowserPublishNotice(
+          "Tidak dapat mengakses kamera/mikrofon untuk siaran dari browser — gunakan detail OBS di bawah."
+        );
+      }
+      return;
+    }
+
+    if (cancelledRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+
+    try {
+      const handle = await publishToWhip({ whipUrl, stream });
+      if (cancelledRef.current) {
+        // Nothing will ever call `close()` on this handle otherwise — see
+        // `cancelledRef`'s own docstring.
+        handle.close();
+        return;
+      }
+      handleRef.current = handle;
+    } catch {
+      if (!cancelledRef.current) {
+        setBrowserPublishNotice("Gagal memulai siaran dari browser — gunakan detail OBS di bawah.");
+      }
+    }
+  }
+
+  async function handleSubmit(event: FormEvent): Promise<void> {
+    event.preventDefault();
+    // Belt and braces with `disabled` below — a form can also be submitted
+    // by Enter in some browsers.
+    if (!canSubmit) return;
+
+    setSubmitting(true);
+    setStartFailure(null);
+    setBrowserPublishNotice(null);
+    try {
+      const started = await startOwnStream({
+        title: title.trim(),
+        // Omitted entirely when unchecked — see `startOwnStream`'s own
+        // docstring on why this never sends a literal `"public"`.
+        visibility: membersOnly ? "members" : undefined,
+      });
+      setLiveStream(started);
+      setTitle("");
+      setMembersOnly(false);
+      void goLiveOverWhip(started.whipUrl);
+    } catch (err: unknown) {
+      // `describeStreamStartFailure` already special-cases the 503 this
+      // route answers when no streaming provider is configured, rather
+      // than the generic "coba lagi sebentar lagi" — see its own docstring.
+      setStartFailure(describeStreamStartFailure(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function endStream(): Promise<void> {
+    if (liveStream === null) return;
+    setEnding(true);
+    // Closes the BROWSER'S OWN publish first, unconditionally — whether or
+    // not the DELETE below succeeds, this browser stops sending video the
+    // instant `close()` returns (`PublishHandle.close()`'s own contract).
+    handleRef.current?.close();
+    handleRef.current = null;
+    try {
+      await endOwnStream(liveStream.id);
+    } catch {
+      // `DELETE /streams/:id` works even with no provider configured
+      // (`endOwnStream`'s own docstring) — a failure here is a network
+      // problem, not a reason to leave the creator's OWN screen still
+      // claiming they are live when their browser has already stopped
+      // sending. See this component's own docstring on the stream key's
+      // lifetime for why `liveStream` is cleared below regardless.
+    } finally {
+      setLiveStream(null);
+      setBrowserPublishNotice(null);
+      setEnding(false);
+    }
+  }
+
+  if (liveStream !== null) {
+    return (
+      <div className="stream-composer stream-composer-live" data-testid="stream-composer">
+        <p>
+          Anda sedang live: <strong>{liveStream.title}</strong>
+        </p>
+
+        {browserPublishNotice !== null ? (
+          <p className="feed-error" role="alert">
+            {browserPublishNotice}
+          </p>
+        ) : null}
+
+        {/* Collapsed by default — design spec §7: "a collapsed block for a
+            creator on a desktop with OBS." */}
+        <details className="stream-obs-details" data-testid="stream-obs-details">
+          <summary>Pakai OBS</summary>
+          <p>
+            URL RTMP: <code>{liveStream.rtmpUrl}</code>
+          </p>
+          <p>
+            Stream key: <code>{liveStream.streamKey}</code>
+          </p>
+        </details>
+
+        <button type="button" className="button-danger" onClick={() => void endStream()} disabled={ending}>
+          {ending ? "Mengakhiri..." : "Akhiri siaran"}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <form className="stream-composer" data-testid="stream-composer" onSubmit={handleSubmit}>
+      <label>
+        Judul
+        <input type="text" value={title} onChange={(event) => setTitle(event.target.value)} />
+      </label>
+
+      <label>
+        <input
+          type="checkbox"
+          checked={membersOnly}
+          onChange={(event) => setMembersOnly(event.target.checked)}
+        />
+        Khusus anggota
+      </label>
+
+      <button type="submit" className="button-primary" disabled={!canSubmit}>
+        Mulai siaran
+      </button>
+
+      {startFailure !== null ? (
+        <p className="feed-error" role="alert">
+          {startFailure}
+        </p>
+      ) : null}
+    </form>
   );
 }

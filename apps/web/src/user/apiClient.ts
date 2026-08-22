@@ -1341,3 +1341,59 @@ export function mintStreamWatchToken(streamId: string): Promise<WatchTokenResult
     method: "POST",
   });
 }
+
+/**
+ * `POST /streams`'s response — mirrors the API's own `StartedUserStream`
+ * (`apps/api/src/application/use-cases/start-user-stream.ts`) exactly, field
+ * for field. **THE ONLY RESPONSE IN THIS CODEBASE'S NEW WORLD THAT CARRIES
+ * `streamKey`** — see that interface's own docstring. `SiaranPage` holds it
+ * in local state only, for exactly as long as the broadcast it belongs to:
+ * never logged, never put in a URL, and cleared the moment *Akhiri siaran*
+ * runs. See `SiaranPage.tsx`'s own docstring for the full reasoning.
+ */
+export interface StartedStream {
+  id: string;
+  title: string;
+  visibility: string;
+  whipUrl: string;
+  rtmpUrl: string;
+  streamKey: string;
+  hlsPlaybackPath: string;
+}
+
+/**
+ * `POST /streams` (201) — *Mulai siaran* (design spec §7/§8). Requires a
+ * live session, same as every other `apiFetch` call.
+ *
+ * `visibility` follows `createPost`'s own convention exactly: **omitted
+ * entirely**, never sent as a literal, when the caller passes nothing — the
+ * route's own schema default is `public` (`user_stream.visibility`'s column
+ * default), and there is no edit path here that an omission could silently
+ * un-gate, unlike a post. There is no way to ask this function for an
+ * explicit `"public"` for the same reason `createPost` has none: every
+ * caller only ever has `"members"` to say, from *Khusus anggota*.
+ *
+ * **503s when this box has no streaming provider configured**
+ * (`routes/streams.ts`) — a condition no retry clears. `SiaranPage` never
+ * shows the general "coba lagi sebentar lagi" sentence for that shape; see
+ * `describeStreamStartFailure` in `errorCopy.ts`.
+ */
+export function startOwnStream(input: { title: string; visibility?: "members" }): Promise<StartedStream> {
+  const payload: { title: string; visibility?: "members" } = { title: input.title };
+  if (input.visibility !== undefined) payload.visibility = input.visibility;
+  return apiFetch<StartedStream>("/streams", { method: "POST", body: JSON.stringify(payload) });
+}
+
+/**
+ * `DELETE /streams/:id` — *Akhiri siaran*, ending the caller's own stream.
+ *
+ * **Works even on a box with no streaming provider configured** — ending a
+ * row that already exists needs nothing from the provider (`routes/streams.ts`'s
+ * own docstring), which is deliberate: without it, a creator on a box whose
+ * streaming was switched off mid-broadcast could never end their own row,
+ * and the partial `user_stream_one_live` index would then pin them `live`
+ * for ever — the exact ghost-row failure design spec §7 exists to prevent.
+ */
+export function endOwnStream(id: string): Promise<{ ended: boolean }> {
+  return apiFetch<{ ended: boolean }>(`/streams/${encodeURIComponent(id)}`, { method: "DELETE" });
+}

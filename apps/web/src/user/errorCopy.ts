@@ -222,3 +222,25 @@ export function describeSubscribeFailure(err: unknown): string {
   }
   return describeRequestFailure(err);
 }
+
+/**
+ * A failed *Mulai siaran* — `POST /streams` needs one distinction the
+ * general sentence gets wrong: its 503 fires ONLY when this box has no
+ * streaming provider configured (`routes/streams.ts`'s own docstring), a
+ * condition **no retry ever clears**. `describeRequestFailure`'s 5xx branch
+ * says "coba lagi sebentar lagi," which is the "confidently wrong" shape
+ * `describeUploadFailure`/`describeSubscribeFailure` were both written to
+ * avoid — telling a creator to retry a request that cannot succeed sends
+ * them round a loop with no exit, exactly the failure this codebase has
+ * already named and fixed twice.
+ *
+ * Every other shape (a 429, an expired session, a network drop, a 400 from
+ * an over-long title) is delegated unchanged — for those, "coba lagi" is
+ * genuinely right.
+ */
+export function describeStreamStartFailure(err: unknown): string {
+  if (err instanceof UserApiError && err.status === 503) {
+    return "Siaran langsung belum dikonfigurasi di server ini. Coba lagi nanti atau hubungi admin.";
+  }
+  return describeRequestFailure(err);
+}

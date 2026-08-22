@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import SiaranPage from "./SiaranPage";
 import type { AttachHlsInput, StreamPlayerHandle } from "./StreamPlayer";
-import type { StreamView } from "./apiClient";
+import { setUserSession, type StreamView } from "./apiClient";
 
 /**
  * `/siaran` — who is live, and a lock where a stranger cannot watch (task
@@ -24,6 +24,10 @@ let originalFetch: typeof fetch;
 
 beforeEach(() => {
   originalFetch = global.fetch;
+  // The composer describes below sign in via `setUserSession` — cleared here
+  // so a session from one test never leaks into the next, the same rule
+  // `BerandaPage.test.tsx`'s own `beforeEach` follows.
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -196,5 +200,316 @@ describe("SiaranPage — both a locked and an unlocked row, together", () => {
 
     await waitFor(() => expect(screen.queryAllByTestId("stream-lock").length).toBe(1));
     await waitFor(() => expect(screen.queryAllByTestId("stream-player").length).toBe(1));
+  });
+});
+
+/**
+ * Task 8: the creator's own controls — a title, *Khusus anggota*, and
+ * *Mulai siaran* (design spec §8's second half, split from Task 7's own
+ * half of §8). Signed-in only, the same gate `PostComposer`'s appearance on
+ * `BerandaPage` already uses — `POST /streams` requires a session, and there
+ * is nothing for a signed-out visitor to do here but collect
+ * `SESSION_EXPIRED_MESSAGE`.
+ *
+ * The API's own `GET /streams` is stubbed empty in every test below, the
+ * same shape `mockStreams([])` already gives every OTHER describe block in
+ * this file — this section only adds routing for the SECOND fetch call,
+ * `POST /streams` (and, where named, `DELETE /streams/:id`).
+ */
+const SESSION_USER = { handle: "wildan", displayName: "Wildan", email: "wildan@example.com" };
+
+const STARTED_STREAM = {
+  id: "stream-new",
+  title: "Tanya jawab",
+  visibility: "public",
+  whipUrl: "https://stream.example.com/whip/streamkey123",
+  rtmpUrl: "rtmp://stream.example.com/live",
+  streamKey: "streamkey123-secret",
+  hlsPlaybackPath: "/u/stream-new/index.m3u8",
+};
+
+interface Call {
+  url: string;
+  init: RequestInit | undefined;
+}
+
+/** Replaces `global.fetch` with a router keyed on method+url, and records every call. */
+function mockApi(handler: (url: string, method: string, init: RequestInit | undefined) => Response): Call[] {
+  const calls: Call[] = [];
+  global.fetch = mock(async (url: string, init?: RequestInit) => {
+    calls.push({ url, init });
+    return handler(url, (init?.method ?? "GET").toUpperCase(), init);
+  }) as unknown as typeof fetch;
+  return calls;
+}
+
+/** `GET /streams` empty, `POST /streams` answering with `STARTED_STREAM`. Nothing else is routed. */
+function mockGoLive(overrides?: Partial<typeof STARTED_STREAM>): Call[] {
+  return mockApi((url, method) => {
+    if (url === "/streams" && method === "GET") return jsonResponse({ streams: [] });
+    if (url === "/streams" && method === "POST") {
+      return jsonResponse({ ...STARTED_STREAM, ...overrides }, 201);
+    }
+    return jsonResponse({ error: "unrouted in this test" }, 500);
+  });
+}
+
+async function renderSignedIn() {
+  setUserSession("jwt-abc", SESSION_USER);
+  const result = renderSiaran();
+  await waitFor(() => expect(screen.queryAllByText("Belum ada siaran langsung.").length).toBe(1));
+  return result;
+}
+
+describe("SiaranPage — Mulai siaran is disabled until a title is typed", () => {
+  it("starts disabled, and enables once a title is typed", async () => {
+    mockGoLive();
+    await renderSignedIn();
+
+    const button = screen.getByRole("button", { name: "Mulai siaran" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    expect(button.disabled).toBe(false);
+  });
+
+  it("goes back to disabled when the title is cleared again — not a one-way switch", async () => {
+    mockGoLive();
+    await renderSignedIn();
+
+    const title = screen.getByLabelText("Judul");
+    const button = screen.getByRole("button", { name: "Mulai siaran" }) as HTMLButtonElement;
+    fireEvent.change(title, { target: { value: "Tanya jawab" } });
+    expect(button.disabled).toBe(false);
+
+    fireEvent.change(title, { target: { value: "   " } });
+    expect(button.disabled).toBe(true);
+  });
+});
+
+describe("SiaranPage — the OBS block after going live", () => {
+  it("shows the RTMP URL and the stream key, collapsed under Pakai OBS", async () => {
+    mockGoLive();
+    await renderSignedIn();
+
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mulai siaran" }));
+
+    const details = (await screen.findByTestId("stream-obs-details")) as HTMLDetailsElement;
+    expect(details.textContent).toContain(STARTED_STREAM.rtmpUrl);
+    expect(details.textContent).toContain(STARTED_STREAM.streamKey);
+    // Collapsed by default — the design spec's own words ("a collapsed
+    // block for a creator on a desktop with OBS"), not merely present.
+    expect(details.open).toBe(false);
+    // The summary's copy, EXACT — catches text appended after "Pakai OBS".
+    expect(screen.getByText("Pakai OBS").textContent).toBe("Pakai OBS");
+  });
+});
+
+describe("SiaranPage — Khusus anggota controls the request body", () => {
+  it("is sent as visibility: members when ticked — the WHOLE parsed body, not just one field", async () => {
+    const calls = mockGoLive();
+    await renderSignedIn();
+
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    fireEvent.click(screen.getByLabelText("Khusus anggota"));
+    fireEvent.click(screen.getByRole("button", { name: "Mulai siaran" }));
+
+    await screen.findByTestId("stream-obs-details");
+    const post = calls.find((c) => c.url === "/streams" && c.init?.method === "POST");
+    expect(JSON.parse((post?.init?.body as string) ?? "null")).toEqual({
+      title: "Tanya jawab",
+      visibility: "members",
+    });
+  });
+
+  it("omits visibility entirely when left unchecked — never sends a literal 'public'", async () => {
+    const calls = mockGoLive();
+    await renderSignedIn();
+
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mulai siaran" }));
+
+    await screen.findByTestId("stream-obs-details");
+    const post = calls.find((c) => c.url === "/streams" && c.init?.method === "POST");
+    expect(JSON.parse((post?.init?.body as string) ?? "null")).toEqual({ title: "Tanya jawab" });
+  });
+});
+
+describe("SiaranPage — Akhiri siaran", () => {
+  it("ends the stream: calls DELETE /streams/:id and returns the composer to its start state", async () => {
+    const calls = mockApi((url, method) => {
+      if (url === "/streams" && method === "GET") return jsonResponse({ streams: [] });
+      if (url === "/streams" && method === "POST") return jsonResponse(STARTED_STREAM, 201);
+      if (url === `/streams/${STARTED_STREAM.id}` && method === "DELETE") {
+        return jsonResponse({ ended: true });
+      }
+      return jsonResponse({ error: "unrouted in this test" }, 500);
+    });
+    await renderSignedIn();
+
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mulai siaran" }));
+    await screen.findByTestId("stream-obs-details");
+
+    fireEvent.click(screen.getByRole("button", { name: "Akhiri siaran" }));
+
+    await waitFor(() =>
+      expect(calls.some((c) => c.url === `/streams/${STARTED_STREAM.id}` && c.init?.method === "DELETE")).toBe(
+        true
+      )
+    );
+    await waitFor(() => expect(screen.queryAllByTestId("stream-obs-details").length).toBe(0));
+    // Back to the start state: the composer form (with its own "Mulai
+    // siaran" button) is there again, disabled until a title is typed.
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Mulai siaran" }) as HTMLButtonElement).disabled).toBe(true)
+    );
+  });
+
+  /**
+   * THE ONE TO THINK ABOUT (task instructions): a stream key must not
+   * outlive the broadcast that produced it, in this creator's own DOM.
+   * Asserted directly on `document.body.innerHTML` rather than a testid
+   * query, since the whole point is that NOTHING should still be holding
+   * it — there is no element left to query by the time this runs.
+   */
+  it("removes the stream key from the DOM once the stream has ended", async () => {
+    mockApi((url, method) => {
+      if (url === "/streams" && method === "GET") return jsonResponse({ streams: [] });
+      if (url === "/streams" && method === "POST") return jsonResponse(STARTED_STREAM, 201);
+      if (url === `/streams/${STARTED_STREAM.id}` && method === "DELETE") {
+        return jsonResponse({ ended: true });
+      }
+      return jsonResponse({ error: "unrouted in this test" }, 500);
+    });
+    await renderSignedIn();
+
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mulai siaran" }));
+    const details = await screen.findByTestId("stream-obs-details");
+    expect(details.textContent).toContain(STARTED_STREAM.streamKey);
+
+    fireEvent.click(screen.getByRole("button", { name: "Akhiri siaran" }));
+
+    await waitFor(() => expect(document.body.innerHTML.includes(STARTED_STREAM.streamKey)).toBe(false));
+  });
+});
+
+describe("SiaranPage — POST /streams 503s when no provider is configured", () => {
+  it("tells the creator honestly, never the generic 'coba lagi' retry sentence, and leaves the button usable", async () => {
+    mockApi((url, method) => {
+      if (url === "/streams" && method === "GET") return jsonResponse({ streams: [] });
+      if (url === "/streams" && method === "POST") {
+        return jsonResponse({ error: "siaran langsung belum tersedia di server ini" }, 503);
+      }
+      return jsonResponse({ error: "unrouted in this test" }, 500);
+    });
+    await renderSignedIn();
+
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mulai siaran" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe(
+      "Siaran langsung belum dikonfigurasi di server ini. Coba lagi nanti atau hubungi admin."
+    );
+    expect(alert.textContent).not.toContain("siaran langsung belum tersedia di server ini");
+    expect(screen.queryAllByTestId("stream-obs-details").length).toBe(0);
+    // Not left staring at a dead button — the title survived the failed
+    // submit (same rule `PostComposer` follows: a failed submit keeps what
+    // was typed), so the button is enabled again, not stuck.
+    expect((screen.getByRole("button", { name: "Mulai siaran" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+/**
+ * The move this task is actually about: `publishToWhip`, relocated from
+ * `dashboard/whip-publisher.ts`, is wired into *Mulai siaran* itself (design
+ * spec §7: "The browser publishes over WHIP"). `RTCPeerConnection` does not
+ * exist in happy-dom, so a minimal fake is installed on `globalThis` — the
+ * same shape `whip-publisher.test.ts` and `EventsPage.test.tsx` both use for
+ * the identical reason — and `navigator.mediaDevices` is stubbed the same
+ * way `EventsPage.test.tsx`'s own top-level `beforeEach` already does.
+ */
+describe("SiaranPage — going live actually publishes over WHIP", () => {
+  class FakePeerConnection {
+    localDescription: { type: string; sdp: string } | null = null;
+    iceGatheringState = "complete";
+    connectionState = "new";
+    closed = false;
+    private listeners = new Map<string, Set<() => void>>();
+    addTrack() {}
+    async createOffer() {
+      return { type: "offer", sdp: "v=0\r\no=- fake-offer\r\n" };
+    }
+    async setLocalDescription(desc: { type: string; sdp: string }) {
+      this.localDescription = desc;
+    }
+    async setRemoteDescription() {
+      this.connectionState = "connected";
+      for (const callback of this.listeners.get("connectionstatechange") ?? []) callback();
+    }
+    addEventListener(event: string, callback: () => void) {
+      if (!this.listeners.has(event)) this.listeners.set(event, new Set());
+      this.listeners.get(event)!.add(callback);
+    }
+    removeEventListener(event: string, callback: () => void) {
+      this.listeners.get(event)?.delete(callback);
+    }
+    close() {
+      this.closed = true;
+    }
+  }
+
+  function fakeMediaStream(): MediaStream {
+    const track = { kind: "video", stop() {} };
+    return { getTracks: () => [track] } as unknown as MediaStream;
+  }
+
+  let originalMediaDevices: MediaDevices | undefined;
+  let originalRTCPeerConnection: unknown;
+
+  beforeEach(() => {
+    originalMediaDevices = navigator.mediaDevices;
+    originalRTCPeerConnection = (globalThis as Record<string, unknown>).RTCPeerConnection;
+    (globalThis as Record<string, unknown>).RTCPeerConnection = FakePeerConnection;
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: async () => fakeMediaStream() },
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: originalMediaDevices });
+    (globalThis as Record<string, unknown>).RTCPeerConnection = originalRTCPeerConnection;
+  });
+
+  it("POSTs the SDP offer to the whipUrl POST /streams returned", async () => {
+    const whipCalls: Call[] = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url === "/streams" && method === "GET") return jsonResponse({ streams: [] });
+      if (url === "/streams" && method === "POST") return jsonResponse(STARTED_STREAM, 201);
+      if (typeof url === "string" && url.startsWith(STARTED_STREAM.whipUrl)) {
+        whipCalls.push({ url, init });
+        return new Response("v=0\r\no=- fake-answer\r\n", {
+          status: 201,
+          headers: {
+            "Content-Type": "application/sdp",
+            Location: `${new URL(STARTED_STREAM.whipUrl).pathname}/session-x`,
+          },
+        });
+      }
+      return jsonResponse({ error: "unrouted in this test" }, 500);
+    }) as unknown as typeof fetch;
+
+    await renderSignedIn();
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mulai siaran" }));
+
+    await waitFor(() => expect(whipCalls.length).toBe(1));
+    expect(whipCalls[0]?.url).toBe(STARTED_STREAM.whipUrl);
+    expect(whipCalls[0]?.init?.method).toBe("POST");
   });
 });
