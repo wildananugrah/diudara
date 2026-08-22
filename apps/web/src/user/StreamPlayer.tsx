@@ -50,6 +50,25 @@ const STREAM_UNSUPPORTED_MESSAGE = "Peramban ini tidak mendukung pemutaran siara
 
 export interface StreamPlayerHandle {
   destroy(): void;
+  /**
+   * **Fix round 1 (review Major).** Called after a successful re-mint has
+   * already updated what `getToken()` returns, for an attach mechanism that
+   * cannot re-read `getToken()` on its own the way `hls.js`'s `xhrSetup`
+   * does. Optional, and deliberately so: the `hls.js` branch below does NOT
+   * implement it, because `xhrSetup` already reads `getToken()` fresh on
+   * EVERY request it makes (the manifest, and every segment) — reloading
+   * there on top of that would only interrupt a stream that was already
+   * picking up the new token on its own.
+   *
+   * The NATIVE branch (`video.src`) is the one that needed this: a bare
+   * `<video src>` has no hook that fires per-request, so a refreshed token
+   * sitting in `getToken()` was previously invisible to it for the rest of
+   * the token's five-minute life — every re-mint minted a token, and the
+   * native path threw it away. `StreamPlayer`'s own re-mint success handler
+   * calls `handle.onTokenRefreshed?.()` right after writing the new token,
+   * so the native implementation below can reload with it.
+   */
+  onTokenRefreshed?(): void;
 }
 
 export interface AttachHlsInput {
@@ -94,14 +113,24 @@ export type AttachHls = (input: AttachHlsInput) => StreamPlayerHandle | null;
  * request, with no need to reconstruct the `Hls` instance or reload the
  * source.
  *
- * The NATIVE branch has a disclosed, unfixed gap, the same one
- * `WatchPage.tsx`'s own docstring records for its native path: there is no
- * hook equivalent to `xhrSetup` on a bare `<video src>`, so a re-mint
- * cannot reach a request already using the token baked into `src` at attach
- * time. Left as a one-time attach with no re-mint wiring at all, rather
- * than a half-correct reload loop that would only mask the gap. Untested,
- * for the same reason `WatchPage.tsx`'s native branch is: no iOS Safari
- * available to verify against.
+ * The NATIVE branch has no hook equivalent to `xhrSetup` on a bare
+ * `<video src>` — that part of the gap this file's earlier version
+ * disclosed is real and does not go away. Fix round 1 (review Major) closes
+ * the CONSEQUENCE rather than the cause: `StreamPlayer` now calls
+ * `handle.onTokenRefreshed?.()` after every successful re-mint, and this
+ * branch's `onTokenRefreshed` reloads `src` with the fresh token — a
+ * reload, not a per-segment hook, and visibly hitchy for it (see
+ * `onTokenRefreshed`'s own comment below), but a token that stays current
+ * for as long as the stream runs, on the ONE path every iOS visitor is
+ * forced through (WebKit is mandatory there; there is no alternative
+ * engine to fall back to). What remains UNVERIFIED rather than fixed:
+ * whether iOS Safari's native error/stall behaviour at the OLD boundary
+ * (before this fix, a token actually expiring mid-request) reaches
+ * `onFatalError` cleanly or stalls silently — happy-dom has no native HLS
+ * engine to answer that with, and this fix removes the question rather
+ * than answering it (the token is never allowed to reach that boundary
+ * now). Left for Task 9's gate to drive on a real iPhone; see this task's
+ * fix-round-1 report.
  */
 export function defaultAttachHls({
   video,
@@ -133,16 +162,40 @@ export function defaultAttachHls({
   }
 
   if (video.canPlayType("application/vnd.apple.mpegurl")) {
-    const token = getToken();
-    video.src = token !== null ? withToken(hlsUrl, token) : hlsUrl;
+    /**
+     * Fix round 1. Re-reads `getToken()` and reloads `src` with it — called
+     * once here at attach time, and again by `onTokenRefreshed` on every
+     * later re-mint. Same call shape both times, so attach and refresh
+     * cannot drift into two different ways of building the URL.
+     *
+     * `video.load()` is the cheapest fix that keeps the stream running, not
+     * a seamless one: reassigning `.src` alone is not reliably picked up by
+     * every native HLS engine (this mirrors `WatchPage.tsx`'s own native
+     * reload-on-error path, which uses the identical `load()` + `play()`
+     * pair for the same reason). For a LIVE manifest this reconnects at the
+     * live edge, the same experience an ordinary network hiccup already
+     * produces — not a scrub back to the start of a recording — but it is a
+     * real, visible hitch every `remintIntervalMs`, disclosed rather than
+     * hidden. A seamless swap would need a hook this platform does not
+     * expose on a bare `<video src>`; keeping the token current is strictly
+     * better than the alternative this fix replaces, which was silence.
+     */
+    function loadWithCurrentToken() {
+      const token = getToken();
+      video.src = token !== null ? withToken(hlsUrl, token) : hlsUrl;
+      video.load();
+      void video.play().catch(() => {});
+    }
+
+    loadWithCurrentToken();
     video.addEventListener("error", onFatalError);
-    void video.play().catch(() => {});
     return {
       destroy() {
         video.removeEventListener("error", onFatalError);
         video.removeAttribute("src");
         video.load();
       },
+      onTokenRefreshed: loadWithCurrentToken,
     };
   }
 
@@ -312,6 +365,12 @@ export default function StreamPlayer({
             const minted = await mintToken(stream.id);
             if (tornDown) return;
             tokenRef.current = minted.token;
+            // Fix round 1 (review Major): tell the attached player a fresh
+            // token exists. `hls.js`'s handle does not implement this —
+            // `xhrSetup` already re-reads `getToken()` on every request —
+            // so this is a no-op there; the native handle's implementation
+            // is the one this call exists for.
+            handle?.onTokenRefreshed?.();
           } catch {
             // Any refusal — a lapsed membership, a dead session, a network
             // drop — is the identical outcome: stop playback and show the
