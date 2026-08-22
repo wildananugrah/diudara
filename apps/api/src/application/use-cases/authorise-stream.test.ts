@@ -146,11 +146,26 @@ function userTokenFor(viewerId: string, streamId: string, secret = SECRET, now =
   });
 }
 
-/** The same token with one byte of its payload rewritten and the signature kept. */
+/**
+ * The same token with its `viewerId` rewritten and the signature kept — an
+ * attempt to present somebody else's credential as your own.
+ *
+ * FIX ROUND 1, MIN-1: this used to rewrite `streamId`, which meant the two
+ * "a TAMPERED token is refused" tests never reached the guard in their name.
+ * The forged `streamId` no longer matched the stream being requested, so
+ * `claims.streamId !== stream.id` refused FIRST — and both tests stayed green
+ * with the signature comparison deleted outright, making them duplicates of
+ * "a token minted for ANOTHER stream…" wearing a different name.
+ *
+ * `viewerId` is the right field to forge precisely because NOTHING downstream
+ * reads it (see `user-watch-token.ts`'s own note): the signature is the only
+ * thing standing between this token and acceptance, so a test that refuses it
+ * is testing the signature and nothing else.
+ */
 function tamperWith(token: string) {
   const [payload, signature] = token.split(".");
   const decoded = JSON.parse(Buffer.from(payload!, "base64url").toString());
-  decoded.streamId = "99999999-9999-4999-8999-999999999999";
+  decoded.viewerId = "99999999-9999-4999-8999-999999999999";
   return `${Buffer.from(JSON.stringify(decoded)).toString("base64url")}.${signature}`;
 }
 
@@ -646,10 +661,28 @@ describe("AuthoriseStream — user world publish (MediaMTX's own hook)", () => {
 });
 
 /**
- * THE PAYWALL, seen from MediaMTX's own hook (resolution BY KEY). Every case
- * here has a twin in the by-id describe further down, and both go through the
- * one `authoriseUserStreamRead` decision — see that method's docstring for
- * why there must not be two copies of it.
+ * THE PAYWALL, seen from MediaMTX's own hook (resolution BY KEY).
+ *
+ * EVERY GATE CASE HERE HAS A TWIN in the by-id describe further down, and
+ * vice versa — nine apiece, in the same order: public-no-token,
+ * members-no-token, members-with-token, wrong-stream, expired, tampered,
+ * wrong-secret, community-token, and unrecognised-visibility. Both describes
+ * reach the same `authoriseUserStreamRead`; the pairs exist so that a copy
+ * which loosened on ONE path would fail on that path alone and say so.
+ *
+ * FIX ROUND 1, MIN-4: that claim used to be written here and was FALSE in
+ * both directions — this describe had no deny-by-default case at all (so
+ * carried requirement #1 rested on a single deletable line in the OTHER
+ * describe), and the by-id one had no wrong-secret or community-token case.
+ * The three missing twins are added rather than the claim softened, because
+ * "the two entry points agree case for case" is the property a shared
+ * decision function exists to have.
+ *
+ * What is deliberately NOT mirrored is each entry point's own RESOLUTION:
+ * by-key alone tests that a community event's key resolves to nothing here,
+ * and by-id alone tests the publish key, an unknown id, a malformed id and an
+ * event id. Those are about which table is consulted and how, which is the
+ * one thing the two paths genuinely do differently.
  */
 describe("AuthoriseStream — user world read by stream key (MediaMTX's own hook)", () => {
   it("a PUBLIC stream authorises a read with no token at all", async () => {
@@ -762,9 +795,18 @@ describe("AuthoriseStream — user world read by stream key (MediaMTX's own hook
 
   /**
    * A COMMUNITY watch token is signed with the very same
-   * `STREAM_TOKEN_SECRET`. It must not open a user stream — the domain
-   * separator in `user-watch-token.ts` is what makes that structural, and
-   * this is that guarantee asserted where it actually matters.
+   * `STREAM_TOKEN_SECRET`. It must not open a user stream, and this is that
+   * outcome asserted where a member would feel it — through the real gate,
+   * against a real row.
+   *
+   * FIX ROUND 1, MIN-2 — WHAT REFUSES IT, corrected. This comment used to
+   * credit the domain separator in `user-watch-token.ts`. It is not the
+   * separator: a community payload carries `subscriptionId`/`eventId` and no
+   * `viewerId`, so `verifyUserWatchToken`'s shape checks turn it away whether
+   * or not the two worlds share a signing domain, and this test stays green
+   * with the separator deleted. The separator is pinned by the one test that
+   * genuinely reaches it — `user-watch-token.test.ts > refuses a well-shaped
+   * payload signed WITHOUT the domain separator`.
    */
   it("a COMMUNITY watch token does not open a gated user stream", async () => {
     const stream = await seedUserStream("members");
@@ -776,6 +818,34 @@ describe("AuthoriseStream — user world read by stream key (MediaMTX's own hook
       action: "read",
       path: `u/${stream.streamKey}`,
       query: `token=${tokenFor(subscription.id, event.id)}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  /**
+   * DENY BY DEFAULT, on THIS path too — the twin of the by-id case, and the
+   * reason it exists: before fix round 1, carried requirement #1 was pinned
+   * by exactly one test on one entry point, so deleting that single line left
+   * an allow-by-default paywall with a green suite.
+   *
+   * The token is present and valid on purpose. It proves the visibility
+   * allow-list is consulted BEFORE the token, so no credential can rescue a
+   * row whose `visibility` this codebase does not recognise.
+   */
+  it("DENIES a visibility it does not recognise, even with a valid token", async () => {
+    const stream = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", stream.id);
+    await db
+      .update(userStreams)
+      .set({ visibility: "tier2" })
+      .where(eq(userStreams.id, stream.id));
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: `token=${token}`,
       now: NOW,
     });
 
@@ -925,6 +995,42 @@ describe("AuthoriseStream — user world read by stream id (nginx auth_request)"
     const result = await useCase.authoriseUserReadByStreamId({
       streamId: stream.id,
       query: `token=${tamperWith(token)}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("a token signed with the WRONG secret is refused", async () => {
+    const stream = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", stream.id, OTHER_SECRET);
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: stream.id,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  /**
+   * The twin of the by-key case, and the one that matters most on THIS path:
+   * nginx's `auth_request` is what a member's browser actually reaches, so a
+   * community token opening a user stream here would be the bypass a real
+   * person could perform. Refused by `verifyUserWatchToken`'s shape checks —
+   * see the by-key twin's comment for why that, and not the domain
+   * separator, is what turns it away.
+   */
+  it("a COMMUNITY watch token does not open a gated user stream", async () => {
+    const stream = await seedUserStream("members");
+    const community = await seedCommunity();
+    const { event } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: stream.id,
+      query: `token=${tokenFor(subscription.id, event.id)}`,
       now: NOW,
     });
 

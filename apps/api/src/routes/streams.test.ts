@@ -32,6 +32,18 @@ const BUDI = {
   displayName: "Budi",
 };
 
+/**
+ * A THIRD creator, and she exists for exactly one test: the cross-creator
+ * isolation pin below. Two accounts cannot express "a paying member of
+ * somebody ELSE" — that needs a creator the stream's owner is not.
+ */
+const CITRA = {
+  handle: "citra",
+  email: "citra@example.com",
+  password: "supersecret123",
+  displayName: "Citra",
+};
+
 function authed(token: string) {
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
@@ -487,6 +499,47 @@ describe("POST /streams/:id/watch-token", () => {
       await subscribe(budi.userId, rina.userId, YESTERDAY());
 
       const res = await mintToken(a, stream.id, budi.token);
+
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe("siaran ini khusus anggota");
+    });
+  });
+
+  /**
+   * FIX ROUND 1, MAJ-1 — THE CROSS-CREATOR ISOLATION PIN, and nothing in the
+   * suite carried it before.
+   *
+   * Every other mint test gives the viewer either NO subscription or one to
+   * the stream's OWN owner, so all of them stay green if the second argument
+   * of `isMemberOf.execute(viewerId, stream.ownerId)` drifts away from "this
+   * stream's owner" towards "is this viewer a member of anything at all".
+   * That drift would open **every gated broadcast on the platform to anybody
+   * holding any subscription** — the same defect class as a watch token that
+   * opens any stream, which is pinned four times over, while the
+   * wrong-CREATOR case was pinned zero times. Phase 6 found this exact shape
+   * in its subscriber list: a cross-owner isolation property everything
+   * relied on and nothing asserted.
+   *
+   * CITRA IS LIVE TOO, and that is load-bearing rather than scenery. A
+   * "member of anyone currently broadcasting" drift can only be caught while
+   * somebody else is actually broadcasting — with Citra merely subscribed-to
+   * and off-air, the mutant that expresses this drift stays green. It also
+   * happens to be the ordinary state of Siaran: several people live at once.
+   */
+  it("a member of ANOTHER creator cannot mint for this creator's stream", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const rina = await signUp(a, RINA);
+      const budi = await signUp(a, BUDI);
+      const citra = await signUp(a, CITRA);
+      const rinas = await (
+        await startStream(a, rina.token, { title: "Tanya jawab", visibility: "members" })
+      ).json();
+      await startStream(a, citra.token, { title: "Kelas Citra", visibility: "members" });
+      // Paid, current, and to the WRONG creator.
+      await subscribe(budi.userId, citra.userId, IN_A_MONTH());
+
+      const res = await mintToken(a, rinas.id, budi.token);
 
       expect(res.status).toBe(403);
       expect((await res.json()).error).toBe("siaran ini khusus anggota");

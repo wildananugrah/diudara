@@ -13,8 +13,23 @@
  * already documents for `ENTITLED_STATUS`.
  *
  * WHAT IT PROVES, AND WHAT IT DOES NOT. It names WHO the request is for
- * (`viewerId`) and WHICH stream it opens (`streamId`), at MINT time. It does
- * NOT prove the viewer is still a paying member: the entitlement check lives
+ * (`viewerId`) and WHICH stream it opens (`streamId`), at MINT time.
+ *
+ * THOSE TWO FIELDS ARE NOT THE SAME KIND OF THING, and the difference is
+ * worth stating because the symmetry of the payload hides it. `streamId` is
+ * ACCESS CONTROL: `AuthoriseStream.authoriseUserStreamRead` compares it
+ * against the row being requested, and a mismatch refuses. `viewerId` is
+ * AUDIT ONLY — nothing anywhere reads it back, and by design cannot: a
+ * forwarded token works for whoever holds it (design spec §5's stated
+ * bargain, chosen deliberately), so a runtime check against the requester
+ * would be a promise this feature does not make. What it buys is that a token
+ * can be reasoned about AFTER the fact, which is precisely what the six-hour
+ * token it replaces could not do — that one named a subscription and no
+ * person. `verifyUserWatchToken` still refuses a token missing the field, and
+ * `user-watch-token.test.ts > refuses a correctly-signed token that names no
+ * viewer` is what keeps that check from rotting into decoration.
+ *
+ * It does NOT prove the viewer is still a paying member: the entitlement check lives
  * at the MINT endpoint (`POST /streams/:id/watch-token` → `MintUserWatchToken`
  * → `IsMemberOf`), and the ten-minute lifetime below is what bounds how long
  * a membership that lapsed mid-broadcast keeps working. Spec §5 states that
@@ -141,6 +156,11 @@ export function verifyUserWatchToken(input: {
   } catch {
     return null;
   }
+  // AUDIT, not access control — nothing downstream reads `viewerId` back (see
+  // this file's header). The check earns its place anyway: a token that names
+  // nobody is not a token this module ever minted, and accepting one would
+  // silently retire the only property that makes a leak investigable. Pinned
+  // by "refuses a correctly-signed token that names no viewer".
   if (typeof payload?.viewerId !== "string") return null;
   if (typeof payload?.streamId !== "string") return null;
   if (typeof payload?.exp !== "number") return null;

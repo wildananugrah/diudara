@@ -84,10 +84,18 @@ describe("user watch tokens", () => {
   /**
    * THE TWO WORLDS SHARE ONE SECRET (`STREAM_TOKEN_SECRET`) and one encoding,
    * so nothing about the wire format keeps a community `watch-token.ts` token
-   * out of this verifier — only what the two modules sign does. A community
-   * token opening a user stream would be a paywall bypass for anybody holding
-   * ANY subscription anywhere, so it is pinned in both directions rather than
-   * left to the accident that the payload field names differ.
+   * out of this verifier. A community token opening a user stream would be a
+   * paywall bypass for anybody holding ANY subscription anywhere, so the
+   * refusal is pinned outright.
+   *
+   * FIX ROUND 1, MIN-2 — WHAT ACTUALLY REFUSES IT, measured rather than
+   * assumed: the `typeof payload?.viewerId !== "string"` shape check, NOT the
+   * domain separator. A community payload carries `subscriptionId`/`eventId`
+   * and no `viewerId`, so this test stays green with the separator deleted.
+   * That is worth knowing and the property is worth pinning — it is the
+   * outcome a member cares about — but the comment used to credit the
+   * separator for it, which was false. The separator has its own test two
+   * cases below, and it is the only one that reaches it.
    */
   it("refuses a COMMUNITY watch token minted with the very same secret", () => {
     const communityToken = mintWatchToken({
@@ -102,10 +110,44 @@ describe("user watch tokens", () => {
   });
 
   /**
-   * ...AND THE SEPARATOR ITSELF, which the test above does NOT reach. Measured,
-   * not assumed: deleting the domain separator from `sign` leaves that test
-   * green, because a community token's payload carries no `viewerId` and the
-   * `typeof` checks turn it away regardless. The separator's whole job is to
+   * FIX ROUND 1, MIN-3 — the `viewerId` shape check, pinned at last.
+   *
+   * Deleting `if (typeof payload?.viewerId !== "string") return null` used to
+   * kill NOTHING: no consumer ever reads `viewerId` back
+   * (`authoriseUserStreamRead` uses only `streamId`), so nothing downstream
+   * could notice a token that names nobody. An unused validation that LOOKS
+   * load-bearing is worse than either keeping or dropping it honestly, so it
+   * gets a test that fails when it goes.
+   *
+   * The payload here is signed CORRECTLY — the domain separator written out
+   * as a literal, the way the bare-HMAC case below writes out the other
+   * module's formula — so the signature, the expiry and `streamId` all pass.
+   * The only thing left to refuse it is the field this test is named for.
+   *
+   * What it buys: `viewerId` is an AUDIT property, not an access-control one.
+   * It cannot decide who gets bytes (a forwarded token works for whoever
+   * holds it — design spec §5's stated bargain), but a token that names
+   * nobody at all cannot be reasoned about after the fact, which is the exact
+   * failing this module exists to fix in the six-hour token it replaces.
+   */
+  it("refuses a correctly-signed token that names no viewer", () => {
+    const encoded = Buffer.from(
+      JSON.stringify({ streamId: STREAM, exp: NOW + 600_000 })
+    ).toString("base64url");
+    const signature = createHmac("sha256", SECRET)
+      .update(`diudara.user-watch.v1.${encoded}`)
+      .digest("base64url");
+
+    expect(
+      verifyUserWatchToken({ token: `${encoded}.${signature}`, now: NOW, secret: SECRET })
+    ).toBeNull();
+  });
+
+  /**
+   * ...AND THE SEPARATOR ITSELF, which the COMMUNITY-token case above does
+   * NOT reach. Measured, not assumed: deleting the domain separator from
+   * `sign` leaves that test green, because a community token's payload carries
+   * no `viewerId` and the `typeof` checks turn it away regardless. The separator's whole job is to
    * make the refusal structural rather than incidental — one careless edit to
    * those shape checks away — so it needs a case that fails on the SIGNATURE.
    *
