@@ -19,7 +19,9 @@ import { resetDatabase } from "../db/test-helpers";
 import { errorHandler } from "../http/error-handler";
 import { AuthoriseStream } from "../application/use-cases/authorise-stream";
 import { HandleStreamLifecycle } from "../application/use-cases/handle-stream-lifecycle";
+import { EndUserStream } from "../application/use-cases/end-user-stream";
 import { OUTBOX_NOTIFY_STREAM_LIVE } from "../application/ports/outbox-repository.port";
+import { SystemClock } from "../infrastructure/clock/system.clock";
 import { mintWatchToken, WATCH_TOKEN_TTL_MS } from "../domain/watch-token";
 import { DrizzleEventRepository } from "../infrastructure/repositories/drizzle-event.repository";
 import { DrizzleStreamLifecycleUnitOfWork } from "../infrastructure/repositories/drizzle-stream-lifecycle.unit-of-work";
@@ -49,6 +51,7 @@ const handleStreamLifecycle = new HandleStreamLifecycle(
   eventRepository,
   new DrizzleStreamLifecycleUnitOfWork(db)
 );
+const endUserStream = new EndUserStream(userStreamRepository, new SystemClock());
 
 /**
  * A REAL `AuthoriseStream`, subclassed only to make its decision methods
@@ -102,9 +105,26 @@ class ThrowingHandleStreamLifecycle extends HandleStreamLifecycle {
   }
 }
 
+/**
+ * Same purpose as `ThrowingHandleStreamLifecycle` above, and used the same way — but
+ * for Task 6's `EndUserStream`, the `u/<key>` world's own lifecycle handler. Its
+ * `execute` throwing PROVES the route never reaches it, whether because the secret
+ * check refused first or because `parseStreamPath` sent this hook to
+ * `HandleStreamLifecycle` instead.
+ */
+class ThrowingEndUserStream extends EndUserStream {
+  constructor() {
+    super(userStreamRepository, new SystemClock());
+  }
+  override async execute(): Promise<void> {
+    throw new Error("EndUserStream.execute must not run for a path it does not own");
+  }
+}
+
 function app(
   authorise: AuthoriseStream = authoriseStream,
-  lifecycle: HandleStreamLifecycle = handleStreamLifecycle
+  lifecycle: HandleStreamLifecycle = handleStreamLifecycle,
+  userLifecycle: EndUserStream = endUserStream
 ) {
   const a = new Hono();
   a.onError(errorHandler);
@@ -114,6 +134,7 @@ function app(
       authoriseStream: authorise,
       mediamtxWebhookSecret: SECRET,
       handleStreamLifecycle: lifecycle,
+      endUserStream: userLifecycle,
     })
   );
   return a;
@@ -826,6 +847,7 @@ describe("GET /webhooks/mediamtx/auth-request — read", () => {
         authoriseStream: undefined,
         mediamtxWebhookSecret: SECRET,
         handleStreamLifecycle: undefined,
+        endUserStream: undefined,
       })
     );
 
@@ -1292,5 +1314,120 @@ describe("POST /webhooks/mediamtx/lifecycle — end-to-end wiring", () => {
       "wrong-secret"
     );
     expect(wrongSecret.status).toBe(401);
+  });
+
+  /**
+   * Same purpose, for the OTHER world Task 6 adds: proves `bootstrap()` really does
+   * wire `EndUserStream` off `MEDIAMTX_WEBHOOK_SECRET` too, and that the real route
+   * dispatches a `u/<key>` hook to it rather than to `HandleStreamLifecycle`.
+   */
+  it("ends a user stream through the real bootstrap() when streaming is fully configured", async () => {
+    const stream = await seedUserStream("public");
+
+    const originals = {
+      MEDIAMTX_RTMP_HOST: process.env.MEDIAMTX_RTMP_HOST,
+      MEDIAMTX_HLS_BASE_URL: process.env.MEDIAMTX_HLS_BASE_URL,
+      MEDIAMTX_WHIP_BASE_URL: process.env.MEDIAMTX_WHIP_BASE_URL,
+      MEDIAMTX_WEBHOOK_SECRET: process.env.MEDIAMTX_WEBHOOK_SECRET,
+      STREAM_TOKEN_SECRET: process.env.STREAM_TOKEN_SECRET,
+    };
+    process.env.MEDIAMTX_RTMP_HOST = "mediamtx.internal";
+    process.env.MEDIAMTX_HLS_BASE_URL = "https://hls.diudara.test";
+    process.env.MEDIAMTX_WHIP_BASE_URL = "https://whip.diudara.test";
+    process.env.MEDIAMTX_WEBHOOK_SECRET = SECRET;
+    process.env.STREAM_TOKEN_SECRET = SECRET;
+
+    let a: ReturnType<typeof createApp>;
+    try {
+      a = createApp(bootstrap());
+    } finally {
+      for (const [key, value] of Object.entries(originals)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+
+    const res = await postLifecycle(a, {
+      hook: "offline",
+      streamKey: `u/${stream.streamKey}`,
+    });
+    expect(res.status).toBe(200);
+
+    const reloaded = await userStreamRepository.findById(stream.id);
+    expect(reloaded!.status).toBe("ended");
+  });
+});
+
+/**
+ * Task 6 of Phase 7: the route's own dispatch between the two lifecycle classes,
+ * told apart by `parseStreamPath` — see `mediamtx-webhooks.ts`'s `/lifecycle`
+ * docstring. These tests are about the ROUTE's own decision, not either class's
+ * internal behaviour (that is `end-user-stream.test.ts`'s and
+ * `handle-stream-lifecycle.test.ts`'s job) — so each uses the OTHER world's
+ * throwing double to prove mutual isolation: a `u/<key>` hook must never reach
+ * `HandleStreamLifecycle`, and a `live/<key>` (or unparseable) hook must never reach
+ * `EndUserStream`.
+ */
+describe("POST /webhooks/mediamtx/lifecycle — dispatch between the two worlds", () => {
+  it("a u/<key> offline hook ends the user stream, and never calls HandleStreamLifecycle", async () => {
+    const stream = await seedUserStream("public");
+    const a = app(authoriseStream, new ThrowingHandleStreamLifecycle());
+
+    const res = await postLifecycle(a, {
+      hook: "offline",
+      streamKey: `u/${stream.streamKey}`,
+    });
+
+    expect(res.status).toBe(200);
+    const reloaded = await userStreamRepository.findById(stream.id);
+    expect(reloaded!.status).toBe("ended");
+  });
+
+  it("a live/<key> hook never calls EndUserStream", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "scheduled");
+    const a = app(authoriseStream, handleStreamLifecycle, new ThrowingEndUserStream());
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
+
+    expect(res.status).toBe(200);
+    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
+    expect(reloaded!.status).toBe("live");
+  });
+
+  it("an unparseable streamKey falls through to HandleStreamLifecycle, unchanged, and never calls EndUserStream", async () => {
+    const a = app(authoriseStream, handleStreamLifecycle, new ThrowingEndUserStream());
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: "not-a-namespaced-path" });
+
+    expect(res.status).toBe(200);
+    const activity = await db.select().from(activityLogs);
+    expect(activity).toHaveLength(0);
+  });
+
+  it("a u/<key> hook acks 200 without throwing when streaming is not configured (endUserStream undefined)", async () => {
+    const stream = await seedUserStream("public");
+    const a = new Hono();
+    a.onError(errorHandler);
+    a.route(
+      "/webhooks/mediamtx",
+      mediamtxWebhookRoutes({
+        authoriseStream,
+        mediamtxWebhookSecret: SECRET,
+        handleStreamLifecycle,
+        endUserStream: undefined,
+      })
+    );
+
+    const res = await postLifecycle(a, {
+      hook: "offline",
+      streamKey: `u/${stream.streamKey}`,
+    });
+
+    expect(res.status).toBe(200);
+    // Nothing ran — the row is untouched, exactly as `handleStreamLifecycle undefined`
+    // leaves a community event untouched.
+    const reloaded = await userStreamRepository.findById(stream.id);
+    expect(reloaded!.status).toBe("live");
   });
 });

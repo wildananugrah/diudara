@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { UnauthorizedError } from "../application/errors";
 import { verifyCallbackToken } from "../infrastructure/webhooks/webhook-token";
+import { parseStreamPath } from "../application/use-cases/authorise-stream";
 import type { Dependencies } from "../bootstrap";
 
 /**
@@ -112,7 +113,7 @@ const LIFECYCLE_HOOKS: ReadonlySet<string> = new Set(["online", "offline"]);
 export function mediamtxWebhookRoutes(
   deps: Pick<
     Dependencies,
-    "authoriseStream" | "mediamtxWebhookSecret" | "handleStreamLifecycle"
+    "authoriseStream" | "mediamtxWebhookSecret" | "handleStreamLifecycle" | "endUserStream"
   >
 ) {
   const app = new Hono();
@@ -339,10 +340,29 @@ export function mediamtxWebhookRoutes(
    * second hand-rolled comparison that could silently diverge.
    *
    * THE SECRET CHECK IS STILL THE FIRST STATEMENT, before the body is parsed and
-   * before `HandleStreamLifecycle` is ever reached — identical ordering to
+   * before either lifecycle class is ever reached — identical ordering to
    * `/auth`, for the identical reason.
    *
-   * ALWAYS 200 ONCE THE SECRET CHECKS OUT, whatever `HandleStreamLifecycle.execute`
+   * TWO WORLDS, ONE ROUTE, TOLD APART BY `parseStreamPath` — Task 6 of Phase 7.
+   * `HandleStreamLifecycle` (the community `live/<key>` world, unchanged by this
+   * task — its own docstring still says the user world "is not handled by this
+   * class") and `EndUserStream` (the new `u/<key>` world) each have a real job to
+   * do only for their own namespace, so THIS ROUTE parses `body.streamKey` ONCE,
+   * itself, with the SAME parser both use-cases already import
+   * (`authorise-stream.ts`'s `parseStreamPath` — "the single parser", per that
+   * function's own docstring), and dispatches to exactly one of them. The
+   * alternative — calling both classes unconditionally and letting each ignore
+   * what is not theirs — was rejected: `HandleStreamLifecycle` already logs a
+   * warning for a path it does not own, and calling it (or the new class) on
+   * EVERY lifecycle event regardless of world would turn an ordinary community
+   * broadcast's `online`/`offline` into a spurious "ignoring" log line every
+   * single time, forever. `EndUserStream` gets the BARE key (`parsed.key`), never
+   * the raw `u/<key>` path — see its own docstring for why its signature could
+   * change (this task owns that file) while `HandleStreamLifecycle.execute`'s
+   * could not (its signature is untouched, so it still takes the raw path and
+   * re-parses it itself for the community/unparseable cases below).
+   *
+   * ALWAYS 200 ONCE THE SECRET CHECKS OUT, whatever the chosen class's `execute`
    * did or did not do: an unknown stream key, a malformed body, an out-of-order
    * hook that turned out to be a no-op — none of these are failures MediaMTX
    * should retry over. `runOnOnline`/`runOnOffline` are fire-and-forget; a 500
@@ -367,6 +387,26 @@ export function mediamtxWebhookRoutes(
     }
 
     if (!isLifecycleRequestBody(body)) {
+      return c.json(ACKNOWLEDGED_BODY, 200);
+    }
+
+    // Told apart by NAMESPACE, never by guessing — see this route's own
+    // docstring. `parsed === null` (unparseable) and `parsed.world ===
+    // "community"` both fall through to `handleStreamLifecycle` below,
+    // UNCHANGED from this route's behaviour before this task: the community
+    // world's own lifecycle logic must not move (Global Constraints).
+    const parsed = parseStreamPath(body.streamKey);
+
+    if (parsed !== null && parsed.world === "user") {
+      // Streaming not configured on this box — nothing to react to. Unreachable
+      // in practice once the secret check above holds (same lockstep pairing as
+      // `handleStreamLifecycle`/`mediamtxWebhookSecret` — see bootstrap.ts);
+      // kept for type-safety and so this route never assumes the pairing
+      // without checking.
+      if (!deps.endUserStream) {
+        return c.json(ACKNOWLEDGED_BODY, 200);
+      }
+      await deps.endUserStream.execute({ hook: body.hook, streamKey: parsed.key });
       return c.json(ACKNOWLEDGED_BODY, 200);
     }
 

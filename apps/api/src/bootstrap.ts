@@ -99,6 +99,7 @@ import {
 import { DrizzleUserStreamRepository } from "./infrastructure/repositories/drizzle-user-stream.repository";
 import { AuthoriseStream } from "./application/use-cases/authorise-stream";
 import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lifecycle";
+import { EndUserStream } from "./application/use-cases/end-user-stream";
 import { ResolveWatchToken } from "./application/use-cases/resolve-watch-token";
 import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-storage.adapter";
 import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage.adapter";
@@ -646,6 +647,18 @@ export interface Dependencies {
    * the class itself.
    */
   handleStreamLifecycle: HandleStreamLifecycle | undefined;
+  /**
+   * Task 6 of Phase 7's `POST /webhooks/mediamtx/lifecycle` decision logic for the
+   * `u/<key>` world — `undefined` in lockstep with `mediamtxWebhookSecret`, same
+   * reasoning as `handleStreamLifecycle` immediately above (this class needs no
+   * secret of its own either; it only reads and writes `user_stream`, unscoped by
+   * owner, same as that class). The route (`routes/mediamtx-webhooks.ts`) parses
+   * `$MTX_PATH` with `parseStreamPath` itself and dispatches to THIS field when the
+   * path names the user world, and to `handleStreamLifecycle` otherwise — see that
+   * route's own docstring for why the dispatch lives there rather than inside either
+   * class.
+   */
+  endUserStream: EndUserStream | undefined;
   /**
    * Task 8's `GET /c/watch/:token` decision logic — `undefined` in lockstep
    * with `authoriseStream` (both are read off `STREAM_TOKEN_SECRET`; see
@@ -2508,6 +2521,19 @@ export function bootstrap(): Dependencies {
     ? new HandleStreamLifecycle(eventRepository, new DrizzleStreamLifecycleUnitOfWork(db))
     : undefined;
 
+  // Task 6 of Phase 7's `POST /webhooks/mediamtx/lifecycle` for the `u/<key>` world —
+  // see the `endUserStream` field's own docstring for why this is a separate class
+  // rather than a branch inside `HandleStreamLifecycle`, and for why the route
+  // decides which of the two to call. `userStreamRepository` is the SAME pooled
+  // instance `startUserStream`/`listLiveStreams`/`endOwnUserStream` already share —
+  // this class needs no transaction of its own, unlike `handleStreamLifecycle`,
+  // because `user_stream`'s `endById` is a single atomic UPDATE with nothing else to
+  // commit alongside it (no activity_log row, no per-member notify — see the class's
+  // own docstring for why the two worlds' `online` hooks differ this much).
+  const endUserStream = mediamtxWebhookSecret
+    ? new EndUserStream(userStreamRepository, clock)
+    : undefined;
+
   return {
     creatorRepository,
     tokenIssuer,
@@ -2583,6 +2609,7 @@ export function bootstrap(): Dependencies {
     resolveWatchToken,
     mediamtxWebhookSecret,
     handleStreamLifecycle,
+    endUserStream,
     mediaStorage,
     uploadMedia,
     mediaRepository,

@@ -9,12 +9,15 @@ import {
   formatPassFailure,
   formatRenewalPassLine,
   formatStalePendingSweepLine,
+  formatUserStreamSweepLine,
+  MAX_USER_STREAM_MS,
   ORPHAN_SWEEP_WINDOW_MS,
   resolveRenewalIntervalMs,
   STALE_PENDING_CHECKOUT_WINDOW_MS,
   SweepExpiredMemberships,
   SweepOrphanMedia,
   SweepStalePendingCheckouts,
+  SweepStaleUserStreams,
 } from "./scheduled-passes";
 
 /**
@@ -69,9 +72,15 @@ const NOTHING_HAPPENED_STALE_PENDING_SWEEP = {
   failed: 0,
 };
 
+const NOTHING_HAPPENED_USER_STREAM_SWEEP = {
+  considered: 0,
+  ended: 0,
+  failed: 0,
+};
+
 /** Counts, an optional stage-free label, `=` and spaces. Nothing else may appear. */
 const COUNTS_ONLY =
-  /^\[(renewals|churn|media|memberships|membership-reminders|pending-checkouts)\] (?:[a-z_]+=\d+ ?)+$/;
+  /^\[(renewals|churn|media|memberships|membership-reminders|pending-checkouts|user-streams)\] (?:[a-z_]+=\d+ ?)+$/;
 
 describe("formatRenewalPassLine", () => {
   it("says nothing when the pass had nothing to do", () => {
@@ -271,6 +280,29 @@ describe("formatStalePendingSweepLine", () => {
   });
 });
 
+describe("formatUserStreamSweepLine", () => {
+  it("says nothing when the pass had nothing to do", () => {
+    expect(formatUserStreamSweepLine(NOTHING_HAPPENED_USER_STREAM_SWEEP)).toBeNull();
+  });
+
+  it("reports every count when the pass did something", () => {
+    const line = formatUserStreamSweepLine({ considered: 3, ended: 2, failed: 1 });
+
+    expect(line).toBe("[user-streams] considered=3 ended=2 failed=1");
+  });
+
+  it("speaks up when every row in the pass failed to end", () => {
+    // `considered>0, ended=0` is the shape of a pass finding stale streams and
+    // failing to end them — the exact silent-failure mode that would leave a
+    // creator unable to go live again.
+    expect(formatUserStreamSweepLine({ considered: 2, ended: 0, failed: 2 })).toContain("failed=2");
+  });
+
+  it("emits counts and nothing else — no owner id, no title, no stream key", () => {
+    expect(formatUserStreamSweepLine({ considered: 1, ended: 1, failed: 0 })).toMatch(COUNTS_ONLY);
+  });
+});
+
 describe("formatPassFailure", () => {
   it("drops the bound parameters of a failed query", () => {
     // Exactly what Phase 4 found in the worker's log: drizzle formats a query
@@ -329,6 +361,12 @@ describe("formatPassFailure", () => {
 
     expect(line.startsWith("[pending-checkouts] pass failed: ")).toBe(true);
   });
+
+  it("is wired for the user-stream sweep's own tag", () => {
+    const line = formatPassFailure("user-streams", new Error("connection reset"));
+
+    expect(line.startsWith("[user-streams] pass failed: ")).toBe(true);
+  });
 });
 
 describe("ORPHAN_SWEEP_WINDOW_MS", () => {
@@ -344,6 +382,158 @@ describe("STALE_PENDING_CHECKOUT_WINDOW_MS", () => {
 
   it("leaves a wide margin under 24 hours, so a live invoice at the provider is never expired here first", () => {
     expect(STALE_PENDING_CHECKOUT_WINDOW_MS).toBeLessThan(24 * 60 * 60_000);
+  });
+});
+
+describe("MAX_USER_STREAM_MS", () => {
+  it("is 12 hours — a backstop against a LOST webhook, not a liveness check (design spec §7)", () => {
+    expect(MAX_USER_STREAM_MS).toBe(12 * 60 * 60 * 1000);
+  });
+});
+
+/**
+ * Structural, like `FakeExpiredMembershipRepository` above: `DrizzleUserStreamRepository`
+ * satisfies `SweepStaleUserStreams`'s narrower repository interface directly, without
+ * being declared against it, so this fake needs no database at all.
+ */
+class FakeStaleUserStreamRepository {
+  readonly rows = new Map<string, { status: string; startedAt: Date; endedAt: Date | null }>();
+  readonly failFor = new Set<string>();
+
+  seed(id: string, startedAt: Date): void {
+    this.rows.set(id, { status: "live", startedAt, endedAt: null });
+  }
+
+  statusOf(id: string): string | undefined {
+    return this.rows.get(id)?.status;
+  }
+
+  async listStaleLive(olderThan: Date): Promise<{ id: string }[]> {
+    return [...this.rows.entries()]
+      .filter(([, row]) => row.status === "live" && row.startedAt.getTime() <= olderThan.getTime())
+      .map(([id]) => ({ id }));
+  }
+
+  async endById(id: string, endedAt: Date): Promise<{ id: string } | null> {
+    const row = this.rows.get(id);
+    if (row === undefined) return null;
+    if (this.failFor.has(id)) {
+      // The real adapter's `endById` is a single UPDATE against a live connection —
+      // a thrown error here stands in for the database being briefly unreachable.
+      throw new Error(`endById(${id}) failed: connection reset`);
+    }
+    // Same atomic-predicate shape as `DrizzleUserStreamRepository.endById`: only a
+    // row still `live` transitions. A raced `endById` (the webhook, or a concurrent
+    // sweep pass, beat this one to it) answers `null`, not an error.
+    if (row.status !== "live") return null;
+    row.status = "ended";
+    row.endedAt = endedAt;
+    return { id };
+  }
+}
+
+/**
+ * Task 6's backstop against a LOST lifecycle webhook (design spec §7): a row that
+ * never gets its `offline` hook would otherwise sit `live` forever, and
+ * `user_stream_one_live`'s partial unique index means its owner could then never go
+ * live again. This is a CAP ON AGE, not a liveness check — deliberately, because
+ * MediaMTX is not polled and, with nobody watching, no read authorisation fires
+ * either, so nothing distinguishes "publishing quietly to an empty room" from "gone"
+ * (see `MAX_USER_STREAM_MS`'s own docstring in `scheduled-passes.ts`).
+ *
+ * THE BOUNDARY IS TESTED IN BOTH DIRECTIONS, spec §11's own rule, restated by Task 6's
+ * brief: a suite with only clearly-stale rows would pass against a window of ANY
+ * length, including one shrunk to a second. Both boundary tests below compute their
+ * row's age with the LITERAL `12 * 60 * 60 * 1000` — never by importing
+ * `MAX_USER_STREAM_MS` — so a mutant that changes the constant's value is exactly what
+ * the second test is built to catch (see this file's own mutation-testing note, and
+ * task-6-report.md for the run that confirmed it).
+ */
+describe("SweepStaleUserStreams", () => {
+  const NOW = new Date("2026-08-18T12:00:00.000Z");
+
+  it("ends a stream live one second longer than the cap", async () => {
+    const streams = new FakeStaleUserStreamRepository();
+    streams.seed("s1", new Date(NOW.getTime() - 12 * 60 * 60 * 1000 - 1_000));
+    const sweep = (now: Date) => new SweepStaleUserStreams(streams, { now: () => now }).execute();
+
+    expect(await sweep(NOW)).toEqual({ considered: 1, ended: 1, failed: 0 });
+    expect(streams.statusOf("s1")).toBe("ended");
+  });
+
+  it("ends a stream started EXACTLY AT the cutoff — inclusive, like the other sweeps' <=", async () => {
+    const streams = new FakeStaleUserStreamRepository();
+    streams.seed("s1", new Date(NOW.getTime() - 12 * 60 * 60 * 1000));
+    const sweep = (now: Date) => new SweepStaleUserStreams(streams, { now: () => now }).execute();
+
+    expect(await sweep(NOW)).toEqual({ considered: 1, ended: 1, failed: 0 });
+  });
+
+  /**
+   * THE BOUNDARY, the other direction, and the one that keeps the cap honest: a
+   * stream one minute inside the window is possibly still being broadcast, and a
+   * sweep that ended everything live (or one that flipped the comparison) would pass
+   * every test above and this test catches it.
+   */
+  it("leaves a stream ONE MINUTE inside the cap alone — somebody may still be broadcasting", async () => {
+    const streams = new FakeStaleUserStreamRepository();
+    streams.seed("s1", new Date(NOW.getTime() - 12 * 60 * 60 * 1000 + 60_000));
+    const sweep = (now: Date) => new SweepStaleUserStreams(streams, { now: () => now }).execute();
+
+    expect(await sweep(NOW)).toEqual({ considered: 0, ended: 0, failed: 0 });
+    expect(streams.statusOf("s1")).toBe("live");
+  });
+
+  it("leaves a stream untouched however long ago it was created, as long as it has already ended", async () => {
+    const streams = new FakeStaleUserStreamRepository();
+    streams.rows.set("s1", {
+      status: "ended",
+      startedAt: new Date(NOW.getTime() - 365 * 24 * 60 * 60_000),
+      endedAt: new Date(NOW.getTime() - 300 * 24 * 60 * 60_000),
+    });
+    const sweep = (now: Date) => new SweepStaleUserStreams(streams, { now: () => now }).execute();
+
+    expect(await sweep(NOW)).toEqual({ considered: 0, ended: 0, failed: 0 });
+  });
+
+  it("counts a stream raced away (the webhook, or a concurrent sweep pass) as neither ended nor failed", async () => {
+    const streams = new FakeStaleUserStreamRepository();
+    streams.seed("raced", new Date(NOW.getTime() - 13 * 60 * 60 * 1000));
+    const listSpy = streams.listStaleLive.bind(streams);
+    streams.listStaleLive = async (olderThan) => {
+      const page = await listSpy(olderThan);
+      // Something else — the lifecycle webhook's own `offline` hook, or a second
+      // sweep pass — ends the row between the list and this row's turn.
+      streams.rows.get("raced")!.status = "ended";
+      return page;
+    };
+    const sweep = (now: Date) => new SweepStaleUserStreams(streams, { now: () => now }).execute();
+
+    expect(await sweep(NOW)).toEqual({ considered: 1, ended: 0, failed: 0 });
+  });
+
+  it("does not abort the pass when one row's endById throws, and that row is left live for the next pass", async () => {
+    const streams = new FakeStaleUserStreamRepository();
+    streams.seed("a", new Date(NOW.getTime() - 13 * 60 * 60 * 1000));
+    streams.seed("b", new Date(NOW.getTime() - 14 * 60 * 60 * 1000));
+    streams.failFor.add("a");
+    const errors: string[] = [];
+
+    const sweep = new SweepStaleUserStreams(streams, {
+      now: () => NOW,
+      logError: (line) => errors.push(line),
+    });
+    const result = await sweep.execute();
+
+    expect(result).toEqual({ considered: 2, ended: 1, failed: 1 });
+    expect(streams.statusOf("b")).toBe("ended");
+    // THE row whose endById threw is left LIVE — still past the cap, so the very
+    // next pass finds it again and retries it.
+    expect(streams.statusOf("a")).toBe("live");
+    // …and the failure is VISIBLE, not just absorbed into a count nobody reads —
+    // same rule `SweepExpiredMemberships`'s own failure test pins.
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/^\[user-streams\] /);
   });
 });
 
@@ -1357,6 +1547,7 @@ describe("createScheduledPassLoops", () => {
       ...NOTHING_HAPPENED_STALE_PENDING_SWEEP,
       expired: 1,
     });
+    const processUserStreamSweep = fakePass({ ...NOTHING_HAPPENED_USER_STREAM_SWEEP, ended: 1 });
     const lines: string[] = [];
     const {
       renewalLoop,
@@ -1365,6 +1556,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop,
       membershipReminderLoop,
       stalePendingSweepLoop,
+      userStreamSweepLoop,
     } = createScheduledPassLoops({
       processRenewals,
       processChurn,
@@ -1372,6 +1564,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipSweep,
       processMembershipReminder,
       processStalePendingSweep,
+      processUserStreamSweep,
       intervalMs: 60_000,
       log: (line) => lines.push(line),
     });
@@ -1383,6 +1576,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop.run(),
       membershipReminderLoop.run(),
       stalePendingSweepLoop.run(),
+      userStreamSweepLoop.run(),
     ]);
     await waitUntil(
       () =>
@@ -1391,7 +1585,8 @@ describe("createScheduledPassLoops", () => {
         processOrphanSweep.state.calls > 0 &&
         processMembershipSweep.state.calls > 0 &&
         processMembershipReminder.state.calls > 0 &&
-        processStalePendingSweep.state.calls > 0,
+        processStalePendingSweep.state.calls > 0 &&
+        processUserStreamSweep.state.calls > 0,
       "the first pass of each type"
     );
     // Long enough that a 5s-ish interval — or no interval at all — would show up
@@ -1403,6 +1598,7 @@ describe("createScheduledPassLoops", () => {
     expect(processMembershipSweep.state.calls).toBe(1);
     expect(processMembershipReminder.state.calls).toBe(1);
     expect(processStalePendingSweep.state.calls).toBe(1);
+    expect(processUserStreamSweep.state.calls).toBe(1);
 
     renewalLoop.stop();
     churnLoop.stop();
@@ -1410,6 +1606,7 @@ describe("createScheduledPassLoops", () => {
     membershipSweepLoop.stop();
     membershipReminderLoop.stop();
     stalePendingSweepLoop.stop();
+    userStreamSweepLoop.stop();
     const finished = await Promise.race([
       running.then(() => "stopped"),
       Bun.sleep(2_000).then(() => "still sleeping in the interval"),
@@ -1423,6 +1620,7 @@ describe("createScheduledPassLoops", () => {
       "[memberships] considered=0 retired=1 skipped=0 failed=0",
       "[membership-reminders] considered=0 reminded=1 already_reminded=0 skipped=0 failed=0",
       "[pending-checkouts] considered=0 expired=1 skipped=0 failed=0",
+      "[user-streams] considered=0 ended=1 failed=0",
     ]);
   });
 
@@ -1443,6 +1641,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop,
       membershipReminderLoop,
       stalePendingSweepLoop,
+      userStreamSweepLoop,
     } = createScheduledPassLoops({
       processRenewals,
       processChurn,
@@ -1450,6 +1649,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipSweep,
       processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
+      processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -1462,6 +1662,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop.run(),
       membershipReminderLoop.run(),
       stalePendingSweepLoop.run(),
+      userStreamSweepLoop.run(),
     ]);
     await waitUntil(
       () =>
@@ -1477,6 +1678,7 @@ describe("createScheduledPassLoops", () => {
     membershipSweepLoop.stop();
     membershipReminderLoop.stop();
     stalePendingSweepLoop.stop();
+    userStreamSweepLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
@@ -1498,6 +1700,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop,
       membershipReminderLoop,
       stalePendingSweepLoop,
+      userStreamSweepLoop,
     } = createScheduledPassLoops({
       processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
@@ -1505,6 +1708,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
       processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
+      processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -1517,6 +1721,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop.run(),
       membershipReminderLoop.run(),
       stalePendingSweepLoop.run(),
+      userStreamSweepLoop.run(),
     ]);
     await waitUntil(() => processOrphanSweep.state.calls >= 3, "the sweep to keep going after the throw");
     renewalLoop.stop();
@@ -1525,6 +1730,7 @@ describe("createScheduledPassLoops", () => {
     membershipSweepLoop.stop();
     membershipReminderLoop.stop();
     stalePendingSweepLoop.stop();
+    userStreamSweepLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
@@ -1546,6 +1752,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop,
       membershipReminderLoop,
       stalePendingSweepLoop,
+      userStreamSweepLoop,
     } = createScheduledPassLoops({
       processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
@@ -1553,6 +1760,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipSweep,
       processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
+      processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -1565,6 +1773,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop.run(),
       membershipReminderLoop.run(),
       stalePendingSweepLoop.run(),
+      userStreamSweepLoop.run(),
     ]);
     await waitUntil(
       () => processMembershipSweep.state.calls >= 3,
@@ -1576,6 +1785,7 @@ describe("createScheduledPassLoops", () => {
     membershipSweepLoop.stop();
     membershipReminderLoop.stop();
     stalePendingSweepLoop.stop();
+    userStreamSweepLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
@@ -1597,6 +1807,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop,
       membershipReminderLoop,
       stalePendingSweepLoop,
+      userStreamSweepLoop,
     } = createScheduledPassLoops({
       processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
@@ -1604,6 +1815,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
       processMembershipReminder,
       processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
+      processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -1616,6 +1828,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop.run(),
       membershipReminderLoop.run(),
       stalePendingSweepLoop.run(),
+      userStreamSweepLoop.run(),
     ]);
     await waitUntil(
       () => processMembershipReminder.state.calls >= 3,
@@ -1627,6 +1840,7 @@ describe("createScheduledPassLoops", () => {
     membershipSweepLoop.stop();
     membershipReminderLoop.stop();
     stalePendingSweepLoop.stop();
+    userStreamSweepLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
@@ -1652,6 +1866,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop,
       membershipReminderLoop,
       stalePendingSweepLoop,
+      userStreamSweepLoop,
     } = createScheduledPassLoops({
       processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
@@ -1659,6 +1874,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
       processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       processStalePendingSweep,
+      processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -1671,6 +1887,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop.run(),
       membershipReminderLoop.run(),
       stalePendingSweepLoop.run(),
+      userStreamSweepLoop.run(),
     ]);
     await waitUntil(
       () => processStalePendingSweep.state.calls >= 3,
@@ -1682,10 +1899,68 @@ describe("createScheduledPassLoops", () => {
     membershipSweepLoop.stop();
     membershipReminderLoop.stop();
     stalePendingSweepLoop.stop();
+    userStreamSweepLoop.stop();
     await running;
 
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain("[pending-checkouts] pass failed: database was briefly unreachable");
+  });
+
+  it("keeps running after the user-stream sweep pass itself throws, and keeps the other passes running too", async () => {
+    // A per-ROW `endById` failure is handled inside `SweepStaleUserStreams` and never
+    // reaches here (see its own describe block) — this is the backstop for something
+    // the pass-level `listStaleLive` query itself cannot survive. Its own loop, so a
+    // query that fails every time cannot also strand the outbox or any other pass —
+    // including, critically, the lifecycle webhook's own path, which never runs
+    // through this loop at all.
+    const processUserStreamSweep = fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP);
+    processUserStreamSweep.state.throwOnCall = 1;
+    const errors: string[] = [];
+    const {
+      renewalLoop,
+      churnLoop,
+      orphanSweepLoop,
+      membershipSweepLoop,
+      membershipReminderLoop,
+      stalePendingSweepLoop,
+      userStreamSweepLoop,
+    } = createScheduledPassLoops({
+      processRenewals: fakePass(NOTHING_HAPPENED_RENEWAL),
+      processChurn: fakePass(NOTHING_HAPPENED_CHURN),
+      processOrphanSweep: fakePass(NOTHING_HAPPENED_SWEEP),
+      processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
+      processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
+      processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
+      processUserStreamSweep,
+      intervalMs: 1,
+      log: () => undefined,
+      logError: (line) => errors.push(line),
+    });
+
+    const running = Promise.all([
+      renewalLoop.run(),
+      churnLoop.run(),
+      orphanSweepLoop.run(),
+      membershipSweepLoop.run(),
+      membershipReminderLoop.run(),
+      stalePendingSweepLoop.run(),
+      userStreamSweepLoop.run(),
+    ]);
+    await waitUntil(
+      () => processUserStreamSweep.state.calls >= 3,
+      "the user-stream sweep to keep going after the throw"
+    );
+    renewalLoop.stop();
+    churnLoop.stop();
+    orphanSweepLoop.stop();
+    membershipSweepLoop.stop();
+    membershipReminderLoop.stop();
+    stalePendingSweepLoop.stop();
+    userStreamSweepLoop.stop();
+    await running;
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("[user-streams] pass failed: database was briefly unreachable");
   });
 
   it("never overlaps two passes of the same type", async () => {
@@ -1712,6 +1987,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop,
       membershipReminderLoop,
       stalePendingSweepLoop,
+      userStreamSweepLoop,
     } = createScheduledPassLoops({
       processRenewals: slowRenewals,
       processChurn: fakePass(NOTHING_HAPPENED_CHURN),
@@ -1719,6 +1995,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipSweep: fakePass(NOTHING_HAPPENED_MEMBERSHIP_SWEEP),
       processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
+      processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
       intervalMs: 1,
       log: () => undefined,
     });
@@ -1730,6 +2007,7 @@ describe("createScheduledPassLoops", () => {
       membershipSweepLoop.run(),
       membershipReminderLoop.run(),
       stalePendingSweepLoop.run(),
+      userStreamSweepLoop.run(),
     ]);
     await waitUntil(() => calls >= 3, "three renewal passes");
     renewalLoop.stop();
@@ -1738,6 +2016,7 @@ describe("createScheduledPassLoops", () => {
     membershipSweepLoop.stop();
     membershipReminderLoop.stop();
     stalePendingSweepLoop.stop();
+    userStreamSweepLoop.stop();
     await running;
 
     expect(maxInFlight).toBe(1);

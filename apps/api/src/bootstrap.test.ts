@@ -1071,6 +1071,8 @@ describe("Dependencies (composition root contract)", () => {
       mediamtxWebhookSecret: undefined,
       // Task 5's lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
       handleStreamLifecycle: undefined,
+      // Task 6's user-world lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
+      endUserStream: undefined,
       // Task 8's `GET /c/watch/:token`. Same undefined-ness reasoning as `authoriseStream`.
       resolveWatchToken: undefined,
       // Phase 4's image storage. Never undefined/null in a real Dependencies —
@@ -1343,6 +1345,8 @@ describe("Dependencies (composition root contract)", () => {
       mediamtxWebhookSecret: undefined,
       // Task 5's lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
       handleStreamLifecycle: undefined,
+      // Task 6's user-world lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
+      endUserStream: undefined,
       // Task 8's `GET /c/watch/:token`. Same undefined-ness reasoning as `authoriseStream`.
       resolveWatchToken: undefined,
       // Phase 4's image storage. Never undefined/null in a real Dependencies —
