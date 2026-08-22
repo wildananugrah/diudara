@@ -15,82 +15,117 @@ import { mintStreamWatchToken, type StreamView, type WatchTokenResult } from "./
  */
 
 /**
- * Comfortably under `USER_WATCH_TOKEN_TTL_MS` (ten minutes —
- * `apps/api/src/domain/user-watch-token.ts`) WITHOUT importing that
- * constant: it lives in `apps/api`, and there is no shared home for it in
- * `@diudara/shared` (unlike `MAX_UPLOAD_BYTES`, which this file's sibling
- * DOES import — that one has a shared home and this one does not). Five
- * minutes leaves a full five-minute margin before the token this player is
- * CURRENTLY using would stop authorising reads, so one missed tick — a
- * backgrounded tab throttling timers, a slow re-mint request — still leaves
- * a comfortable window for the next tick to land before expiry. A round
- * number, not tuned against real traffic; the only hard requirement is
- * "well under ten minutes," and this project's own convention is to assert
- * a timing constant like this as the LITERAL `300000` in tests, never by
- * importing it — see `StreamPlayer.test.tsx`.
+ * **Fix round 3 (review). Shrunk from 5 minutes to 1 — the interval turned
+ * out to be the actual lever, not a fixed cost.** Two things move together
+ * whenever `I` (this constant) shrinks, and the review judged the second
+ * more important than the first:
+ *
+ *   1. Fewer native reloads. `NATIVE_RELOAD_MARGIN_MS`'s own docstring
+ *      derives WHY: the achievable reload period, with margin chosen at the
+ *      smallest safe value, approaches `TTL` as `I` shrinks — ~6 minutes at
+ *      `I = 2`, ~8 at `I = 1` — rather than capping out near 6 as fix round
+ *      2 wrongly assumed (that round stopped exactly at the feasibility
+ *      threshold, `I < TTL/3`, instead of pushing past it).
+ *   2. **A refused re-mint reaches `block()` within `I`, on BOTH paths,
+ *      because minting itself — never gated by any margin — runs every
+ *      tick regardless of platform.** At `I = 5` (fix rounds 1–2), a member
+ *      whose subscription lapses mid-broadcast keeps watching for up to
+ *      five minutes before the lock appears. At `I = 1`, up to one. This is
+ *      the paywall itself reacting five times faster, for the cost of one
+ *      constant — the review's own framing, and the deciding factor here:
+ *      it is a security/business property, not a polish one, and it
+ *      dominates the hitch-frequency question in every case that matters.
+ *
+ * **The cost: background traffic.** Each tick is one authenticated
+ * `POST /streams/:id/watch-token` plus one indexed `isMemberOf` lookup, per
+ * ACTIVE VIEWER of a currently-gated live stream — not a mass endpoint, and
+ * bounded to exactly the audience this feature exists for. Going from `I =
+ * 5` to `I = 1` is 12/hour to 60/hour per such viewer. `I = 2` (30/hour)
+ * would have been the more conservative choice, and is a legitimate one —
+ * the review explicitly said so. `I = 1` is chosen here because it does not
+ * actually trade anything away among the feasible values: it maximises the
+ * refusal-latency win (the one judged to matter more) AND it happens to
+ * ALSO minimise reload frequency (an 8-minute period beats `I = 2`'s
+ * 6-minute one) — the only real cost is the 2× traffic increase over `I =
+ * 2`, weighed against a live-membership platform where the audience of a
+ * single gated broadcast is the relevant scale, not the whole user base,
+ * and an indexed lookup is cheap at that scale. A round number, per this
+ * project's own convention for a value that is not tuned against real
+ * traffic — see this constant's OWN docstring for why timing constants like
+ * this are asserted as literals in tests, never imported.
  */
-export const DEFAULT_REMINT_INTERVAL_MS = 5 * 60 * 1000;
+export const DEFAULT_REMINT_INTERVAL_MS = 1 * 60 * 1000;
 
 /**
- * Fix round 2 (review). **How close to its OWN expiry the token currently
- * applied to the native `<video>` must be before a re-mint is actually
- * APPLIED there.** Minting still happens every `remintIntervalMs` tick,
- * unconditionally — nothing about that changes (fix round 1's promptness
- * property, "a refused re-mint reaches `block()` promptly," depends on
- * minting never skipping a tick, and does not depend on this margin at
- * all). This constant only gates the SEPARATE decision of whether the
- * freshly-minted token is worth a `video.load()` reload right now.
+ * **How close to its OWN expiry the token currently applied to the native
+ * `<video>` must be before a re-mint is actually APPLIED there.** Minting
+ * still happens every `remintIntervalMs` tick, unconditionally — nothing
+ * about that changes (fix round 1's promptness property, "a refused
+ * re-mint reaches `block()` promptly," depends on minting never skipping a
+ * tick, and does not depend on this margin at all — see the `catch` branch
+ * in `StreamPlayer` below, which never reads this constant). This constant
+ * only gates the SEPARATE decision of whether the freshly-minted token is
+ * worth a `video.load()` reload right now.
  *
- * **THE HONEST FINDING THIS FIX ROUND PRODUCED, STATED PLAINLY: at the
- * numbers already committed — `USER_WATCH_TOKEN_TTL_MS` is ten minutes,
- * `DEFAULT_REMINT_INTERVAL_MS` is five — the review's own stated safety
- * requirement ("comfortably larger than one re-mint interval, so a single
- * failed tick cannot let the attached token lapse before the next
- * successful one applies") and its stated goal ("roughly twelve hitches an
- * hour into six or seven") CANNOT both be satisfied. This is not a
- * near-miss; it is exact, and worth deriving once so nobody re-litigates it
- * from a hunch:**
+ * **FIX ROUND 3 CORRECTS A WRONG BOUND FIX ROUND 2 SHIPPED.** That round's
+ * docstring claimed `margin ≥ I` was the safety requirement — sufficient
+ * for the NORMAL case where every tick actually fires, but insufficient
+ * for the case the requirement exists to cover: a tick that is skipped
+ * entirely (thrown by a backgrounded tab's throttled timer, say). Surviving
+ * ONE fully-missed tick needs the reload point to still have a WHOLE
+ * SECOND interval of life left after it, not zero — which means the
+ * correct bound is:
  *
- * A token applied at time T expires at T + TTL. At each tick T + kI (I =
- * `remintIntervalMs`), the applied token's remaining life is `TTL - kI`.
- * The reload condition below fires the FIRST tick where `remaining ≤
- * margin`, i.e. the smallest `k` with `k ≥ (TTL - margin) / I`. With
- * TTL = 2I exactly (10 min / 5 min), remaining after ONE tick is always
- * `TTL - I = I` — so ANY `margin ≥ I` (the review's own requirement) makes
- * that very first tick satisfy the condition, and the native path reloads
- * on literally EVERY tick: identical to fix round 1's behaviour, zero
- * improvement. The only way to skip a tick (reload every OTHER one, the
- * "six or seven" the review named) is `margin < I` — and because TTL is
- * exactly two ticks wide, that reload then lands EXACTLY at the moment the
- * previous token expires, with no slack at all for a delayed tick: the
- * opposite of what the margin exists to buy.
+ *     margin > 2 × I
+ *
+ * Proof sketch: the reload naturally triggers at the smallest tick `k`
+ * where `TTL - kI ≤ margin`. If THAT tick is skipped, the next chance is
+ * tick `k+1`, and the token is still valid there iff `TTL - (k+1)I > 0`.
+ * Since `k` is smallest, tick `k-1` did NOT trigger: `TTL - (k-1)I >
+ * margin`. Substituting `margin > 2I` into that inequality gives
+ * `TTL > 2I + (k-1)I = (k+1)I` — exactly the survival condition. `margin ≥
+ * I` (fix round 2's bound) does not carry this through; it only guarantees
+ * ONE interval of remaining life at the trigger tick itself, none of which
+ * is left over for a missed tick to still land inside.
+ *
+ * **The other bound, unchanged from fix round 2 and still required for a
+ * tick to be skippable AT ALL:** `margin < TTL - I` (otherwise the very
+ * first tick after ANY apply already satisfies the condition). Combining
+ * both bounds: `2I < margin < TTL - I`, which has a solution only when
+ * `I < TTL / 3` — this is the feasibility threshold fix round 2 found and
+ * then, incorrectly, treated as also being the BEST available period. It
+ * is only where skipping starts becoming possible at all; as `I` shrinks
+ * further below that threshold, the achievable period (choosing margin at
+ * its safe minimum, just above `2I`) approaches `TTL` — `~6 minutes` at `I
+ * = 2`, `~8 minutes` at `I = 1` — not the ~6-minute ceiling fix round 2
+ * assumed.
+ *
+ * **The value chosen: `margin = 2.5 minutes` (150 000 ms), at `I = 1
+ * minute`.** `2 × I = 2 minutes`, so `2.5` clears the corrected bound with
+ * a genuine 25% of headroom above it — not shaved to the boundary, which
+ * would satisfy the inequality on paper while leaving no real slack against
+ * jitter in exactly how long a tick's own round trip takes. It also sits
+ * inside the window that yields the shortest achievable period at `I = 1`
+ * (any margin in `[2, 3)` minutes gives the same 8-tick, 8-minute period;
+ * `2.5` is the middle of that window, not its edge).
  *
  * **This is also the OPPOSITE of the intuitive direction reviewing this
- * fix out loud might suggest.** For a "reload once remaining life ≤ margin"
- * rule, a LARGER margin reloads EARLIER within each cycle, which SHORTENS
- * the cycle — bigger margin means MORE frequent reloads, not fewer;
- * `margin = 0` is the LEAST frequent (and least safe) setting, reloading
- * only once the previous token has already run out. Mutating this constant
- * to `0` therefore does NOT reproduce "every tick reloads" — it reproduces
- * the opposite failure. `StreamPlayer.test.tsx` runs and reports this
- * mutation exactly as instructed, and separately identifies the mutation
- * that DOES reproduce "quietly becomes every tick again" (raising the
- * margin, not zeroing it) — see that file's own comments.
+ * fix out loud might suggest.** For a "reload once remaining life ≤
+ * margin" rule, a LARGER margin reloads EARLIER within each cycle, which
+ * SHORTENS the cycle — bigger margin means MORE frequent reloads, not
+ * fewer; `margin = 0` is the LEAST frequent (and least safe) setting,
+ * reloading only once the previous token has already run out. Verified
+ * empirically in fix round 2 by mutating this constant's use to a literal
+ * `0`: the "not near expiry, no reload" test stayed GREEN, not red — the
+ * mutation that actually reproduces "quietly becomes every tick again" is
+ * forcing the reload decision to `true` unconditionally, not zeroing the
+ * margin. See `StreamPlayer.test.tsx`'s own comments on both mutations.
  *
- * **The decision made here, honouring the review's explicit safety
- * requirement over its numeric example:** `margin = 8 minutes`, comfortably
- * above the 5-minute interval (1.6×) while staying short of the full
- * 10-minute TTL so the comparison is not degenerate. Chosen KNOWING this
- * means the native path still reloads on every tick at today's numbers —
- * see the fix round 2 report for the full disclosure and the two paths
- * that WOULD unlock a real reduction (shrinking `remintIntervalMs`, which
- * this round was told to leave alone; or a smaller margin, which this
- * constant deliberately does not use because it removes exactly the slack
- * the review asked to keep). Never imported elsewhere — see
- * `DEFAULT_REMINT_INTERVAL_MS`'s own note on why a timing constant like
- * this is asserted as a literal in tests instead.
+ * Never imported elsewhere — see `DEFAULT_REMINT_INTERVAL_MS`'s own note on
+ * why a timing constant like this is asserted as a literal in tests
+ * instead.
  */
-export const NATIVE_RELOAD_MARGIN_MS = 8 * 60 * 1000;
+export const NATIVE_RELOAD_MARGIN_MS = 2.5 * 60 * 1000;
 
 /**
  * Parses `WatchTokenResult.expiresAt` (ISO-8601) into epoch milliseconds,

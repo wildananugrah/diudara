@@ -707,3 +707,60 @@ describe("StreamPlayer — the native reload is gated by proximity to expiry (fi
     expect(destroyCount()).toBe(1);
   });
 });
+
+describe("StreamPlayer — a reload is genuinely SKIPPED at the shipped I:margin:TTL ratio (fix round 3)", () => {
+  /**
+   * Fix round 2's suite proved the mint/apply split works in general, but
+   * every one of its scenarios used numbers chosen to demonstrate ONE
+   * outcome cleanly (either "never reloads" or "reloads immediately") — none
+   * of them proved a tick is skipped and THEN a later one reloads, because
+   * at fix round 2's shipped numbers (`I = 5 min`, `margin = 8 min`) that
+   * never actually happens: `margin ≥ I` forces a reload on literally every
+   * tick, so "skipping" was unexercised in the configuration that ships.
+   *
+   * Fix round 3 changes the shipped numbers (`I = 1 min`, `margin = 2.5
+   * min`) specifically so skipping becomes real — this test is what proves
+   * it, using the SAME RATIO the real constants carry (`I : margin : TTL` =
+   * `1 : 2.5 : 10`), scaled to `50ms : 125ms : 500ms` so the test runs in
+   * well under a second rather than the real eight minutes. The scaled
+   * values are literals, chosen for a comfortable real-time margin against
+   * event-loop jitter — not imported from `DEFAULT_REMINT_INTERVAL_MS` /
+   * `NATIVE_RELOAD_MARGIN_MS`, which this project's own convention keeps
+   * out of test files entirely (see those constants' own docstrings).
+   */
+  it("does not reload for several early ticks, then does reload once the applied token nears its own expiry", async () => {
+    const { attach, calls, refreshedTokens } = recordingNativeAttach();
+    let mintCallCount = 0;
+
+    render(
+      <StreamPlayer
+        stream={unlockedStream()}
+        attachHls={attach}
+        // Every mint — the initial one and every re-mint — is good for
+        // 500ms from THE MOMENT IT IS MINTED, mirroring production: the
+        // server always issues a fresh full-TTL token regardless of
+        // whether the client ends up applying it.
+        mintToken={async () => {
+          mintCallCount += 1;
+          return tokenResultExpiringIn(500, `tok-${mintCallCount}`);
+        }}
+        remintIntervalMs={50}
+        nativeReloadMarginMs={125}
+      />
+    );
+
+    await waitFor(() => expect(calls.length).toBe(1));
+
+    // At this ratio the trigger tick is the 8th (~400ms in). Well before
+    // that — after only a handful of ticks — nothing should have applied
+    // yet, even though minting has clearly kept running.
+    await waitFor(() => expect(mintCallCount).toBeGreaterThan(3));
+    expect(refreshedTokens().length).toBe(0);
+
+    // And it is not PERMANENTLY skipped — the applied token's own margin
+    // window is eventually reached, and a reload follows.
+    await waitFor(() => expect(refreshedTokens().length).toBeGreaterThan(0), {
+      timeout: 3000,
+    });
+  });
+});
