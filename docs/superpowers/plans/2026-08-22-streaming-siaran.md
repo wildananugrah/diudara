@@ -377,7 +377,14 @@ git add -A && git commit -m "feat(api,infra): the user namespace reaches MediaMT
 - Consumes: `parseStreamPath` (Task 2); `isMemberOf`.
 - Produces: `mintUserWatchToken({ viewerId, streamId, now, ttlMs, secret })`, `verifyUserWatchToken(token, secret, now)`; `POST /streams/:id/watch-token` → `{ token, expiresAt }`.
 
-**Write a new token module. Do not widen `watch-token.ts`** — it serves the old world, which Phase 8
+**First, close the publish hole.** Task 4's review flagged that a **user-world PUBLISH is still
+refused** and no task owned it — so nobody can actually go live. It is small (~4 lines in
+`AuthoriseStream`'s user branch, resolving `u/<key>` via `findByStreamKey` and allowing only a `live`
+row), and **the existing pinned refusal test must be replaced by a pinned allowance**, not merely
+deleted. Add its mirror too: a publish naming a stream that is already `ended` is refused, exactly as
+the community world refuses a publish to a non-publishable status.
+
+**Then the watch token. Do not widen `watch-token.ts`** — it serves the old world, which Phase 8
 deletes, and widening it would couple a thing being removed to a thing being built.
 
 `USER_WATCH_TOKEN_TTL_MS = 10 * 60 * 1000`.
