@@ -295,7 +295,77 @@ git add -A && git commit -m "feat(api): a creator goes live, once at a time"
 
 ---
 
-### Task 4: Watching
+### Task 4: The user namespace reaches production
+
+**Files:**
+- Modify: `apps/api/src/application/ports/streaming-provider.port.ts`
+- Modify: `apps/api/src/infrastructure/streaming/mediamtx.adapter.ts`, `fake-streaming.adapter.ts` (+ their tests)
+- Modify: `apps/api/src/application/use-cases/authorise-stream.ts` (a by-id read entry point, and the stale docstring)
+- Modify: `infra/nginx/live-hls.conf.template`
+- Test: the adapter tests, `authorise-stream.test.ts`
+
+**Interfaces:**
+- Consumes: `parseStreamPath` (Task 2); `UserStreamRepositoryPort.findById` (Task 1).
+- Produces: `createSession({ streamKey, namespace: "live" | "u" })`; `AuthoriseStream`'s by-id read path for the user world.
+
+**This task exists because Task 3's review found the namespace unreachable in production.** The adapter
+builds `live/<key>` with no namespace parameter, and `infra/nginx/` contains no `/u/` anywhere — so a
+real user publish parses as `world: "community"` and never reaches the user branch. Task 2's work is
+correct and currently unusable.
+
+**Follow the old world's shipped pattern; do not invent one.** It already solves this exact problem:
+`authoriseReadByEventId` resolves a read by **id**, and the template's
+`proxy_redirect /live/$mtx_key/ /live/$mtx_event/` (around line 409) is what lets a public URL name an
+id while MediaMTX serves the path it was published to. Read that pair before writing anything.
+
+Three pieces, and a half-fix is worse than none — an adapter emitting `u/<key>` with no matching nginx
+location would look closed and be broken:
+
+1. **A namespace parameter** on `createSession`, threaded through both adapters.
+2. **A by-id read entry point** on `AuthoriseStream` for the user world, mirroring `authoriseReadByEventId`.
+3. **An `^~ /u/` read location** in the nginx template mirroring `/live/`, and **`/whip/` learning its namespace** — it currently hard-rewrites onto `/live/<key>/whip`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+test("createSession builds a u/ path when the namespace says so", () => {
+  const s = adapter.createSession({ streamKey: "abc", namespace: "u" });
+  expect(s.hlsPlaybackPath).toContain("/u/abc/");
+});
+
+test("createSession still builds live/ for the community world — unchanged", () => {
+  const s = adapter.createSession({ streamKey: "abc", namespace: "live" });
+  expect(s.hlsPlaybackPath).toContain("/live/abc/");
+});
+
+test("a user-world read resolves by STREAM ID, never by the publish key", async () => {
+  expect(await authorise({ action: "read", path: `u/${stream.id}`, query: "" })).toEqual({ allowed: true });
+});
+
+test("a user-world read naming the KEY instead of the id is refused", async () => {
+  expect(await authorise({ action: "read", path: `u/${stream.streamKey}`, query: "" })).toEqual({ allowed: false });
+});
+```
+
+The fourth is the one that matters: it proves the publish secret is not a second way in.
+
+- [ ] **Step 2: Run, watch fail. Step 3: implement all three pieces**
+
+**Fix the stale docstring** in `authorise-stream.ts` that says *"Task 3 teaches an adapter to construct
+`u/<key>` paths"* — Task 3 never owned that, and a docstring naming the wrong owner is how this gap
+survived review once already.
+
+- [ ] **Step 4: Run, mutation-test, commit**
+
+The nginx template is **not testable here.** Say so in the report, and it goes on the gate checklist.
+
+```bash
+git add -A && git commit -m "feat(api,infra): the user namespace reaches MediaMTX"
+```
+
+---
+
+### Task 5: Watching
 
 **Files:**
 - Create: `apps/api/src/domain/user-watch-token.ts`
@@ -361,7 +431,7 @@ git add -A && git commit -m "feat(api): a watch token names its viewer and dies 
 
 ---
 
-### Task 5: Ending, and the stream that never ends
+### Task 6: Ending, and the stream that never ends
 
 **Files:**
 - Create: `apps/api/src/application/use-cases/end-user-stream.ts`
@@ -407,7 +477,7 @@ git add -A && git commit -m "feat(api,worker): a stream ends, and a lost webhook
 
 ---
 
-### Task 6: Siaran — who is live
+### Task 7: Siaran — who is live
 
 **Files:**
 - Modify: `apps/web/src/user/SiaranPage.tsx`
@@ -462,7 +532,7 @@ git add -A && git commit -m "feat(web): Siaran shows who is live, and what you c
 
 ---
 
-### Task 7: Going live from the browser
+### Task 8: Going live from the browser
 
 **Files:**
 - Move: `apps/web/src/dashboard/whip-publisher.ts` → `apps/web/src/user/whip-publisher.ts` (and its test)
@@ -499,7 +569,7 @@ git add -A && git commit -m "feat(web): go live from the browser, or from OBS"
 
 ---
 
-### Task 8: The gate checklist
+### Task 9: The gate checklist
 
 **Files:**
 - Create: `docs/superpowers/sdd/2026-08-22-streaming-siaran/gate-checklist.md`
@@ -518,8 +588,8 @@ Written by the controller, run by the owner. It must cover what no suite here ca
 
 ## Self-Review
 
-**Spec coverage.** §4 model → Task 1. §6 namespaces → Task 2. §7 going live → Task 3, §7's sweep →
-Task 5. §5 watching → Task 4. §8 Siaran → Tasks 6, 7. §9 testing → distributed. §10 out of scope →
+**Spec coverage.** §4 model → Task 1. §6 namespaces → Tasks 2 and 4. §7 going live → Task 3, §7's
+sweep → Task 6. §5 watching → Task 5. §8 Siaran → Tasks 7, 8. §9 testing → distributed. §10 out of scope →
 respected.
 
 **Gap found and fixed in review:** Task 6 consumed a `GET /streams` that no task built — the same
