@@ -285,18 +285,22 @@ export function mediamtxWebhookRoutes(
       return c.json(REFUSED_BODY, 403);
     }
 
-    const eventId = c.req.header("X-Mtx-Event-Id");
-    const streamId = c.req.header("X-Mtx-Stream-Id");
+    const eventId = presentId(c.req.header("X-Mtx-Event-Id"));
+    const streamId = presentId(c.req.header("X-Mtx-Stream-Id"));
     const token = c.req.header("X-Watch-Token");
     const query = token ? `token=${encodeURIComponent(token)}` : "";
 
     // EXACTLY ONE of the two ids, never both and never neither. Each nginx
-    // location sends its own (`^~ /live/` sends the event id, `^~ /u/` the
-    // stream id), so a request carrying both did not come from a location in
-    // this repository's template — and picking a winner by precedence would
-    // make which WORLD authorises a request depend on a rule nobody reading
-    // the nginx config can see. Refuse instead, with the same body every
-    // other refusal here uses.
+    // location sends its own and CLEARS the other's (`^~ /live/` sends the
+    // event id, `^~ /u/` the stream id — see the two internal locations in
+    // `infra/nginx/live-hls.conf.template`), so a request carrying both did
+    // not come from a location in this repository's template — and picking a
+    // winner by precedence would make which WORLD authorises a request depend
+    // on a rule nobody reading the nginx config can see. Refuse instead, with
+    // the same body every other refusal here uses.
+    //
+    // `presentId` above is what keeps this rule from depending on nginx —
+    // read its docstring before changing either.
     if ((eventId === undefined) === (streamId === undefined)) {
       return c.json(REFUSED_BODY, 403);
     }
@@ -383,6 +387,58 @@ export function mediamtxWebhookRoutes(
   });
 
   return app;
+}
+
+/**
+ * An id header, normalised to "present" or "absent" — where a header that
+ * arrived EMPTY, or holding nothing but whitespace, counts as **absent**.
+ *
+ * FIX ROUND 2. This exists so that the `/auth-request` route's
+ * exactly-one-id rule does not depend on a behaviour of nginx that nobody
+ * here has run. The two internal `auth_request` locations each CLEAR the
+ * other world's id header with `proxy_set_header X-Mtx-... "";`, and nginx's
+ * documented response to an empty value is to drop the field entirely. If
+ * some nginx version instead forwarded the field present-and-empty, then —
+ * with a stricter `=== undefined` test — EVERY request would arrive carrying
+ * both ids, the rule below would refuse all of them, and BOTH worlds' HLS
+ * would go dark at once. That is a total outage resting on an unverified
+ * assumption, and the assumption is not worth keeping: an empty string is
+ * not an id, nothing can ever legitimately send one, and accepting it as
+ * "present" buys nothing at all.
+ *
+ * So the nginx directives stay — they are correct, and they are what keeps a
+ * client-forged sibling header out of the subrequest in the first place —
+ * but they are now belt-and-braces rather than load-bearing.
+ *
+ * WHAT ARRIVES HERE, MEASURED RATHER THAN ASSUMED — probed with a real Hono
+ * request during fix round 2, because the whole point of this function is to
+ * stop guessing about transports:
+ *
+ *   header absent      -> `undefined`
+ *   `X-Foo: ""`        -> `""`     <- PRESENT AND EMPTY. This is exactly the
+ *                                     nginx failure mode above, reproducible
+ *                                     at this layer, which is what lets the
+ *                                     four tests for it actually bite.
+ *   `X-Foo: "   "`     -> `""`     <- HTTP strips optional whitespace around
+ *                                     a field value before anything here.
+ *   `X-Foo: "  abc  "` -> `"abc"`  <- same rule.
+ *
+ * So over HTTP the `.trim()` below is a no-op and `raw.trim() !== ""` is
+ * equivalent to `raw !== ""`. It is kept as cheap defence in depth — this
+ * function should be obviously right when read on its own, without the
+ * reader having to know that rule, and a future runtime or a non-HTTP caller
+ * is not owed the benefit of the doubt.
+ *
+ * IT IS A PRESENCE TEST ONLY; the value itself is passed on UNCHANGED, so
+ * nothing here can repair a not-quite-matching id into a matching one. That
+ * property is deliberately NOT pinned by a test: the transport already
+ * guarantees a padded value never reaches this function, so a test for it
+ * would assert against an input HTTP cannot deliver. A mutant that trims the
+ * VALUE therefore survives, for that reason and no other — see
+ * task-4-fix-2-report.md.
+ */
+function presentId(raw: string | undefined): string | undefined {
+  return raw !== undefined && raw.trim() !== "" ? raw : undefined;
 }
 
 /** The minimum shape `AuthoriseStream.execute` needs out of MediaMTX's body. */

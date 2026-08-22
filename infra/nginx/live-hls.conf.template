@@ -611,17 +611,28 @@ location = /_internal/mediamtx-auth-request {
     # nginx has independently verified as a real stream key.
     proxy_set_header X-Mtx-Event-Id "$mtx_event";
     # PHASE 7, TASK 4 FIX ROUND 1 — CLEARS the user world's id header, and
-    # this line is load-bearing, not tidiness. An `auth_request` subrequest
-    # INHERITS the parent request's incoming headers, and `proxy_set_header`
-    # only overrides the fields it names — so without this line a client
-    # attaching its own `X-Mtx-Stream-Id` to an ordinary `/live/<eventId>/...`
-    # request would make apps/api see BOTH ids and refuse the read (that
-    # route rejects both-or-neither rather than resolving by precedence).
-    # Self-inflicted rather than a bypass, but it is a client choosing to
-    # break its own community-world playback, and the guarantee the route's
-    # rule rests on — one id per request — has to be enforced HERE, since
-    # this is the only place that knows which world the location means. An
-    # empty value makes nginx drop the field entirely.
+    # this line is still load-bearing. An `auth_request` subrequest INHERITS
+    # the parent request's incoming headers, and `proxy_set_header` only
+    # overrides the fields it names — so without this line a client attaching
+    # its own `X-Mtx-Stream-Id: <some real id>` to an ordinary
+    # `/live/<eventId>/...` request would make apps/api see BOTH ids and
+    # refuse the read (that route rejects both-or-neither rather than
+    # resolving by precedence). Self-inflicted rather than a bypass, but it
+    # is a client choosing to break its own community-world playback, and the
+    # guarantee the route's rule rests on — one id per request — has to be
+    # enforced HERE, since this is the only place that knows which world the
+    # location means.
+    #
+    # WHAT AN EMPTY VALUE DOES, and what no longer depends on it (FIX ROUND
+    # 2): nginx's documented behaviour for `proxy_set_header field "";` is to
+    # drop the field entirely. That was previously the whole rule's
+    # foundation — if some nginx version forwarded it present-and-empty
+    # instead, EVERY request would carry both ids and both worlds' HLS would
+    # go dark at once. apps/api's `presentId` now treats an empty (or
+    # whitespace-only) id header as ABSENT, so that failure mode is gone and
+    # this directive is belt-and-braces for the EMPTY case. It remains the
+    # only defence against a forged NON-EMPTY sibling header, which is why
+    # the line stays.
     proxy_set_header X-Mtx-Stream-Id "";
     proxy_set_header X-Watch-Token "$watch_token";
 }
@@ -652,7 +663,18 @@ location = /_internal/mediamtx-auth-request {
 # that event's stream key into `$mtx_ukey`. No bytes came of it (the proxied
 # `u/<eventStreamKey>` path is one nothing publishes to, and MediaMTX's own
 # hook refuses it), but a client must not get to choose which world a
-# location resolves in. An empty value makes nginx drop the field entirely.
+# location resolves in. That is what this clearing line prevents, and it is
+# why it stays.
+#
+# FIX ROUND 2 — what this line no longer has to be trusted for. nginx's
+# documented behaviour for `proxy_set_header field "";` is to drop the field
+# entirely; if some version instead forwarded it present-and-empty, a
+# stricter route would have seen both ids on EVERY request and refused all of
+# them, taking both worlds' HLS down together. apps/api's `presentId` now
+# reads an empty or whitespace-only id header as ABSENT, so the empty case
+# cannot break anything whichever way nginx behaves. This directive is
+# belt-and-braces there, and load-bearing only against a forged NON-EMPTY
+# sibling header — which is exactly the case above.
 #
 # Both worlds get the same `X-Stream-Key` response header back, and both read
 # it with `auth_request_set` — see the `^~ /u/` location above.

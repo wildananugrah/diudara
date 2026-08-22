@@ -854,6 +854,79 @@ describe("GET /webhooks/mediamtx/auth-request — the user world", () => {
     expect(res.status).toBe(403);
   });
 
+  /**
+   * FIX ROUND 2 — the four tests below remove a bet, they do not add a
+   * feature.
+   *
+   * The two internal `auth_request` locations each CLEAR the other world's
+   * id header (`proxy_set_header X-Mtx-... "";`), and nginx's documented
+   * response to an empty value is to drop the field. Fix round 1 rested the
+   * whole exactly-one-id rule on that: if some nginx version forwarded the
+   * field present-and-empty instead, EVERY request would carry both ids and
+   * BOTH worlds' HLS would go dark at once — a total outage resting on a
+   * behaviour nobody in this project has run.
+   *
+   * `presentId` (mediamtx-webhooks.ts) now treats an empty — or
+   * whitespace-only — id header as ABSENT, which is the only sane reading:
+   * an empty string is not an id and nothing can ever legitimately send one.
+   * These tests pin that from BOTH sides, so the nginx directives are
+   * belt-and-braces rather than the thing the system depends on.
+   */
+  it("an EMPTY X-Mtx-Stream-Id alongside a real event id resolves the COMMUNITY world, not a 403", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = mintWatchToken({
+      subscriptionId: subscription.id,
+      eventId: event.id,
+      now: Date.now(),
+      ttlMs: WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const a = app();
+
+    const res = await getAuthRequest(a, { eventId: event.id, streamId: "", token });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+    expect(res.headers.get("X-Stream-Key")).toBe(streamKey);
+  });
+
+  it("an EMPTY X-Mtx-Event-Id alongside a real stream id resolves the USER world, not a 403", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.id, eventId: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+    expect(res.headers.get("X-Stream-Key")).toBe(stream.streamKey);
+  });
+
+  /**
+   * A whitespace-only field is the SAME case as an empty one by the time it
+   * reaches here — HTTP strips optional whitespace around a field value, so
+   * `"   "` arrives as `""` (measured, see `presentId`'s docstring). Kept as
+   * its own test because it is the shape a hand-written nginx variable
+   * expansion would most plausibly produce, and a reader should not have to
+   * know the transport rule to be sure it is handled.
+   */
+  it("a WHITESPACE-ONLY id header is absent too — the user world still resolves", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.id, eventId: "   " });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+    expect(res.headers.get("X-Stream-Key")).toBe(stream.streamKey);
+  });
+
+  it("BOTH ids empty is still the NEITHER case — refused, without attempting either resolution", async () => {
+    const a = app(new ThrowingAuthoriseStream());
+
+    const res = await getAuthRequest(a, { eventId: "", streamId: "" });
+
+    expect(res.status).toBe(403);
+  });
+
   it("refuses a malformed stream id rather than answering 500", async () => {
     const a = app();
 
