@@ -193,8 +193,28 @@ describe("HandleStreamLifecycle — online", () => {
     const { streamKey } = await seedEvent(community.id, "scheduled");
 
     // The bare key, with no `live/` prefix — not a shape MediaMTX's own config
-    // ever produces (see `streamKeyFromPath`'s docstring in authorise-stream.ts).
+    // ever produces (see `parseStreamPath`'s docstring in authorise-stream.ts).
     await useCase.execute({ hook: "online", streamKey });
+
+    const activity = await db.select().from(activityLogs);
+    expect(activity).toHaveLength(0);
+  });
+
+  /**
+   * `u/<key>` now parses cleanly (Phase 7's `parseStreamPath` recognises it as the
+   * user world) — so this is a STRONGER version of the test above: a naive removal
+   * of the `parsed.world !== "community"` guard would fall through to
+   * `findByStreamKey(key)` and, if a community event happened to share that literal
+   * key string, mark IT live from a `u/`-namespaced hook that has nothing to do with
+   * it. Seeding an event whose stream key collides with the `u/` path's key is what
+   * makes that mutant visible; a non-colliding key would pass even with the guard
+   * missing.
+   */
+  it("a u/<key> hook is ignored even when a community event happens to share that exact key", async () => {
+    const community = await seedCommunity();
+    const { streamKey } = await seedEvent(community.id, "scheduled");
+
+    await useCase.execute({ hook: "online", streamKey: `u/${streamKey}` });
 
     const activity = await db.select().from(activityLogs);
     expect(activity).toHaveLength(0);

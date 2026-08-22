@@ -20,50 +20,67 @@ const PUBLISHABLE_STATUSES: ReadonlySet<string> = new Set(["scheduled", "live"])
 const ENTITLED_STATUS = "active";
 
 /**
- * The one top-level path segment MediaMTX's stream paths are ever built
- * under in this codebase — see `MediaMtxAdapter.createSession`, which
- * constructs both `rtmp://<host>:1935/live/<streamKey>` and
- * `<hlsBaseUrl>/live/<streamKey>/index.m3u8`. Every real publish and every
- * real read this route will ever see therefore has `path = "live/<key>"`,
- * nothing else.
+ * Every top-level path segment MediaMTX's stream paths are ever built
+ * under in this codebase, mapped to the world it names. `live` is the one
+ * `MediaMtxAdapter.createSession` has ever constructed — it builds both
+ * `rtmp://<host>:1935/live/<streamKey>` and
+ * `<hlsBaseUrl>/live/<streamKey>/index.m3u8` — and stays the community
+ * `event` world unchanged. `u` is the new Phase 7 namespace for a person's
+ * own `user_stream`; Task 3 is what teaches an adapter to construct
+ * `u/<key>` paths, and Task 4 is what teaches `AuthoriseStream` to actually
+ * authorise anything under it. Adding a THIRD namespace later means adding
+ * ONE entry here — see `parseStreamPath` below for why an entry not listed
+ * in this map is refused rather than guessed at.
  */
-const LIVE_PATH_SEGMENT = "live";
+const NAMESPACES: ReadonlyMap<string, "community" | "user"> = new Map([
+  ["live", "community"],
+  ["u", "user"],
+]);
 
 /**
- * Extracts the stream key from `path`, requiring EXACTLY `live/<key>` (a
- * leading/trailing slash tolerated, an empty key or extra segments not).
+ * Parses `path` into the world it names and the key inside it, requiring
+ * EXACTLY `<namespace>/<key>` for a namespace listed in `NAMESPACES` above
+ * (a leading/trailing slash tolerated, an empty key, extra segments, or an
+ * unlisted namespace not) — `null` otherwise.
  *
- * REQUIRING the `live/` prefix, rather than just taking the last segment
- * regardless of what came before it, is load-bearing and not merely tidy:
- * without it, `foo/bar/<key>` authorised a publish exactly as `live/<key>`
- * did, for any real key — an attacker (or a misconfigured MediaMTX) could
- * publish to a path our own adapter never constructs, and Task 5's
- * `runOnOnline` would then fire with `MTX_PATH=foo/bar/<key>`, mark the
- * event `live`, and notify every member with an HLS URL under
- * `live/<key>` that nothing is actually publishing to. An unknown or
- * wrongly-shaped path now refuses outright (`""`, which never resolves via
- * `findByStreamKey`), matching the ONE shape this codebase's own adapter
- * ever produces.
+ * THIS IS THE ONE PARSER. It used to be named `streamKeyFromPath`, return a
+ * bare string, and recognise only `live/`; Phase 7 widened it to cover both
+ * worlds rather than growing a second, sibling parser for `u/` — see the
+ * design spec §6 and this task's ruling in `progress.md`. A second parser
+ * would re-open, wearing a new prefix, the exact defect this one was
+ * hardened against: REQUIRING the namespace, rather than just taking the
+ * last segment regardless of what came before it, is load-bearing and not
+ * merely tidy. Without it, `foo/bar/<key>` once authorised a publish
+ * exactly as `live/<key>` did, for any real key — an attacker (or a
+ * misconfigured MediaMTX) could publish to a path our own adapter never
+ * constructs, and `HandleStreamLifecycle`'s `runOnOnline` would then fire
+ * with `MTX_PATH=foo/bar/<key>`, mark the event `live`, and notify every
+ * member with an HLS URL under `live/<key>` that nothing is actually
+ * publishing to. An unknown or wrongly-shaped path now refuses outright
+ * (`null`, which `AuthoriseStream.execute` and `HandleStreamLifecycle.execute`
+ * both treat as an immediate refusal / no-op), matching only the shapes
+ * this codebase's own adapters are ever meant to produce.
  *
- * EXPORTED for `HandleStreamLifecycle` (Task 5): MediaMTX hands
+ * EXPORTED for `HandleStreamLifecycle`: MediaMTX hands
  * `runOnOnline`/`runOnOffline` the SAME `$MTX_PATH` value — confirmed
  * against mediamtx.org's hooks documentation ("MTX_PATH: path name"),
  * which is the runtime path a client actually published to, i.e.
- * `live/<key>` under this codebase's catch-all path config, not the bare
- * key. Re-parsing it here rather than duplicating the two-segment check a
- * second time is what keeps "what path shape is legitimate" answered in
- * exactly one place; see this task's carry-forward note in
- * `progress.md` for the failure mode a second, looser parser would
- * reopen (an event marked `live` from a path this codebase's own adapter
- * never constructs, whose members are then sent an HLS URL that points
- * nowhere).
+ * `live/<key>` (or, once Task 3 wires it up, `u/<key>`) under this
+ * codebase's catch-all path config, not the bare key. Re-parsing it here
+ * rather than duplicating the segment check a second time is what keeps
+ * "what path shape is legitimate, and which world does it name" answered
+ * in exactly one place.
  */
-export function streamKeyFromPath(path: string): string {
+export function parseStreamPath(path: string): { world: "community" | "user"; key: string } | null {
   const segments = path.split("/").filter((segment) => segment.length > 0);
-  if (segments.length !== 2 || segments[0] !== LIVE_PATH_SEGMENT) {
-    return "";
+  if (segments.length !== 2) {
+    return null;
   }
-  return segments[1]!;
+  const world = NAMESPACES.get(segments[0]!);
+  if (world === undefined) {
+    return null;
+  }
+  return { world, key: segments[1]! };
 }
 
 /**
@@ -190,11 +207,22 @@ export class AuthoriseStream {
     query: string;
     now: number;
   }): Promise<{ allowed: boolean }> {
-    const streamKey = streamKeyFromPath(input.path);
-    if (streamKey === "") {
+    const parsed = parseStreamPath(input.path);
+    if (!parsed) {
       return { allowed: false };
     }
 
+    if (parsed.world === "user") {
+      // The user world's real authorisation logic is added in Task 4. Until
+      // then this refuses outright, deliberately — never fall through to
+      // the community branch below, which would try to resolve a `u/<key>`
+      // key against the `event` table it has nothing to do with.
+      return { allowed: false };
+    }
+
+    // parsed.world === "community" from here on — EXACT current behaviour,
+    // unchanged by the addition of the user world above.
+    const streamKey = parsed.key;
     if (input.action === "publish") {
       return this.authorisePublish(streamKey);
     }

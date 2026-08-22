@@ -6,7 +6,7 @@ import { resetDatabase } from "../../db/test-helpers";
 import { DrizzleEventRepository } from "../../infrastructure/repositories/drizzle-event.repository";
 import { DrizzleSubscriptionRepository } from "../../infrastructure/repositories/drizzle-subscription.repository";
 import { mintWatchToken, WATCH_TOKEN_TTL_MS } from "../../domain/watch-token";
-import { AuthoriseStream } from "./authorise-stream";
+import { AuthoriseStream, parseStreamPath } from "./authorise-stream";
 
 beforeEach(resetDatabase);
 
@@ -82,6 +82,35 @@ async function cancelSubscription(id: string) {
 function tokenFor(subscriptionId: string, eventId: string, secret = SECRET, now = NOW) {
   return mintWatchToken({ subscriptionId, eventId, now, ttlMs: WATCH_TOKEN_TTL_MS, secret });
 }
+
+/**
+ * `parseStreamPath` is the ONE parser both `AuthoriseStream.execute` and
+ * `HandleStreamLifecycle.execute` go through — see its own docstring for
+ * why a second, looser parser for the new `u/` namespace would re-open the
+ * exact defect `streamKeyFromPath` was hardened against (a publish to
+ * `foo/bar/<key>` once authorising exactly as `live/<key>` did).
+ */
+describe("parseStreamPath", () => {
+  it("live/<key> is the community world", () => {
+    expect(parseStreamPath("live/abc123")).toEqual({ world: "community", key: "abc123" });
+  });
+
+  it("u/<key> is the user world", () => {
+    expect(parseStreamPath("u/abc123")).toEqual({ world: "user", key: "abc123" });
+  });
+
+  it("an UNKNOWN namespace is refused, never guessed at", () => {
+    expect(parseStreamPath("foo/abc123")).toBeNull();
+  });
+
+  it("a three-segment path is refused even when its first segment is known", () => {
+    expect(parseStreamPath("live/abc123/extra")).toBeNull();
+  });
+
+  it("a bare key with no namespace is refused", () => {
+    expect(parseStreamPath("abc123")).toBeNull();
+  });
+});
 
 describe("AuthoriseStream — publish", () => {
   it("allows a publish to a scheduled event", async () => {
@@ -421,6 +450,55 @@ describe("AuthoriseStream — read by event id (nginx auth_request)", () => {
     });
 
     expect(result).toEqual({ allowed: false });
+  });
+});
+
+/**
+ * The `u/<key>` namespace is the user world's — `parseStreamPath` already
+ * recognises it, but `AuthoriseStream` does not yet authorise anything
+ * under it. Task 4 adds the real logic. Until then this MUST refuse
+ * outright, deliberately, rather than falling through to the community
+ * branch's event lookup.
+ *
+ * Both tests below deliberately seed a COMMUNITY event whose stream key is
+ * the exact same string used in the `u/<key>` path. This is what makes the
+ * refusal a proven decision rather than an accident: a naive removal of the
+ * `parsed.world === "user"` guard would fall through to the community
+ * branch's `authorisePublish`/`authoriseRead`, which — given that shared
+ * key — would find a real, valid event and return `allowed: true`. A
+ * non-colliding key would pass this test even with the guard deleted,
+ * because the community lookup would fail anyway; only the collision
+ * proves the guard, not the lookup, is what refuses.
+ */
+describe("AuthoriseStream — user world (not yet implemented)", () => {
+  it("refuses a publish under u/, even when a community event shares the exact same key", async () => {
+    const community = await seedCommunity();
+    const { streamKey } = await seedEvent(community.id, "scheduled");
+
+    const result = await useCase.execute({
+      action: "publish",
+      path: `u/${streamKey}`,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result.allowed).toBe(false);
+  });
+
+  it("refuses a read under u/, even when a community event and a valid token share the exact same key", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = tokenFor(subscription.id, event.id);
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${streamKey}`,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result.allowed).toBe(false);
   });
 });
 
