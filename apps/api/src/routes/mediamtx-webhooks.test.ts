@@ -25,6 +25,10 @@ import { DrizzleEventRepository } from "../infrastructure/repositories/drizzle-e
 import { DrizzleStreamLifecycleUnitOfWork } from "../infrastructure/repositories/drizzle-stream-lifecycle.unit-of-work";
 import { DrizzleSubscriptionRepository } from "../infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzleUserStreamRepository } from "../infrastructure/repositories/drizzle-user-stream.repository";
+import {
+  mintUserWatchToken,
+  USER_WATCH_TOKEN_TTL_MS,
+} from "../domain/user-watch-token";
 import { mediamtxWebhookRoutes } from "./mediamtx-webhooks";
 
 beforeEach(resetDatabase);
@@ -355,6 +359,72 @@ describe("POST /webhooks/mediamtx/auth — publish", () => {
     const res = await post(a, { action: "publish", path: "live/no-such-key", query: "" });
 
     expect(isSuccessStatus(res.status)).toBe(false);
+  });
+});
+
+/**
+ * TASK 5 — the user world at the wire, through the endpoint a real MediaMTX
+ * actually calls. This is the hole Task 4's review found: the namespace, the
+ * nginx locations and the by-id read entry point all shipped, and a `u/`
+ * PUBLISH was still refused, so nobody could go live at all. Every test here
+ * would have failed before this task.
+ */
+describe("POST /webhooks/mediamtx/auth — the user world", () => {
+  it("returns 2xx for a publish to a LIVE user stream", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await post(a, { action: "publish", path: `u/${stream.streamKey}`, query: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+  });
+
+  it("refuses (non-2xx) a publish to an ENDED user stream", async () => {
+    const stream = await seedUserStream("public");
+    await userStreamRepository.endById(stream.id, new Date());
+    const a = app();
+
+    const res = await post(a, { action: "publish", path: `u/${stream.streamKey}`, query: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+  });
+
+  it("returns 2xx for a read of a PUBLIC user stream with no token", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await post(a, { action: "read", path: `u/${stream.streamKey}`, query: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+  });
+
+  it("refuses (non-2xx) a read of a GATED user stream with no token", async () => {
+    const stream = await seedUserStream("members");
+    const a = app();
+
+    const res = await post(a, { action: "read", path: `u/${stream.streamKey}`, query: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+  });
+
+  it("returns 2xx for a read of a GATED user stream with a token naming it", async () => {
+    const stream = await seedUserStream("members");
+    const token = mintUserWatchToken({
+      viewerId: "55555555-5555-4555-8555-555555555555",
+      streamId: stream.id,
+      now: Date.now(),
+      ttlMs: USER_WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const a = app();
+
+    const res = await post(a, {
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: `token=${token}`,
+    });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
   });
 });
 
@@ -798,13 +868,67 @@ describe("GET /webhooks/mediamtx/auth-request — the user world", () => {
     expect(res.headers.get("X-Stream-Key")).toBeNull();
   });
 
-  it("refuses a MEMBERS-only user stream — the gate itself arrives in Task 5", async () => {
+  /**
+   * TASK 5 REPLACED THE NAME, NOT THE ASSERTION. This test used to read "the
+   * gate itself arrives in Task 5" and pinned a blanket refusal of every
+   * gated stream. The gate has arrived, and a gated stream with no token
+   * still refuses — but now because `authoriseUserStreamRead` found no token,
+   * not because the method refused everything. Its counterpart immediately
+   * below is what proves that difference at THIS layer: a valid token, sent
+   * the way nginx sends one, opens it.
+   */
+  it("refuses a MEMBERS-only user stream carrying no watch token", async () => {
     const stream = await seedUserStream("members");
     const a = app();
 
     const res = await getAuthRequest(a, { streamId: stream.id });
 
     expect(isSuccessStatus(res.status)).toBe(false);
+  });
+
+  /**
+   * THE ROUTE'S OWN HALF OF THE PAYWALL, and nothing pinned it for the user
+   * world before: `/auth-request` reads `X-Watch-Token` and rebuilds it into
+   * the `token=...` query string `AuthoriseStream` parses. The use-case tests
+   * pass that query string in directly and would go on passing if this route
+   * dropped the header on the user path — the community world's tests do not
+   * cover it either, since they exercise a different branch of the same
+   * handler.
+   */
+  it("authorises a MEMBERS-only user stream with a valid watch token, and returns the key", async () => {
+    const stream = await seedUserStream("members");
+    const token = mintUserWatchToken({
+      viewerId: "55555555-5555-4555-8555-555555555555",
+      streamId: stream.id,
+      now: Date.now(),
+      ttlMs: USER_WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.id, token });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+    expect(res.headers.get("X-Stream-Key")).toBe(stream.streamKey);
+    expect(await res.text()).not.toContain(stream.streamKey);
+  });
+
+  it("refuses a MEMBERS-only user stream with a token minted for ANOTHER stream", async () => {
+    const target = await seedUserStream("members");
+    const other = await seedUserStream("members");
+    const token = mintUserWatchToken({
+      viewerId: "55555555-5555-4555-8555-555555555555",
+      streamId: other.id,
+      now: Date.now(),
+      ttlMs: USER_WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: target.id, token });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+    expect(res.headers.get("X-Stream-Key")).toBeNull();
   });
 
   /**

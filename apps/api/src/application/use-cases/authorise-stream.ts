@@ -1,7 +1,11 @@
+import { verifyUserWatchToken } from "../../domain/user-watch-token";
 import { verifyWatchToken } from "../../domain/watch-token";
 import type { EventRecord, EventRepositoryPort } from "../ports/event-repository.port";
 import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
-import type { UserStreamRepositoryPort } from "../ports/user-stream-repository.port";
+import type {
+  UserStreamRepositoryPort,
+  UserStreamRow,
+} from "../ports/user-stream-repository.port";
 import { MEMBERS_ONLY } from "./post-views";
 
 /**
@@ -9,6 +13,26 @@ import { MEMBERS_ONLY } from "./post-views";
  * deliberately excluded — see the class docstring below.
  */
 const PUBLISHABLE_STATUSES: ReadonlySet<string> = new Set(["scheduled", "live"]);
+
+/**
+ * The one `user_stream.status` a publish is allowed against — Task 5, and the
+ * community world's `PUBLISHABLE_STATUSES` rule applied to the new table.
+ * There is no `scheduled` here: `StartUserStream` inserts a row that is
+ * already `live` (there is nothing to schedule in Siaran), so the set has one
+ * member rather than two. `ended` refuses for the identical reason the
+ * community world gives — a finished session must not be republishable by
+ * somebody who captured the RTMP URL after the creator moved on.
+ */
+const USER_PUBLISHABLE_STATUS = "live";
+
+/**
+ * The one `user_stream.visibility` that opens a read to everybody. Written
+ * here as a literal beside `MEMBERS_ONLY` rather than imported from anywhere,
+ * because the decision below is an ALLOW-LIST: see
+ * `authoriseUserStreamRead`'s docstring for why this file must not be able to
+ * infer "not gated" from "not the gated value".
+ */
+const PUBLIC_VISIBILITY = "public";
 
 /**
  * The one status a watch token's subscription must hold for a read to be
@@ -198,9 +222,28 @@ function watchTokenFromQuery(query: string): string | null {
  * nginx's `auth_request`, now also fronting the `^~ /u/` location. It
  * resolves `user_stream` by its opaque row id (never by its stream key —
  * see its own docstring) and returns that row's key on success so nginx can
- * rewrite onto MediaMTX's internal `u/<streamKey>` path. `execute()`'s own
- * user branch still refuses everything; Task 5 is what answers MediaMTX's
- * direct hook for that world.
+ * rewrite onto MediaMTX's internal `u/<streamKey>` path.
+ *
+ * THE USER WORLD'S OWN TWO DECISIONS — Task 5, and until it landed this
+ * branch refused everything, so nobody could go live at all:
+ *
+ *   - `publish`: allowed only if `u/<key>` resolves, via
+ *     `UserStreamRepositoryPort.findByStreamKey`, to a row whose `status` is
+ *     `live`. `ended` refuses, for the identical reason the community world
+ *     refuses one. See `authoriseUserPublish`.
+ *   - `read`: `authoriseUserStreamRead`, an ALLOW-LIST over `visibility` — a
+ *     `public` row needs no token at all, a `members` row needs a valid
+ *     `user-watch-token.ts` token NAMING THAT ROW, and any other visibility
+ *     value is refused. It is the SAME function nginx's by-id entry point
+ *     calls, deliberately: one decision, two callers, because two copies of a
+ *     paywall drift and the drift is silent.
+ *
+ * The user world's read does NOT re-check membership on every segment the
+ * way the community world's does. Its token lives ten minutes rather than
+ * six hours and the player re-mints silently, so the entitlement check lives
+ * at the MINT endpoint (`POST /streams/:id/watch-token`) where the viewer's
+ * session actually is. Design spec §5; `authoriseUserStreamRead`'s own
+ * docstring carries the full reasoning.
  *
  * EVERY refusal — no such event, ended event, bad signature, expired token,
  * wrong event, wrong community, cancelled subscription, an unknown or gated
@@ -242,19 +285,23 @@ export class AuthoriseStream {
     }
 
     if (parsed.world === "user") {
-      // STILL REFUSES, and Task 4 deliberately left it that way.
+      // TASK 5. This method is what MediaMTX's OWN `authHTTPAddress` hook
+      // calls, with the path a client published to or read from —
+      // `u/<streamKey>` — so BOTH actions resolve through
+      // `UserStreamRepositoryPort.findByStreamKey`, never through the
+      // `event` table this world has nothing to do with.
       //
-      // This method is what MediaMTX's OWN `authHTTPAddress` hook calls,
-      // with the path a client published to or read from — `u/<streamKey>`.
-      // Answering it needs the membership gate and the user watch token,
-      // both of which are Task 5's ("Watching"). Task 4's own user-world
-      // work is `authoriseUserReadByStreamId` below: the by-ID entry point
-      // nginx's `auth_request` calls, which is the only surface a member's
-      // browser ever reaches.
-      //
-      // Never fall through to the community branch below, which would try
-      // to resolve a `u/<key>` key against the `event` table it has nothing
-      // to do with.
+      // Until Task 5 this branch refused everything, which meant nobody
+      // could go live at all: Task 4 shipped the namespace, the nginx
+      // locations and the by-id read entry point, and no task owned the
+      // publish. `authorise-stream.test.ts`'s "user world publish" describe
+      // is the replaced pin.
+      if (input.action === "publish") {
+        return this.authoriseUserPublish(parsed.key);
+      }
+      if (input.action === "read") {
+        return this.authoriseUserReadByStreamKey(parsed.key, input.query, input.now);
+      }
       return { allowed: false };
     }
 
@@ -291,6 +338,49 @@ export class AuthoriseStream {
   }
 
   /**
+   * The USER world's publish — Task 5, and the ~4 lines that let anybody go
+   * live at all.
+   *
+   * `findByStreamKey` is the ONE sanctioned unscoped lookup on this port, for
+   * the same reason it is on `EventRepositoryPort`: MediaMTX knows only the
+   * key baked into the RTMP/WHIP path and there is no authenticated creator
+   * on this call. Only a `live` row publishes (`USER_PUBLISHABLE_STATUS`);
+   * an `ended` row refuses, exactly as the community world refuses a publish
+   * to a non-publishable status.
+   *
+   * NO VISIBILITY CHECK, deliberately: `visibility` gates who may WATCH, and
+   * the person publishing is the owner, who is never gated out of their own
+   * broadcast. A gated stream must be publishable or *Khusus anggota* would
+   * be a switch that breaks going live.
+   */
+  private async authoriseUserPublish(streamKey: string): Promise<{ allowed: boolean }> {
+    const stream = await this.userStreams.findByStreamKey(streamKey);
+    if (!stream) {
+      return { allowed: false };
+    }
+    return { allowed: stream.status === USER_PUBLISHABLE_STATUS };
+  }
+
+  /**
+   * The USER world's read as MediaMTX's own hook asks it — resolved BY KEY,
+   * because that hook only ever knows the path a client actually requested.
+   * The decision itself is `authoriseUserStreamRead`, shared verbatim with
+   * `authoriseUserReadByStreamId` (nginx's by-id entry point); this method is
+   * nothing but the lookup in front of it.
+   */
+  private async authoriseUserReadByStreamKey(
+    streamKey: string,
+    query: string,
+    now: number
+  ): Promise<{ allowed: boolean }> {
+    const stream = await this.userStreams.findByStreamKey(streamKey);
+    if (!stream) {
+      return { allowed: false };
+    }
+    return this.authoriseUserStreamRead(stream, query, now);
+  }
+
+  /**
    * nginx's `auth_request` re-authorisation for the USER world, by STREAM ID
    * — Task 4, and deliberately the SAME shape as `authoriseReadByEventId`
    * below rather than a second mechanism beside a working one.
@@ -314,14 +404,13 @@ export class AuthoriseStream {
    * either identifier would quietly undo the entire reason ids are what get
    * published. `authorise-stream.test.ts` pins this with a real 32-hex key.
    *
-   * `visibility` IS THE ONLY GATE TODAY, and it fails CLOSED: a `members`
-   * stream refuses outright, because the token that could open it does not
-   * exist yet (Task 5 adds `user-watch-token.ts`, the mint route, and the
-   * membership check, and this is the method it will widen). `query` is
-   * accepted now, unused now, and named in the signature so that widening
-   * does not change every caller — the route already forwards
-   * `X-Watch-Token` for the community world and will forward it here
-   * unchanged.
+   * THE GATE ITSELF IS NOT HERE. It is `authoriseUserStreamRead` below, which
+   * this method and `execute()`'s own by-key user branch BOTH call — one
+   * decision, two callers. Task 5's ruling, and not a stylistic one: two
+   * copies of a paywall drift, and the drift is silent, because the copy that
+   * loosened still has its own passing tests. `query` carries the watch token
+   * (the route already forwards `X-Watch-Token` as `token=...` for both
+   * worlds) and `now` is the instant the caller read once.
    *
    * NO STATUS CHECK, matching `authoriseReadByEventId` exactly: the community
    * world's read path has never consulted `event.status` either, and an
@@ -338,10 +427,90 @@ export class AuthoriseStream {
     if (!stream) {
       return { allowed: false };
     }
-    if (stream.visibility === MEMBERS_ONLY) {
+    const result = this.authoriseUserStreamRead(stream, input.query, input.now);
+    if (!result.allowed) {
       return { allowed: false };
     }
     return { allowed: true, streamKey: stream.streamKey };
+  }
+
+  /**
+   * THE USER WORLD'S READ DECISION — the whole paywall, in one place, called
+   * by both entry points: `authoriseUserReadByStreamId` (nginx's
+   * `auth_request`, resolving by the opaque row id a browser is allowed to
+   * know) and `authoriseUserReadByStreamKey` (MediaMTX's own
+   * `authHTTPAddress` hook, resolving by the key baked into the path). By the
+   * time either calls this, it has the row in hand and nothing past that
+   * point differs. This mirrors `authoriseReadForEvent`, which the community
+   * world's two entry points already share for the identical reason.
+   *
+   * DENY BY DEFAULT. The shape here is an ALLOW-LIST over `visibility` — a
+   * `public` row is authorised, a `members` row is authorised only by a valid
+   * token naming it, and ANY OTHER VALUE IS REFUSED. It is deliberately NOT
+   * the `visibility !== MEMBERS_ONLY -> allow` test the earlier version of
+   * this method used. `user_stream.visibility` is a widened `varchar`, so a
+   * typo, a migration, or a future tier name would read as "not gated" and
+   * open the stream to the public internet; `toStreamView`'s listing gate can
+   * afford that reading because the write path is the authority on what may
+   * be stored there and the worst case is a lock shown where none was meant.
+   * Here the worst case is the paywall, and an allow-by-default paywall is
+   * one typo from open.
+   *
+   * NO LIVE MEMBERSHIP RE-CHECK, and this is the ONE place the two worlds
+   * deliberately disagree. The community world re-reads the subscription on
+   * every segment (`authoriseReadForEvent`) because its token lives SIX
+   * HOURS. This one lives TEN MINUTES and the player re-mints silently while
+   * watching, so a membership that lapses mid-broadcast stops access at the
+   * next re-mint — `MintUserWatchToken` is what asks `IsMemberOf`, and it
+   * needs the viewer's own session to answer, which is exactly why a
+   * forwarded token cannot be renewed. Design spec §5 states that bargain and
+   * chooses it; this method is not the place to re-litigate it, and adding a
+   * membership query here would put one on every HLS segment request.
+   *
+   * NO STATUS CHECK, matching both `authoriseReadByEventId` and this world's
+   * own by-id entry point: an `ended` stream has nothing for MediaMTX to
+   * serve regardless, and the player must be able to reach the point of
+   * discovering that for itself rather than being handed a dead link.
+   *
+   * SYNCHRONOUS on purpose — it touches no repository. Everything it needs is
+   * the row the caller already fetched, plus the token in the query.
+   */
+  private authoriseUserStreamRead(
+    stream: UserStreamRow,
+    query: string,
+    now: number
+  ): { allowed: boolean } {
+    if (stream.visibility === PUBLIC_VISIBILITY) {
+      // Nothing to gate. Spec §5: "A public stream needs no token" — there is
+      // nothing to mint and nothing to refresh, and `MintUserWatchToken`
+      // refuses to issue one for such a stream rather than handing out a
+      // credential that means nothing.
+      return { allowed: true };
+    }
+    if (stream.visibility !== MEMBERS_ONLY) {
+      return { allowed: false };
+    }
+
+    const token = watchTokenFromQuery(query);
+    if (!token) {
+      return { allowed: false };
+    }
+    const claims = verifyUserWatchToken({
+      token,
+      now,
+      secret: this.config.streamTokenSecret,
+    });
+    if (!claims) {
+      return { allowed: false };
+    }
+    // A token proves "this viewer may watch stream X"; the signature never
+    // mentions which stream is being REQUESTED. Without this comparison one
+    // paid membership anywhere would open every gated broadcast on the
+    // platform — the same defect class as Phase 6's forwarded media id.
+    if (claims.streamId !== stream.id) {
+      return { allowed: false };
+    }
+    return { allowed: true };
   }
 
   /**

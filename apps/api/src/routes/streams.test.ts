@@ -89,6 +89,48 @@ async function subscribe(subscriberId: string, ownerId: string, periodEnd: Date)
 const IN_A_MONTH = () => new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 const YESTERDAY = () => new Date(Date.now() - 24 * 60 * 60 * 1000);
 
+/**
+ * Live streaming is DELETED from the environment for the whole run (see
+ * `test-env-preload.ts`), so a bare `bootstrap()` leaves `mintUserWatchToken`
+ * — and `authoriseStream` — `undefined`. The watch-token tests need both, so
+ * they boot inside this, the SAME shape `watch-session.test.ts` and
+ * `mediamtx-webhooks.test.ts` already use for the identical reason.
+ *
+ * `bootstrap()` MUST be called inside the callback: the secrets are read at
+ * construction time, not per request.
+ */
+const STREAM_SECRET = "e".repeat(32);
+
+async function withStreamingConfigured<T>(fn: () => Promise<T>): Promise<T> {
+  const originals = {
+    MEDIAMTX_RTMP_HOST: process.env.MEDIAMTX_RTMP_HOST,
+    MEDIAMTX_HLS_BASE_URL: process.env.MEDIAMTX_HLS_BASE_URL,
+    MEDIAMTX_WHIP_BASE_URL: process.env.MEDIAMTX_WHIP_BASE_URL,
+    MEDIAMTX_WEBHOOK_SECRET: process.env.MEDIAMTX_WEBHOOK_SECRET,
+    STREAM_TOKEN_SECRET: process.env.STREAM_TOKEN_SECRET,
+  };
+  process.env.MEDIAMTX_RTMP_HOST = "mediamtx.internal";
+  process.env.MEDIAMTX_HLS_BASE_URL = "https://hls.diudara.test";
+  process.env.MEDIAMTX_WHIP_BASE_URL = "https://whip.diudara.test";
+  process.env.MEDIAMTX_WEBHOOK_SECRET = STREAM_SECRET;
+  process.env.STREAM_TOKEN_SECRET = STREAM_SECRET;
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(originals)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+async function mintToken(a: ReturnType<typeof app>, streamId: string, token?: string) {
+  return a.request(`/streams/${streamId}/watch-token`, {
+    method: "POST",
+    headers: token ? authed(token) : { "Content-Type": "application/json" },
+  });
+}
+
 describe("POST /streams", () => {
   it("returns both publish URLs and the key", async () => {
     const a = app();
@@ -390,6 +432,197 @@ describe("DELETE /streams/:id", () => {
 });
 
 /**
+ * `POST /streams/:id/watch-token` — Task 5, design spec §5. The credential a
+ * gated stream's player carries, minted for ONE viewer and ONE stream, alive
+ * for ten minutes, and re-mintable only with the viewer's own session.
+ *
+ * Everything here boots inside `withStreamingConfigured`, because the mint
+ * needs `STREAM_TOKEN_SECRET` to sign with and the suite deletes it.
+ */
+describe("POST /streams/:id/watch-token", () => {
+  /** Rina live and gated; Budi signed up, not subscribed. */
+  async function gated(a: ReturnType<typeof app>) {
+    const rina = await signUp(a, RINA);
+    const budi = await signUp(a, BUDI);
+    const stream = await (
+      await startStream(a, rina.token, { title: "Tanya jawab", visibility: "members" })
+    ).json();
+    return { rina, budi, stream };
+  }
+
+  /**
+   * A CREDENTIAL THAT MEANS NOTHING IS WORSE THAN NO CREDENTIAL. A public
+   * stream authorises a read with no token at all (see
+   * `authorise-stream.test.ts`), so minting one would hand a client something
+   * to attach, refresh and reason about that decides nothing — and would make
+   * "the token was refused" and "the stream was never gated" look identical
+   * from the outside. Spec §5.
+   */
+  it("refuses to mint a token for a PUBLIC stream — there is nothing to gate", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const rina = await signUp(a, RINA);
+      const budi = await signUp(a, BUDI);
+      const stream = await (
+        await startStream(a, rina.token, { title: "Ngobrol", visibility: "public" })
+      ).json();
+
+      const res = await mintToken(a, stream.id, budi.token);
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("siaran ini terbuka untuk semua, tidak perlu token");
+    });
+  });
+
+  /**
+   * WHERE PHASE 5b's RETIREMENT WORK BECOMES VISIBLE. The row is still
+   * `status = 'active'` — 5a has no renewal pass — and only
+   * `current_period_end` says it is over. A status-only check would mint here
+   * forever, which is the exact defect `IsMemberOf` exists to prevent.
+   */
+  it("a LAPSED member cannot mint — their period ended", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { rina, budi, stream } = await gated(a);
+      await subscribe(budi.userId, rina.userId, YESTERDAY());
+
+      const res = await mintToken(a, stream.id, budi.token);
+
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe("siaran ini khusus anggota");
+    });
+  });
+
+  it("a signed-in stranger cannot mint", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { budi, stream } = await gated(a);
+
+      expect((await mintToken(a, stream.id, budi.token)).status).toBe(403);
+    });
+  });
+
+  it("a CURRENT member can mint", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { rina, budi, stream } = await gated(a);
+      await subscribe(budi.userId, rina.userId, IN_A_MONTH());
+
+      const res = await mintToken(a, stream.id, budi.token);
+
+      expect(res.status).toBe(200);
+      expect(Object.keys(await res.json()).sort()).toEqual(["expiresAt", "token"]);
+    });
+  });
+
+  /** Nobody subscribes to themselves; the owner is never gated out of their own broadcast. */
+  it("the owner can always mint for their own stream", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { rina, stream } = await gated(a);
+
+      const res = await mintToken(a, stream.id, rina.token);
+
+      expect(res.status).toBe(200);
+      expect(typeof (await res.json()).token).toBe("string");
+    });
+  });
+
+  it("expires ten minutes after it was minted", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { rina, stream } = await gated(a);
+
+      const before = Date.now();
+      const { expiresAt } = await (await mintToken(a, stream.id, rina.token)).json();
+      const after = Date.now();
+
+      expect(Date.parse(expiresAt)).toBeGreaterThanOrEqual(before + 600_000);
+      expect(Date.parse(expiresAt)).toBeLessThanOrEqual(after + 600_000);
+    });
+  });
+
+  /**
+   * THE END-TO-END PROOF, and the reason this test reaches past the route:
+   * a mint endpoint that answers 200 with a well-shaped body proves nothing
+   * about whether the thing it minted actually opens the stream — or opens
+   * ONLY that stream. Both halves are asserted against the very
+   * `AuthoriseStream` the same `bootstrap()` built, so the signing secret and
+   * the verifying secret are genuinely the same one.
+   */
+  it("the minted token opens THAT stream through the read gate, and no other", async () => {
+    await withStreamingConfigured(async () => {
+      const deps = bootstrap();
+      const a = createApp(deps);
+      const rina = await signUp(a, RINA);
+      const budi = await signUp(a, BUDI);
+      const mine = await (
+        await startStream(a, rina.token, { title: "Tanya jawab", visibility: "members" })
+      ).json();
+      const theirs = await (
+        await startStream(a, budi.token, { title: "Punya Budi", visibility: "members" })
+      ).json();
+
+      const { token } = await (await mintToken(a, mine.id, rina.token)).json();
+      const query = `token=${encodeURIComponent(token)}`;
+
+      expect(
+        await deps.authoriseStream!.authoriseUserReadByStreamId({
+          streamId: mine.id,
+          query,
+          now: Date.now(),
+        })
+      ).toEqual({ allowed: true, streamKey: mine.streamKey });
+      expect(
+        await deps.authoriseStream!.authoriseUserReadByStreamId({
+          streamId: theirs.id,
+          query,
+          now: Date.now(),
+        })
+      ).toEqual({ allowed: false });
+    });
+  });
+
+  /**
+   * The stream key is the PUBLISH credential. This response is minted FOR a
+   * member, so it is exactly the place a key must never appear — asserted
+   * over the whole serialised body, the same way `GET /streams` asserts it.
+   */
+  it("NEVER sends the stream key back", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { rina, stream } = await gated(a);
+
+      const body = await (await mintToken(a, stream.id, rina.token)).text();
+
+      expect(stream.streamKey).toMatch(/^[0-9a-f]{32}$/);
+      expect(body).not.toContain(stream.streamKey);
+    });
+  });
+
+  it("rejects an unauthenticated request with 401", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { stream } = await gated(a);
+
+      expect((await mintToken(a, stream.id)).status).toBe(401);
+    });
+  });
+
+  it("404s an unknown id and 400s an id that is not a uuid", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const rina = await signUp(a, RINA);
+
+      expect((await mintToken(a, "00000000-0000-4000-8000-000000000000", rina.token)).status).toBe(
+        404
+      );
+      expect((await mintToken(a, "not-a-uuid", rina.token)).status).toBe(400);
+    });
+  });
+});
+
+/**
  * A box with no MediaMTX configured — `Dependencies.streamingProvider`, and
  * therefore `startUserStream`, is `undefined` (see `selectStreamingProvider`
  * in bootstrap.ts). Built by hand rather than by moving `NODE_ENV`, the same
@@ -444,6 +677,11 @@ describe("/streams when streaming is not configured", () => {
             return undefined;
           },
         } as never,
+        // Task 5. `undefined` here is the POINT of the block: this app has no
+        // `STREAM_TOKEN_SECRET`, so there is nothing to sign a watch token
+        // with, and `POST /streams/:id/watch-token` must 503 rather than
+        // reach a use case that does not exist.
+        mintUserWatchToken: undefined,
         ...overrides,
       })
     );
@@ -466,6 +704,19 @@ describe("/streams when streaming is not configured", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ streams: [] });
+  });
+
+  it("a box with no STREAM_TOKEN_SECRET refuses to mint a watch token, and says so", async () => {
+    const res = await disabledApp().request(
+      "/streams/22222222-2222-4222-8222-222222222222/watch-token",
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer valid", "Content-Type": "application/json" },
+      }
+    );
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toBe("siaran langsung belum tersedia di server ini");
   });
 
   it("DELETE still works — ending a row depends on no provider either", async () => {

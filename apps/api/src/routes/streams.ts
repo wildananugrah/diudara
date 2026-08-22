@@ -39,10 +39,10 @@ const streamIdParams = z.object({ id: uuidParam });
 /**
  * `/streams` — Phase 7's Siaran (design spec §7, §8).
  *
- * THREE ROUTES, TWO AUTH SHAPES, and the split is the point:
+ * FOUR ROUTES, TWO AUTH SHAPES, and the split is the point:
  *
- *  - `POST /streams` and `DELETE /streams/:id` are yours, behind
- *    `requireUserAuth`.
+ *  - `POST /streams`, `DELETE /streams/:id` and
+ *    `POST /streams/:id/watch-token` are yours, behind `requireUserAuth`.
  *  - `GET /streams` is PUBLIC — spec §8, "visible to everyone signed in or
  *    not" — so it uses `resolveViewerId`, which degrades a missing, expired
  *    or epoch-stale token to `null` instead of throwing. The same shape
@@ -50,11 +50,24 @@ const streamIdParams = z.object({ id: uuidParam });
  *    is a publicly reachable page, and an auth-only listing would break it
  *    for a signed-out visitor.
  *
+ * `POST /streams/:id/watch-token` (Task 5) is authenticated for a reason
+ * worth stating: the credential it mints is issued to a NAMED viewer, and
+ * re-minting it is the ONLY thing that keeps a lapsed membership out (design
+ * spec §5). A forwarded token cannot be renewed precisely because renewing it
+ * requires the member's own session.
+ *
  * **`deps.startUserStream` is `undefined` exactly when
  * `Dependencies.streamingProvider` is** (see `selectStreamingProvider` in
  * bootstrap.ts): live streaming is not configured on this box. That is a 503
  * here, the same shape `POST /ai/messages` and
  * `POST /communities/:communityId/events` already use.
+ * `deps.mintUserWatchToken` is `undefined` on a slightly DIFFERENT condition
+ * — exactly when `STREAM_TOKEN_SECRET` is absent, mirroring
+ * `Dependencies.authoriseStream` rather than `startUserStream` — because
+ * signing a token needs that secret and nothing else. A relaxed dev box with
+ * a `FakeStreamingAdapter` and no secrets can start a stream and cannot mint
+ * a watch token; both answer 503 off their own dependency, neither infers the
+ * other's.
  *
  * **`GET /streams` STILL WORKS on such a box, and that is deliberate.**
  * `deps.listLiveStreams` is never `undefined`: the listing reads rows and
@@ -73,6 +86,7 @@ export function streamRoutes(
     | "startUserStream"
     | "listLiveStreams"
     | "endOwnUserStream"
+    | "mintUserWatchToken"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -105,6 +119,39 @@ export function streamRoutes(
     });
     return c.json({ ended: true });
   });
+
+  /**
+   * `POST /streams/:id/watch-token` — Task 5, design spec §5.
+   *
+   * `validateParams` FIRST, for the reason `DELETE /:id` above records: a
+   * non-uuid `:id` otherwise reaches a uuid column and 500s with the failing
+   * SQL on stderr.
+   *
+   * NEITHER THE TOKEN NOR THE STREAM KEY IS EVER LOGGED here or anywhere
+   * downstream — `MintUserWatchToken` returns the token and the route puts it
+   * straight in the body. The rule `HandleStreamLifecycle`'s docstring states
+   * for stream keys covers this credential for the same reason.
+   *
+   * 200, not 201: nothing is created. The token is derived from a row that
+   * already exists and a clock, and the same viewer re-mints every few
+   * minutes for the whole broadcast.
+   */
+  app.post<"/:id/watch-token">(
+    "/:id/watch-token",
+    requireAuth,
+    validateParams(streamIdParams),
+    async (c) => {
+      if (!deps.mintUserWatchToken) {
+        throw new ServiceUnavailableError("siaran langsung belum tersedia di server ini");
+      }
+      return c.json(
+        await deps.mintUserWatchToken.execute({
+          viewerId: c.get("userId"),
+          streamId: c.req.param("id"),
+        })
+      );
+    }
+  );
 
   app.get("/", async (c) => {
     const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);

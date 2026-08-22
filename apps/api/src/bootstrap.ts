@@ -94,6 +94,7 @@ import {
   StartUserStream,
   ListLiveStreams,
   EndOwnUserStream,
+  MintUserWatchToken,
 } from "./application/use-cases/start-user-stream";
 import { DrizzleUserStreamRepository } from "./infrastructure/repositories/drizzle-user-stream.repository";
 import { AuthoriseStream } from "./application/use-cases/authorise-stream";
@@ -572,6 +573,22 @@ export interface Dependencies {
    * to stop.
    */
   endOwnUserStream: EndOwnUserStream;
+  /**
+   * Task 5's `POST /streams/:id/watch-token` — the credential a gated user
+   * stream's player carries (design spec §5), and the ONE place membership is
+   * actually checked for watching.
+   *
+   * `undefined` EXACTLY when `streamTokenSecret` is — in LOCKSTEP with
+   * `authoriseStream` and `resolveWatchToken`, not with `startUserStream`.
+   * The distinction is real and is pinned by a test: a relaxed dev box
+   * (`development`/`test` with no streaming vars) gets a truthy
+   * `FakeStreamingAdapter`, so `startUserStream` is DEFINED while
+   * `STREAM_TOKEN_SECRET` is absent — such a box can go live and cannot mint
+   * a watch token, and `routes/streams.ts` answers 503 off each dependency
+   * separately rather than inferring one from the other. Signing a token
+   * needs the secret and nothing else; there is no provider in the picture.
+   */
+  mintUserWatchToken: MintUserWatchToken | undefined;
   /**
    * Task 4's `POST /webhooks/mediamtx/auth` decision logic — `undefined`
    * EXACTLY when `streamTokenSecret` is. Mirrors `scheduleLiveSession`'s
@@ -2445,6 +2462,16 @@ export function bootstrap(): Dependencies {
       })
     : undefined;
 
+  // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`
+  // above (both need only `STREAM_TOKEN_SECRET`), and handed the SAME
+  // `isMemberOf` the public profile and the feed already ask — so Siaran's
+  // paywall, the profile's `viewerIsMember` and the feed's lock cannot
+  // disagree about who is a paying member at a given instant. `isMemberOf`
+  // itself is untouched by this task (spec §10).
+  const mintUserWatchToken = streamTokenSecret
+    ? new MintUserWatchToken(userStreamRepository, isMemberOf, clock, { streamTokenSecret })
+    : undefined;
+
   // Task 8's `GET /c/watch/:token`. `undefined` in lockstep with
   // `authoriseStream` — both need nothing but `STREAM_TOKEN_SECRET`, and
   // both refuse everything (this route's ONE generic body; that webhook's
@@ -2551,6 +2578,7 @@ export function bootstrap(): Dependencies {
     startUserStream,
     listLiveStreams,
     endOwnUserStream,
+    mintUserWatchToken,
     authoriseStream,
     resolveWatchToken,
     mediamtxWebhookSecret,

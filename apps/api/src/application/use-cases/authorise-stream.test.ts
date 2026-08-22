@@ -9,12 +9,17 @@ import {
   members,
   membershipTiers,
   subscriptions,
+  userStreams,
 } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { DrizzleEventRepository } from "../../infrastructure/repositories/drizzle-event.repository";
 import { DrizzleSubscriptionRepository } from "../../infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzleUserStreamRepository } from "../../infrastructure/repositories/drizzle-user-stream.repository";
 import { mintWatchToken, WATCH_TOKEN_TTL_MS } from "../../domain/watch-token";
+import {
+  mintUserWatchToken,
+  USER_WATCH_TOKEN_TTL_MS,
+} from "../../domain/user-watch-token";
 import { AuthoriseStream, parseStreamPath } from "./authorise-stream";
 
 beforeEach(resetDatabase);
@@ -128,6 +133,25 @@ async function seedUserStream(visibility: string) {
     visibility,
     streamKey,
   });
+}
+
+/** A user watch token, the Phase 7 kind — `viewerId` + `streamId`, ten minutes. */
+function userTokenFor(viewerId: string, streamId: string, secret = SECRET, now = NOW) {
+  return mintUserWatchToken({
+    viewerId,
+    streamId,
+    now,
+    ttlMs: USER_WATCH_TOKEN_TTL_MS,
+    secret,
+  });
+}
+
+/** The same token with one byte of its payload rewritten and the signature kept. */
+function tamperWith(token: string) {
+  const [payload, signature] = token.split(".");
+  const decoded = JSON.parse(Buffer.from(payload!, "base64url").toString());
+  decoded.streamId = "99999999-9999-4999-8999-999999999999";
+  return `${Buffer.from(JSON.stringify(decoded)).toString("base64url")}.${signature}`;
 }
 
 /**
@@ -501,32 +525,84 @@ describe("AuthoriseStream — read by event id (nginx auth_request)", () => {
 });
 
 /**
- * The `u/<key>` namespace is the user world's — `parseStreamPath` already
- * recognises it, but `execute()` does not yet authorise anything under it.
+ * THE USER WORLD, through MediaMTX's OWN `authHTTPAddress` hook — the entry
+ * point that arrives with `u/<streamKey>`, the path a client actually
+ * published to or read from. Task 5.
  *
- * TASK 4 DID NOT CHANGE THIS, and the distinction is the whole point of
- * that task. `execute()` is what MediaMTX's OWN `authHTTPAddress` hook
- * calls, with the path a client actually published to or read from —
- * `u/<streamKey>`. Task 4 added a SEPARATE by-id entry point
- * (`authoriseUserReadByStreamId`, tested in its own describe below) for
- * nginx's `auth_request`, which is the only thing a member's browser ever
- * reaches. Teaching `execute()` to resolve a user stream BY KEY is Task 5's
- * ("Watching"), together with the membership gate and the user watch token
- * that decide the answer. Until then this MUST refuse outright, rather than
- * falling through to the community branch's event lookup.
+ * WHAT REPLACED WHAT, so the history is not lost: this describe used to be
+ * "user world (not yet implemented)" and pinned a blanket REFUSAL of every
+ * `u/` publish and every `u/` read, because Task 4 shipped the namespace
+ * before the gate that decides it. Nobody could go live at all. The refusal
+ * is not merely deleted — it is replaced, publish by publish, by the
+ * allowance that closes the hole, plus the mirror the community world has
+ * always had (an `ended` stream is not republishable).
  *
- * Both tests below deliberately seed a COMMUNITY event whose stream key is
- * the exact same string used in the `u/<key>` path. This is what makes the
- * refusal a proven decision rather than an accident: a naive removal of the
- * `parsed.world === "user"` guard would fall through to the community
- * branch's `authorisePublish`/`authoriseRead`, which — given that shared
- * key — would find a real, valid event and return `allowed: true`. A
- * non-colliding key would pass this test even with the guard deleted,
- * because the community lookup would fail anyway; only the collision
- * proves the guard, not the lookup, is what refuses.
+ * The COLLISION PROPERTY the old tests carried is kept, and it now proves the
+ * opposite direction: several tests below seed a COMMUNITY event whose stream
+ * key is the exact string used in the `u/<key>` path, with NO user stream
+ * behind it, and require a refusal. Without that, a user branch that fell
+ * through to the `event` table would pass every other test in this file.
  */
-describe("AuthoriseStream — user world (not yet implemented)", () => {
-  it("refuses a publish under u/, even when a community event shares the exact same key", async () => {
+describe("AuthoriseStream — user world publish (MediaMTX's own hook)", () => {
+  it("ALLOWS a publish under u/ to a LIVE user stream — nobody can go live without this", async () => {
+    const stream = await seedUserStream("public");
+
+    const result = await useCase.execute({
+      action: "publish",
+      path: `u/${stream.streamKey}`,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result.allowed).toBe(true);
+  });
+
+  it("allows a publish to a GATED live stream too — visibility gates reading, not publishing", async () => {
+    const stream = await seedUserStream("members");
+
+    const result = await useCase.execute({
+      action: "publish",
+      path: `u/${stream.streamKey}`,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result.allowed).toBe(true);
+  });
+
+  /**
+   * The mirror of the allowance above, and the exact rule the community world
+   * already enforces (`PUBLISHABLE_STATUSES` excludes `ended`): a finished
+   * session must not be republishable, because nothing else stops somebody
+   * who captured the RTMP URL from restarting it after the creator moved on.
+   */
+  it("refuses a publish to an ENDED user stream", async () => {
+    const stream = await seedUserStream("public");
+    await userStreamRepository.endById(stream.id, new Date(NOW));
+
+    const result = await useCase.execute({
+      action: "publish",
+      path: `u/${stream.streamKey}`,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result.allowed).toBe(false);
+  });
+
+  it("refuses a publish under u/ against a key no user stream carries", async () => {
+    const result = await useCase.execute({
+      action: "publish",
+      path: "u/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      query: "",
+      now: NOW,
+    });
+
+    expect(result.allowed).toBe(false);
+  });
+
+  /** The two worlds do not share a table. A community key is nothing here. */
+  it("refuses a publish under u/ naming a COMMUNITY event's stream key", async () => {
     const community = await seedCommunity();
     const { streamKey } = await seedEvent(community.id, "scheduled");
 
@@ -540,7 +616,173 @@ describe("AuthoriseStream — user world (not yet implemented)", () => {
     expect(result.allowed).toBe(false);
   });
 
-  it("refuses a read under u/, even when a community event and a valid token share the exact same key", async () => {
+  /** ...and the reverse, which nothing pinned before. */
+  it("refuses a publish under live/ naming a USER stream's key", async () => {
+    const stream = await seedUserStream("public");
+
+    const result = await useCase.execute({
+      action: "publish",
+      path: `live/${stream.streamKey}`,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result.allowed).toBe(false);
+  });
+
+  it("refuses an action under u/ that is neither publish nor read", async () => {
+    const stream = await seedUserStream("public");
+
+    for (const action of ["playback", "api", "metrics", "pprof", "", "PUBLISH"]) {
+      const result = await useCase.execute({
+        action,
+        path: `u/${stream.streamKey}`,
+        query: "",
+        now: NOW,
+      });
+      expect(result.allowed).toBe(false);
+    }
+  });
+});
+
+/**
+ * THE PAYWALL, seen from MediaMTX's own hook (resolution BY KEY). Every case
+ * here has a twin in the by-id describe further down, and both go through the
+ * one `authoriseUserStreamRead` decision — see that method's docstring for
+ * why there must not be two copies of it.
+ */
+describe("AuthoriseStream — user world read by stream key (MediaMTX's own hook)", () => {
+  it("a PUBLIC stream authorises a read with no token at all", async () => {
+    const stream = await seedUserStream("public");
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: true });
+  });
+
+  it("a MEMBERS stream refuses a read with no token", async () => {
+    const stream = await seedUserStream("members");
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("a MEMBERS stream allows a read with a token minted for it", async () => {
+    const stream = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", stream.id);
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: true });
+  });
+
+  /**
+   * A token proves "this viewer may watch stream X". Without comparing the
+   * `streamId` it would prove "this viewer may watch ANY stream" — the same
+   * defect class as Phase 6's forwarded media id, and one paid membership
+   * anywhere would open every gated broadcast on the platform.
+   */
+  it("a token minted for ANOTHER stream does not open this one", async () => {
+    const target = await seedUserStream("members");
+    const other = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", other.id);
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${target.streamKey}`,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("an EXPIRED token is refused", async () => {
+    const stream = await seedUserStream("members");
+    const token = userTokenFor(
+      "55555555-5555-4555-8555-555555555555",
+      stream.id,
+      SECRET,
+      NOW - 600_000
+    );
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("a TAMPERED token is refused", async () => {
+    const stream = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", stream.id);
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: `token=${tamperWith(token)}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("a token signed with the WRONG secret is refused", async () => {
+    const stream = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", stream.id, OTHER_SECRET);
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  /**
+   * A COMMUNITY watch token is signed with the very same
+   * `STREAM_TOKEN_SECRET`. It must not open a user stream — the domain
+   * separator in `user-watch-token.ts` is what makes that structural, and
+   * this is that guarantee asserted where it actually matters.
+   */
+  it("a COMMUNITY watch token does not open a gated user stream", async () => {
+    const stream = await seedUserStream("members");
+    const community = await seedCommunity();
+    const { event } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: `token=${tokenFor(subscription.id, event.id)}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("refuses a read under u/ naming a COMMUNITY event's stream key, token or no token", async () => {
     const community = await seedCommunity();
     const { event, streamKey } = await seedEvent(community.id, "live");
     const subscription = await seedActiveSubscription(community.id);
@@ -553,7 +795,7 @@ describe("AuthoriseStream — user world (not yet implemented)", () => {
       now: NOW,
     });
 
-    expect(result.allowed).toBe(false);
+    expect(result).toEqual({ allowed: false });
   });
 });
 
@@ -607,13 +849,102 @@ describe("AuthoriseStream — user world read by stream id (nginx auth_request)"
   });
 
   /**
-   * Membership gating is Task 5's ("Watching"), with its own token module.
-   * Until it lands a gated stream refuses outright — the direction a missing
-   * gate must fail in, and the same rule `toStreamView` already applies to
-   * the listing (`locked` withholds the playback path entirely).
+   * THE SAME PAYWALL AS THE BY-KEY DESCRIBE ABOVE, asserted through the OTHER
+   * entry point — because nginx's `auth_request` is the one a member's browser
+   * actually reaches, and MediaMTX's own hook is the one a client reaches
+   * directly. Task 5's ruling: ONE decision function, TWO callers. These five
+   * tests are what would redden if somebody copied the gate into one path and
+   * then loosened only that copy.
+   *
+   * This block REPLACES the Task 4 test that pinned "a MEMBERS-only stream
+   * refuses outright — the gate itself arrives in Task 5". The gate has
+   * arrived; the blanket refusal it stood in for is now the no-token case
+   * immediately below.
    */
-  it("refuses a MEMBERS-only stream outright — the gate itself arrives in Task 5", async () => {
+  it("a MEMBERS stream refuses a read with no token", async () => {
     const stream = await seedUserStream("members");
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: stream.id,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("a MEMBERS stream allows a read with a token minted for it, and hands back the key", async () => {
+    const stream = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", stream.id);
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: stream.id,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: true, streamKey: stream.streamKey });
+  });
+
+  it("a token minted for ANOTHER stream does not open this one", async () => {
+    const target = await seedUserStream("members");
+    const other = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", other.id);
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: target.id,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("an EXPIRED token is refused", async () => {
+    const stream = await seedUserStream("members");
+    const token = userTokenFor(
+      "55555555-5555-4555-8555-555555555555",
+      stream.id,
+      SECRET,
+      NOW - 600_000
+    );
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: stream.id,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("a TAMPERED token is refused", async () => {
+    const stream = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", stream.id);
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: stream.id,
+      query: `token=${tamperWith(token)}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  /**
+   * A stream whose `visibility` this codebase does not recognise — a typo, a
+   * future tier name — must DENY, not sail through. `toStreamView`'s own
+   * gate reads the other way round (`=== MEMBERS_ONLY` locks, anything else
+   * is open), which is safe there only because the write path is the
+   * authority on what may be stored. It is NOT safe here: this method is the
+   * paywall itself, and an allow-by-default paywall is one typo from open.
+   */
+  it("DENIES a visibility it does not recognise, rather than treating it as public", async () => {
+    const stream = await seedUserStream("members");
+    await db
+      .update(userStreams)
+      .set({ visibility: "publik" })
+      .where(eq(userStreams.id, stream.id));
 
     const result = await useCase.authoriseUserReadByStreamId({
       streamId: stream.id,

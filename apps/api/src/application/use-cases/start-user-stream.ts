@@ -1,4 +1,8 @@
-import { ForbiddenError, NotFoundError } from "../errors";
+import {
+  mintUserWatchToken,
+  USER_WATCH_TOKEN_TTL_MS,
+} from "../../domain/user-watch-token";
+import { ForbiddenError, NotFoundError, ValidationError } from "../errors";
 import type { ClockPort } from "../ports/clock.port";
 import { newStreamKey, type StreamingProviderPort } from "../ports/streaming-provider.port";
 import type {
@@ -6,11 +10,18 @@ import type {
   UserStreamRow,
 } from "../ports/user-stream-repository.port";
 import type { UserSubscriptionRepositoryPort } from "../ports/user-subscription-repository.port";
+import type { IsMemberOf } from "./is-member-of";
 import { MEMBERS_ONLY } from "./post-views";
 import { toStreamView, userStreamPlaybackPath, type StreamView } from "./stream-views";
 
 /** "this stream is not yours" — the DELETE refusal, Bahasa like every other 403 a person can hit. */
 const NOT_YOURS_MESSAGE = "siaran ini bukan milik Anda";
+
+/** "this stream is members-only" — the mint refusal a non-member (or a LAPSED one) sees. */
+const NOT_A_MEMBER_MESSAGE = "siaran ini khusus anggota";
+
+/** "this stream is open to everyone, no token needed" — the 400 a public stream's mint gets. */
+const NOTHING_TO_GATE_MESSAGE = "siaran ini terbuka untuk semua, tidak perlu token";
 
 /**
  * What `POST /streams` hands back, and the ONLY response in this codebase's
@@ -221,5 +232,107 @@ export class EndOwnUserStream {
     if (stream === null) throw new NotFoundError("stream not found");
     if (stream.ownerId !== input.ownerId) throw new ForbiddenError(NOT_YOURS_MESSAGE);
     await this.streams.endById(input.streamId, this.clock.now());
+  }
+}
+
+/**
+ * What `POST /streams/:id/watch-token` hands back. `expiresAt` is an ISO-8601
+ * UTC instant, present so the player can schedule its silent re-mint without
+ * having to decode the token — the token's payload is not a public format and
+ * nothing outside `user-watch-token.ts` may parse it.
+ */
+export interface MintedWatchToken {
+  token: string;
+  expiresAt: string;
+}
+
+/**
+ * `POST /streams/:id/watch-token` (design spec §5) — the ONE place a gated
+ * user stream's credential is issued, and therefore the one place entitlement
+ * is actually checked.
+ *
+ * THE WHOLE PAYWALL RESTS ON THIS METHOD, not on the read path. Design spec
+ * §5's bargain, stated plainly: the token cannot be prevented from being
+ * shared, but it dies in ten minutes and **a shared token cannot be renewed**,
+ * because re-minting needs the member's own session — which is this route,
+ * behind `requireUserAuth`. So a membership that lapses mid-broadcast stops
+ * access at the next re-mint rather than at the end of a six-hour lifetime.
+ * `AuthoriseStream.authoriseUserStreamRead` deliberately does NOT repeat this
+ * check on every HLS segment; see its docstring.
+ *
+ * `IsMemberOf` is REUSED, never re-implemented and never edited — the same
+ * single indexed read (`status = 'active'` AND `current_period_end > now`)
+ * Phases 5a, 5b and 6 all rest on, and the reason a LAPSED member is refused
+ * here: 5a has no renewal pass, so a status-only check would mint for a row
+ * whose paid period ended months ago. That case is `streams.test.ts`'s "a
+ * LAPSED member cannot mint".
+ *
+ * THE OWNER IS NEVER ASKED ABOUT. Nobody subscribes to themselves (the
+ * database's own `user_subscription_no_self` check constraint makes such a row
+ * impossible, and `IsMemberOf.describe` answers `none` for that pair), so
+ * asking would be a round trip whose answer cannot be yes — the same
+ * short-circuit `ListLiveStreams` makes for the listing, and for the same
+ * reason.
+ *
+ * A PUBLIC STREAM IS A 400, NOT A TOKEN. There is nothing to gate: the read
+ * path authorises a public stream with no token at all, so a credential
+ * issued here would decide nothing, and handing out one that means nothing is
+ * worse than handing out none — it makes "refused" and "never gated"
+ * indistinguishable to the client, and gives a player something to refresh
+ * forever for no reason.
+ *
+ * NO STATUS CHECK on the stream, matching the read path exactly: an `ended`
+ * stream has nothing to serve, so a token for one opens nothing, and refusing
+ * here would only make the player's re-mint fail differently from the way its
+ * next segment request already fails.
+ */
+export class MintUserWatchToken {
+  constructor(
+    private readonly streams: UserStreamRepositoryPort,
+    private readonly isMemberOf: IsMemberOf,
+    private readonly clock: ClockPort,
+    private readonly config: { streamTokenSecret: string }
+  ) {}
+
+  async execute(input: { viewerId: string; streamId: string }): Promise<MintedWatchToken> {
+    // `findById` is the unscoped-by-id lookup this port documents — the
+    // viewer is authenticated, but they are not the owner, so there is no
+    // owner to scope by. An unknown id is an English `NotFoundError`, the
+    // same split `EndOwnUserStream` uses.
+    const stream = await this.streams.findById(input.streamId);
+    if (stream === null) throw new NotFoundError("stream not found");
+
+    // DENY BY DEFAULT, the same shape as the read gate: a token is minted for
+    // a `members` stream and for nothing else. An unrecognised `visibility`
+    // value lands here rather than being read as "gated, mint away".
+    if (stream.visibility !== MEMBERS_ONLY) {
+      throw new ValidationError(NOTHING_TO_GATE_MESSAGE);
+    }
+
+    const entitled =
+      stream.ownerId === input.viewerId ||
+      (await this.isMemberOf.execute(input.viewerId, stream.ownerId));
+    if (!entitled) throw new ForbiddenError(NOT_A_MEMBER_MESSAGE);
+
+    // Read the clock ONCE and pass the instant down, so the token's `exp` and
+    // the `expiresAt` this reports are the same arithmetic on the same
+    // instant rather than two reads that can straddle a millisecond.
+    //
+    // `IsMemberOf` reads its own clock above — the SAME `SystemClock`
+    // instance `bootstrap()` hands both, so the two cannot disagree about
+    // what "now" means by more than the microseconds between the calls. It is
+    // not passed the instant because `IsMemberOf` must not be edited (this
+    // task's constraint, and spec §10's), and its signature takes no `now`.
+    const now = this.clock.now();
+    return {
+      token: mintUserWatchToken({
+        viewerId: input.viewerId,
+        streamId: stream.id,
+        now: now.getTime(),
+        ttlMs: USER_WATCH_TOKEN_TTL_MS,
+        secret: this.config.streamTokenSecret,
+      }),
+      expiresAt: new Date(now.getTime() + USER_WATCH_TOKEN_TTL_MS).toISOString(),
+    };
   }
 }

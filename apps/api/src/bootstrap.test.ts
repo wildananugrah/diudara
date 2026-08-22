@@ -35,6 +35,7 @@ import {
   StartUserStream,
   ListLiveStreams,
   EndOwnUserStream,
+  MintUserWatchToken,
 } from "./application/use-cases/start-user-stream";
 import type { UserStreamRepositoryPort } from "./application/ports/user-stream-repository.port";
 import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
@@ -1059,6 +1060,9 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock
       ),
       endOwnUserStream: new EndOwnUserStream(fakeUserStreamRepository, fakeClock),
+      // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`
+      // below (both need STREAM_TOKEN_SECRET, absent here).
+      mintUserWatchToken: undefined,
       // Task 4's authorisation webhook. `authoriseStream` mirrors
       // `scheduleLiveSession`'s undefined-ness for the same reason (needs
       // STREAM_TOKEN_SECRET, which is absent here); these tests are not
@@ -1328,6 +1332,9 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock
       ),
       endOwnUserStream: new EndOwnUserStream(fakeUserStreamRepository, fakeClock),
+      // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`
+      // below (both need STREAM_TOKEN_SECRET, absent here).
+      mintUserWatchToken: undefined,
       // Task 4's authorisation webhook. `authoriseStream` mirrors
       // `scheduleLiveSession`'s undefined-ness for the same reason (needs
       // STREAM_TOKEN_SECRET, which is absent here); these tests are not
@@ -3669,6 +3676,44 @@ describe("bootstrap() streaming provider wiring", () => {
       expect(deps.startUserStream).toBeInstanceOf(StartUserStream);
       expect(deps.listLiveStreams).toBeInstanceOf(ListLiveStreams);
       expect(deps.endOwnUserStream).toBeInstanceOf(EndOwnUserStream);
+    });
+  });
+
+  /**
+   * Task 5, and the reason it is a SEPARATE assertion from the three above:
+   * `mintUserWatchToken` is undefined in lockstep with `STREAM_TOKEN_SECRET`,
+   * NOT with the provider. This box is the relaxed dev/test one — no
+   * streaming env vars at all (`test-env-preload.ts` deletes them), so
+   * `selectStreamingProvider` hands back a truthy `FakeStreamingAdapter` and
+   * `startUserStream` IS constructed while the secret is genuinely absent. A
+   * box that can go live and cannot mint a watch token is the correct, if
+   * odd-looking, combination: signing needs the secret and nothing else, and
+   * `routes/streams.ts` answers 503 off each dependency separately rather
+   * than inferring one from the other.
+   */
+  it("leaves the watch-token mint undefined when only STREAM_TOKEN_SECRET is missing", () => {
+    withJwtSecret("x".repeat(32), () => {
+      const deps = bootstrap();
+      expect(deps.startUserStream).toBeInstanceOf(StartUserStream);
+      expect(deps.mintUserWatchToken).toBeUndefined();
+      expect(deps.authoriseStream).toBeUndefined();
+    });
+  });
+
+  it("wires the watch-token mint when all five streaming env vars are configured", () => {
+    withJwtSecret("x".repeat(32), () => {
+      withEnv(
+        {
+          MEDIAMTX_RTMP_HOST: FULL_STREAMING_CONFIG.rtmpHost,
+          MEDIAMTX_HLS_BASE_URL: FULL_STREAMING_CONFIG.hlsBaseUrl,
+          MEDIAMTX_WHIP_BASE_URL: FULL_STREAMING_CONFIG.whipBaseUrl,
+          MEDIAMTX_WEBHOOK_SECRET: FULL_STREAMING_CONFIG.webhookSecret,
+          STREAM_TOKEN_SECRET: FULL_STREAMING_CONFIG.streamTokenSecret,
+        },
+        () => {
+          expect(bootstrap().mintUserWatchToken).toBeInstanceOf(MintUserWatchToken);
+        }
+      );
     });
   });
 
