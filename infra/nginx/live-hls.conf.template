@@ -1,6 +1,7 @@
 # Task 9 (+ final whole-branch review FIX 1/2/3): the `location` blocks the
-# real VPS's PUBLIC nginx needs for `/live/` (and, as of Phase 7's Task 4,
-# for `/u/` — see the two blocks marked "PHASE 7, TASK 4" below), re-authorising EVERY HLS
+# real VPS's PUBLIC nginx needs for `/live/` — and, as of Phase 7's Task 4,
+# for `/u/` too (see the blocks marked "PHASE 7, TASK 4" below) —
+# re-authorising EVERY HLS
 # request against apps/api instead of trusting MediaMTX's own read-auth
 # cache (which authorises once per viewer session, not once per request —
 # see mediamtx-webhooks.ts's `/auth-request` docstring and
@@ -609,6 +610,19 @@ location = /_internal/mediamtx-auth-request {
     # the event id nginx captured from the PUBLIC request, nothing this
     # nginx has independently verified as a real stream key.
     proxy_set_header X-Mtx-Event-Id "$mtx_event";
+    # PHASE 7, TASK 4 FIX ROUND 1 — CLEARS the user world's id header, and
+    # this line is load-bearing, not tidiness. An `auth_request` subrequest
+    # INHERITS the parent request's incoming headers, and `proxy_set_header`
+    # only overrides the fields it names — so without this line a client
+    # attaching its own `X-Mtx-Stream-Id` to an ordinary `/live/<eventId>/...`
+    # request would make apps/api see BOTH ids and refuse the read (that
+    # route rejects both-or-neither rather than resolving by precedence).
+    # Self-inflicted rather than a bypass, but it is a client choosing to
+    # break its own community-world playback, and the guarantee the route's
+    # rule rests on — one id per request — has to be enforced HERE, since
+    # this is the only place that knows which world the location means. An
+    # empty value makes nginx drop the field entirely.
+    proxy_set_header X-Mtx-Stream-Id "";
     proxy_set_header X-Watch-Token "$watch_token";
 }
 
@@ -620,11 +634,25 @@ location = /_internal/mediamtx-auth-request {
 # now serves both worlds and tells them apart by which header arrived:
 # `X-Mtx-Event-Id` resolves a community `event`, `X-Mtx-Stream-Id` resolves a
 # `user_stream`. That route REFUSES a request carrying both or neither rather
-# than picking a winner by precedence — so this location must send exactly
-# one, and must not grow an `X-Mtx-Event-Id` line "for symmetry". A second
-# internal location rather than a shared one with two conditional headers is
-# what makes that guarantee readable: each location sends its own id, always,
-# and there is no branch to get wrong.
+# than picking a winner by precedence — so this location SENDS its own id and
+# CLEARS the other world's. A second internal location rather than a shared
+# one with two conditional headers is what makes that readable: each location
+# states both halves unconditionally, and there is no branch to get wrong.
+#
+# FIX ROUND 1 (Task 4 review, Major 2) — the clearing line is why this
+# paragraph changed from "must not grow an `X-Mtx-Event-Id` line" to "clears
+# it". An `auth_request` subrequest INHERITS the parent request's incoming
+# headers and `proxy_set_header` only overrides what it names, so the
+# original wording described a guarantee this file did not actually enforce.
+# The case that mattered was not the doubled-header 403: it was a request to
+# `/u/` whose `if` regex MISSES (a bare `GET /u/`, so `$mtx_stream` stays
+# empty and nginx omits the field) carrying a client-forged
+# `X-Mtx-Event-Id` — the route would then see only an event id and this,
+# the USER location, would authorise against the COMMUNITY world, putting
+# that event's stream key into `$mtx_ukey`. No bytes came of it (the proxied
+# `u/<eventStreamKey>` path is one nothing publishes to, and MediaMTX's own
+# hook refuses it), but a client must not get to choose which world a
+# location resolves in. An empty value makes nginx drop the field entirely.
 #
 # Both worlds get the same `X-Stream-Key` response header back, and both read
 # it with `auth_request_set` — see the `^~ /u/` location above.
@@ -643,5 +671,6 @@ location = /_internal/mediamtx-user-auth-request {
     proxy_set_header Content-Length "";
     proxy_set_header X-Mediamtx-Secret "${MEDIAMTX_WEBHOOK_SECRET}";
     proxy_set_header X-Mtx-Stream-Id "$mtx_stream";
+    proxy_set_header X-Mtx-Event-Id "";
     proxy_set_header X-Watch-Token "$watch_token";
 }

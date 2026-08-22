@@ -47,15 +47,23 @@ const handleStreamLifecycle = new HandleStreamLifecycle(
 );
 
 /**
- * A REAL `AuthoriseStream`, subclassed only to make `execute` throw. Used
- * exclusively for the "no database read" test below: since `execute` is
- * the ONLY thing in this codebase that reads the database for this
- * decision, a request that reaches 401 without this throwing proves the
- * route never called it — a stronger guarantee than asserting on outcome
- * alone, and one that needs no instrumentation of the database client
- * itself. Extending the real class (rather than a plain object literal)
- * is required for the type to structurally match `AuthoriseStream`, which
- * has private constructor parameters.
+ * A REAL `AuthoriseStream`, subclassed only to make its decision methods
+ * throw. Used exclusively for the "no database read" tests below: these
+ * three methods are the ONLY things in this codebase that read the database
+ * for this decision, so a request that reaches 401 without any of them
+ * throwing proves the route never called them — a stronger guarantee than
+ * asserting on outcome alone, and one that needs no instrumentation of the
+ * database client itself. Extending the real class (rather than a plain
+ * object literal) is required for the type to structurally match
+ * `AuthoriseStream`, which has private constructor parameters.
+ *
+ * FIX ROUND 1 (Task 4 review, Major 1 and Minor 2): only `execute` used to
+ * throw here, which meant the `/auth-request` route's own "never calls
+ * AuthoriseStream at all" tests proved nothing — that route never calls
+ * `execute`. Both by-id entry points now throw too, so those tests mean what
+ * their names say, and so the both-or-neither guard can be pinned by the one
+ * property that actually distinguishes it: it must refuse BEFORE either
+ * resolution is attempted.
  */
 class ThrowingAuthoriseStream extends AuthoriseStream {
   constructor() {
@@ -65,6 +73,16 @@ class ThrowingAuthoriseStream extends AuthoriseStream {
   }
   override async execute(): Promise<{ allowed: boolean }> {
     throw new Error("AuthoriseStream.execute must not run before the secret header is verified");
+  }
+  override async authoriseReadByEventId(): Promise<{ allowed: false }> {
+    throw new Error(
+      "AuthoriseStream.authoriseReadByEventId must not run before the secret header is verified, nor for a request carrying no event id"
+    );
+  }
+  override async authoriseUserReadByStreamId(): Promise<{ allowed: false }> {
+    throw new Error(
+      "AuthoriseStream.authoriseUserReadByStreamId must not run before the secret header is verified, nor for a request carrying no stream id"
+    );
   }
 }
 
@@ -554,6 +572,40 @@ describe("GET /webhooks/mediamtx/auth-request — secret verification", () => {
     expect(res.status).toBe(401);
   });
 
+  /**
+   * FIX ROUND 1 — Task 4 review, MAJOR 1. Both 401 tests above name an
+   * EVENT id, so a mutant that skipped `verifyCallbackToken` whenever
+   * `X-Mtx-Stream-Id` was present ran this entire file green.
+   *
+   * The shared secret is the ONE control that makes `X-Mtx-Stream-Id`
+   * non-forgeable, and the by-id user path trusts that header completely:
+   * whatever it names is resolved, and its stream key comes back in a
+   * response header. `location ^~ /webhooks/mediamtx/ { deny all; }` is the
+   * second layer, but it lives in a config fragment the real server block
+   * must remember to include — which is exactly why that block exists at
+   * all. So the secret gets pinned for the surface it now guards, not only
+   * for the one it guarded before.
+   */
+  it("401s a missing secret header on the USER-world path too, and never resolves the stream id", async () => {
+    const a = app(new ThrowingAuthoriseStream());
+
+    const res = await getAuthRequest(a, { streamId: "00000000-0000-4000-8000-000000000000" }, null);
+
+    expect(res.status).toBe(401);
+  });
+
+  it("401s a wrong secret header on the USER-world path too, and never resolves the stream id", async () => {
+    const a = app(new ThrowingAuthoriseStream());
+
+    const res = await getAuthRequest(
+      a,
+      { streamId: "00000000-0000-4000-8000-000000000000" },
+      "wrong-secret"
+    );
+
+    expect(res.status).toBe(401);
+  });
+
   it("does not accept the secret via a query parameter — nginx, unlike authHTTPAddress, can always send a header", async () => {
     const a = app(new ThrowingAuthoriseStream());
 
@@ -781,12 +833,25 @@ describe("GET /webhooks/mediamtx/auth-request — the user world", () => {
     expect(isSuccessStatus(res.status)).toBe(false);
   });
 
-  it("refuses a request carrying NEITHER id", async () => {
-    const a = app();
+  /**
+   * FIX ROUND 1 — Task 4 review, MINOR 2. This test used to pass whether or
+   * not the both-or-neither guard existed: without it, `eventId!` is
+   * `undefined`, `findById(undefined)` stringifies to `"undefined"`, and the
+   * uuid guard turns that into a miss and a 403 anyway. The named test did
+   * not test the line it was written against.
+   *
+   * `ThrowingAuthoriseStream` is what makes it bite. The property that
+   * actually distinguishes the guard is not the status code — it is that the
+   * route refuses BEFORE attempting either resolution. Delete the guard and
+   * `authoriseReadByEventId` throws, which the error handler turns into a
+   * 500, not a 403.
+   */
+  it("refuses a request carrying NEITHER id, without attempting either resolution", async () => {
+    const a = app(new ThrowingAuthoriseStream());
 
     const res = await getAuthRequest(a, { token: "anything" });
 
-    expect(isSuccessStatus(res.status)).toBe(false);
+    expect(res.status).toBe(403);
   });
 
   it("refuses a malformed stream id rather than answering 500", async () => {
