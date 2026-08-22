@@ -21,7 +21,7 @@
 - Tests assert **literal values**, never the constant they check.
 - **`toContain` and regex matchers accept a superstring** — they cannot see text appended to a string. Every user-facing string needs at least one assertion that fails when text is added to it.
 - **Read the clock once per operation** and pass the `Date` down.
-- **The api suite takes ~340s.** Run it in the FOREGROUND with `timeout: 500000`; a backgrounded run never wakes a subagent.
+- **NEVER background the api suite.** It takes ~360s, so run it in the FOREGROUND with `timeout: 500000`. A backgrounded run does **not** wake a subagent — it parks, the coordinator has to notice and nudge it, and this has now stalled **eight** agents across three phases. If you catch yourself reaching for `run_in_background` or a Monitor to wait on a test run: don't. Pass the timeout instead.
 - Never run a dev server, bind a port, or drive a browser.
 
 ## File Structure
