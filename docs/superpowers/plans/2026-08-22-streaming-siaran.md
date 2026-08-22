@@ -263,6 +263,23 @@ unique index loses, and **four contenders proved far too few** — measure the n
 record it beside the test. Warm the pool first: `postgres.js` connects lazily, and 5b confirmed an
 unwarmed race test can measure connection serialisation rather than the arbitration it names.
 
+- [ ] **Step 1b: Handle a box with no streaming provider**
+
+`Dependencies.streamingProvider` is `StreamingProviderPort | undefined` — **optional at boot**, exactly
+like the payments provider, and `scheduleLiveSession` already models the pattern: the use case is
+`undefined` exactly when the provider is. Follow it.
+
+```ts
+test("a box with no streaming provider refuses to start a stream, and says so", async () => {
+  const res = await request("/streams", { method: "POST", body: { title: "Halo" }, headers: rinaAuth });
+  expect(res.status).toBe(503);
+});
+```
+
+**`GET /streams` must still work on such a box** — it lists rows from the database and needs no
+provider. A listing that 503s because nobody configured MediaMTX would take Siaran down for readers
+over a writer's dependency.
+
 - [ ] **Step 2: Run, watch fail. Step 3: implement, letting the database arbitrate**
 
 Insert and let `user_stream_one_live` refuse the loser; translate the unique violation into a 409.
