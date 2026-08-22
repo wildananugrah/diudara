@@ -1203,3 +1203,48 @@ export const membershipReminders = pgTable(
     uniqueIndex("membership_reminder_subscription_unique").on(table.userSubscriptionId),
   ]
 );
+
+/**
+ * Task 1 of Phase 7: one broadcast a person is running, or has run, on their
+ * own profile — a NEW, user-scoped table beside the old world's `event`
+ * (community-scoped, untouchable), never a generalisation of it. See the
+ * design spec's §4.1 for why: `event.community_id` references `community`,
+ * one of the untouchable `/dashboard/*` tables, and an `app_user` broadcast
+ * has no community at all — the same argument Phase 5a made for `user_tier`
+ * and `user_subscription`, with the same payoff: Phase 8 becomes a deletion
+ * rather than an untangling.
+ */
+export const userStreams = pgTable(
+  "user_stream",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ownerId: uuid("owner_id")
+      .notNull()
+      .references(() => appUsers.id),
+    title: varchar("title", { length: 140 }).notNull(),
+    // Same column type and values as `post.visibility`, for the same reason:
+    // a varchar so a later value needs no migration.
+    visibility: varchar("visibility", { length: 16 }).notNull().default("public"),
+    // The publish secret, from `newStreamKey()`. NEVER logged — see
+    // `handle-stream-lifecycle.ts`'s docstring for the rule this table
+    // inherits unchanged.
+    streamKey: varchar("stream_key", { length: 128 }).notNull().unique(),
+    status: varchar("status", { length: 16 }).notNull().default("live"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (table) => [
+    // ONE live stream per person, arbitrated by the database. PARTIAL, so an
+    // ended stream frees the slot — without the WHERE, a creator could
+    // stream exactly once, ever, and be blocked forever by their own
+    // history. See the design spec's §4 and the Task 1 report for the
+    // mutants that pin this clause down.
+    uniqueIndex("user_stream_one_live")
+      .on(table.ownerId)
+      .where(sql`${table.status} = 'live'`),
+    // Siaran's listing: live rows, newest first.
+    index("user_stream_live_started_idx")
+      .on(table.startedAt.desc())
+      .where(sql`${table.status} = 'live'`),
+  ]
+);

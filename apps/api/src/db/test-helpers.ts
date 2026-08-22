@@ -31,6 +31,7 @@ import {
   userSubscriptions,
   userTransactions,
   membershipReminders,
+  userStreams,
 } from "./schema";
 
 /**
@@ -125,6 +126,9 @@ export async function resetDatabase() {
   // userTiers references app_user (owner) — Task 1 of Phase 5a — so it must
   // clear before app_user too.
   await db.delete(userTiers);
+  // userStreams references app_user (owner) — Task 1 of Phase 7 — so it too
+  // must clear before app_user.
+  await db.delete(userStreams);
   // app_user is a fully independent identity table (Phase 9's pivot) — no FK
   // relationship to anything above it, so its position here is free.
   await db.delete(appUsers);

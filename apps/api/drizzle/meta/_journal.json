@@ -225,6 +225,13 @@
       "when": 1787307955076,
       "tag": "0031_tough_vin_gonzales",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1787383054940,
+      "tag": "0032_familiar_tigra",
+      "breakpoints": true
     }
   ]
 }

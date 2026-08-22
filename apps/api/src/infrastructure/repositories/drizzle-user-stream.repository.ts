@@ -1,0 +1,131 @@
+import { and, desc, eq, lte } from "drizzle-orm";
+import type { DatabaseExecutor } from "../../db/client";
+import { appUsers, userStreams } from "../../db/schema";
+import type {
+  UserStreamRepositoryPort,
+  UserStreamRow,
+} from "../../application/ports/user-stream-repository.port";
+import { UniqueRule } from "../../application/errors";
+import { rethrowUniqueViolation } from "./pg-errors";
+
+/** `user_stream.status` — see `UserStreamRow`'s docstring. */
+const LIVE_STATUS = "live";
+const ENDED_STATUS = "ended";
+
+/**
+ * The ONE projection every read path selects — never a bare `select()`, the
+ * same rule `drizzle-post.repository.ts`'s `postColumns` follows, and for
+ * the same reason: an explicit list is what keeps a later column (this
+ * table's `stream_key` very much included) from reaching a caller by
+ * accident just because a join widened.
+ */
+const userStreamColumns = {
+  id: userStreams.id,
+  ownerId: userStreams.ownerId,
+  ownerHandle: appUsers.handle,
+  ownerDisplayName: appUsers.displayName,
+  title: userStreams.title,
+  visibility: userStreams.visibility,
+  streamKey: userStreams.streamKey,
+  status: userStreams.status,
+  startedAt: userStreams.startedAt,
+  endedAt: userStreams.endedAt,
+} as const;
+
+export class DrizzleUserStreamRepository implements UserStreamRepositoryPort {
+  constructor(private readonly db: DatabaseExecutor) {}
+
+  async startLive(input: {
+    ownerId: string;
+    title: string;
+    visibility: string;
+    streamKey: string;
+  }): Promise<UserStreamRow> {
+    try {
+      const [inserted] = await this.db
+        .insert(userStreams)
+        .values({
+          ownerId: input.ownerId,
+          title: input.title,
+          visibility: input.visibility,
+          streamKey: input.streamKey,
+        })
+        .returning({ id: userStreams.id });
+      const row = await this.findById(inserted!.id);
+      // The row was just inserted inside this call; a null here means the
+      // projection join is broken, which is a bug rather than a missing row.
+      if (row === null) throw new Error("stream disappeared immediately after insert");
+      return row;
+    } catch (err) {
+      // Unlike `endById` (an UPDATE the caller can predicate on the row's
+      // own current status), this is a bare INSERT: nothing here can see in
+      // advance whether the owner already holds a `live` row before
+      // attempting it. `user_stream_one_live` — the partial unique index —
+      // is the only thing that can catch it, and it is the load-bearing
+      // guarantee this whole table exists for: one live stream per person,
+      // arbitrated by the database, not by a read-then-write pre-check that
+      // would race under concurrency (see the design spec's §4, and 5a's
+      // three-times-over lesson on the same shape).
+      rethrowUniqueViolation(err, {
+        user_stream_one_live: {
+          rule: UniqueRule.userStreamOneLive,
+          message: "sudah ada siaran yang sedang berlangsung",
+        },
+      });
+    }
+  }
+
+  async findByStreamKey(streamKey: string): Promise<UserStreamRow | null> {
+    const [row] = await this.db
+      .select(userStreamColumns)
+      .from(userStreams)
+      .innerJoin(appUsers, eq(userStreams.ownerId, appUsers.id))
+      .where(eq(userStreams.streamKey, streamKey))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async findById(id: string): Promise<UserStreamRow | null> {
+    const [row] = await this.db
+      .select(userStreamColumns)
+      .from(userStreams)
+      .innerJoin(appUsers, eq(userStreams.ownerId, appUsers.id))
+      .where(eq(userStreams.id, id))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async listLive(): Promise<UserStreamRow[]> {
+    return this.db
+      .select(userStreamColumns)
+      .from(userStreams)
+      .innerJoin(appUsers, eq(userStreams.ownerId, appUsers.id))
+      .where(eq(userStreams.status, LIVE_STATUS))
+      .orderBy(desc(userStreams.startedAt));
+  }
+
+  async endById(id: string, endedAt: Date): Promise<UserStreamRow | null> {
+    // `status = LIVE_STATUS` is IN the predicate, not read first — the same
+    // atomic-predicate shape as `DrizzleEventRepository.markEnded`, and for
+    // the same reason: it is what makes the transition safe under a
+    // flapping lifecycle webhook, or the hourly sweep racing the webhook
+    // for the same row. Only the caller that actually flips the status gets
+    // a non-null result back; a repeat call is a no-op.
+    const [updated] = await this.db
+      .update(userStreams)
+      .set({ status: ENDED_STATUS, endedAt })
+      .where(and(eq(userStreams.id, id), eq(userStreams.status, LIVE_STATUS)))
+      .returning({ id: userStreams.id });
+    if (updated === undefined) return null;
+    return this.findById(updated.id);
+  }
+
+  async listStaleLive(olderThan: Date): Promise<UserStreamRow[]> {
+    return this.db
+      .select(userStreamColumns)
+      .from(userStreams)
+      .innerJoin(appUsers, eq(userStreams.ownerId, appUsers.id))
+      .where(and(eq(userStreams.status, LIVE_STATUS), lte(userStreams.startedAt, olderThan)))
+      .orderBy(userStreams.startedAt);
+  }
+}

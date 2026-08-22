@@ -202,6 +202,15 @@ export const UniqueRule = {
    * createActiveWithoutBilling`.
    */
   subscriptionMemberTierActive: "subscription_member_tier_active",
+  /**
+   * `user_stream_one_live` — the PARTIAL unique index on `user_stream`
+   * (`owner_id`, `WHERE status = 'live'`): one live broadcast per person,
+   * arbitrated by the database. `DrizzleUserStreamRepository.startLive` is
+   * a bare INSERT, so — same shape as `subscriptionMemberTierActive` above
+   * — nothing upstream can see in advance whether the owner already holds a
+   * `live` row before attempting it.
+   */
+  userStreamOneLive: "user_stream_one_live",
 } as const;
 
 export type UniqueRuleName = (typeof UniqueRule)[keyof typeof UniqueRule];
