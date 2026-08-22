@@ -952,6 +952,23 @@ export interface PostView {
    * that added the guards.
    */
   media: MediaView[];
+  /**
+   * On EVERY post, not only locked ones (matches `toPostView` in
+   * `apps/api/src/application/use-cases/post-views.ts`). The author and
+   * paying members are the two people who never see a lock, and they are
+   * exactly the two who need to know their own post is gated — a
+   * conditional key would leave a client unable to tell "not gated" from
+   * "gated, and you are in". Needed here so the edit composer can seed
+   * "Khusus anggota" from what the post already is (spec §7) — see
+   * `EditComposer` in `postOwnerActions.tsx`.
+   */
+  membersOnly: boolean;
+  /**
+   * How many images the lock is hiding. `0` whenever `media` is populated.
+   * Mirrors the API's own field 1:1; not read anywhere on this branch of
+   * the composer work — the lock panel that renders it is Task 7.
+   */
+  lockedMediaCount: number;
 }
 
 /** One keyset page of posts — `nextCursor` is `null` on the last page, never absent. */
@@ -1000,11 +1017,25 @@ export function listUserPosts(handle: string, before?: string | null): Promise<F
  * on `POST`, but they are NOT on `PATCH` (see `editPost`), and one rule for both
  * keeps the distinction where it is real instead of teaching this file that an
  * empty list and no list are interchangeable.
+ *
+ * `visibility` is likewise OMITTED, never sent as `undefined`, when the
+ * caller passes nothing — a brand-new post with no `visibility` key is
+ * public (spec §7, and the route's own default). There is no way to ask this
+ * function for an explicit `"public"` on create because there is nothing to
+ * leave alone yet; every caller of `createPost` only ever has "members" to
+ * say (see `PostComposer`'s own `resolveVisibility`).
  */
-export function createPost(body: string, mediaIds?: string[]): Promise<PostView> {
+export function createPost(
+  body: string,
+  mediaIds?: string[],
+  visibility?: "members"
+): Promise<PostView> {
+  const payload: { body: string; mediaIds?: string[]; visibility?: "members" } = { body };
+  if (mediaIds !== undefined) payload.mediaIds = mediaIds;
+  if (visibility !== undefined) payload.visibility = visibility;
   return apiFetch<PostView>("/users/posts", {
     method: "POST",
-    body: JSON.stringify(mediaIds === undefined ? { body } : { body, mediaIds }),
+    body: JSON.stringify(payload),
   });
 }
 
@@ -1017,11 +1048,34 @@ export function createPost(body: string, mediaIds?: string[]): Promise<PostView>
  * reachable from here — an explicit `[]` REMOVES every image, while omitting
  * the key leaves the post's images exactly as they were, which is what a
  * text-only edit sends.
+ *
+ * **`visibility` follows the exact same "omitted means leave alone" rule,
+ * and getting it backwards is the one mistake that matters here.** The
+ * route's schema makes it `.optional()` for precisely this reason (spec §7):
+ * an edit that does not mention `visibility` must change nothing about it,
+ * so a caption fix on a members-only post can never silently un-gate it.
+ * `PostComposer` computes whether the creator's checkbox actually MOVED away
+ * from what the post already was; when it did not, this function receives
+ * `undefined` and the key is genuinely absent from the request body, not
+ * present with value `undefined` — `JSON.stringify` would already drop a
+ * literal `undefined` value, but this function builds the payload
+ * key-by-key rather than relying on that, the same way `mediaIds` above
+ * does, so the omission is deliberate and not a stringify accident.
  */
-export function editPost(id: string, body: string, mediaIds?: string[]): Promise<PostView> {
+export function editPost(
+  id: string,
+  body: string,
+  mediaIds?: string[],
+  visibility?: "public" | "members"
+): Promise<PostView> {
+  const payload: { body: string; mediaIds?: string[]; visibility?: "public" | "members" } = {
+    body,
+  };
+  if (mediaIds !== undefined) payload.mediaIds = mediaIds;
+  if (visibility !== undefined) payload.visibility = visibility;
   return apiFetch<PostView>(`/users/posts/${encodeURIComponent(id)}`, {
     method: "PATCH",
-    body: JSON.stringify(mediaIds === undefined ? { body } : { body, mediaIds }),
+    body: JSON.stringify(payload),
   });
 }
 

@@ -53,9 +53,21 @@ export default function PostCard({ post, isOwn, now, onEdit, onDeleteRequested }
   // required and never absent — see the comment on the media slot below for
   // why a version-skew deploy window makes that guarantee occasionally false.
   const media = post.media ?? [];
+  // Locked is `lockedMediaCount > 0`, NOT `membersOnly` and NOT
+  // `media.length === 0`. `membersOnly` is `true` on every members-only post
+  // including the ones THIS viewer can see (the author's own, and a paying
+  // member's) — see `PostView.membersOnly`'s own docstring. And an ordinary
+  // post with no photos also has `media: []`. `lockedMediaCount` is the one
+  // field the API sets to mean exactly "there is something here you cannot
+  // see" (`toPostView`'s docstring in `apps/api`). Guarded with `?? 0` for
+  // the same version-skew deploy window as `media` above — `undefined > 0`
+  // would already be `false`, but the guard keeps the reasoning visible
+  // rather than relying on an implicit coercion.
+  const lockedCount = post.lockedMediaCount ?? 0;
+  const locked = lockedCount > 0;
 
   return (
-    <article className="post-card">
+    <article className="post-card" data-testid="post-card">
       <header className="post-card-header">
         <Link to={`/@${post.author.handle}`} className="post-card-identity">
           <span className="post-card-name">{post.author.displayName}</span>
@@ -93,7 +105,25 @@ export default function PostCard({ post, isOwn, now, onEdit, onDeleteRequested }
           profile page for every visitor until the reload finishes. The type
           stays honest about what a healthy API returns; this guard is for
           the minute it is not the current one. */}
-      {media.length > 0 ? (
+      {locked ? (
+        // The lock panel — the conversion surface (spec §5, §5.1; design §8).
+        // Carries ONLY the count and a link to the author's profile. No `img`,
+        // no `src`, no id from `post.media` (it is `[]` for a locked post by
+        // the API's own construction) — there is no media URL anywhere in
+        // this branch for a future edit to accidentally wire up. The link
+        // target is `/@handle`, the SAME shape every other in-app profile
+        // link uses (the identity link above, `FollowListPage`, `JelajahPage`)
+        // and the only shape `ProfilePage`'s route actually accepts — see
+        // that file's own docstring on why a bare handle 404s. Phase 5a's
+        // membership offer and "Jadi anggota" button already live there
+        // (spec §6); this is deliberately not a second payment surface.
+        <div className="post-card-locked">
+          <p className="post-card-locked-count">{lockedCount} foto terkunci</p>
+          <Link to={`/@${post.author.handle}`} className="post-card-locked-link">
+            Jadi anggota untuk melihat
+          </Link>
+        </div>
+      ) : media.length > 0 ? (
         <div className="post-card-media" data-count={media.length}>
           {media.map((image) => (
             <img

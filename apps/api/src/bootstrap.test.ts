@@ -99,6 +99,7 @@ import type { PostRepositoryPort } from "./application/ports/post-repository.por
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
 import type { MediaRepositoryPort } from "./application/ports/media-repository.port";
 import { UploadMedia } from "./application/use-cases/upload-media";
+import { MediaEntitlement } from "./application/use-cases/media-entitlement";
 import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
@@ -118,6 +119,7 @@ import type { PaymentActivationUnitOfWorkPort } from "./application/ports/paymen
 import type { UserPurchaseUnitOfWorkPort } from "./application/ports/user-purchase-unit-of-work.port";
 import type { JoinRequestRepositoryPort } from "./application/ports/join-request-repository.port";
 import type { JoinRequestUnitOfWorkPort } from "./application/ports/join-request-unit-of-work.port";
+import type { PostEditUnitOfWorkPort } from "./application/ports/post-edit-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -309,6 +311,9 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   async listActiveSubscribers() {
     return [];
   },
+  async listActiveOwnersAmong() {
+    return [];
+  },
   async createTransaction() {
     throw new Error("not used");
   },
@@ -359,11 +364,24 @@ const fakePostRepository: PostRepositoryPort = {
       body,
       createdAt: new Date(0),
       editedAt: null,
+      // Distinct from any viewer id used in this file's smoke tests.
+      authorId: "fake-author",
+      visibility: "public",
       authorHandle: "fake",
       authorDisplayName: "Fake",
     };
   },
   async ownershipOf() {
+    return null;
+  },
+  /** Same reason as `ownershipOf` above: unused by these smoke tests. */
+  async lockForEdit() {
+    return null;
+  },
+  // Phase 6's `MediaEntitlement` reads this. `null` is the REFUSING answer —
+  // these smoke tests never drive the gate, and a fake that answered "public"
+  // by default would be a fake that opens a paywall.
+  async gatingOf() {
     return null;
   },
   async updateBody() {
@@ -378,6 +396,19 @@ const fakePostRepository: PostRepositoryPort = {
   },
   async listByAuthor() {
     return [];
+  },
+};
+
+/**
+ * Task 5 fix round 1: `EditPost` now takes a `PostEditUnitOfWorkPort`
+ * instead of the two repositories directly — see that port's own docstring.
+ * Runs the work inline against the same fakes, like every other unit of
+ * work in this file: bootstrap wiring, not atomicity, is what this file
+ * pins.
+ */
+const fakePostEditUnitOfWork: PostEditUnitOfWorkPort = {
+  async run(work) {
+    return work({ posts: fakePostRepository, media: fakeMediaRepository });
   },
 };
 
@@ -839,15 +870,22 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
-      createPost: new CreatePost(fakePostRepository, fakeMediaRepository),
+      createPost: new CreatePost(fakePostEditUnitOfWork),
       maxPostImages: 5,
-      editPost: new EditPost(fakePostRepository, fakeMediaRepository),
+      editPost: new EditPost(fakePostEditUnitOfWork),
       deletePost: new DeletePost(fakePostRepository),
-      listFeed: new ListFeed(fakePostRepository, fakeMediaRepository),
+      listFeed: new ListFeed(
+        fakePostRepository,
+        fakeMediaRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
+      ),
       listUserPosts: new ListUserPosts(
         fakeUserRepository,
         fakePostRepository,
-        fakeMediaRepository
+        fakeMediaRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
       ),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
@@ -999,6 +1037,16 @@ describe("Dependencies (composition root contract)", () => {
       // Task 5's delivery routes. Same fake as `uploadMedia` above — neither
       // test calls `mediaRepository.findById` either.
       mediaRepository: fakeMediaRepository,
+      // Phase 6's barrier two. Built from the module-level fakes rather than
+      // `null`ed out, because this block's whole job is to prove a
+      // hand-written `Dependencies` still SATISFIES the container's type with
+      // no casts — a field that only `bootstrap()` can supply would defeat it.
+      mediaEntitlement: new MediaEntitlement(
+        fakeMediaRepository,
+        fakePostRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
+      ),
     };
 
     const created = await deps.creatorRepository.create({
@@ -1080,15 +1128,22 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
-      createPost: new CreatePost(fakePostRepository, fakeMediaRepository),
+      createPost: new CreatePost(fakePostEditUnitOfWork),
       maxPostImages: 5,
-      editPost: new EditPost(fakePostRepository, fakeMediaRepository),
+      editPost: new EditPost(fakePostEditUnitOfWork),
       deletePost: new DeletePost(fakePostRepository),
-      listFeed: new ListFeed(fakePostRepository, fakeMediaRepository),
+      listFeed: new ListFeed(
+        fakePostRepository,
+        fakeMediaRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
+      ),
       listUserPosts: new ListUserPosts(
         fakeUserRepository,
         fakePostRepository,
-        fakeMediaRepository
+        fakeMediaRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
       ),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,
@@ -1240,6 +1295,16 @@ describe("Dependencies (composition root contract)", () => {
       // Task 5's delivery routes. Same fake as `uploadMedia` above — neither
       // test calls `mediaRepository.findById` either.
       mediaRepository: fakeMediaRepository,
+      // Phase 6's barrier two. Built from the module-level fakes rather than
+      // `null`ed out, because this block's whole job is to prove a
+      // hand-written `Dependencies` still SATISFIES the container's type with
+      // no casts — a field that only `bootstrap()` can supply would defeat it.
+      mediaEntitlement: new MediaEntitlement(
+        fakeMediaRepository,
+        fakePostRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
+      ),
     };
 
     const res = await createApp(deps).request("/health");

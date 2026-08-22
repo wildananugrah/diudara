@@ -891,6 +891,11 @@ export const posts = pgTable(
     // single biggest risk: each path's own tests only ever create live posts, so
     // nothing goes red.
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    // `public` | `members`. VARCHAR, not an enum — the reasoning
+    // subscription.status already records: a later value needs no migration.
+    // The DEFAULT is load-bearing: it makes this migration additive and turns
+    // every existing post public, which is the only safe direction.
+    visibility: varchar("visibility", { length: 16 }).notNull().default("public"),
   },
   (table) => [
     // Untuk Anda: newest first across everybody. PARTIAL, so deleted rows leave

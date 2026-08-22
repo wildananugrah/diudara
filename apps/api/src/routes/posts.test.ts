@@ -3,7 +3,7 @@ import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { resetDatabase } from "../db/test-helpers";
 import { db } from "../db/client";
-import { appUsers } from "../db/schema";
+import { appUsers, posts as postsTable, userSubscriptions, userTiers } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { DrizzleMediaRepository } from "../infrastructure/repositories/drizzle-media.repository";
 
@@ -70,15 +70,21 @@ async function createPost(
   a: ReturnType<typeof app>,
   token: string,
   body: string,
-  mediaIds?: string[]
+  mediaIds?: string[],
+  visibility?: "public" | "members"
 ) {
   return a.request("/users/posts", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authed(token) },
-    // `mediaIds` is OMITTED, not sent as undefined, when the caller passes
-    // nothing — an absent key is what a text-only client sends, and PATCH
-    // treats absent and empty differently (see its own tests below).
-    body: JSON.stringify(mediaIds === undefined ? { body } : { body, mediaIds }),
+    // `mediaIds` and `visibility` are OMITTED, not sent as undefined, when
+    // the caller passes nothing — an absent key is what a text-only client
+    // sends, and PATCH treats absent and empty differently (see its own
+    // tests below).
+    body: JSON.stringify({
+      body,
+      ...(mediaIds === undefined ? {} : { mediaIds }),
+      ...(visibility === undefined ? {} : { visibility }),
+    }),
   });
 }
 
@@ -86,7 +92,7 @@ async function patchPost(
   a: ReturnType<typeof app>,
   token: string,
   id: string,
-  payload: { body: string; mediaIds?: string[] }
+  payload: { body: string; mediaIds?: string[]; visibility?: "public" | "members" }
 ) {
   return a.request(`/users/posts/${id}`, {
     method: "PATCH",
@@ -150,9 +156,15 @@ describe("POST /users/posts", () => {
       "createdAt",
       "editedAt",
       "id",
+      "lockedMediaCount",
       "media",
+      "membersOnly",
     ]);
     expect(body.media).toEqual([]);
+    // The author of a brand-new public post: nothing is gated and nothing is
+    // hidden — the create response never locks, because it answers the author.
+    expect(body.membersOnly).toBe(false);
+    expect(body.lockedMediaCount).toBe(0);
     expect(Object.keys(body.author).sort()).toEqual(["displayName", "handle"]);
     expect(body.body).toBe("halo dunia");
     expect(body.editedAt === null).toBe(true);
@@ -678,7 +690,9 @@ describe("media on posts", () => {
       "createdAt",
       "editedAt",
       "id",
+      "lockedMediaCount",
       "media",
+      "membersOnly",
     ]);
     expect(post.media).toHaveLength(1);
     expect(Object.keys(post.media[0]).sort()).toEqual(["height", "id", "width"]);
@@ -713,7 +727,16 @@ describe("media on posts", () => {
     const feed = await (await a.request("/users/feed?tab=untuk-anda")).json();
     const profile = await (await a.request(`/users/${VALID.handle}/posts`)).json();
 
-    const POST_KEYS = ["author", "body", "createdAt", "editedAt", "id", "media"];
+    const POST_KEYS = [
+      "author",
+      "body",
+      "createdAt",
+      "editedAt",
+      "id",
+      "lockedMediaCount",
+      "media",
+      "membersOnly",
+    ];
     const MEDIA_KEYS = ["height", "id", "width"];
     for (const post of [patched, feed.posts[0], profile.posts[0]]) {
       expect(Object.keys(post).sort()).toEqual(POST_KEYS);
@@ -997,5 +1020,373 @@ describe("media on posts", () => {
     expect(byId.get(withImages.id)).toEqual([second, first]);
     expect(byId.get(withoutImages.id)).toEqual([]);
     expect(byId.get(withOne.id)).toEqual([third]);
+  });
+});
+
+/**
+ * Task 5, spec §7: `visibility = 'members'` requires at least one image, on
+ * create and edit alike, checked against the state the request is
+ * PRODUCING. `write-post.test.ts` covers the rule itself against fakes; these
+ * prove the real route wiring — the zod schema, `bootstrap()`'s real
+ * `CreatePost`/`EditPost`, and the real repository — agree with it end to end.
+ */
+describe("Task 5: a members-only post needs an image, enforced at the server", () => {
+  it("POST /users/posts: a members-only post with no image is a 400, in Bahasa", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await createPost(a, token, "tidak ada foto", undefined, "members");
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("foto");
+  });
+
+  it("POST /users/posts: a members-only post carrying an image succeeds, membersOnly true", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const mediaId = await uploadFixture(a, token);
+
+    const res = await createPost(a, token, "ada foto", [mediaId], "members");
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.membersOnly).toBe(true);
+    // The AUTHOR's own create response is never locked — this is the same
+    // `locked: false` rule `write-post.ts` documents at every `toPostView`
+    // call site in that file.
+    expect(body.media.map((image: { id: string }) => image.id)).toEqual([mediaId]);
+    expect(body.lockedMediaCount).toBe(0);
+  });
+
+  it("rejects a visibility value the server does not recognise, with 400", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/users/posts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ body: "halo", visibility: "premium" }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("PATCH /users/posts/:id: refuses to edit away the last image of a members-only post — 400", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const mediaId = await uploadFixture(a, token);
+    const post = await (
+      await createPost(a, token, "khusus anggota", [mediaId], "members")
+    ).json();
+
+    const res = await patchPost(a, token, post.id, { body: "halo lagi", mediaIds: [] });
+
+    expect(res.status).toBe(400);
+  });
+
+  /**
+   * The scenario the brief calls out by name: unlocking and clearing images
+   * must work in ONE request, or a creator needs two edits to undo one
+   * mistake.
+   */
+  it("PATCH /users/posts/:id: unlocking and clearing the last image together succeeds", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const mediaId = await uploadFixture(a, token);
+    const post = await (
+      await createPost(a, token, "khusus anggota", [mediaId], "members")
+    ).json();
+
+    const res = await patchPost(a, token, post.id, {
+      body: "sekarang publik",
+      mediaIds: [],
+      visibility: "public",
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.membersOnly).toBe(false);
+    expect(body.media).toEqual([]);
+  });
+
+  /**
+   * The central risk this task's brief calls out by name: `.optional()` on
+   * `visibility` must mean "leave it alone" on PATCH, never "make it
+   * public" — proven here by editing ONLY the body, through the real HTTP
+   * route, and confirming the members-only post stays gated. Checked both
+   * on the response this same request returns AND on a completely separate
+   * follow-up read, so a bug that only fixed the echoed response (but wrote
+   * `public` to the row) cannot pass.
+   */
+  it("PATCH /users/posts/:id: omitting visibility leaves a members-only post members-only", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const mediaId = await uploadFixture(a, token);
+    const post = await (
+      await createPost(a, token, "khusus anggota", [mediaId], "members")
+    ).json();
+
+    const res = await patchPost(a, token, post.id, { body: "hanya teks yang berubah" });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).membersOnly).toBe(true);
+
+    const reread = await (await a.request("/users/wildan/posts", { headers: authed(token) })).json();
+    expect(reread.posts[0].membersOnly).toBe(true);
+    expect(reread.posts[0].media.map((image: { id: string }) => image.id)).toEqual([mediaId]);
+  });
+
+  /**
+   * The mirror of the test above, for a PUBLIC post: omitting `visibility`
+   * must not accidentally gate it either. Proves `.optional()` is neutral in
+   * BOTH directions, not merely "never turns public".
+   */
+  it("PATCH /users/posts/:id: omitting visibility leaves a public post public", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const post = await (await createPost(a, token, "publik")).json();
+
+    const res = await patchPost(a, token, post.id, { body: "masih publik" });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).membersOnly).toBe(false);
+  });
+});
+
+/**
+ * **BARRIER ONE, end to end through the real wiring** — `bootstrap()`'s own
+ * `DrizzleUserSubscriptionRepository` and its one `SystemClock`, not a fake.
+ * The use-case tests in `read-posts.test.ts` prove the gate's logic against a
+ * fake that mirrors the query's predicate; these prove the composition root
+ * actually handed that dependency over and that BOTH read routes resolve a
+ * viewer to answer it for.
+ *
+ * The write path accepts `visibility` as of Task 5 (see the tests below and
+ * `write-post.test.ts`), but these tests are about BARRIER ONE — the read
+ * gate — not the write-time rule, so `gate()` keeps writing the column
+ * directly, the same technique the reserved-handle helper above uses:
+ * reaching the gated state without dragging the write path's own rules
+ * (one image minimum) into what is a read-side test.
+ */
+describe("members-only posts: the projection never sends a media id to a non-member", () => {
+  const RINA = { handle: "rina", email: "rina@example.com", displayName: "Rina" };
+  const BUYER = { handle: "andi", email: "andi@example.com", displayName: "Andi" };
+
+  async function userIdFor(handle: string): Promise<string> {
+    const [row] = await db.select().from(appUsers).where(eq(appUsers.handle, handle));
+    return row!.id;
+  }
+
+  /** Makes an existing post members-only. */
+  async function gate(postId: string): Promise<void> {
+    await db.update(postsTable).set({ visibility: "members" }).where(eq(postsTable.id, postId));
+  }
+
+  /**
+   * A real membership row for (subscriber → owner), ending at `periodEnd`. A
+   * tier comes first because `user_subscription_tier_owner_fk` makes a
+   * subscription whose owner disagrees with its tier's owner impossible to
+   * insert.
+   */
+  async function grantMembership(
+    subscriberId: string,
+    ownerId: string,
+    periodEnd: Date
+  ): Promise<void> {
+    const [tier] = await db
+      .insert(userTiers)
+      .values({ ownerId, name: "Anggota", priceAmount: 50000, billingCycle: "monthly" })
+      .returning();
+    await db.insert(userSubscriptions).values({
+      subscriberId,
+      tierId: tier!.id,
+      ownerId,
+      status: "active",
+      currentPeriodEnd: periodEnd,
+    });
+  }
+
+  const IN_A_MONTH = () => new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  const YESTERDAY = () => new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  /** Rina, one gated post with one image. Returns her token and the post id. */
+  async function rinaWithAGatedPost(a: ReturnType<typeof app>) {
+    const token = await tokenForValidUser(a, RINA);
+    const mediaId = await uploadFixture(a, token);
+    const post = await (await createPost(a, token, "Behind the scenes", [mediaId])).json();
+    await gate(post.id);
+    return { token, postId: post.id as string, mediaId };
+  }
+
+  it("a signed-out reader gets the caption and NO media, on the feed and on the profile", async () => {
+    const a = app();
+    await rinaWithAGatedPost(a);
+
+    const feed = await (await a.request("/users/feed?tab=untuk-anda")).json();
+    const profile = await (await a.request("/users/rina/posts")).json();
+
+    for (const post of [feed.posts[0], profile.posts[0]]) {
+      expect(post.body).toBe("Behind the scenes");
+      expect(post.media).toEqual([]);
+      expect(post.membersOnly).toBe(true);
+      expect(post.lockedMediaCount).toBe(1);
+    }
+  });
+
+  /**
+   * The closed projection in its LOCKED shape, at the route. A spot-check on
+   * `media` alone passes against a response that leaked the id under some
+   * other key, which is the entire failure mode of this phase (spec §10).
+   */
+  it("a locked response carries the same closed key set as an unlocked one", async () => {
+    const a = app();
+    const { token } = await rinaWithAGatedPost(a);
+
+    const locked = (await (await a.request("/users/rina/posts")).json()).posts[0];
+    const unlocked = (
+      await (await a.request("/users/rina/posts", { headers: authed(token) })).json()
+    ).posts[0];
+
+    const POST_KEYS = [
+      "author",
+      "body",
+      "createdAt",
+      "editedAt",
+      "id",
+      "lockedMediaCount",
+      "media",
+      "membersOnly",
+    ];
+    expect(Object.keys(locked).sort()).toEqual(POST_KEYS);
+    expect(Object.keys(unlocked).sort()).toEqual(POST_KEYS);
+  });
+
+  it("no media id survives anywhere in a locked response", async () => {
+    const a = app();
+    const { mediaId } = await rinaWithAGatedPost(a);
+
+    const body = await (await a.request("/users/feed?tab=untuk-anda")).text();
+
+    expect(body).not.toContain(mediaId);
+  });
+
+  it("the AUTHOR always gets their own media back, on the feed and on the profile", async () => {
+    const a = app();
+    const { token, mediaId } = await rinaWithAGatedPost(a);
+
+    const feed = await (
+      await a.request("/users/feed?tab=untuk-anda", { headers: authed(token) })
+    ).json();
+    const profile = await (
+      await a.request("/users/rina/posts", { headers: authed(token) })
+    ).json();
+
+    for (const post of [feed.posts[0], profile.posts[0]]) {
+      expect(post.media.map((image: { id: string }) => image.id)).toEqual([mediaId]);
+      expect(post.membersOnly).toBe(true);
+      expect(post.lockedMediaCount).toBe(0);
+    }
+  });
+
+  it("a signed-in reader who pays for nobody is locked out", async () => {
+    const a = app();
+    await rinaWithAGatedPost(a);
+    const buyerToken = await tokenForValidUser(a, BUYER);
+
+    const feed = await (
+      await a.request("/users/feed?tab=untuk-anda", { headers: authed(buyerToken) })
+    ).json();
+
+    expect(feed.posts[0].media).toEqual([]);
+    expect(feed.posts[0].lockedMediaCount).toBe(1);
+  });
+
+  it("a paying member gets the media", async () => {
+    const a = app();
+    const { mediaId } = await rinaWithAGatedPost(a);
+    const buyerToken = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+
+    const feed = await (
+      await a.request("/users/feed?tab=untuk-anda", { headers: authed(buyerToken) })
+    ).json();
+    const profile = await (
+      await a.request("/users/rina/posts", { headers: authed(buyerToken) })
+    ).json();
+
+    for (const post of [feed.posts[0], profile.posts[0]]) {
+      expect(post.media.map((image: { id: string }) => image.id)).toEqual([mediaId]);
+      expect(post.lockedMediaCount).toBe(0);
+    }
+  });
+
+  /**
+   * The row still reads `status = 'active'` — nothing has retired it, and 5b's
+   * sweep may not run for hours (its §9). A status-only check would hand this
+   * person every gated image they have stopped paying for.
+   */
+  it("a LAPSED member does NOT get the media — their period ended", async () => {
+    const a = app();
+    await rinaWithAGatedPost(a);
+    const buyerToken = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), YESTERDAY());
+
+    const feed = await (
+      await a.request("/users/feed?tab=untuk-anda", { headers: authed(buyerToken) })
+    ).json();
+
+    expect(feed.posts[0].media).toEqual([]);
+    expect(feed.posts[0].lockedMediaCount).toBe(1);
+  });
+
+  /**
+   * A membership buys that creator's gated posts and nothing else. Paying Rina
+   * must not unlock Budi — the gate answers per AUTHOR, and a set keyed on the
+   * viewer alone would be exactly this bug.
+   *
+   * **BOTH SIDES, out of ONE feed response** — whole-branch review, MIN-1. This
+   * used to assert only that Budi's post was stripped, which a projection that
+   * locked EVERYBODY passed unchanged (verified by mutation: disabling the
+   * projection's membership removal left this test green). Rina's post carrying
+   * its media in the SAME page is what makes this a test of isolation rather
+   * than of a wall.
+   */
+  it("paying one creator does not unlock another creator's gated post", async () => {
+    const a = app();
+    const rina = await rinaWithAGatedPost(a);
+    const budiToken = await tokenForValidUser(a, VALID);
+    const budiMedia = await uploadFixture(a, budiToken);
+    const budiPost = await (await createPost(a, budiToken, "punya budi", [budiMedia])).json();
+    await gate(budiPost.id);
+    const buyerToken = await tokenForValidUser(a, BUYER);
+    await grantMembership(await userIdFor("andi"), await userIdFor("rina"), IN_A_MONTH());
+
+    const feed = await (
+      await a.request("/users/feed?tab=untuk-anda", { headers: authed(buyerToken) })
+    ).json();
+
+    const byId = new Map(
+      feed.posts.map((post: { id: string; media: { id: string }[] }) => [
+        post.id,
+        post.media.map((image) => image.id),
+      ])
+    );
+    expect(byId.get(budiPost.id)).toEqual([]);
+    // The half that makes the line above mean something: the creator this
+    // viewer actually pays for is unlocked, in the same response.
+    expect(byId.get(rina.postId)).toEqual([rina.mediaId]);
+  });
+
+  it("a public post is unaffected — media, membersOnly false, nothing hidden", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a, RINA);
+    const mediaId = await uploadFixture(a, token);
+    await createPost(a, token, "terbuka", [mediaId]);
+
+    const feed = await (await a.request("/users/feed?tab=untuk-anda")).json();
+
+    expect(feed.posts[0].media.map((image: { id: string }) => image.id)).toEqual([mediaId]);
+    expect(feed.posts[0].membersOnly).toBe(false);
+    expect(feed.posts[0].lockedMediaCount).toBe(0);
   });
 });

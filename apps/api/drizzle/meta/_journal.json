@@ -218,6 +218,13 @@
       "when": 1787273279759,
       "tag": "0030_early_puma",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1787307955076,
+      "tag": "0031_tough_vin_gonzales",
+      "breakpoints": true
     }
   ]
 }

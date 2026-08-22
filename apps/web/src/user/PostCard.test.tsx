@@ -16,6 +16,8 @@ const POST: PostView = {
   editedAt: null,
   media: [],
   author: { handle: "wildan", displayName: "Wildan" },
+  membersOnly: false,
+  lockedMediaCount: 0,
 };
 
 function renderCard(props: Partial<Parameters<typeof PostCard>[0]> = {}) {
@@ -314,5 +316,137 @@ describe("PostCard — no viewerFollows anywhere in this component (carry-forwar
   it("the source file's CODE never renders the body via dangerouslySetInnerHTML", () => {
     const source = readFileSync(join(import.meta.dir, "PostCard.tsx"), "utf8");
     expect(stripComments(source).includes("dangerouslySetInnerHTML")).toBe(false);
+  });
+});
+
+/**
+ * **Task 7 — the lock panel, the conversion surface (spec §5, §5.1; design
+ * §8).** A locked post is told apart from an ordinary one ONLY by
+ * `lockedMediaCount > 0` — never by `membersOnly` alone, since `membersOnly`
+ * is `true` on every members-only post including the ones the viewer CAN see
+ * (the author's own, and a paying member's), and never by `media.length ===
+ * 0` alone, since an ordinary post with no photos is also `[]`.
+ * `lockedMediaCount` is the one field the API sets to exactly "there is
+ * something here you cannot see" (its own docstring in `apiClient.ts`).
+ *
+ * `document.body.innerHTML` — not a scoped `container.innerHTML` — is used
+ * for the URL-leak test on purpose: the whole DOM is the surface a browser
+ * could serve to a non-member, not just this component's own subtree.
+ */
+describe("PostCard — the lock panel (Task 7, spec §5, §5.1)", () => {
+  const lockedPost: PostView = {
+    ...POST,
+    body: "Behind the scenes",
+    media: [],
+    membersOnly: true,
+    lockedMediaCount: 3,
+    author: { handle: "rina", displayName: "Rina" },
+  };
+
+  it("a locked post shows the caption, the count, and the invitation", () => {
+    renderCard({ post: lockedPost });
+
+    const text = screen.getByTestId("post-card").textContent ?? "";
+    expect(text).toContain("Behind the scenes");
+    expect(text).toContain("3 foto terkunci");
+    expect(text).toContain("Jadi anggota untuk melihat");
+  });
+
+  /**
+   * Fix round 1 (Major, coordinator review): the previous version of this
+   * file pinned the caption, the count and the invitation with `toContain`
+   * ONLY — a substring check that stays green when text is APPENDED to any
+   * of the three (verified: mutating the count copy to
+   * `"3 foto terkunci ekstra"` left all 30 tests green before this fix).
+   * `1d8d133` already fixed exactly this shape for the invitation link's
+   * accessible name; these two tests give the other two strings the same
+   * standard of proof — exact `.textContent`, not `toContain`.
+   */
+  it("the locked count copy is EXACT, not merely present — catches text appended after it", () => {
+    const { container } = renderCard({ post: lockedPost });
+
+    const count = container.querySelector(".post-card-locked-count");
+    expect(count?.textContent ?? "").toBe("3 foto terkunci");
+  });
+
+  /**
+   * The property parent spec §5 actually cares about: "its caption
+   * readable" is why a visible lock converts at all. Scoped to the
+   * `.post-card-body` node's own `.textContent`, not the whole card's, so it
+   * cannot be satisfied by the count or the invitation text instead.
+   */
+  it("the locked post's caption survives into the locked view, EXACT and unmodified", () => {
+    const { container } = renderCard({ post: lockedPost });
+
+    const body = container.querySelector(".post-card-body");
+    expect(body?.textContent ?? "").toBe("Behind the scenes");
+  });
+
+  /**
+   * The link target is the author's PUBLIC profile route, `/@handle` — the
+   * SAME shape every other in-app link to a profile already uses (the
+   * identity link above, `FollowListPage`, `JelajahPage`), and the ONLY shape
+   * `ProfilePage`'s own route actually accepts: `App.tsx` mounts the profile
+   * at the bare `path="/:handleParam"` and `ProfilePage` 404s anything whose
+   * first segment does not start with "@" (see that file's docstring). A
+   * bare "/rina" would 404, not open the offer.
+   */
+  it("the lock links to the author's profile, where the offer lives", () => {
+    renderCard({ post: lockedPost });
+
+    // A plain string TextMatch (not a regex) matches the accessible name
+    // EXACTLY, not as a substring — chosen over a regex on purpose, so a
+    // mutant that appends to "Jadi anggota untuk melihat" (e.g. "... foto")
+    // fails to resolve the link at all instead of silently matching.
+    expect(
+      screen.getByRole("link", { name: "Jadi anggota untuk melihat" }).getAttribute("href")
+    ).toBe("/@rina");
+  });
+
+  it("an unlocked members-only post renders its images, not the lock", () => {
+    const unlockedMembersOnly: PostView = {
+      ...POST,
+      membersOnly: true,
+      lockedMediaCount: 0,
+      media: [mediaEntry("m1", 800, 600)],
+    };
+
+    const { container } = renderCard({ post: unlockedMembersOnly });
+
+    const srcs = [...container.querySelectorAll("img")].map((img) => img.getAttribute("src"));
+    expect(srcs).toEqual(["/users/media/m1/thumb"]);
+    expect(screen.queryAllByText(/terkunci/).length).toBe(0);
+    expect(screen.queryAllByText("Jadi anggota untuk melihat").length).toBe(0);
+  });
+
+  it("no image URL for a locked post reaches the DOM", () => {
+    renderCard({ post: lockedPost });
+
+    expect(document.body.innerHTML).not.toContain("/users/media/");
+  });
+
+  /**
+   * EXACT, like the plural case above. Whole-branch review, MIN-5: this was the
+   * last residual `toContain` on new copy — a superstring satisfies it, so a
+   * mutant rendering `"1 foto terkunci saja"` passed, and the plural test's
+   * exact assertion does not reach the singular branch.
+   */
+  it("renders the singular count the same way — Indonesian 'foto' does not inflect for number", () => {
+    const { container } = renderCard({ post: { ...lockedPost, lockedMediaCount: 1 } });
+
+    const count = container.querySelector(".post-card-locked-count");
+    expect(count?.textContent ?? "").toBe("1 foto terkunci");
+  });
+
+  it("renders no media block at all for a locked post", () => {
+    const { container } = renderCard({ post: lockedPost });
+
+    expect(container.querySelectorAll(".post-card-media").length).toBe(0);
+    expect(container.querySelectorAll("img").length).toBe(0);
+  });
+
+  it("every post-card root carries data-testid=post-card, locked or not", () => {
+    renderCard({ post: POST });
+    expect(screen.getByTestId("post-card").textContent ?? "").toContain("Halo semua!");
   });
 });

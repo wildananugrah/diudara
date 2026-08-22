@@ -38,6 +38,19 @@ export interface PostComposerProps {
    * switch between posts remount instead — see `EditComposer`'s `key`.
    */
   initialMedia?: MediaView[];
+  /**
+   * Seeds "Khusus anggota" — an EDIT starts checked exactly when the post is
+   * currently `members`, unchecked otherwise (spec §7). Defaults to
+   * `"public"`, which is what the CREATE composer always gets (there is no
+   * post yet to be members-only). Read ONCE, exactly like `initialBody` and
+   * `initialMedia`: it is also the yardstick `resolveVisibility` compares
+   * the checkbox's FINAL state against, so this component can tell "the
+   * creator left it alone" from "the creator changed it back to what it
+   * already was" — both send nothing, but only the first is really "nothing
+   * changed" and the distinction is exactly what an untouched-field-omitted
+   * PATCH requires.
+   */
+  initialVisibility?: "public" | "members";
   /** `Kirim` when composing, `Simpan` when editing. The caller names the action; this component does not know which it is. */
   submitLabel: string;
   /**
@@ -53,8 +66,23 @@ export interface PostComposerProps {
    * (spec §5.2) — `[]` when there are none, never `undefined`, so an edit that
    * removed every photo is distinguishable from one that never had any. Only
    * ids that finished uploading are in it; see `attachedIds`.
+   *
+   * `visibility` is passed ONLY when the checkbox's FINAL state differs from
+   * `initialVisibility` — `"members"` when checked away from public,
+   * `"public"` when unchecked away from members — and OMITTED (not
+   * `undefined`, genuinely absent from the call) whenever it matches the
+   * seed, whether that is because the creator never touched the box or
+   * because they toggled it and toggled it back. That mirrors the API's own
+   * contract (spec §7): on the write path `visibility` is optional and an
+   * omitted value on an edit means "leave it alone", not "make it public".
+   * A caller wired to `editPost` never has to guess what an omitted
+   * argument meant — this component already resolved that.
    */
-  onSubmit: (body: string, mediaIds: string[]) => Promise<void>;
+  onSubmit: (
+    body: string,
+    mediaIds: string[],
+    visibility?: "public" | "members"
+  ) => Promise<void>;
   /** Renders a `Batal` button when present. Absent for the create composer, which has nothing to cancel back to. */
   onCancel?: () => void;
   /**
@@ -156,6 +184,7 @@ function seedImages(media: MediaView[]): ComposerImage[] {
 export default function PostComposer({
   initialBody = "",
   initialMedia,
+  initialVisibility = "public",
   submitLabel,
   onSubmit,
   onCancel,
@@ -173,6 +202,25 @@ export default function PostComposer({
    * and `removeImage`.
    */
   const [notice, setNotice] = useState<string | null>(null);
+
+  /**
+   * "Khusus anggota" (spec §7). `visibility = 'members'` requires at least
+   * one image, and **the server enforces that** — this state is a courtesy
+   * that explains the rule before the creator hits it, never the rule
+   * itself. Nothing here assumes the checkbox is the only way the field
+   * gets set; it is only ever this component's own opinion of what THIS
+   * submit should ask for.
+   */
+  const [membersOnly, setMembersOnly] = useState(initialVisibility === "members");
+  /**
+   * The seed `membersOnly` STARTED at, captured once and never updated —
+   * `resolveVisibility` compares the checkbox's final state against this,
+   * not against `initialVisibility` the prop, because a `useRef` initial
+   * value is exactly as "read once" as `useState`'s lazy initialiser is, and
+   * writing it as a second `useState` would invite a future edit to call its
+   * setter and quietly move the goalposts of what counts as "unchanged".
+   */
+  const initialMembersOnly = useRef(initialVisibility === "members").current;
 
   /**
    * The advisory cap, learned once at boot by `App` and read here as a store so
@@ -310,10 +358,17 @@ export default function PostComposer({
   function removeImage(key: string): void {
     const target = images.find((image) => image.key === key);
     if (target !== undefined) releasePreview(target);
-    setImages((current) => current.filter((image) => image.key !== key));
+    const remaining = images.filter((image) => image.key !== key);
+    setImages(remaining);
     // The notice counts photos a PAST pick could not take. Removing one makes
     // room, so repeating it would misdescribe what can be added now.
     setNotice(null);
+    // Removing the LAST image un-checks "Khusus anggota" rather than leaving
+    // an unenforceable lock armed (spec §7): without this, a creator clears
+    // their images, submits, and gets a server error they did not cause on
+    // purpose. Only the last one does this — taking a post from two photos
+    // to one leaves the lock exactly as enforceable as it was.
+    if (remaining.length === 0) setMembersOnly(false);
   }
 
   /** Re-sends the SAME file, on the same row, clearing that row's failure. */
@@ -346,10 +401,40 @@ export default function PostComposer({
    */
   const canSubmit = trimmed.length > 0 && !overLimit && !submitting && !uploading;
 
+  /**
+   * Whether "Khusus anggota" may be checked at all — at least one image is
+   * ATTACHED, counting the same way the strip's own limit does (`images`,
+   * not `attachedIds`): a photo still uploading is not yet enforceable
+   * server-side, but it is not nothing either, and disabling the box the
+   * instant a pick lands (before the network answers) would be a worse UI
+   * than the one-beat delay of waiting for `attachedIds`.
+   */
+  const canBeMembersOnly = images.length > 0;
+
   /** Only the ids that actually exist. A failed or in-flight image contributes nothing. */
   const attachedIds = images.flatMap((image) =>
     image.status === "ready" && image.mediaId !== null ? [image.mediaId] : []
   );
+
+  /**
+   * What to tell `onSubmit` about "Khusus anggota" — `undefined` (genuinely
+   * omitted, not sent as the literal `undefined`) when the checkbox's FINAL
+   * state matches what it STARTED at, and an explicit `"members"` or
+   * `"public"` when it does not.
+   *
+   * This is the whole reason `initialMembersOnly` is captured once rather
+   * than read live from the prop: on an EDIT, a creator who never touches
+   * the box must produce an omitted field (spec §7 — "leave it alone"), and
+   * so must a creator who checks it and then unchecks it again before
+   * saving. Only an ACTUAL change from what the post already is produces an
+   * explicit value. On CREATE, `initialMembersOnly` is always `false`, so
+   * this collapses to exactly the old behaviour: checked sends `"members"`,
+   * unchecked sends nothing.
+   */
+  function resolveVisibility(): "public" | "members" | undefined {
+    if (membersOnly === initialMembersOnly) return undefined;
+    return membersOnly ? "members" : "public";
+  }
 
   async function handleSubmit(event: FormEvent): Promise<void> {
     event.preventDefault();
@@ -361,7 +446,16 @@ export default function PostComposer({
     setSubmitting(true);
     setError(null);
     try {
-      await onSubmit(trimmed, attachedIds);
+      // `visibility` is passed ONLY when it actually changed — see
+      // `resolveVisibility` and the prop's own docstring for why an
+      // unchanged box omits the argument entirely rather than sending it as
+      // `undefined`.
+      const visibility = resolveVisibility();
+      if (visibility !== undefined) {
+        await onSubmit(trimmed, attachedIds, visibility);
+      } else {
+        await onSubmit(trimmed, attachedIds);
+      }
       // ONLY on success. See the docstring: a rejection leaves this line
       // unreached, and the text AND the photos exactly where the author left
       // them — a failed send that made somebody pick and re-upload every photo
@@ -370,6 +464,7 @@ export default function PostComposer({
       for (const image of images) releasePreview(image);
       setImages([]);
       setNotice(null);
+      setMembersOnly(false);
     } catch (err: unknown) {
       setError(`${SUBMIT_FAILED_PREFIX} ${describeRequestFailure(err)}`);
     } finally {
@@ -390,6 +485,27 @@ export default function PostComposer({
         onRemove={removeImage}
         onRetry={retryImage}
       />
+
+      {/* "Khusus anggota" (spec §7). Disabled until an image is attached —
+          a courtesy that explains the server's own rule before the creator
+          hits it, not the rule itself. */}
+      <div className="post-composer-members-only">
+        <label htmlFor="post-composer-members-only">
+          <input
+            id="post-composer-members-only"
+            type="checkbox"
+            checked={membersOnly}
+            disabled={!canBeMembersOnly}
+            onChange={(event) => setMembersOnly(event.target.checked)}
+          />
+          Khusus anggota
+        </label>
+        {!canBeMembersOnly ? (
+          <p className="post-composer-hint" data-testid="members-only-hint">
+            Tambahkan foto dulu — teks selalu bisa dibaca semua orang.
+          </p>
+        ) : null}
+      </div>
 
       <textarea
         className="post-composer-body"

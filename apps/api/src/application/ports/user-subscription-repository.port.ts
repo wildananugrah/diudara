@@ -313,6 +313,35 @@ export interface UserSubscriptionRepositoryPort {
    * docstring for exactly what may and may not cross this boundary.
    */
   listActiveSubscribers(ownerId: string, now: Date): Promise<SubscriberRow[]>;
+  /**
+   * Phase 6's paywall question, asked once for a whole feed page: which of
+   * `ownerIds` is `subscriberId` CURRENTLY a member of. Same "currently
+   * subscribed" definition as `listActiveSubscribers` and `is-member-of.ts`'s
+   * `membershipStanding` — `status = 'active'` AND `current_period_end >
+   * now`, strict — mirrored here rather than composed from either, for the
+   * same reason `listActiveSubscribers`'s own docstring gives: a feed holds
+   * posts from many authors, and answering this per-owner would be an N+1
+   * query on the page that matters most. `is-member-of.ts` stays untouched —
+   * see its own docstring on why it is pinned exactly as reviewed in 5a.
+   *
+   * A lapsed membership — `status` still `active` but its period already
+   * over, because Task 3 of 5b's sweep has not yet retired it (§9's honest
+   * limitation) — is excluded, not merely a past subscriber: a status-only
+   * filter would let a lapsed member keep seeing gated images they no longer
+   * pay for.
+   *
+   * `now` is a parameter, never read inside this method, for the same
+   * `ClockPort` reason every time-sensitive read in this codebase takes one.
+   *
+   * Returns only the ids from `ownerIds` that are currently paid for — never
+   * the whole membership row, and never an id outside `ownerIds`. Order is
+   * unspecified; a caller building a per-post gate turns this into a Set.
+   *
+   * An empty `ownerIds` answers `[]` without touching the database — an
+   * empty `IN ()` is a SQL error in some drivers and a pointless round trip
+   * in all of them.
+   */
+  listActiveOwnersAmong(subscriberId: string, ownerIds: string[], now: Date): Promise<string[]>;
   createTransaction(input: {
     userSubscriptionId: string;
     amount: number;

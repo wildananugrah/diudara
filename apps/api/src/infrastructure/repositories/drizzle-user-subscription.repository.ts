@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { appUsers, userSubscriptions, userTransactions } from "../../db/schema";
 import { isConnectedPaymentAccount } from "../../domain/payment-account";
@@ -433,6 +433,35 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         )
       )
       .orderBy(desc(userSubscriptions.createdAt), desc(userSubscriptions.id));
+  }
+
+  /**
+   * See the port's own docstring for the full contract. Same strict `gt` on
+   * `current_period_end` as `listActiveSubscribers` and `findActiveFor` —
+   * `is-member-of.ts`'s `> now`, not `>=` — a period ending at exactly `now`
+   * has ended, not one tick from ending.
+   *
+   * An empty `ownerIds` short-circuits before the query: an empty `IN ()` is
+   * a SQL error in some drivers and a pointless round trip in all of them.
+   */
+  async listActiveOwnersAmong(
+    subscriberId: string,
+    ownerIds: string[],
+    now: Date
+  ): Promise<string[]> {
+    if (ownerIds.length === 0) return [];
+    const rows = await this.db
+      .select({ ownerId: userSubscriptions.ownerId })
+      .from(userSubscriptions)
+      .where(
+        and(
+          eq(userSubscriptions.subscriberId, subscriberId),
+          inArray(userSubscriptions.ownerId, ownerIds),
+          eq(userSubscriptions.status, "active"),
+          gt(userSubscriptions.currentPeriodEnd, now)
+        )
+      );
+    return rows.map((row) => row.ownerId);
   }
 
   async createTransaction(input: {

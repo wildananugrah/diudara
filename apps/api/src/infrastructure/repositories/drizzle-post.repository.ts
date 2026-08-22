@@ -3,6 +3,7 @@ import type { DatabaseExecutor } from "../../db/client";
 import { appUsers, follows, posts } from "../../db/schema";
 import type { KeysetCursor } from "../../domain/keyset-cursor";
 import type {
+  PostGating,
   PostOwnership,
   PostRepositoryPort,
   PostRow,
@@ -10,16 +11,21 @@ import type {
 import { clampLimit } from "./drizzle-follow.repository";
 
 /**
- * The ONE projection every read path selects. `author_id` and `deleted_at` are
- * absent by construction rather than stripped later — Phase 1's review found the
+ * The ONE projection every read path selects. `deleted_at` is absent by
+ * construction rather than stripped later — Phase 1's review found the
  * no-email invariant defended on only two of five repository paths precisely
- * because each path chose its own columns.
+ * because each path chose its own columns. `author_id` and `visibility` ARE
+ * selected (Phase 6): entitlement is a question about ids, not handles, and
+ * `toPostView` in `post-views.ts` is what keeps them off the wire, not their
+ * absence here.
  */
 const postColumns = {
   id: posts.id,
   body: posts.body,
   createdAt: posts.createdAt,
   editedAt: posts.editedAt,
+  authorId: posts.authorId,
+  visibility: posts.visibility,
   authorHandle: appUsers.handle,
   authorDisplayName: appUsers.displayName,
 } as const;
@@ -64,10 +70,14 @@ function newestFirstOrder() {
 export class DrizzlePostRepository implements PostRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
 
-  async create(authorId: string, body: string): Promise<PostRow> {
+  async create(authorId: string, body: string, visibility?: string): Promise<PostRow> {
     const [inserted] = await this.db
       .insert(posts)
-      .values({ authorId, body })
+      // `visibility` omitted entirely (not `visibility: undefined`) when the
+      // caller did not pass one, so the column's own `default('public')`
+      // decides — a spread with an explicit `undefined` value would instead
+      // ask drizzle to insert NULL into a `NOT NULL` column and throw.
+      .values(visibility === undefined ? { authorId, body } : { authorId, body, visibility })
       .returning({ id: posts.id });
     const row = await this.readOne(inserted!.id);
     // The row was just inserted inside this call; a null here means the
@@ -78,17 +88,84 @@ export class DrizzlePostRepository implements PostRepositoryPort {
 
   async ownershipOf(id: string): Promise<PostOwnership | null> {
     const [row] = await this.db
-      .select({ id: posts.id, authorId: posts.authorId, deletedAt: posts.deletedAt })
+      .select({
+        id: posts.id,
+        authorId: posts.authorId,
+        deletedAt: posts.deletedAt,
+        visibility: posts.visibility,
+      })
       .from(posts)
       .where(eq(posts.id, id));
     if (row === undefined) return null;
-    return { id: row.id, authorId: row.authorId, isDeleted: row.deletedAt !== null };
+    return {
+      id: row.id,
+      authorId: row.authorId,
+      isDeleted: row.deletedAt !== null,
+      visibility: row.visibility,
+    };
   }
 
-  async updateBody(id: string, body: string): Promise<PostRow | null> {
+  /**
+   * Task 5 fix round 1. Same projection and same shape as `ownershipOf`,
+   * `FOR UPDATE OF post` added — this is what makes it safe to read
+   * `visibility` and the post's current media for a resulting-state check: a
+   * second caller locking the SAME id blocks here until this transaction
+   * ends. `of posts` names the table explicitly even though this query has
+   * no join, matching `DrizzleSubscriptionRepository.markPaid`'s own
+   * `for("update", { of: subscriptions })` — naming the target is what keeps
+   * a later join added to this method from silently widening the lock.
+   */
+  async lockForEdit(id: string): Promise<PostOwnership | null> {
+    const [row] = await this.db
+      .select({
+        id: posts.id,
+        authorId: posts.authorId,
+        deletedAt: posts.deletedAt,
+        visibility: posts.visibility,
+      })
+      .from(posts)
+      .where(eq(posts.id, id))
+      .for("update", { of: posts });
+    if (row === undefined) return null;
+    return {
+      id: row.id,
+      authorId: row.authorId,
+      isDeleted: row.deletedAt !== null,
+      visibility: row.visibility,
+    };
+  }
+
+  /**
+   * Two columns, by primary key — what BARRIER TWO reads before any bytes
+   * leave `MediaStoragePort` (spec §6.2).
+   *
+   * NO `deleted_at` FILTER, and that is the whole difference from the read
+   * paths above: a soft-deleted post is unreachable through every projection,
+   * but its images are still reachable by id, and §6.3 settles that this route
+   * keeps serving them exactly as it does today. Filtering here would answer
+   * `null` for a deleted post, which the gate refuses — a behaviour change to
+   * deletion semantics smuggled in through a WHERE clause.
+   */
+  async gatingOf(id: string): Promise<PostGating | null> {
+    const [row] = await this.db
+      .select({ authorId: posts.authorId, visibility: posts.visibility })
+      .from(posts)
+      .where(eq(posts.id, id));
+    return row ?? null;
+  }
+
+  async updateBody(id: string, body: string, visibility?: string): Promise<PostRow | null> {
     const [updated] = await this.db
       .update(posts)
-      .set({ body, editedAt: sql`now()` })
+      // `visibility` omitted (not spread as `undefined`) means "do not touch
+      // this column" — the same reasoning as `create` above, and the reason
+      // an omitted `visibility` on PATCH leaves a post's gating exactly as
+      // it was rather than resetting it to public.
+      .set(
+        visibility === undefined
+          ? { body, editedAt: sql`now()` }
+          : { body, editedAt: sql`now()`, visibility }
+      )
       .where(and(eq(posts.id, id), isNull(posts.deletedAt)))
       .returning({ id: posts.id });
     if (updated === undefined) return null;

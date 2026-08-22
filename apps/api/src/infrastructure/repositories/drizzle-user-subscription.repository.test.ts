@@ -1213,3 +1213,67 @@ describe("listActiveSubscribers (Task 6 of Phase 5b)", () => {
     expect(rows.map((r) => r.handle)).toEqual([rina.handle, bob.handle]);
   });
 });
+
+/**
+ * Task 2 of Phase 6: one query answering "which of these authors is this
+ * subscriber currently a member of", for a whole feed page's worth of owners
+ * at once. Reads the SAME predicate `is-member-of.ts`'s `membershipStanding`
+ * and `listActiveSubscribers` above both use — `status = 'active' AND
+ * current_period_end > now`, strict — never composed from either: see
+ * `listActiveOwnersAmong`'s own docstring on the port for why a shared call
+ * would mean an N+1 query per owner instead of one query per page.
+ */
+describe("listActiveOwnersAmong (Task 2 of Phase 6)", () => {
+  const PERIOD_END = new Date("2027-01-01T00:00:00.000Z"); // after NOW
+
+  async function seedMembership(subscriberId: string, ownerId: string, periodEnd: Date) {
+    const tier = await tiers.create({
+      ownerId,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const created = await subs.create({ subscriberId, tierId: tier.id, ownerId });
+    await subs.activate(created.id, periodEnd);
+    return created;
+  }
+
+  it("returns only the owners this subscriber currently pays for", async () => {
+    const buyer = await createUser("buyer");
+    const rina = await createUser("rina");
+    const budi = await createUser("budi"); // buyer does NOT subscribe to budi
+    const sari = await createUser("sari");
+    await seedMembership(buyer.id, rina.id, PERIOD_END);
+    await seedMembership(buyer.id, sari.id, PERIOD_END);
+
+    const found = await subs.listActiveOwnersAmong(buyer.id, [rina.id, budi.id, sari.id], NOW);
+
+    expect(found.sort()).toEqual([rina.id, sari.id].sort());
+  });
+
+  it("EXCLUDES an owner whose period has already passed — status alone is not membership", async () => {
+    const buyer = await createUser("buyer");
+    const lapsed = await createUser("lapsed");
+    await seedMembership(buyer.id, lapsed.id, new Date(NOW.getTime() - 60_000));
+
+    const found = await subs.listActiveOwnersAmong(buyer.id, [lapsed.id], NOW);
+
+    expect(found).toEqual([]);
+  });
+
+  it("excludes an owner whose period end EQUALS now exactly (strict >, not >=)", async () => {
+    const buyer = await createUser("buyer");
+    const edge = await createUser("edge");
+    await seedMembership(buyer.id, edge.id, NOW);
+
+    const found = await subs.listActiveOwnersAmong(buyer.id, [edge.id], NOW);
+
+    expect(found).toEqual([]);
+  });
+
+  it("returns an empty array for an empty ownerIds list, without querying", async () => {
+    const buyer = await createUser("buyer");
+
+    expect(await subs.listActiveOwnersAmong(buyer.id, [], NOW)).toEqual([]);
+  });
+});

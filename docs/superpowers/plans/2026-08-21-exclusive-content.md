@@ -19,7 +19,7 @@ query per page, decided in the use case where a test can point at it.
 - **`/dashboard/*` and its six tables are UNTOUCHABLE**: `community`, `membership_tier`, `member`, `subscription`, `transaction`, `creator`.
 - **`isMemberOf` must not change** — `apps/api/src/application/use-cases/is-member-of.ts` is byte-identical to its Phase 5a form and pinned by an `EXPLAIN` test. Reuse its predicate; never edit it.
 - **Never turn `/users/media/:id` into a redirect.** Read the comment at `apps/api/src/routes/media.ts:125` before touching that file.
-- `apps/api/src/test/no-raw-server-errors.test.ts` and `apps/web/src/test/no-hanging-dom-assertions.test.ts` must stay green.
+- **Both guard tests live in `apps/web`**: `apps/web/src/test/no-raw-server-errors.test.ts` and `apps/web/src/test/no-hanging-dom-assertions.test.ts`. There is no `apps/api/src/test/no-raw-server-errors.test.ts`. Both must stay green.
 - **Never put a DOM node on either side of an assertion that can fail** — it serialises the node's whole object graph and has taken this machine down once. Use the `isNode` helper in `BerandaPage.test.tsx`, or compare `textContent` strings.
 - Tests assert **literal values**, never the constant they check.
 - **Read the clock once per operation** and pass the `Date` down. Phase 5b shipped a residual (m-8) caused by one use case reading `clock.now()` twice around a query.
@@ -64,7 +64,8 @@ cannot work without it, because entitlement is a question about ids, not handles
 ```ts
 test("a post row carries its author's id and its visibility, defaulting to public", async () => {
   const author = await seedUser({ handle: "rina" });
-  const post = await repo.create({ authorId: author.id, body: "halo" });
+  // NOTE: `create` is POSITIONAL — `create(authorId: string, body: string)`.
+  const post = await repo.create(author.id, "halo");
   const rows = await repo.listByAuthor(author.id, 10, null);
   expect(rows[0]?.authorId).toBe(author.id);
   expect(rows[0]?.visibility).toBe("public");
@@ -469,18 +470,22 @@ One rule, checked on **create and edit alike**, so the two cannot drift.
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
+// `CreatePost`, `EditPost` and `DeletePost` are three separate classes, each with
+// ONE `execute(input)` method. There is no `writePost.create` / `.edit`.
 test("refuses to create a members-only post with no image — the lock would protect nothing", async () => {
-  await expect(writePost.create({ authorId: rina.id, body: "halo", mediaIds: [], visibility: "members" }))
+  await expect(createPost.execute({ authorId: rina.id, body: "halo", mediaIds: [], visibility: "members" }))
     .rejects.toThrow(ValidationError);
 });
 
 test("refuses to EDIT away the last image of a members-only post", async () => {
-  await expect(writePost.edit({ postId: locked.id, editorId: rina.id, mediaIds: [] }))
+  await expect(editPost.execute({ postId: locked.id, editorId: rina.id, body: "halo", mediaIds: [] }))
     .rejects.toThrow(ValidationError);
 });
 
 test("allows removing the last image once the post is public again, in the same edit", async () => {
-  const view = await writePost.edit({ postId: locked.id, editorId: rina.id, mediaIds: [], visibility: "public" });
+  const view = await editPost.execute({
+    postId: locked.id, editorId: rina.id, body: "halo", mediaIds: [], visibility: "public",
+  });
   expect(view.membersOnly).toBe(false);
 });
 ```
@@ -543,6 +548,10 @@ git add -A && git commit -m "feat(web): compose a members-only post"
 - Modify: `apps/web/src/user/PostCard.tsx`
 - Test: `apps/web/src/user/PostCard.test.tsx`
 
+`PostCard` has **no `data-testid` today** — add `data-testid="post-card"` to its root as part of this
+task. It exists so assertions can read one `textContent` string instead of putting a DOM node on
+either side of a failing assertion.
+
 - [ ] **Step 1: Write the failing tests**
 
 ```tsx
@@ -556,8 +565,12 @@ test("a locked post shows the caption, the count, and the invitation", () => {
 
 test("the lock links to the author's profile, where the offer lives", () => {
   render(<PostCard post={lockedPost} />);
-  expect(screen.getByRole("link", { name: /Jadi anggota untuk melihat/ }).getAttribute("href"))
-    .toBe("/rina");
+  // `/@rina`, not `/rina` — every in-app profile link carries the `@`, and
+  // `App.tsx:136` explains why the route is `path="/:handleParam"` rather than
+  // `path="/@:handle"`. Match the link name EXACTLY: a `toContain` or a regex
+  // accepts a superstring, so appended copy would slip past.
+  expect(screen.getByRole("link", { name: "Jadi anggota untuk melihat" }).getAttribute("href"))
+    .toBe("/@rina");
 });
 
 test("an unlocked members-only post renders its images, not the lock", () => { /* … */ });
@@ -607,4 +620,10 @@ Task 4. §9 limitation → nothing to build. §10 testing → distributed. §11 
 **Type consistency.** `PostRow.authorId`/`visibility` (Task 1) are consumed by Tasks 3 and 4.
 `listActiveOwnersAmong(subscriberId, ownerIds, now)` (Task 2) is called in Task 3 Step 4 with that
 exact signature. `toPostView(row, media, locked)` (Task 3) matches all four call sites.
+
+**Pre-flight corrections (made before Task 1 was dispatched).** Three names in the first draft did not
+match the codebase: `PostRepositoryPort.create` is **positional** (`create(authorId, body)`), not an
+object; `write-post.ts` exposes **`CreatePost` / `EditPost` / `DeletePost`, each with one
+`execute(input)`** — there is no `writePost.create`; and `PostCard` carries **no `data-testid`**, so
+Task 7 adds one. All three are corrected in place above.
 `PostView`'s key list in Task 3's closed-projection test matches the interface in the same task.

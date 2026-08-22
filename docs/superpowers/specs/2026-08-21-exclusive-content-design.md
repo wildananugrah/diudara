@@ -80,8 +80,9 @@ After a feed page (or a profile's posts, or a single post) loads its rows, **one
 *of these authors, which is this viewer an active member of?* One indexed query per page, whatever the
 page size.
 
-The query is one port method — `activeMembershipsAmong(viewerId, authorIds) -> Set<authorId>` — and
-it answers for the whole page at once. It reads the same `status = 'active' AND current_period_end >
+The query is one port method — `listActiveOwnersAmong(subscriberId, ownerIds, now) -> string[]` — and
+it answers for the whole page at once. It takes an explicit `now` and returns an array, matching its
+neighbour `listActiveSubscribers(ownerId, now)`; the use case builds the Set. It reads the same `status = 'active' AND current_period_end >
 now()` predicate `isMemberOf` does, against the same partial unique index, **without changing
 `isMemberOf` itself**.
 
@@ -108,9 +109,32 @@ a missing row, so gated and absent are indistinguishable from outside.
 
 ### 6.3 Two kinds of row the gate must not trip over
 
-- **Unclaimed media** (`post_id is null`) — bytes uploaded but not yet attached to a post. There is no
-  post, so there is no visibility to read. These stay **ungated**, exactly as today: the id is known
-  only to its uploader, who is the only person who could have received it.
+- **Unclaimed media** (`post_id is null`) — no post, so no visibility to read. Served to **its owner
+  only** (`post_media.owner_id`), and always with the gated cache header, never `public, immutable`.
+
+  **Corrected 2026-08-21 by the whole-branch review (MAJ-1).** This clause used to rule unclaimed media
+  *ungated*, on the ground that *"the id is known only to its uploader, who is the only person who could
+  have received it."* That sentence is true of a **never-claimed upload** and false of a **released
+  row** — and both are `post_id IS NULL`. `claim` releases the rows a post no longer names by setting
+  `post_id = NULL` (§8: removal unclaims, it does not delete), so editing an image out of a members-only
+  post produced an unclaimed row whose id had **already been sent to every paying member who loaded that
+  post**, which is precisely the threat §6.4 names. Un-gated, that image was fetchable by anybody for up
+  to ~25 hours (the orphan sweep measures its window from `created_at`, not from release) and cacheable
+  by anything that touched it for a **year**. One rationale was written about one kind of row and applied
+  to two.
+
+  The database cannot tell a released row from a never-claimed one, so the fix does not try to: it
+  **enforces** the rationale instead of assuming it. If the id is meaningful only to its uploader, only
+  its uploader gets bytes for it.
+
+  Nothing legitimate loses anything. The composer previews a fresh upload from a local object URL
+  (`PostComposer.previewFor`), never from this route, and asks this route only for media already claimed
+  by the post it is editing — where the caller is the owner anyway. The orphan sweep reads bytes through
+  `MediaStoragePort`, not over HTTP.
+
+  The header is `private, no-store` rather than `public, immutable` for a second, independent reason: an
+  unclaimed row may be claimed by a members-only post a second from now. **A response that can turn
+  private must never license a year in a shared cache.**
 - **Media on a soft-deleted post** (`post.deleted_at is not null`) — already unreachable through every
   projection. The route keeps serving it as it does today; this phase does not change deletion
   semantics. Recorded so the next reader knows it was considered, not missed.
