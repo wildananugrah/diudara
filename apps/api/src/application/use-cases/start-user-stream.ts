@@ -164,15 +164,21 @@ export class ListLiveStreams {
         lockedOwners.delete(ownerId);
       }
     }
-    return {
-      streams: rows.map((row) =>
-        // Consulted TOGETHER with the row's own visibility, never alone — the
-        // same rule `toFeedPage` states: an owner with one gated and one
-        // public stream is in that set because of the gated one, and locking
-        // on membership alone would withhold the public one from everybody.
-        toStreamView(row, row.visibility === MEMBERS_ONLY && lockedOwners.has(row.ownerId))
-      ),
-    };
+    // Narrowed back to STREAMS before it is consulted, so the lock is asked
+    // about the row rather than about its owner. `toFeedPage` keeps an
+    // owner-shaped set and re-checks `visibility` at every row instead — a
+    // post's author can hold a gated and a public post on the same page, and
+    // locking on membership alone there would withhold the public one. Here
+    // that second check would be UNREACHABLE: `user_stream_one_live` means an
+    // owner has at most one live row, so an owner in `lockedOwners` is in it
+    // because of the very row being projected. An unreachable guard is worse
+    // than none — nothing can prove it still works — so the gate's two
+    // conditions (`visibility`, and "not your own") stay in exactly one place,
+    // the `gated` filter above, and this set carries the answer.
+    const lockedStreamIds = new Set(
+      gated.filter((row) => lockedOwners.has(row.ownerId)).map((row) => row.id)
+    );
+    return { streams: rows.map((row) => toStreamView(row, lockedStreamIds.has(row.id))) };
   }
 }
 

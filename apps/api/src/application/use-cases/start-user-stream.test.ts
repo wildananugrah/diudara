@@ -379,12 +379,14 @@ describe("ListLiveStreams", () => {
   });
 
   /**
-   * The gate is consulted TOGETHER with the row's own visibility, never
-   * alone. One owner with a gated stream and (after it ends) a public one
-   * would otherwise have the public stream withheld from everybody because
-   * their id is in the locked set.
+   * A MIXED page: one gated stream and one public one, live at the same
+   * moment, and only the gated one locks. Across two owners rather than one,
+   * because `user_stream_one_live` makes "one person, two live streams" — the
+   * shape `toFeedPage` guards against for posts — impossible here by
+   * construction; see `ListLiveStreams`'s own comment on why that guard is
+   * therefore absent rather than merely untested.
    */
-  it("does not lock a PUBLIC stream just because its owner also gated one", async () => {
+  it("locks the gated stream on a page and leaves the public one open", async () => {
     const rina = await createUser("rina", "Rina");
     const budi = await createUser("budi", "Budi");
     const gated = await startUserStream().execute({
