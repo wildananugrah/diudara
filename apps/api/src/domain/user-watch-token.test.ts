@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createHmac } from "node:crypto";
 import { mintWatchToken, WATCH_TOKEN_TTL_MS } from "./watch-token";
 import {
   mintUserWatchToken,
@@ -98,5 +99,31 @@ describe("user watch tokens", () => {
     });
 
     expect(verifyUserWatchToken({ token: communityToken, now: NOW, secret: SECRET })).toBeNull();
+  });
+
+  /**
+   * ...AND THE SEPARATOR ITSELF, which the test above does NOT reach. Measured,
+   * not assumed: deleting the domain separator from `sign` leaves that test
+   * green, because a community token's payload carries no `viewerId` and the
+   * `typeof` checks turn it away regardless. The separator's whole job is to
+   * make the refusal structural rather than incidental — one careless edit to
+   * those shape checks away — so it needs a case that fails on the SIGNATURE.
+   *
+   * This builds one: a payload of exactly the shape this module accepts,
+   * signed with the bare-payload HMAC `watch-token.ts` uses (its `sign` is not
+   * exported, so the formula is written out here — that duplication IS the
+   * assertion). If this verifier ever accepts it, the two worlds share a
+   * signing domain again and a forger who can get one kind of token minted can
+   * present it as the other.
+   */
+  it("refuses a well-shaped payload signed WITHOUT the domain separator", () => {
+    const encoded = Buffer.from(
+      JSON.stringify({ viewerId: VIEWER, streamId: STREAM, exp: NOW + 600_000 })
+    ).toString("base64url");
+    const bareSignature = createHmac("sha256", SECRET).update(encoded).digest("base64url");
+
+    expect(
+      verifyUserWatchToken({ token: `${encoded}.${bareSignature}`, now: NOW, secret: SECRET })
+    ).toBeNull();
   });
 });
