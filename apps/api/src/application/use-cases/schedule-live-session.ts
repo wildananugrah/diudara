@@ -68,7 +68,7 @@ export class ScheduleLiveSession {
     scheduledAt?: Date;
   }): Promise<ScheduledSession> {
     const streamKey = newStreamKey();
-    const session = this.streamingProvider.createSession({ streamKey });
+    const session = this.streamingProvider.createSession({ streamKey, namespace: "live" });
 
     const event = await this.events.createForCreator({
       communityId: input.communityId,
@@ -152,7 +152,10 @@ export class ListLiveSessions {
       if (!event.streamKey || !this.streamingProvider) {
         return { ...event, rtmpUrl: null, whipUrl: null };
       }
-      const session = this.streamingProvider.createSession({ streamKey: event.streamKey });
+      const session = this.streamingProvider.createSession({
+        streamKey: event.streamKey,
+        namespace: "live",
+      });
       return { ...event, rtmpUrl: session.rtmpUrl, whipUrl: session.whipUrl };
     });
   }

@@ -205,6 +205,21 @@ export function mediamtxWebhookRoutes(
    * proxied through nginx at all (see CONTRIBUTING.md's port-asymmetry note),
    * so this route has no publish case to handle.
    *
+   * TWO WORLDS, ONE ROUTE, TOLD APART BY WHICH ID HEADER ARRIVES — Phase 7's
+   * Task 4. `X-Mtx-Event-Id` names a community `event` and resolves through
+   * `authoriseReadByEventId`; `X-Mtx-Stream-Id` names a `user_stream` and
+   * resolves through `authoriseUserReadByStreamId`. The nginx template's
+   * `^~ /live/` and `^~ /u/` locations each send exactly one, through their
+   * own internal `auth_request` location, and a request carrying BOTH or
+   * NEITHER is refused rather than resolved by precedence — see the check in
+   * the handler. Both worlds answer with the SAME `X-Stream-Key` response
+   * header, because both need the same rewrite for the same reason: the
+   * public path names an id, MediaMTX's internal path names a key. This is
+   * one route rather than two because the CONTRACT is identical (a secret
+   * header, an id header, a token header, a status code and one response
+   * header) — only the table the id lives in differs, and that is exactly
+   * what the two header names say.
+   *
    * FINAL WHOLE-BRANCH REVIEW CRITICAL, FIXED HERE: this route used to read
    * `X-Mtx-Path` (`live/<streamKey>`) and call `AuthoriseStream.execute`
    * with `action: "read"` — resolving by STREAM KEY, the same identifier
@@ -270,15 +285,34 @@ export function mediamtxWebhookRoutes(
       return c.json(REFUSED_BODY, 403);
     }
 
-    const eventId = c.req.header("X-Mtx-Event-Id") ?? "";
+    const eventId = c.req.header("X-Mtx-Event-Id");
+    const streamId = c.req.header("X-Mtx-Stream-Id");
     const token = c.req.header("X-Watch-Token");
     const query = token ? `token=${encodeURIComponent(token)}` : "";
 
-    const result = await deps.authoriseStream.authoriseReadByEventId({
-      eventId,
-      query,
-      now: Date.now(),
-    });
+    // EXACTLY ONE of the two ids, never both and never neither. Each nginx
+    // location sends its own (`^~ /live/` sends the event id, `^~ /u/` the
+    // stream id), so a request carrying both did not come from a location in
+    // this repository's template — and picking a winner by precedence would
+    // make which WORLD authorises a request depend on a rule nobody reading
+    // the nginx config can see. Refuse instead, with the same body every
+    // other refusal here uses.
+    if ((eventId === undefined) === (streamId === undefined)) {
+      return c.json(REFUSED_BODY, 403);
+    }
+
+    const result =
+      streamId !== undefined
+        ? await deps.authoriseStream.authoriseUserReadByStreamId({
+            streamId,
+            query,
+            now: Date.now(),
+          })
+        : await deps.authoriseStream.authoriseReadByEventId({
+            eventId: eventId!,
+            query,
+            now: Date.now(),
+          });
 
     if (!result.allowed) {
       return c.json(REFUSED_BODY, 403);

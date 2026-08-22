@@ -79,7 +79,12 @@ export class StartUserStream {
     visibility: string;
   }): Promise<StartedUserStream> {
     const streamKey = newStreamKey();
-    const session = this.streamingProvider.createSession({ streamKey });
+    // `namespace: "u"` (Task 4) — the whole reason this parameter exists.
+    // Without it this line built `live/<key>`, so a creator publishing to the
+    // url this use case hands back reached `AuthoriseStream` as the COMMUNITY
+    // world and was looked up in the `event` table. See
+    // `StreamingProviderPort.createSession`'s own docstring.
+    const session = this.streamingProvider.createSession({ streamKey, namespace: "u" });
 
     const stream = await this.streams.startLive({
       ownerId: input.ownerId,

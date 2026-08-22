@@ -124,6 +124,20 @@ describe("DrizzleUserStreamRepository", () => {
     expect(await repo.findById("00000000-0000-4000-8000-000000000000")).toBe(null);
   });
 
+  /**
+   * Task 4 made this reachable from RAW CLIENT INPUT: nginx's `^~ /u/`
+   * location captures the id straight out of the public request URI and
+   * hands it to `AuthoriseStream.authoriseUserReadByStreamId`, which calls
+   * this method. Without the guard, `GET /u/anything/index.m3u8` becomes a
+   * Postgres `invalid input syntax for type uuid` — a 500 on apps/api for
+   * every mistyped or probed URL, where the honest answer is "no such
+   * stream". Same rule, same wording, as `EventRepositoryPort.findById`.
+   */
+  it("answers a MISS, not a driver error, for an id that is not a uuid at all", async () => {
+    expect(await repo.findById("../../etc/passwd")).toBe(null);
+    expect(await repo.findById("")).toBe(null);
+  });
+
   it("finds a stream by id", async () => {
     const rina = await createUser("rina");
     const started = await repo.startLive({

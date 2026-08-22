@@ -1,6 +1,8 @@
 import { verifyWatchToken } from "../../domain/watch-token";
 import type { EventRecord, EventRepositoryPort } from "../ports/event-repository.port";
 import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
+import type { UserStreamRepositoryPort } from "../ports/user-stream-repository.port";
+import { MEMBERS_ONLY } from "./post-views";
 
 /**
  * `event.status` values a publish is allowed against. `ended` is
@@ -26,11 +28,28 @@ const ENTITLED_STATUS = "active";
  * `rtmp://<host>:1935/live/<streamKey>` and
  * `<hlsBaseUrl>/live/<streamKey>/index.m3u8` — and stays the community
  * `event` world unchanged. `u` is the new Phase 7 namespace for a person's
- * own `user_stream`; Task 3 is what teaches an adapter to construct
- * `u/<key>` paths, and Task 4 is what teaches `AuthoriseStream` to actually
- * authorise anything under it. Adding a THIRD namespace later means adding
- * ONE entry here — see `parseStreamPath` below for why an entry not listed
- * in this map is refused rather than guessed at.
+ * own `user_stream`.
+ *
+ * WHO OWNS WHAT, corrected — the previous version of this sentence named
+ * TASK 3 as the task that teaches an adapter to construct `u/<key>` paths.
+ * Task 3 never owned that, nothing did, and the gap survived a review
+ * precisely because this comment said otherwise: `MediaMtxAdapter` went on
+ * hard-coding `live/`, so a real user publish arrived here parsed as
+ * `world: "community"` and the branch below was unreachable in production.
+ * TASK 4 is what added `StreamingProviderPort`'s `namespace` parameter, the
+ * `^~ /u/` and `^~ /whip/u/` locations in
+ * `infra/nginx/live-hls.conf.template`, and
+ * `authoriseUserReadByStreamId` below. TASK 5 is what teaches `execute()`'s
+ * own read branch — MediaMTX's direct `authHTTPAddress` hook, which arrives
+ * with `u/<streamKey>` — to answer for the user world, together with the
+ * membership gate and the watch token that decide the answer.
+ *
+ * These two keys are the same pair `StreamNamespace`
+ * (`streaming-provider.port.ts`) declares for the CONSTRUCTION side; see its
+ * docstring for why they are written twice rather than derived. Adding a
+ * THIRD namespace later means adding ONE entry here and one there — see
+ * `parseStreamPath` below for why an entry not listed in this map is refused
+ * rather than guessed at.
  */
 const NAMESPACES: ReadonlyMap<string, "community" | "user"> = new Map([
   ["live", "community"],
@@ -65,7 +84,7 @@ const NAMESPACES: ReadonlyMap<string, "community" | "user"> = new Map([
  * `runOnOnline`/`runOnOffline` the SAME `$MTX_PATH` value — confirmed
  * against mediamtx.org's hooks documentation ("MTX_PATH: path name"),
  * which is the runtime path a client actually published to, i.e.
- * `live/<key>` (or, once Task 3 wires it up, `u/<key>`) under this
+ * `live/<key>` (or, as of Task 4, `u/<key>`) under this
  * codebase's catch-all path config, not the bare key. Re-parsing it here
  * rather than duplicating the segment check a second time is what keeps
  * "what path shape is legitimate, and which world does it name" answered
@@ -174,9 +193,18 @@ function watchTokenFromQuery(query: string): string | null {
  * never present in the two literal bodies (`ALLOWED_BODY`/`REFUSED_BODY`)
  * either endpoint ever sends to anything a browser can see.
  *
+ * A FOURTH ENTRY POINT — `authoriseUserReadByStreamId` — is the same idea
+ * again for the USER world (Task 4), and exists for the same one caller:
+ * nginx's `auth_request`, now also fronting the `^~ /u/` location. It
+ * resolves `user_stream` by its opaque row id (never by its stream key —
+ * see its own docstring) and returns that row's key on success so nginx can
+ * rewrite onto MediaMTX's internal `u/<streamKey>` path. `execute()`'s own
+ * user branch still refuses everything; Task 5 is what answers MediaMTX's
+ * direct hook for that world.
+ *
  * EVERY refusal — no such event, ended event, bad signature, expired token,
- * wrong event, wrong community, cancelled subscription — returns the same
- * `{ allowed: false }`. Nothing here, or in the route that calls this,
+ * wrong event, wrong community, cancelled subscription, an unknown or gated
+ * user stream — returns the same `{ allowed: false }`. Nothing here, or in the route that calls this,
  * distinguishes one refusal reason from another: doing so would let a
  * prober learn whether a stream key exists, or whether a given subscription
  * id is real, from the SHAPE of a rejection.
@@ -198,6 +226,7 @@ export class AuthoriseStream {
   constructor(
     private readonly events: EventRepositoryPort,
     private readonly subscriptions: SubscriptionRepositoryPort,
+    private readonly userStreams: UserStreamRepositoryPort,
     private readonly config: { streamTokenSecret: string }
   ) {}
 
@@ -213,10 +242,19 @@ export class AuthoriseStream {
     }
 
     if (parsed.world === "user") {
-      // The user world's real authorisation logic is added in Task 4. Until
-      // then this refuses outright, deliberately — never fall through to
-      // the community branch below, which would try to resolve a `u/<key>`
-      // key against the `event` table it has nothing to do with.
+      // STILL REFUSES, and Task 4 deliberately left it that way.
+      //
+      // This method is what MediaMTX's OWN `authHTTPAddress` hook calls,
+      // with the path a client published to or read from — `u/<streamKey>`.
+      // Answering it needs the membership gate and the user watch token,
+      // both of which are Task 5's ("Watching"). Task 4's own user-world
+      // work is `authoriseUserReadByStreamId` below: the by-ID entry point
+      // nginx's `auth_request` calls, which is the only surface a member's
+      // browser ever reaches.
+      //
+      // Never fall through to the community branch below, which would try
+      // to resolve a `u/<key>` key against the `event` table it has nothing
+      // to do with.
       return { allowed: false };
     }
 
@@ -250,6 +288,60 @@ export class AuthoriseStream {
       return { allowed: false };
     }
     return this.authoriseReadForEvent(event, query, now);
+  }
+
+  /**
+   * nginx's `auth_request` re-authorisation for the USER world, by STREAM ID
+   * — Task 4, and deliberately the SAME shape as `authoriseReadByEventId`
+   * below rather than a second mechanism beside a working one.
+   *
+   * WHY BY ID. `GET /streams` is PUBLIC — signed in or not — and publishes
+   * `/u/<streamId>/index.m3u8` (`userStreamPlaybackPath`), never
+   * `createSession`'s `hlsPlaybackPath`, because that URL carries the stream
+   * key and a stream key authorises a PUBLISH. That is the old world's own
+   * Critical (see `ResolveWatchToken`'s docstring) with a wider blast
+   * radius, and Task 3 closed it the same way the old world did. This method
+   * is the read side meeting that decision: it resolves the PUBLIC id via
+   * `findById` and, only on success, hands the caller the stream key so
+   * nginx can rewrite onto MediaMTX's unchanged internal `u/<streamKey>`
+   * path (`auth_request_set $mtx_ukey`, then
+   * `proxy_pass .../u/$mtx_ukey$mtx_rest`). MediaMTX was never taught about
+   * stream ids and does not need to be.
+   *
+   * A PUBLISH KEY IS NOT A SECOND WAY IN. `findById` looks in the `id`
+   * column; nothing here ever consults `findByStreamKey`, and nothing here
+   * ever falls back to it when the id misses. A read path that accepted
+   * either identifier would quietly undo the entire reason ids are what get
+   * published. `authorise-stream.test.ts` pins this with a real 32-hex key.
+   *
+   * `visibility` IS THE ONLY GATE TODAY, and it fails CLOSED: a `members`
+   * stream refuses outright, because the token that could open it does not
+   * exist yet (Task 5 adds `user-watch-token.ts`, the mint route, and the
+   * membership check, and this is the method it will widen). `query` is
+   * accepted now, unused now, and named in the signature so that widening
+   * does not change every caller — the route already forwards
+   * `X-Watch-Token` for the community world and will forward it here
+   * unchanged.
+   *
+   * NO STATUS CHECK, matching `authoriseReadByEventId` exactly: the community
+   * world's read path has never consulted `event.status` either, and an
+   * `ended` stream has nothing for MediaMTX to serve regardless. Adding one
+   * here and not there would make the two worlds disagree about a rule
+   * neither of them needs.
+   */
+  async authoriseUserReadByStreamId(input: {
+    streamId: string;
+    query: string;
+    now: number;
+  }): Promise<{ allowed: false } | { allowed: true; streamKey: string }> {
+    const stream = await this.userStreams.findById(input.streamId);
+    if (!stream) {
+      return { allowed: false };
+    }
+    if (stream.visibility === MEMBERS_ONLY) {
+      return { allowed: false };
+    }
+    return { allowed: true, streamKey: stream.streamKey };
   }
 
   /**

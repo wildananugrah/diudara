@@ -1,10 +1,19 @@
 import { describe, expect, it, beforeEach } from "bun:test";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client";
-import { communities, creators, events, members, membershipTiers, subscriptions } from "../../db/schema";
+import {
+  appUsers,
+  communities,
+  creators,
+  events,
+  members,
+  membershipTiers,
+  subscriptions,
+} from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { DrizzleEventRepository } from "../../infrastructure/repositories/drizzle-event.repository";
 import { DrizzleSubscriptionRepository } from "../../infrastructure/repositories/drizzle-subscription.repository";
+import { DrizzleUserStreamRepository } from "../../infrastructure/repositories/drizzle-user-stream.repository";
 import { mintWatchToken, WATCH_TOKEN_TTL_MS } from "../../domain/watch-token";
 import { AuthoriseStream, parseStreamPath } from "./authorise-stream";
 
@@ -16,9 +25,13 @@ const NOW = Date.parse("2026-08-11T10:00:00.000Z");
 
 const eventRepository = new DrizzleEventRepository(db);
 const subscriptionRepository = new DrizzleSubscriptionRepository(db);
-const useCase = new AuthoriseStream(eventRepository, subscriptionRepository, {
-  streamTokenSecret: SECRET,
-});
+const userStreamRepository = new DrizzleUserStreamRepository(db);
+const useCase = new AuthoriseStream(
+  eventRepository,
+  subscriptionRepository,
+  userStreamRepository,
+  { streamTokenSecret: SECRET }
+);
 
 let seedCounter = 0;
 
@@ -81,6 +94,40 @@ async function cancelSubscription(id: string) {
 
 function tokenFor(subscriptionId: string, eventId: string, secret = SECRET, now = NOW) {
   return mintWatchToken({ subscriptionId, eventId, now, ttlMs: WATCH_TOKEN_TTL_MS, secret });
+}
+
+/** One person, the minimum a `user_stream` row needs as its owner. */
+async function seedUser(handle: string) {
+  seedCounter += 1;
+  const [row] = await db
+    .insert(appUsers)
+    .values({
+      handle: `${handle}${seedCounter}`,
+      email: `${handle}${seedCounter}@example.com`,
+      whatsappNumber: null,
+      passwordHash: "irrelevant-hash",
+      displayName: handle,
+      bio: null,
+    })
+    .returning();
+  return row!;
+}
+
+/**
+ * One `live` user stream, with a stream key shaped exactly like a REAL one:
+ * 32 lowercase hex characters, which is what `newStreamKey` mints. The shape
+ * matters for the refusal test below — a key shaped `key-7` would prove far
+ * less about a real deployment than the string a creator actually holds.
+ */
+async function seedUserStream(visibility: string) {
+  const owner = await seedUser("rina");
+  const streamKey = seedCounter.toString(16).padStart(32, "b");
+  return userStreamRepository.startLive({
+    ownerId: owner.id,
+    title: "Bedah karya",
+    visibility,
+    streamKey,
+  });
 }
 
 /**
@@ -455,10 +502,18 @@ describe("AuthoriseStream — read by event id (nginx auth_request)", () => {
 
 /**
  * The `u/<key>` namespace is the user world's — `parseStreamPath` already
- * recognises it, but `AuthoriseStream` does not yet authorise anything
- * under it. Task 4 adds the real logic. Until then this MUST refuse
- * outright, deliberately, rather than falling through to the community
- * branch's event lookup.
+ * recognises it, but `execute()` does not yet authorise anything under it.
+ *
+ * TASK 4 DID NOT CHANGE THIS, and the distinction is the whole point of
+ * that task. `execute()` is what MediaMTX's OWN `authHTTPAddress` hook
+ * calls, with the path a client actually published to or read from —
+ * `u/<streamKey>`. Task 4 added a SEPARATE by-id entry point
+ * (`authoriseUserReadByStreamId`, tested in its own describe below) for
+ * nginx's `auth_request`, which is the only thing a member's browser ever
+ * reaches. Teaching `execute()` to resolve a user stream BY KEY is Task 5's
+ * ("Watching"), together with the membership gate and the user watch token
+ * that decide the answer. Until then this MUST refuse outright, rather than
+ * falling through to the community branch's event lookup.
  *
  * Both tests below deliberately seed a COMMUNITY event whose stream key is
  * the exact same string used in the `u/<key>` path. This is what makes the
@@ -499,6 +554,118 @@ describe("AuthoriseStream — user world (not yet implemented)", () => {
     });
 
     expect(result.allowed).toBe(false);
+  });
+});
+
+/**
+ * `authoriseUserReadByStreamId` — Task 4. The user world's answer to the
+ * exact problem `authoriseReadByEventId` already solved for the community
+ * world, and deliberately the SAME answer rather than a second mechanism.
+ *
+ * `GET /streams` publishes `/u/<streamId>/index.m3u8` (Task 3,
+ * `userStreamPlaybackPath`) — an opaque row id, never the stream key, because
+ * a public listing carrying `createSession`'s key-bearing `hlsPlaybackPath`
+ * would hand every reader every creator's publish credential. So the READ
+ * side must resolve by that id, and hand nginx the key back out of band
+ * (`X-Stream-Key`, over loopback) so it can rewrite onto MediaMTX's
+ * unchanged `u/<streamKey>` internal path.
+ */
+describe("AuthoriseStream — user world read by stream id (nginx auth_request)", () => {
+  it("authorises a read of a PUBLIC stream named by its stream id, and hands back the key", async () => {
+    const stream = await seedUserStream("public");
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: stream.id,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: true, streamKey: stream.streamKey });
+  });
+
+  /**
+   * THE TEST THIS TASK EXISTS FOR. The stream key is the PUBLISH secret; if
+   * naming it where an id belongs also opened a read, then publishing ids
+   * instead of keys would have bought nothing — the credential would simply
+   * be a second, undocumented way in. Mirrors the community world's own
+   * "refuses when the caller passes a stream key instead of an event id"
+   * above, with a real 32-hex key rather than a token stand-in. TWO
+   * independent things refuse it, which is the point: `findById`'s uuid
+   * guard turns away a dashless string, and even without that guard the
+   * lookup is against the `id` COLUMN, which no stream key ever occupies.
+   */
+  it("refuses a read naming the publish KEY instead of the stream id", async () => {
+    const stream = await seedUserStream("public");
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: stream.streamKey,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  /**
+   * Membership gating is Task 5's ("Watching"), with its own token module.
+   * Until it lands a gated stream refuses outright — the direction a missing
+   * gate must fail in, and the same rule `toStreamView` already applies to
+   * the listing (`locked` withholds the playback path entirely).
+   */
+  it("refuses a MEMBERS-only stream outright — the gate itself arrives in Task 5", async () => {
+    const stream = await seedUserStream("members");
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: stream.id,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("refuses a stream id that names no row at all", async () => {
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: "00000000-0000-4000-8000-000000000000",
+      query: "",
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  /**
+   * nginx captures this value straight out of the PUBLIC request URI, so a
+   * stranger fetching `/u/anything-at-all/index.m3u8` decides what arrives
+   * here. A malformed id must be a REFUSAL, not a driver error that becomes
+   * a 500 — the same rule `EventRepositoryPort.findById` already documents.
+   */
+  it("refuses a malformed stream id rather than failing with a driver error", async () => {
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: "../../etc/passwd",
+      query: "",
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  /**
+   * The two worlds share nothing but a webhook. An event id resolves in the
+   * `event` table and must mean nothing here, exactly as a user stream id
+   * means nothing to `authoriseReadByEventId`.
+   */
+  it("refuses a community EVENT id — the two worlds do not share a lookup", async () => {
+    const community = await seedCommunity();
+    const { event } = await seedEvent(community.id, "live");
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: event.id,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
   });
 });
 

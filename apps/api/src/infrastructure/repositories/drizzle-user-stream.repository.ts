@@ -8,6 +8,23 @@ import type {
 import { UniqueRule } from "../../application/errors";
 import { rethrowUniqueViolation } from "./pg-errors";
 
+/**
+ * Same literal, same reasoning, as `drizzle-event.repository.ts`'s own copy:
+ * a value that is not a uuid at all must be a MISS, not a Postgres
+ * `invalid input syntax for type uuid` that becomes a 500.
+ *
+ * Task 4 is what made this load-bearing here rather than merely tidy.
+ * nginx's `^~ /u/` location captures the id straight out of the PUBLIC
+ * request URI and hands it, unvalidated, to
+ * `AuthoriseStream.authoriseUserReadByStreamId`, which calls `findById`
+ * below — so `GET /u/anything-at-all/index.m3u8` is a stranger choosing this
+ * argument. Duplicated rather than shared for the same reason the other
+ * repositories duplicate it: a `db/` module exporting a validation regex
+ * every repository must remember to import is the arrangement this codebase
+ * has already declined twice.
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** `user_stream.status` — see `UserStreamRow`'s docstring. */
 const LIVE_STATUS = "live";
 const ENDED_STATUS = "ended";
@@ -86,6 +103,11 @@ export class DrizzleUserStreamRepository implements UserStreamRepositoryPort {
   }
 
   async findById(id: string): Promise<UserStreamRow | null> {
+    if (!UUID_PATTERN.test(id)) {
+      // A MISS, not a driver error — see `UUID_PATTERN` above for who
+      // chooses this string.
+      return null;
+    }
     const [row] = await this.db
       .select(userStreamColumns)
       .from(userStreams)

@@ -2440,7 +2440,9 @@ export function bootstrap(): Dependencies {
   // selectors agreeing forever about what "configured" means.
   const mediamtxWebhookSecret = presentOrUndefined(process.env.MEDIAMTX_WEBHOOK_SECRET);
   const authoriseStream = streamTokenSecret
-    ? new AuthoriseStream(eventRepository, subscriptionRepository, { streamTokenSecret })
+    ? new AuthoriseStream(eventRepository, subscriptionRepository, userStreamRepository, {
+        streamTokenSecret,
+      })
     : undefined;
 
   // Task 8's `GET /c/watch/:token`. `undefined` in lockstep with

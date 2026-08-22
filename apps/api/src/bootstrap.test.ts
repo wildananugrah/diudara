@@ -3609,7 +3609,10 @@ describe("bootstrap() streaming provider wiring", () => {
         },
         () => {
           const deps = bootstrap();
-          const session = deps.streamingProvider!.createSession({ streamKey: "abc123" });
+          const session = deps.streamingProvider!.createSession({
+            streamKey: "abc123",
+            namespace: "live",
+          });
           expect(session.whipUrl).toBe("https://stream.example.com/whip/abc123");
         }
       );

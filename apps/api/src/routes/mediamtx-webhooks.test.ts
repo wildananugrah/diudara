@@ -6,6 +6,7 @@ import { bootstrap } from "../bootstrap";
 import { db } from "../db/client";
 import {
   activityLogs,
+  appUsers,
   communities,
   creators,
   events,
@@ -23,6 +24,7 @@ import { mintWatchToken, WATCH_TOKEN_TTL_MS } from "../domain/watch-token";
 import { DrizzleEventRepository } from "../infrastructure/repositories/drizzle-event.repository";
 import { DrizzleStreamLifecycleUnitOfWork } from "../infrastructure/repositories/drizzle-stream-lifecycle.unit-of-work";
 import { DrizzleSubscriptionRepository } from "../infrastructure/repositories/drizzle-subscription.repository";
+import { DrizzleUserStreamRepository } from "../infrastructure/repositories/drizzle-user-stream.repository";
 import { mediamtxWebhookRoutes } from "./mediamtx-webhooks";
 
 beforeEach(resetDatabase);
@@ -32,9 +34,13 @@ const HEADER = "X-Mediamtx-Secret";
 
 const eventRepository = new DrizzleEventRepository(db);
 const subscriptionRepository = new DrizzleSubscriptionRepository(db);
-const authoriseStream = new AuthoriseStream(eventRepository, subscriptionRepository, {
-  streamTokenSecret: SECRET,
-});
+const userStreamRepository = new DrizzleUserStreamRepository(db);
+const authoriseStream = new AuthoriseStream(
+  eventRepository,
+  subscriptionRepository,
+  userStreamRepository,
+  { streamTokenSecret: SECRET }
+);
 const handleStreamLifecycle = new HandleStreamLifecycle(
   eventRepository,
   new DrizzleStreamLifecycleUnitOfWork(db)
@@ -53,7 +59,9 @@ const handleStreamLifecycle = new HandleStreamLifecycle(
  */
 class ThrowingAuthoriseStream extends AuthoriseStream {
   constructor() {
-    super(eventRepository, subscriptionRepository, { streamTokenSecret: SECRET });
+    super(eventRepository, subscriptionRepository, userStreamRepository, {
+      streamTokenSecret: SECRET,
+    });
   }
   override async execute(): Promise<{ allowed: boolean }> {
     throw new Error("AuthoriseStream.execute must not run before the secret header is verified");
@@ -485,14 +493,44 @@ describe("POST /webhooks/mediamtx/auth — end-to-end wiring", () => {
  */
 function getAuthRequest(
   a: Hono<any>,
-  params: { eventId?: string; token?: string },
+  params: { eventId?: string; streamId?: string; token?: string },
   secret: string | null = SECRET
 ) {
   const headers: Record<string, string> = {};
   if (secret !== null) headers[HEADER] = secret;
   if (params.eventId !== undefined) headers["X-Mtx-Event-Id"] = params.eventId;
+  // Task 4: the user world's header. Exactly ONE of the two ids may be
+  // present on a request — see the route's own docstring.
+  if (params.streamId !== undefined) headers["X-Mtx-Stream-Id"] = params.streamId;
   if (params.token !== undefined) headers["X-Watch-Token"] = params.token;
   return a.request("/webhooks/mediamtx/auth-request", { headers });
+}
+
+let userSeedCounter = 0;
+
+/** One person, and one `live` user stream of theirs — Task 4's user world. */
+async function seedUserStream(visibility: string) {
+  userSeedCounter += 1;
+  const [owner] = await db
+    .insert(appUsers)
+    .values({
+      handle: `rina${userSeedCounter}`,
+      email: `rina${userSeedCounter}@example.com`,
+      whatsappNumber: null,
+      passwordHash: "irrelevant-hash",
+      displayName: "Rina",
+      bio: null,
+    })
+    .returning();
+  // 32 lowercase hex, exactly as `newStreamKey` mints — see
+  // `authorise-stream.test.ts`'s own seed for why the shape matters.
+  const streamKey = userSeedCounter.toString(16).padStart(32, "c");
+  return userStreamRepository.startLive({
+    ownerId: owner!.id,
+    title: "Bedah karya",
+    visibility,
+    streamKey,
+  });
 }
 
 describe("GET /webhooks/mediamtx/auth-request — secret verification", () => {
@@ -675,6 +713,88 @@ describe("GET /webhooks/mediamtx/auth-request — read", () => {
     });
 
     expect(isSuccessStatus(res.status)).toBe(false);
+  });
+});
+
+/**
+ * Task 4 — the USER world's half of this same route. nginx's `^~ /u/`
+ * location sends `X-Mtx-Stream-Id` (the id it captured from the public
+ * `/u/<streamId>/...` URL) where `^~ /live/` sends `X-Mtx-Event-Id`, and
+ * gets the same `X-Stream-Key` header back so it can rewrite onto
+ * MediaMTX's unchanged `u/<streamKey>` internal path.
+ */
+describe("GET /webhooks/mediamtx/auth-request — the user world", () => {
+  it("authorises a PUBLIC user stream by its stream id and returns the key via X-Stream-Key — never in the body", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.id });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+    expect(res.headers.get("X-Stream-Key")).toBe(stream.streamKey);
+    const body = await res.text();
+    expect(body).not.toContain(stream.streamKey);
+  });
+
+  it("refuses a user stream named by its publish KEY instead of its id", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.streamKey });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+    expect(res.headers.get("X-Stream-Key")).toBeNull();
+  });
+
+  it("refuses a MEMBERS-only user stream — the gate itself arrives in Task 5", async () => {
+    const stream = await seedUserStream("members");
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.id });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+  });
+
+  /**
+   * Ambiguity is refused rather than resolved by precedence. nginx sends
+   * exactly one of these two headers per location; a request carrying both
+   * did not come from a location in this repository's template, and picking
+   * a winner would make which world authorises the request depend on a rule
+   * nobody deploying nginx can see.
+   */
+  it("refuses a request carrying BOTH ids — nginx sends exactly one", async () => {
+    const community = await seedCommunity();
+    const { event } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = mintWatchToken({
+      subscriptionId: subscription.id,
+      eventId: event.id,
+      now: Date.now(),
+      ttlMs: WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await getAuthRequest(a, { eventId: event.id, streamId: stream.id, token });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+  });
+
+  it("refuses a request carrying NEITHER id", async () => {
+    const a = app();
+
+    const res = await getAuthRequest(a, { token: "anything" });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+  });
+
+  it("refuses a malformed stream id rather than answering 500", async () => {
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: "../../etc/passwd" });
+
+    expect(res.status).toBe(403);
   });
 });
 

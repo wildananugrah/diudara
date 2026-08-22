@@ -93,6 +93,33 @@ describe("StartUserStream", () => {
     expect(started.streamKey).toMatch(/^[0-9a-f]{32}$/);
   });
 
+  /**
+   * THE DEFECT TASK 4 EXISTS TO FIX, pinned. Before it, this use case called
+   * `createSession({ streamKey })` and got `live/<key>` back — so a creator
+   * publishing to the url in this very response reached `AuthoriseStream`
+   * parsed as the COMMUNITY world and was looked up in the `event` table.
+   * Nothing caught that, because no test here ever asserted the URLs' shape:
+   * the key-for-key test above only checks that the two keys EXIST.
+   *
+   * Literal strings, matching `FakeStreamingAdapter`'s own construction —
+   * which in turn matches `MediaMtxAdapter`'s, including the deliberate
+   * asymmetry in WHIP's extra `u/` segment (see `whipSuffix`).
+   */
+  it("asks the provider for the USER namespace — the publish URLs name u/<key>, never live/<key>", async () => {
+    const rina = await createUser("rina");
+    const provider = new FakeStreamingAdapter();
+
+    const started = await new StartUserStream(streams, provider).execute({
+      ownerId: rina.id,
+      title: "Tanya jawab",
+      visibility: "public",
+    });
+
+    expect(provider.sessions).toEqual([{ streamKey: started.streamKey, namespace: "u" }]);
+    expect(started.rtmpUrl).toBe(`rtmp://fake-mediamtx.local:1935/u/${started.streamKey}`);
+    expect(started.whipUrl).toBe(`https://fake-mediamtx.local/whip/u/${started.streamKey}`);
+  });
+
   it("persists exactly one LIVE row, carrying the key it handed back", async () => {
     const rina = await createUser("rina");
 
