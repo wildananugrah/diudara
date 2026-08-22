@@ -32,6 +32,80 @@ import { mintStreamWatchToken, type StreamView, type WatchTokenResult } from "./
 export const DEFAULT_REMINT_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
+ * Fix round 2 (review). **How close to its OWN expiry the token currently
+ * applied to the native `<video>` must be before a re-mint is actually
+ * APPLIED there.** Minting still happens every `remintIntervalMs` tick,
+ * unconditionally — nothing about that changes (fix round 1's promptness
+ * property, "a refused re-mint reaches `block()` promptly," depends on
+ * minting never skipping a tick, and does not depend on this margin at
+ * all). This constant only gates the SEPARATE decision of whether the
+ * freshly-minted token is worth a `video.load()` reload right now.
+ *
+ * **THE HONEST FINDING THIS FIX ROUND PRODUCED, STATED PLAINLY: at the
+ * numbers already committed — `USER_WATCH_TOKEN_TTL_MS` is ten minutes,
+ * `DEFAULT_REMINT_INTERVAL_MS` is five — the review's own stated safety
+ * requirement ("comfortably larger than one re-mint interval, so a single
+ * failed tick cannot let the attached token lapse before the next
+ * successful one applies") and its stated goal ("roughly twelve hitches an
+ * hour into six or seven") CANNOT both be satisfied. This is not a
+ * near-miss; it is exact, and worth deriving once so nobody re-litigates it
+ * from a hunch:**
+ *
+ * A token applied at time T expires at T + TTL. At each tick T + kI (I =
+ * `remintIntervalMs`), the applied token's remaining life is `TTL - kI`.
+ * The reload condition below fires the FIRST tick where `remaining ≤
+ * margin`, i.e. the smallest `k` with `k ≥ (TTL - margin) / I`. With
+ * TTL = 2I exactly (10 min / 5 min), remaining after ONE tick is always
+ * `TTL - I = I` — so ANY `margin ≥ I` (the review's own requirement) makes
+ * that very first tick satisfy the condition, and the native path reloads
+ * on literally EVERY tick: identical to fix round 1's behaviour, zero
+ * improvement. The only way to skip a tick (reload every OTHER one, the
+ * "six or seven" the review named) is `margin < I` — and because TTL is
+ * exactly two ticks wide, that reload then lands EXACTLY at the moment the
+ * previous token expires, with no slack at all for a delayed tick: the
+ * opposite of what the margin exists to buy.
+ *
+ * **This is also the OPPOSITE of the intuitive direction reviewing this
+ * fix out loud might suggest.** For a "reload once remaining life ≤ margin"
+ * rule, a LARGER margin reloads EARLIER within each cycle, which SHORTENS
+ * the cycle — bigger margin means MORE frequent reloads, not fewer;
+ * `margin = 0` is the LEAST frequent (and least safe) setting, reloading
+ * only once the previous token has already run out. Mutating this constant
+ * to `0` therefore does NOT reproduce "every tick reloads" — it reproduces
+ * the opposite failure. `StreamPlayer.test.tsx` runs and reports this
+ * mutation exactly as instructed, and separately identifies the mutation
+ * that DOES reproduce "quietly becomes every tick again" (raising the
+ * margin, not zeroing it) — see that file's own comments.
+ *
+ * **The decision made here, honouring the review's explicit safety
+ * requirement over its numeric example:** `margin = 8 minutes`, comfortably
+ * above the 5-minute interval (1.6×) while staying short of the full
+ * 10-minute TTL so the comparison is not degenerate. Chosen KNOWING this
+ * means the native path still reloads on every tick at today's numbers —
+ * see the fix round 2 report for the full disclosure and the two paths
+ * that WOULD unlock a real reduction (shrinking `remintIntervalMs`, which
+ * this round was told to leave alone; or a smaller margin, which this
+ * constant deliberately does not use because it removes exactly the slack
+ * the review asked to keep). Never imported elsewhere — see
+ * `DEFAULT_REMINT_INTERVAL_MS`'s own note on why a timing constant like
+ * this is asserted as a literal in tests instead.
+ */
+export const NATIVE_RELOAD_MARGIN_MS = 8 * 60 * 1000;
+
+/**
+ * Parses `WatchTokenResult.expiresAt` (ISO-8601) into epoch milliseconds,
+ * or `null` for anything that does not parse. **`null` is treated as
+ * "unknown" wherever this is called, which means "apply immediately" —**
+ * a malformed expiry must never become a reason to withhold a reload
+ * forever, which is the failure direction that matters here (see
+ * `NATIVE_RELOAD_MARGIN_MS`'s own note on which direction is unsafe).
+ */
+function parseExpiryMs(iso: string): number | null {
+  const parsed = new Date(iso).getTime();
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+/**
  * Bahasa copy for a stream this player could not (or could no longer) play
  * for lack of entitlement — EXPORTED so `StreamPlayer.test.tsx` can assert
  * the exact string rather than re-typing it, the same "assert literals, not
@@ -217,6 +291,8 @@ export interface StreamPlayerProps {
   mintToken?: (streamId: string) => Promise<WatchTokenResult>;
   /** Injected for testing — see `DEFAULT_REMINT_INTERVAL_MS`'s own docstring for why the default is what it is. */
   remintIntervalMs?: number;
+  /** Fix round 2. Injected for testing — see `NATIVE_RELOAD_MARGIN_MS`'s own docstring for why the default is what it is, and for the finding that motivated a separate, injectable value rather than a hardcoded one. */
+  nativeReloadMarginMs?: number;
 }
 
 /**
@@ -266,10 +342,23 @@ export default function StreamPlayer({
   attachHls = defaultAttachHls,
   mintToken = mintStreamWatchToken,
   remintIntervalMs = DEFAULT_REMINT_INTERVAL_MS,
+  nativeReloadMarginMs = NATIVE_RELOAD_MARGIN_MS,
 }: StreamPlayerProps) {
   const [phase, setPhase] = useState<Phase>({ name: "loading" });
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const tokenRef = useRef<string | null>(null);
+  /**
+   * Fix round 2. When the token currently APPLIED to the native `<video>`
+   * expires, in epoch ms — `null` means "unknown, apply immediately" (see
+   * `parseExpiryMs`). Set once at the initial attach (effect 1's
+   * successful mint always applies unconditionally — there is nothing
+   * applied yet to compare against) and again every time a re-mint tick
+   * actually applies its token (effect 2). Irrelevant to the `hls.js` path,
+   * which never reads it — `xhrSetup` re-reads `getToken()` fresh on every
+   * request regardless of what is "applied," so there is no reload
+   * decision for it to gate.
+   */
+  const appliedExpiresAtRef = useRef<number | null>(null);
   const needsToken = stream.visibility !== "public";
   const hlsUrl = stream.hlsPlaybackPath;
 
@@ -301,6 +390,10 @@ export default function StreamPlayer({
         const minted = await mintToken(stream.id);
         if (cancelled) return;
         tokenRef.current = minted.token;
+        // Fix round 2. The FIRST attach always applies unconditionally —
+        // there is nothing applied yet to compare a margin against — so
+        // this is set here with no gate, unlike the re-mint tick below.
+        appliedExpiresAtRef.current = parseExpiryMs(minted.expiresAt);
         setPhase({ name: "ready" });
       } catch {
         // Any refusal — a 403 (no longer a member), a 401 (dead session), a
@@ -364,18 +457,39 @@ export default function StreamPlayer({
           try {
             const minted = await mintToken(stream.id);
             if (tornDown) return;
+            // ALWAYS written, unconditionally, on EVERY successful tick —
+            // fix round 1's property this must not regress. `hls.js`'s
+            // `xhrSetup` reads this fresh on every request it makes, so a
+            // refusal reaching `block()` promptly (below) and a valid token
+            // always being the one in hand both depend on this line running
+            // every tick, never gated by the reload decision that follows.
             tokenRef.current = minted.token;
-            // Fix round 1 (review Major): tell the attached player a fresh
-            // token exists. `hls.js`'s handle does not implement this —
-            // `xhrSetup` already re-reads `getToken()` on every request —
-            // so this is a no-op there; the native handle's implementation
-            // is the one this call exists for.
-            handle?.onTokenRefreshed?.();
+
+            // Fix round 2. WHETHER TO APPLY is a separate question from
+            // whether to MINT — see `NATIVE_RELOAD_MARGIN_MS`'s own
+            // docstring. `hls.js`'s handle does not implement
+            // `onTokenRefreshed` at all, so this whole block is a no-op for
+            // it regardless of the decision below; only the native branch's
+            // handle does anything with the call.
+            const mintedExpiresAtMs = parseExpiryMs(minted.expiresAt);
+            const appliedExpiresAtMs = appliedExpiresAtRef.current;
+            const shouldApply =
+              appliedExpiresAtMs === null ||
+              mintedExpiresAtMs === null ||
+              Date.now() >= appliedExpiresAtMs - nativeReloadMarginMs;
+            if (shouldApply) {
+              appliedExpiresAtRef.current = mintedExpiresAtMs;
+              handle?.onTokenRefreshed?.();
+            }
           } catch {
             // Any refusal — a lapsed membership, a dead session, a network
             // drop — is the identical outcome: stop playback and show the
             // lock, the same collapse `mintStreamWatchToken`'s own
-            // docstring describes for the FIRST mint.
+            // docstring describes for the FIRST mint. UNCONDITIONAL, exactly
+            // as before fix round 2 — this branch does not consult
+            // `nativeReloadMarginMs` at all, so "apply later" can never
+            // become "notice a refusal later." A refusal always reaches
+            // `block()` on the SAME tick it happens, on both paths.
             block();
           }
         })();
@@ -388,7 +502,7 @@ export default function StreamPlayer({
     // that fires forever. Plain teardown, not `block()` — an ordinary
     // unmount is not a membership lapsing, and has nothing to show.
     return teardown;
-  }, [phase, hlsUrl, needsToken, attachHls, mintToken, remintIntervalMs, stream.id]);
+  }, [phase, hlsUrl, needsToken, attachHls, mintToken, remintIntervalMs, nativeReloadMarginMs, stream.id]);
 
   return (
     <div className="stream-player" data-testid="stream-player">

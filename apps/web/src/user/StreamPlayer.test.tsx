@@ -53,6 +53,22 @@ function tokenResult(token: string): WatchTokenResult {
   return { token, expiresAt: "2026-01-01T00:10:00.000Z" };
 }
 
+/**
+ * Fix round 2. A `WatchTokenResult` whose `expiresAt` is `offsetMs`
+ * milliseconds from THE ACTUAL CURRENT WALL CLOCK at call time — unlike
+ * `tokenResult()` above (a fixed date, which by design is now in the past
+ * relative to whenever this suite actually runs, and therefore trivially
+ * "already expired" for every existing fix-round-1 test's purposes). The
+ * margin-gating tests below need a controllable relationship to `Date.now()`
+ * specifically, since `StreamPlayer` reads the real clock rather than an
+ * injected one — a deliberate simplification: full control over what each
+ * mint call RETURNS was already enough to exercise both branches
+ * deterministically, without adding a `now` prop nobody else needed.
+ */
+function tokenResultExpiringIn(offsetMs: number, token = "tok"): WatchTokenResult {
+  return { token, expiresAt: new Date(Date.now() + offsetMs).toISOString() };
+}
+
 /** A fake `attachHls` that records every call and every `getToken()` read, and hands the caller its own `destroy` spy. */
 function recordingAttach(): {
   attach: AttachHls;
@@ -594,5 +610,100 @@ describe("StreamPlayer — the native-shaped handle, wired through the real re-m
     // Still exactly one attach — the hls.js path re-mints by having its own
     // xhrSetup read getToken() fresh, never by a second attach or a throw.
     expect(calls.length).toBe(1);
+  });
+});
+
+describe("StreamPlayer — the native reload is gated by proximity to expiry (fix round 2)", () => {
+  /**
+   * Minting still happens on every tick either way — `mintCallCount` is
+   * asserted to keep climbing in BOTH tests below, so "not near expiry"
+   * never gets confused with "stopped minting". Only whether the mint gets
+   * APPLIED to the native handle (`refreshedTokens()`) differs.
+   */
+
+  it("a tick that is NOT near expiry does not reload", async () => {
+    const { attach, calls, refreshedTokens } = recordingNativeAttach();
+    let mintCallCount = 0;
+
+    render(
+      <StreamPlayer
+        stream={unlockedStream()}
+        attachHls={attach}
+        // Every mint — the initial one AND every re-mint — is good for
+        // roughly 2.7 hours from the moment it is minted. With a margin of
+        // only 100ms, nothing here ever comes remotely close to it.
+        mintToken={async () => {
+          mintCallCount += 1;
+          return tokenResultExpiringIn(10_000_000, `tok-${mintCallCount}`);
+        }}
+        remintIntervalMs={5}
+        nativeReloadMarginMs={100}
+      />
+    );
+
+    await waitFor(() => expect(calls.length).toBe(1));
+    // Let several ticks land.
+    await waitFor(() => expect(mintCallCount).toBeGreaterThan(3));
+
+    expect(refreshedTokens().length).toBe(0);
+  });
+
+  it("a tick that IS near expiry reloads", async () => {
+    const { attach, calls, refreshedTokens } = recordingNativeAttach();
+    let mintCallCount = 0;
+
+    render(
+      <StreamPlayer
+        stream={unlockedStream()}
+        attachHls={attach}
+        // The INITIAL token is good for only 50ms — by the very first
+        // re-mint tick (5ms later), it is well within an 8-minute margin
+        // of its own expiry.
+        mintToken={async () => {
+          mintCallCount += 1;
+          return mintCallCount === 1
+            ? tokenResultExpiringIn(50, "tok-1")
+            : tokenResultExpiringIn(10_000_000, `tok-${mintCallCount}`);
+        }}
+        remintIntervalMs={5}
+        nativeReloadMarginMs={8 * 60 * 1000}
+      />
+    );
+
+    await waitFor(() => expect(calls.length).toBe(1));
+    await waitFor(() => expect(refreshedTokens().length).toBeGreaterThan(0));
+
+    // Once applied, the applied-expiry resets to the JUST-reloaded token's
+    // own (far-future) expiry, so it must not keep reloading every
+    // subsequent tick too — the whole point of gating at all.
+    const countAfterFirstReload = refreshedTokens().length;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(refreshedTokens().length).toBe(countAfterFirstReload);
+  });
+
+  it("a refused re-mint reaches block() promptly regardless of how the margin decision would have gone", async () => {
+    // Uses a margin that would say "not near expiry, don't reload" for
+    // every mint this test hands out — proving block() does not go
+    // through, or wait on, the reload-gating decision at all.
+    const { attach, destroyCount } = recordingNativeAttach();
+    let mintCallCount = 0;
+
+    render(
+      <StreamPlayer
+        stream={unlockedStream()}
+        attachHls={attach}
+        mintToken={async () => {
+          mintCallCount += 1;
+          if (mintCallCount === 1) return tokenResultExpiringIn(10_000_000, "tok-1");
+          throw new Error("membership lapsed");
+        }}
+        remintIntervalMs={5}
+        nativeReloadMarginMs={100}
+      />
+    );
+
+    const blocked = await screen.findByTestId("stream-player-blocked");
+    expect(blocked.textContent).toBe("Jadi anggota untuk menonton");
+    expect(destroyCount()).toBe(1);
   });
 });
