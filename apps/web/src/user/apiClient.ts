@@ -1271,3 +1271,73 @@ export interface SubscriberEntry {
 export function listSubscribers(): Promise<{ subscribers: SubscriberEntry[] }> {
   return apiFetch<{ subscribers: SubscriberEntry[] }>("/users/me/subscribers");
 }
+
+/**
+ * One live stream as `GET /streams` renders it — mirrors the API's own
+ * `StreamView` (`apps/api/src/application/use-cases/stream-views.ts`)
+ * exactly, field for field, for the reason that file's own docstring gives:
+ * the projection is CLOSED, so this type must not widen it either.
+ *
+ * `hlsPlaybackPath` is **ABSENT, never `null`**, on a row this viewer is
+ * locked out of — see the API's own docstring on that field. `SiaranPage`
+ * and `StreamPlayer` both key their behaviour off `locked`, never off
+ * whether `hlsPlaybackPath` happens to be present, for the same reason
+ * `PostCard` keys a lock off `lockedMediaCount` rather than an empty
+ * `media` array: `locked` is the field the SERVER computed the answer into,
+ * and re-deriving the same answer from a different field is exactly the
+ * kind of client-side paywall spec §5.1 forbids.
+ */
+export interface StreamView {
+  id: string;
+  title: string;
+  /** `"public"` | `"members"` — a plain string for the same reason `PostView.membersOnly`'s sibling fields are: the column is a widened `varchar` server-side. */
+  visibility: string;
+  owner: { handle: string; displayName: string };
+  locked: boolean;
+  hlsPlaybackPath?: string;
+}
+
+/**
+ * `GET /streams` — **PUBLIC BUT NOT ANONYMOUS**, the same shape as
+ * `getProfileByHandle`/`listFeed("untuk-anda")`: it goes through
+ * `publicGet`, which attaches the viewer's token when there is one and
+ * sends nothing at all when there is not, and which never clears the
+ * session on a 401 (this route never answers one — a signed-out visitor
+ * gets `locked: true` rows, not a refusal). Sending the token is not
+ * optional here: it is the ONLY input `ListLiveStreams` has for deciding
+ * whether a gated row's `locked` is `true` or `false` for THIS viewer.
+ */
+export function listStreams(): Promise<{ streams: StreamView[] }> {
+  return publicGet<{ streams: StreamView[] }>("/streams", "gagal memuat siaran");
+}
+
+/** `POST /streams/:id/watch-token`'s response shape — mirrors the API's own `MintedWatchToken` (`application/use-cases/start-user-stream.ts`). */
+export interface WatchTokenResult {
+  token: string;
+  /** ISO-8601, ten minutes out — never parsed to a `Date` here; `StreamPlayer` only ever compares tokens by re-minting, never by reading this field. */
+  expiresAt: string;
+}
+
+/**
+ * `POST /streams/:id/watch-token` — mints (or RE-mints) a ten-minute
+ * credential naming the signed-in viewer and this stream. Requires a live
+ * session (`apiFetch`, same as every other authenticated call in this
+ * file): the entitlement check this endpoint runs needs to know WHO is
+ * asking, which is exactly why a forwarded token can never be renewed
+ * (design spec §5).
+ *
+ * **Refuses a PUBLIC stream** — `MintUserWatchToken` throws a 400
+ * (`NOTHING_TO_GATE_MESSAGE`) for one, because there is nothing to gate.
+ * `StreamPlayer` never calls this for a stream whose `visibility` is
+ * `"public"`; see its own docstring.
+ *
+ * Every refusal (a 400 for a public stream, a 403 for somebody no longer a
+ * member, a 401 for a dead session, a network drop) is handled identically
+ * by `StreamPlayer`: any rejection here means "stop playback and show the
+ * lock," never a distinction the player tries to read out of the error.
+ */
+export function mintStreamWatchToken(streamId: string): Promise<WatchTokenResult> {
+  return apiFetch<WatchTokenResult>(`/streams/${encodeURIComponent(streamId)}/watch-token`, {
+    method: "POST",
+  });
+}

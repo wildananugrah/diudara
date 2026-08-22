@@ -106,6 +106,13 @@ export default defineConfig({
       // interact with — but the reasoning below it is what a future `bypass`
       // would be written against, so it says what is actually true.
       "^/users/": "http://localhost:3000",
+      // Task 7 (Phase 7's Siaran): `GET /streams` and
+      // `POST /streams/:id/watch-token` (`apps/web/src/user/apiClient.ts`).
+      // A plain string, not a regex like `^/c/`/`^/users/` above — no SPA
+      // route in this app begins with "streams", so there is no page
+      // navigation to protect with `bypass`, matching `/auth`,
+      // `/communities` and `/ai` above rather than the two regex entries.
+      "/streams": "http://localhost:3000",
     },
   },
 });
