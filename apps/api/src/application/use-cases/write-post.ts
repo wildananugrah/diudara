@@ -1,7 +1,7 @@
 import { MAX_POST_BODY_LENGTH } from "@diudara/shared";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../errors";
 import type { MediaRepositoryPort } from "../ports/media-repository.port";
-import type { PostEditUnitOfWorkPort } from "../ports/post-edit-unit-of-work.port";
+import type { PostWriteUnitOfWorkPort } from "../ports/post-write-unit-of-work.port";
 import type { PostRepositoryPort } from "../ports/post-repository.port";
 import { MEMBERS_ONLY, toPostView, type PostView } from "./post-views";
 
@@ -69,7 +69,7 @@ function requireImageWhenLocked(visibility: string, mediaCount: number): void {
  * and the original trade-off was never weighed against that outcome because
  * that outcome did not exist yet. So `CreatePost` and `EditPost` alike now
  * run their post write and their media claim inside ONE transaction (see
- * `PostEditUnitOfWorkPort`) — this error rolls BOTH back on either path, and
+ * `PostWriteUnitOfWorkPort`) — this error rolls BOTH back on either path, and
  * a caller who sees it can retry knowing nothing was left half-written,
  * gated or not.
  */
@@ -157,11 +157,11 @@ export class CreatePost {
   /**
    * Task 5 fix round 2: takes the SAME unit of work `EditPost` does, and for
    * the same reason — the post write and the media claim must land or fail
-   * together. Named for "edit" only because `EditPost` needed it first; see
-   * `PostEditUnitOfWorkPort`'s own docstring, which now documents both
-   * callers.
+   * together. The port is named `PostWrite` rather than `PostEdit` precisely
+   * so this line no longer has to apologise for it (retire-telegram Task 7);
+   * see its own docstring, which documents both callers.
    */
-  constructor(private readonly postWrite: PostEditUnitOfWorkPort) {}
+  constructor(private readonly postWrite: PostWriteUnitOfWorkPort) {}
 
   async execute(input: {
     authorId: string;
@@ -211,12 +211,12 @@ export class CreatePost {
 }
 
 export class EditPost {
-  constructor(private readonly postEdit: PostEditUnitOfWorkPort) {}
+  constructor(private readonly postWrite: PostWriteUnitOfWorkPort) {}
 
   /**
    * Task 5 fix round 1: the WHOLE body — lock, ownership check, resulting-state
    * check, body/visibility write and media claim — runs inside ONE
-   * transaction via `this.postEdit.run`. See `PostEditUnitOfWorkPort`'s own
+   * transaction via `this.postWrite.run`. See `PostWriteUnitOfWorkPort`'s own
    * docstring for the two concrete paths that left `visibility = 'members'`
    * with zero images before this existed, and why a row lock (not a retry) is
    * what closes them.
@@ -245,7 +245,7 @@ export class EditPost {
     visibility?: string;
   }): Promise<PostView> {
     const body = requireBody(input.body);
-    return this.postEdit.run(async ({ posts, media }) => {
+    return this.postWrite.run(async ({ posts, media }) => {
       // `lockForEdit`, not `ownershipOf`: this is the row lock the fix round
       // is FOR. Ownership BEFORE the write, and a 403 that does not reveal
       // the body: returning 404 for someone else's post would make the id an

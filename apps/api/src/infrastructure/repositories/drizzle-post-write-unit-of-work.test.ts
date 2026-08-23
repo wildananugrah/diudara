@@ -4,12 +4,12 @@ import { ConflictError } from "../../application/errors";
 import { db } from "../../db/client";
 import { appUsers, posts as postsTable } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
-import { DrizzlePostEditUnitOfWork } from "./drizzle-post-edit-unit-of-work";
+import { DrizzlePostWriteUnitOfWork } from "./drizzle-post-write-unit-of-work";
 import { DrizzlePostRepository } from "./drizzle-post.repository";
 
 beforeEach(resetDatabase);
 
-const unitOfWork = () => new DrizzlePostEditUnitOfWork(db);
+const unitOfWork = () => new DrizzlePostWriteUnitOfWork(db);
 const posts = new DrizzlePostRepository(db);
 
 let seedCounter = 0;
@@ -39,7 +39,7 @@ async function seedPost(): Promise<{ authorId: string; postId: string }> {
 /**
  * Mirrors `drizzle-user-purchase.unit-of-work.test.ts` exactly: proves
  * `posts`/`media` are bound to the SAME transaction the unit of work opens,
- * not to the pool — the entire mechanism `PostEditUnitOfWorkPort`'s
+ * not to the pool — the entire mechanism `PostWriteUnitOfWorkPort`'s
  * docstring claims, on BOTH the paths that depend on it: fix round 1's path
  * 2 (`EditPost`'s claim failing after the visibility write already ran) and
  * fix round 2 (`CreatePost`'s claim failing after the post row already
@@ -49,14 +49,14 @@ async function seedPost(): Promise<{ authorId: string; postId: string }> {
  * property through genuine `EditPost.execute()`/`CreatePost.execute()` calls
  * and a REAL `ConflictError` from a real vanished-media race — the tests a
  * reader will find most convincing. This file proves it one layer down,
- * directly against `DrizzlePostEditUnitOfWork` itself, which those other
+ * directly against `DrizzlePostWriteUnitOfWork` itself, which those other
  * tests do not touch (they open their own ad hoc transaction to inject the
- * race). Without this file, a defect confined to `DrizzlePostEditUnitOfWork.run`
+ * race). Without this file, a defect confined to `DrizzlePostWriteUnitOfWork.run`
  * alone — for instance, constructing its repositories against the POOL
  * instead of the transaction handle it opens — would be invisible to every
  * test that never calls `run` directly.
  */
-describe("DrizzlePostEditUnitOfWork", () => {
+describe("DrizzlePostWriteUnitOfWork", () => {
   it("rolls the visibility write back when the work throws after it", async () => {
     const { postId } = await seedPost();
 

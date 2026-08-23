@@ -54,16 +54,15 @@ const PUBLIC_VISIBILITY = "public";
  * two. `authorise-stream.test.ts`'s four `parseStreamPath` refusal cases were
  * verified by mutation against precisely this collapse.
  *
- * NOT IN STEP WITH THE CONSTRUCTION SIDE, and said here rather than left to
- * be found. `StreamNamespace` (`streaming-provider.port.ts`) still declares
- * `"live" | "u"`, because Task 6 owned the authorisation seam and not the
- * adapters. Nothing in `src/` passes `"live"` — `StartUserStream` is the only
- * `createSession` caller and it passes `"u"` — but the TYPE would still let
- * somebody build a `live/<key>` URL that this map refuses. Fails closed (the
- * publish is refused, so nobody goes live on a bad URL) and is flagged in
- * that union's own docstring. Adding a SECOND namespace later means adding
- * ONE entry here and one there; see that docstring for why the two key sets
- * are written out twice rather than derived.
+ * IN STEP WITH THE CONSTRUCTION SIDE AGAIN, as of Task 7. Between Tasks 6 and
+ * 7 it was not: `StreamNamespace` (`streaming-provider.port.ts`) still
+ * declared `"live" | "u"`, so the TYPE let somebody build a `live/<key>` URL
+ * this map refuses. That failed CLOSED — the publish was refused, so nobody
+ * went live on a bad URL — but at runtime rather than at compile time. Task 7
+ * narrowed the union to `"u"`, and the two sides now hold the same one key.
+ * Adding a SECOND namespace later means adding ONE entry here and one member
+ * there; see that docstring for why the two key sets are written out twice
+ * rather than derived.
  */
 const NAMESPACES: ReadonlyMap<string, "user"> = new Map([["u", "user"]]);
 

@@ -9,8 +9,8 @@ import type {
  * (bootstrap.ts) under the SAME `RELAXED_NODE_ENVS` allowlist
  * `FakeAiAdapter` is, and for the same reason: nothing is on the line if
  * streaming is not really wired up locally, so a developer working on
- * `ScheduleLiveSession` (Task 3) or the creator's streaming UI (Task 7) gets
- * URLs to look at without running MediaMTX at all.
+ * `StartUserStream` or the Siaran UI gets URLs to look at without running
+ * MediaMTX at all.
  *
  * Like `MediaMtxAdapter`, `createSession` is pure URL construction and
  * cannot fail — the "fake-mediamtx.local" host is a placeholder, never a
@@ -19,28 +19,24 @@ import type {
  * Records every call so a test can assert what a use-case asked for without
  * inspecting the URLs' shape.
  *
- * FIX (final whole-branch review, minor): `hlsPlaybackPath` used to carry an
- * extra `/hls` segment (`https://fake-mediamtx.local/hls/live/<key>/...`)
- * that `MediaMtxAdapter` never produces — that adapter builds
- * `${hlsBaseUrl}/live/<key>/index.m3u8` with NOTHING inserted between the
- * configured base and `live/`; a `/hls` prefix only ever appeared in that
- * adapter's own tests because the EXAMPLE `hlsBaseUrl` they configured
- * happened to end in `/hls`, not because the adapter added it. Removed here
- * so the fake matches the real adapter's actual construction rule, not an
- * accidental shape nothing in `infra/nginx/live-hls.conf.template`'s
- * `/live/...` location would ever match.
+ * EVERY SHAPE HERE MATCHES `MediaMtxAdapter`'s EXACTLY, and that is the whole
+ * discipline of this file — a fake that drifts from its real counterpart is
+ * how integration bugs hide. Two drifts have actually been caught:
  *
- * `whipUrl` (Task 2) is held to the SAME rule: `MediaMtxAdapter` builds it as
- * `${whipBaseUrl}/whip/<key>` — a separate nginx prefix, not nested under
- * `/live/` — so this fake matches that exactly rather than inventing its own
- * shape. A fake that drifts from its real counterpart is how integration
- * bugs hide.
+ *  - `hlsPlaybackPath` once carried an extra `/hls` segment that
+ *    `MediaMtxAdapter` never produces. That adapter builds
+ *    `${hlsBaseUrl}/<namespace>/<key>/index.m3u8` with NOTHING inserted
+ *    between the configured base and the namespace; `/hls` only ever
+ *    appeared in that adapter's own tests because the EXAMPLE `hlsBaseUrl`
+ *    they configure happens to end in `/hls`.
+ *  - `whipUrl` is `${whipBaseUrl}/whip/<namespace>/<key>` — a `/whip/` nginx
+ *    prefix of its own, deliberately not nested under the HLS read prefix.
  *
- * `namespace` (Task 4) is held to that same rule once more, including the one
- * place `MediaMtxAdapter` is deliberately asymmetric: `live` keeps the bare
- * `/whip/<key>` shape and `u` takes an extra segment, `/whip/u/<key>`. See
- * that adapter's `whipSuffix` for why the community world could not be
- * changed to match.
+ * `namespace` (Phase 7, Task 4) is held to the same rule. Since
+ * retire-telegram Task 7 narrowed `StreamNamespace` to a single member there
+ * is no second shape to get wrong: `MediaMtxAdapter`'s community-only
+ * `whipSuffix` asymmetry — the bare `/whip/<key>` the deleted `live`
+ * namespace kept — went with the namespace itself.
  */
 export class FakeStreamingAdapter implements StreamingProviderPort {
   readonly sessions: { streamKey: string; namespace: StreamNamespace }[] = [];
@@ -50,16 +46,15 @@ export class FakeStreamingAdapter implements StreamingProviderPort {
     namespace: StreamNamespace;
   }): { rtmpUrl: string; whipUrl: string; hlsPlaybackPath: string } {
     // Recorded WITH the namespace: "which world did the caller say this
-    // stream belongs to" is exactly the question Task 4 exists because
-    // nobody could previously ask it, and a test asserting on
-    // `sessions` should be able to.
+    // stream belongs to" is exactly the question Phase 7's Task 4 exists
+    // because nobody could previously ask it, and a test asserting on
+    // `sessions` should be able to. It stays recorded with one namespace
+    // left, because the recording is about what the CALLER said.
     this.sessions.push({ streamKey: input.streamKey, namespace: input.namespace });
     const mtxPath = `${input.namespace}/${input.streamKey}`;
-    const whipSuffix =
-      input.namespace === "live" ? input.streamKey : `${input.namespace}/${input.streamKey}`;
     return {
       rtmpUrl: `rtmp://fake-mediamtx.local:1935/${mtxPath}`,
-      whipUrl: `https://fake-mediamtx.local/whip/${whipSuffix}`,
+      whipUrl: `https://fake-mediamtx.local/whip/${mtxPath}`,
       hlsPlaybackPath: `https://fake-mediamtx.local/${mtxPath}/index.m3u8`,
     };
   }

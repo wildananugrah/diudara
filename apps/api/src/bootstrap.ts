@@ -35,7 +35,7 @@ import { DrizzleUserTierRepository } from "./infrastructure/repositories/drizzle
 import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
 import { DrizzleUserSubscriptionRepository } from "./infrastructure/repositories/drizzle-user-subscription.repository";
 import { StartUserSubscription } from "./application/use-cases/start-user-subscription";
-import { DrizzlePostEditUnitOfWork } from "./infrastructure/repositories/drizzle-post-edit-unit-of-work";
+import { DrizzlePostWriteUnitOfWork } from "./infrastructure/repositories/drizzle-post-write-unit-of-work";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
@@ -1487,13 +1487,13 @@ export function bootstrap(): Dependencies {
   const maxPostImages = resolveMaxPostImages(process.env.MAX_POST_IMAGES);
   // Task 5 fix rounds 1 and 2: the post write and the media claim run in ONE
   // transaction, for `CreatePost` and `EditPost` alike (`EditPost` also locks
-  // the row first) — see `PostEditUnitOfWorkPort`'s own docstring for the
+  // the row first) — see `PostWriteUnitOfWorkPort`'s own docstring for the
   // paths that left a members-only post with zero images before this
   // existed on each side. ONE instance, shared by both, the same way
   // `postRepository`/`mediaRepository` above are.
-  const postEditUnitOfWork = new DrizzlePostEditUnitOfWork(db);
-  const createPost = new CreatePost(postEditUnitOfWork);
-  const editPost = new EditPost(postEditUnitOfWork);
+  const postWriteUnitOfWork = new DrizzlePostWriteUnitOfWork(db);
+  const createPost = new CreatePost(postWriteUnitOfWork);
+  const editPost = new EditPost(postWriteUnitOfWork);
   const deletePost = new DeletePost(postRepository);
   // The SAME `userSubscriptionRepository` and the SAME `clock` `isMemberOf`
   // and `listSubscribers` read, so the paywall gate cannot disagree with the

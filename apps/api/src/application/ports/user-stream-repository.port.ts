@@ -49,16 +49,17 @@ export interface UserStreamRepositoryPort {
   /**
    * Unscoped by owner ON PURPOSE — `AuthoriseStream` (Task 4) knows only the
    * key baked into the `u/<key>` publish/read path and has no authenticated
-   * owner to scope by. It is the ONE sanctioned unscoped lookup on this
-   * port, and the retired community `event` port documented the identical
-   * exception for the identical reason. `null` when no row carries this key.
+   * owner to scope by. One of the TWO sanctioned unscoped lookups on this
+   * port — this one and `findById` below, and no others; the retired community
+   * `event` port documented the identical exception for the identical reason.
+   * `null` when no row carries this key.
    */
   findByStreamKey(streamKey: string): Promise<UserStreamRow | null>;
 
   /**
    * Unscoped by owner ON PURPOSE — the lifecycle webhook and the hourly
    * sweep both resolve a specific row by id with no authenticated caller in
-   * the picture — the second sanctioned unscoped lookup here, alongside
+   * the picture — the second of the two sanctioned unscoped lookups, alongside
    * `findByStreamKey` above. `null` when the id does not exist.
    */
   findById(id: string): Promise<UserStreamRow | null>;

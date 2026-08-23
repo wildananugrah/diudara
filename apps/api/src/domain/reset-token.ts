@@ -26,7 +26,7 @@ export const RESET_TOKEN_TTL_MS = 30 * 60 * 1000;
  * not drawn from a CSPRNG and several of its bits are fixed by the version,
  * so it is unsuitable as a bearer secret. `randomBytes` from `node:crypto`
  * is the CSPRNG this process already trusts `HonoJwtTokenIssuer` and
- * `watch-token.ts` to sit on top of.
+ * `user-watch-token.ts` to sit on top of.
  */
 const TOKEN_BYTES = 32;
 

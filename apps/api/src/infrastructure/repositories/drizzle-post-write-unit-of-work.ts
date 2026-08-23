@@ -1,12 +1,12 @@
 import type { db as DbClient } from "../../db/client";
 import type {
-  PostEditRepositories,
-  PostEditUnitOfWorkPort,
-} from "../../application/ports/post-edit-unit-of-work.port";
+  PostWriteRepositories,
+  PostWriteUnitOfWorkPort,
+} from "../../application/ports/post-write-unit-of-work.port";
 import { DrizzleMediaRepository } from "./drizzle-media.repository";
 import { DrizzlePostRepository } from "./drizzle-post.repository";
 
-export class DrizzlePostEditUnitOfWork implements PostEditUnitOfWorkPort {
+export class DrizzlePostWriteUnitOfWork implements PostWriteUnitOfWorkPort {
   /**
    * Takes the pooled client specifically, not a `DatabaseExecutor`: opening
    * the transaction is this class's entire job — see
@@ -33,7 +33,7 @@ export class DrizzlePostEditUnitOfWork implements PostEditUnitOfWorkPort {
    * real elsewhere — see `UserSubscriptionRepositoryPort.claimPending`'s own
    * docstring — but it does not apply to this method.
    */
-  async run<T>(work: (repositories: PostEditRepositories) => Promise<T>): Promise<T> {
+  async run<T>(work: (repositories: PostWriteRepositories) => Promise<T>): Promise<T> {
     return this.db.transaction(async (tx) =>
       work({
         posts: new DrizzlePostRepository(tx),

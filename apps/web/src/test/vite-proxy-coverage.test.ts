@@ -129,6 +129,50 @@ function isCovered(prefix: string, keys: string[]): boolean {
   );
 }
 
+/**
+ * THE OTHER DIRECTION, and the blind spot this file shipped with (found by
+ * retire-telegram Task 7's sweep). Every check above asks "does each prefix
+ * the app FETCHES have an entry?" — nothing asked whether each ENTRY still
+ * forwards something. So when Task 3 deleted the streaming pages and Task 4
+ * deleted `/communities`, `/ai` and `^/c/`, FOUR proxy entries went stale
+ * pointing at API paths that no longer existed and this file stayed green
+ * through all of it. A stale entry is much less dangerous than a missing one
+ * (it forwards a request nobody makes), but it is a dangling reference in an
+ * executable file, and the whole reason this guard exists is that dead entries
+ * here are invisible to every other check in the repo.
+ *
+ * The rule: every proxy key must be a prefix this app actually fetches, OR be
+ * listed below with a reason. `/streaming` would have failed it the moment
+ * `StreamingPage` was deleted, because the deletion removed its last caller.
+ *
+ * DELIBERATELY AN ALLOW-LIST OF KEYS, NOT OF REASONS: adding an entry the app
+ * never calls costs a line here and a sentence saying why, which is exactly
+ * the friction that keeps a stale one from being re-justified in passing.
+ */
+const NOT_FETCHED_BY_THIS_APP: Record<string, string> = {
+  // apps/api's `/webhooks` — Xendit calls it from the internet, never this
+  // app. Proxied so a webhook can be replayed against the dev origin by hand
+  // (`curl localhost:5173/webhooks/...`) instead of remembering :3000.
+  "/webhooks": "inbound provider callbacks; no browser caller by design",
+  // `/auth` (creator signup/login) and `/payment-account` (creator payout
+  // setup) are the OLD creator world's API. Retire-telegram deleted every page
+  // that called them; the ROUTES survive because the `creator` table does —
+  // migrating those rows into `app_user` is explicitly out of scope for the
+  // phase (design spec §9). These two entries are the honest record of that:
+  // API surface with no surviving web caller, kept reachable rather than
+  // silently unproxied, and due to go with the routes themselves.
+  "/auth": "creator-world API kept until `creator` rows are migrated (spec §9)",
+  "/payment-account": "creator-world API kept until `creator` rows are migrated (spec §9)",
+};
+
+/** Whether `key` forwards something this app fetches, or is an accounted-for exception. */
+function isJustified(key: string, prefixes: Set<string>): boolean {
+  if (key in NOT_FETCHED_BY_THIS_APP) return true;
+  return [...prefixes].some((prefix) =>
+    key.startsWith("^") ? new RegExp(key).test(`${prefix}/`) : key === prefix
+  );
+}
+
 describe("vite proxy coverage", () => {
   it("has a proxy entry for every path prefix this app actually fetches", () => {
     const keys = proxyKeys();
@@ -159,6 +203,32 @@ describe("vite proxy coverage", () => {
     const prefixes = fetchedPrefixes();
     expect(prefixes.size).toBeGreaterThan(1);
     expect(prefixes.has("/users")).toBe(true);
+  });
+
+  it("has no proxy entry that forwards nothing — every key is fetched by this app or listed as an exception", () => {
+    const prefixes = fetchedPrefixes();
+    const unjustified = proxyKeys()
+      .filter((key) => !isJustified(key, prefixes))
+      .sort();
+
+    // Printed as strings: a key here is an entry pointing at an API path this
+    // app stopped calling — the state `/streaming` sat in, unreported, from
+    // Task 3 until Task 4 happened to remove it.
+    expect(unjustified).toEqual([]);
+  });
+
+  it("detects a stale proxy entry — the mutation the reverse check exists to catch", () => {
+    // Simulates `/streaming` still being in the table after the pages that
+    // fetched it were deleted: a key that is neither fetched nor excepted.
+    // Run against the same `isJustified` the test above uses, so this pins the
+    // real logic rather than a restatement of it.
+    expect(isJustified("/streaming", fetchedPrefixes())).toBe(false);
+    // And the exception list is what makes the three real ones pass — not a
+    // loophole in the matching. Deleting `/webhooks` from
+    // `NOT_FETCHED_BY_THIS_APP` must turn the check above red; this asserts the
+    // half of that which a test can assert without editing itself.
+    expect("/webhooks" in NOT_FETCHED_BY_THIS_APP).toBe(true);
+    expect(isJustified("/webhooks", new Set(["/users", "/streams"]))).toBe(true);
   });
 
   it("detects an uncovered prefix when a proxy entry is missing — the mutation this test exists to catch", () => {

@@ -25,8 +25,8 @@ export interface WorkerDependencies {
    * The outbox dispatcher. It claims rows and hands each to a registered handler
    * — and since retire-telegram Task 4 the HANDLER MAP IS EMPTY, and since Task 5
    * removed the payment webhook's community branch there is NO WRITER either (see
-   * `bootstrapWorker` for both, and for the recommendation that this pass be
-   * retired with the `outbox` table rather than kept indefinitely).
+   * `bootstrapWorker` for both, and for Task 7's recorded DECISION naming
+   * exactly what retires with the `outbox` table, in one commit, when it drops).
    *
    * It is kept for one time-limited reason: a database that ran the earlier code
    * can still hold `grant_access` rows, and this pass claims them, fails them
@@ -124,13 +124,23 @@ export function bootstrapWorker(): WorkerDependencies {
   // `grant_access` rows, and this pass is what turns them into a loud, bounded
   // permanent failure ("no handler is registered", which
   // `worker-bootstrap.test.ts` asserts on) instead of leaving them `pending` and
-  // unread for ever. Once that is no longer possible — the same follow-up that
-  // drops the retired tables — `ProcessOutbox`, `OutboxRepositoryPort`,
-  // `DrizzleOutboxRepository`, this loop and the `outbox` table should go
-  // together, in one deliberate commit. That decision is NOT Task 5's to take
-  // silently, and it is recorded here rather than acted on. Anything added later
-  // that must happen AFTER a payment commits reinstates the real reason: see
-  // `PaymentActivationUnitOfWorkPort`.
+  // unread for ever.
+  //
+  // TASK 7 TOOK THE DECISION RATHER THAN DEFERRING IT ONWARD, and this is the
+  // whole of it, so that nothing later has to guess what "together" meant. ONE
+  // COMMIT, in the follow-up that drops the retired tables, retires exactly:
+  // `ProcessOutbox` and its test, `OutboxRepositoryPort` (including every
+  // surviving `OUTBOX_*` constant), `DrizzleOutboxRepository` and its test, the
+  // `OutboxHandler` type, this map and the poll loop below that reads it,
+  // `WORKER_POLL_INTERVAL_MS` and its `.env.example` entry, and the `outbox`
+  // table itself. NOT BEFORE the table drops, for the reason above: a drainer
+  // deleted while the table survives turns a loud failure into silence.
+  // `enqueueMany` was the one piece that did NOT wait — Task 7 deleted it,
+  // because the argument above is about draining and cannot be made for a
+  // writer.
+  //
+  // Anything added later that must happen AFTER a payment commits reinstates the
+  // real reason to keep all of it: see `PaymentActivationUnitOfWorkPort`.
   const handlers = new Map<string, OutboxHandler>();
   // Task 4 of Phase 5b: reminding a member BEFORE their membership ends. Selected
   // through the SAME allowlist the API root uses, and it may legitimately be `null` —

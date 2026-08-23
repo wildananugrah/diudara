@@ -81,7 +81,7 @@ import type { WebhookEventRepositoryPort } from "./application/ports/webhook-eve
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
 import type { UserPurchaseUnitOfWorkPort } from "./application/ports/user-purchase-unit-of-work.port";
-import type { PostEditUnitOfWorkPort } from "./application/ports/post-edit-unit-of-work.port";
+import type { PostWriteUnitOfWorkPort } from "./application/ports/post-write-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
@@ -359,13 +359,13 @@ const fakePostRepository: PostRepositoryPort = {
 };
 
 /**
- * Task 5 fix round 1: `EditPost` now takes a `PostEditUnitOfWorkPort`
+ * Task 5 fix round 1: `EditPost` now takes a `PostWriteUnitOfWorkPort`
  * instead of the two repositories directly — see that port's own docstring.
  * Runs the work inline against the same fakes, like every other unit of
  * work in this file: bootstrap wiring, not atomicity, is what this file
  * pins.
  */
-const fakePostEditUnitOfWork: PostEditUnitOfWorkPort = {
+const fakePostWriteUnitOfWork: PostWriteUnitOfWorkPort = {
   async run(work) {
     return work({ posts: fakePostRepository, media: fakeMediaRepository });
   },
@@ -608,9 +608,9 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
-      createPost: new CreatePost(fakePostEditUnitOfWork),
+      createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,
-      editPost: new EditPost(fakePostEditUnitOfWork),
+      editPost: new EditPost(fakePostWriteUnitOfWork),
       deletePost: new DeletePost(fakePostRepository),
       listFeed: new ListFeed(
         fakePostRepository,
@@ -795,9 +795,9 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
-      createPost: new CreatePost(fakePostEditUnitOfWork),
+      createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,
-      editPost: new EditPost(fakePostEditUnitOfWork),
+      editPost: new EditPost(fakePostWriteUnitOfWork),
       deletePost: new DeletePost(fakePostRepository),
       listFeed: new ListFeed(
         fakePostRepository,
@@ -2515,9 +2515,9 @@ describe("bootstrap() streaming provider wiring", () => {
           const deps = bootstrap();
           const session = deps.streamingProvider!.createSession({
             streamKey: "abc123",
-            namespace: "live",
+            namespace: "u",
           });
-          expect(session.whipUrl).toBe("https://stream.example.com/whip/abc123");
+          expect(session.whipUrl).toBe("https://stream.example.com/whip/u/abc123");
         }
       );
     });

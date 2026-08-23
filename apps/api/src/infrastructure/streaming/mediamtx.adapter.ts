@@ -16,10 +16,10 @@ const RTMP_PORT = 1935;
  * Exercise it there before trusting a creator's OBS session to it, then
  * delete this warning.
  *
- * The one exception is `whipUrl` (Task 2): that shape — a separate `/whip/`
- * nginx prefix, not nested under `/live/` — WAS proven against a running
- * MediaMTX and a real publish before this adapter was written. See
- * `createSession`'s own docstring below.
+ * The one exception is `whipUrl` (Task 2): that shape — a `/whip/` nginx
+ * prefix of its own, deliberately NOT nested under the HLS read prefix — WAS
+ * proven against a running MediaMTX and a real publish before this adapter
+ * was written. See `createSession`'s own docstring below.
  *
  * DELIBERATELY THIN, and that is not an oversight: MediaMTX's
  * `authMethod: http` (see `infra/mediamtx.yml`) asks OUR API to authorise
@@ -46,66 +46,59 @@ export class MediaMtxAdapter implements StreamingProviderPort {
 
   constructor(config: { rtmpHost: string; hlsBaseUrl: string; whipBaseUrl: string }) {
     this.rtmpHost = config.rtmpHost;
-    // Trailing slash stripped so concatenating "/live/<key>/index.m3u8"
+    // Trailing slash stripped so concatenating "/u/<key>/index.m3u8"
     // below never produces a doubled "//" — the same rule
     // `resolveAppBaseUrl` (bootstrap.ts) applies to APP_BASE_URL.
     this.hlsBaseUrl = config.hlsBaseUrl.replace(/\/+$/, "");
     // Same rule, same reason, applied to the WHIP origin: concatenating
-    // "/whip/<key>" below must never produce a doubled "//" from a
+    // "/whip/u/<key>" below must never produce a doubled "//" from a
     // configured value that happens to carry a trailing slash.
     this.whipBaseUrl = config.whipBaseUrl.replace(/\/+$/, "");
   }
 
   /**
-   * `whipUrl` (Task 2) is built as `<whipBaseUrl>/whip/<streamKey>` — a
-   * shape verified against a real MediaMTX instance and a real publish (see
-   * this repo's Task 1), NOT symmetrical with the `/live/<key>/...` shape
-   * `rtmpUrl`/`hlsPlaybackPath` use above. `/whip/` is a deliberately
-   * SEPARATE nginx location, not nested under `/live/`: nginx's existing
-   * `^~ /live/` prefix match would permanently shadow anything placed
-   * beneath it, so the public WHIP path could never live at
-   * `/live/<key>/whip`. The session sub-resource MediaMTX hands back after
-   * the initial POST (`<whipUrl>/<sessionId>`) is nginx's problem, not
-   * this adapter's — nginx rewrites it correctly and nothing here needs to
-   * construct it.
+   * `whipUrl` is built as `<whipBaseUrl>/whip/u/<streamKey>` — NOT
+   * symmetrical with the `<base>/u/<key>/...` shape `rtmpUrl` and
+   * `hlsPlaybackPath` use, and the one asymmetry in this file.
+   *
+   * `/whip/` IS A SEPARATE nginx PREFIX, NOT NESTED UNDER THE READ PREFIX.
+   * MediaMTX's own WHIP url shape is `/<namespace>/<streamKey>/whip`, which
+   * sits literally under the `^~` prefix location the HLS read owns — and a
+   * `^~` prefix location, once selected, makes nginx skip the regex phase
+   * entirely, so a regex nested beneath it could never be reached. A prefix
+   * that shares no leading characters with the read prefix sidesteps that
+   * permanently, which is why the public WHIP path starts `/whip/` and the
+   * namespace segment follows it rather than leading.
+   *
+   * WHY THE EXTRA `u/` SEGMENT, HISTORICALLY (Phase 7, Task 4): the community
+   * world's WHIP url was the bare `<base>/whip/<key>`, deployed and proven
+   * against a real MediaMTX and a real browser publish, and Phase 7 was
+   * forbidden from changing it by a byte — so the user world took the extra
+   * segment instead of the community world losing its bare one. Phase 8
+   * deleted the community world, and this shape STAYS: it is what
+   * `infra/nginx/live-hls.conf.template`'s `^~ /whip/u/` location serves and
+   * what is deployed today. Shortening it would be a coordinated
+   * config-and-code change with nothing to gain, not a cleanup.
+   *
+   * The session sub-resource MediaMTX hands back after the initial POST
+   * (`<whipUrl>/<sessionId>`) is nginx's problem, not this adapter's — nginx
+   * rewrites it correctly and nothing here needs to construct it.
    */
   createSession(input: {
     streamKey: string;
     namespace: StreamNamespace;
   }): { rtmpUrl: string; whipUrl: string; hlsPlaybackPath: string } {
     // The MediaMTX path this session publishes to and is read from —
-    // `live/<key>` or `u/<key>`, the two segments `parseStreamPath`
-    // recognises. RTMP and HLS both carry it verbatim; WHIP does not, for
-    // the reason below.
+    // `u/<key>`, the one segment `parseStreamPath` recognises since
+    // retire-telegram Task 6. Built from `input.namespace` rather than the
+    // literal, because a hard-coded segment here is exactly the defect the
+    // parameter exists to prevent (see `StreamNamespace`). RTMP and HLS both
+    // carry this path verbatim; WHIP does not, for the reason above.
     const mtxPath = `${input.namespace}/${input.streamKey}`;
     return {
       rtmpUrl: `rtmp://${this.rtmpHost}:${RTMP_PORT}/${mtxPath}`,
-      whipUrl: `${this.whipBaseUrl}/whip/${whipSuffix(input.namespace, input.streamKey)}`,
+      whipUrl: `${this.whipBaseUrl}/whip/${mtxPath}`,
       hlsPlaybackPath: `${this.hlsBaseUrl}/${mtxPath}/index.m3u8`,
     };
   }
-}
-
-/**
- * The part of the public WHIP url after `/whip/` — and the one place the two
- * namespaces are NOT symmetrical.
- *
- * The community world's WHIP url is `<base>/whip/<key>`, with no namespace
- * segment at all: a shape verified against a real MediaMTX and a real
- * browser publish (Task 1 of the browser-publishing phase), already
- * deployed, and one Task 4 was explicitly forbidden from changing by a
- * single byte. So the USER world takes the extra segment instead —
- * `<base>/whip/u/<key>` — rather than the community world losing its bare
- * shape for the sake of a tidier pair.
- *
- * nginx is what keeps the two apart, and it needs no regex to do it:
- * `^~ /whip/u/` is a strictly LONGER literal prefix than `^~ /whip/`, and
- * nginx selects the longest matching prefix location independent of source
- * order (see `infra/nginx/live-hls.conf.template`, which carries the same
- * argument at length for `/live/`). The two can never collide: `newStreamKey`
- * mints 32 lowercase hex characters, so a community key can never itself be
- * the single character `u`.
- */
-function whipSuffix(namespace: StreamNamespace, streamKey: string): string {
-  return namespace === "live" ? streamKey : `${namespace}/${streamKey}`;
 }

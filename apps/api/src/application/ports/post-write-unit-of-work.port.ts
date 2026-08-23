@@ -6,20 +6,27 @@ import type { PostRepositoryPort } from "./post-repository.port";
  * transaction with — one post write, one media claim, landing or failing
  * together on BOTH paths (Task 5 fix rounds 1 and 2).
  */
-export interface PostEditRepositories {
+export interface PostWriteRepositories {
   posts: PostRepositoryPort;
   media: MediaRepositoryPort;
 }
 
 /**
  * Runs a post write's lock-or-create, resulting-state check, body/visibility
- * write and media claim as ONE atomic unit. Named for `EditPost`, which
- * needed it first (fix round 1); `CreatePost` uses the SAME port and the SAME
- * adapter (fix round 2) rather than a parallel one, because both paths share
- * exactly one invariant to protect and one shape of failure to protect it
- * from — see `requireFullyClaimed`'s own docstring for why a second,
- * `CreatePost`-flavoured type would just be this one again under a different
- * name.
+ * write and media claim as ONE atomic unit. `CreatePost` and `EditPost` share
+ * the SAME port and the SAME adapter rather than a parallel one each, because
+ * both paths share exactly one invariant to protect and one shape of failure
+ * to protect it from — see `requireFullyClaimed`'s own docstring for why a
+ * second, `CreatePost`-flavoured type would just be this one again under a
+ * different name.
+ *
+ * NAMED `PostWrite`, NOT `PostEdit`, AND THAT IS THE WHOLE OF THE RENAME.
+ * `EditPost` needed this first (Task 5 fix round 1) and the port was named
+ * after it; `CreatePost` joined one fix round later (round 2) and the name
+ * never caught up, so a use case that creates rows depended on a port called
+ * `Edit`. Phase 6 chose to defer the rename rather than bury it in a fix diff,
+ * and retire-telegram Task 7 is that commit. NOTHING ELSE MOVED — same
+ * interface, same adapter, same two members, same semantics on both paths.
  *
  * **WHY THIS EXISTS, FOR `EditPost` (fix round 1).** Before this,
  * `EditPost.execute` read `PostOwnership` (unlocked), computed the
@@ -66,13 +73,15 @@ export interface PostEditRepositories {
  * `media.claim` now commit or roll back together, exactly as they do for
  * `EditPost`'s write and claim.
  *
- * Modelled on `UserPurchaseUnitOfWorkPort`/`JoinRequestUnitOfWorkPort`: the
+ * Modelled on `UserPurchaseUnitOfWorkPort` (the sibling this codebase still
+ * has — the community `JoinRequestUnitOfWorkPort` this paragraph used to name
+ * alongside it went with the community world in retire-telegram Task 4): the
  * work function receives repositories already bound to the transaction, so
  * no port method grows a "pass the handle in" parameter and no repository has
  * to know whether it is inside one. Anything thrown out of `work` rolls the
  * whole unit back and propagates — including `ConflictError` from a lost
  * claim race, which is exactly what both fix rounds close.
  */
-export interface PostEditUnitOfWorkPort {
-  run<T>(work: (repositories: PostEditRepositories) => Promise<T>): Promise<T>;
+export interface PostWriteUnitOfWorkPort {
+  run<T>(work: (repositories: PostWriteRepositories) => Promise<T>): Promise<T>;
 }

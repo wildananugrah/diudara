@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 # Stands up a REAL nginx:1.27-alpine container running the ACTUAL, committed
 # infra/nginx/live-hls.conf.template (envsubst-rendered, nothing hand-edited),
-# then drives a real RTCPeerConnection through its /whip/ location via
+# then drives a real RTCPeerConnection through its `^~ /whip/u/` location via
 # negotiate.mjs — the harness that produced task-1-report.md's "Second run:
 # through the new nginx /whip/ location" evidence (browser-publishing phase,
 # Task 1). Re-run this any time that location changes, rather than trusting
 # the report's own transcript to still be accurate.
+#
+# THE ONLY SCRIPT LEFT IN THIS DIRECTORY, as of retire-telegram Task 7. The
+# others — run-dashboard.sh, run-gate.sh and five `drive-*.mjs` drivers — all
+# stood up the deleted creator dashboard (`/dashboard/c/:id/streaming`,
+# `localStorage diudara.dashboard.*`) and drove it through deleted API routes
+# (`POST /communities`, `GET /c/subscription/:id/status`,
+# `GET /c/watch/:token`). They could not be repaired, only rewritten against a
+# UI they were never written for, so they went with the world they exercised.
+# This one survives because it needs neither: an nginx container, a real
+# MediaMTX, and one stream key.
 #
 # PREREQUISITES, all satisfied by CONTRIBUTING.md's normal local dev setup:
 #   - Docker, with the nginx:1.27-alpine image available (pulled on first run
@@ -19,11 +29,16 @@
 #     five MEDIAMTX_*/STREAM_TOKEN_SECRET vars set so MediaMtxAdapter, not
 #     FakeStreamingAdapter, is selected — see CONTRIBUTING.md) reachable at
 #     127.0.0.1 on the ports docker-compose.yml maps.
-#   - A REAL stream key from a scheduled session, passed as this script's
-#     one required argument:
-#       curl -X POST http://localhost:3000/communities/<id>/events \
-#         -H "Authorization: Bearer <token>" -d '{"title":"whip proxy test"}'
-#     — use the "streamKey" field of the response.
+#   - A REAL stream key for a `user_stream` row, passed as this script's one
+#     required argument. Start a broadcast from Siaran in the real app and take
+#     the key from that row, or insert one by hand:
+#       psql "$DATABASE_URL" -c "insert into user_stream (owner_id, title, \
+#         status, stream_key) values ('<userId>', 'whip proxy test', 'live', \
+#         md5(random()::text)) returning stream_key;"
+#     — MediaMTX authorises the publish against apps/api's
+#     /webhooks/mediamtx/auth, which resolves `u/<streamKey>`, so the row has
+#     to exist and be publishable for the negotiation to succeed. This script
+#     needs no apps/web at all: it drives nginx and MediaMTX directly.
 #
 # Usage:
 #   ./run.sh <streamKey>
@@ -37,8 +52,8 @@
 # where 127.0.0.1 means the CONTAINER's own loopback, not the host's. Every
 # 127.0.0.1 in the rendered config is swapped for host.docker.internal below
 # — exactly the documented variant in live-hls.conf.template's own header
-# comment. Because the /whip/ and /live/ locations both build their
-# proxy_pass target from a VARIABLE (the captured stream key / event id),
+# comment. Because the /whip/u/ and /u/ locations both build their
+# proxy_pass target from a VARIABLE (the captured stream key / stream id),
 # nginx resolves that hostname at REQUEST time, which needs an explicit
 # `resolver` directive — found running this for real (Task 1): omitting it
 # produces "no resolver defined to resolve host.docker.internal" in nginx's

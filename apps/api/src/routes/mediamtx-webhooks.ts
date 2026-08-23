@@ -6,10 +6,9 @@ import type { Dependencies } from "../bootstrap";
 
 /**
  * The header a caller MAY carry the shared secret in, mirroring
- * `X-CALLBACK-TOKEN` (Xendit) and `X-Telegram-Bot-Api-Secret-Token`
- * (Telegram) — and the SAME name Task 5's lifecycle hooks
- * (`runOnOnline`/`runOnOffline`) use, since those ARE shell `curl`
- * commands this codebase writes and so genuinely CAN send a header.
+ * `X-CALLBACK-TOKEN` (Xendit) — and the SAME name the lifecycle hooks
+ * (`runOnOnline`/`runOnOffline`) use, since those ARE shell commands this
+ * codebase writes and so genuinely CAN send a header.
  *
  * This is now one of TWO accepted mechanisms — see the `secret` query
  * parameter this route also checks, and the docstring on
@@ -42,11 +41,14 @@ const MEDIAMTX_SECRET_QUERY_PARAM = "secret";
 /**
  * The fixed body every REFUSED decision returns — not just the same fields,
  * the same literal value every time. `AuthoriseStream` already collapses
- * "no such event", "ended event", "bad signature", "expired token", "wrong
- * event", "wrong community" and "cancelled subscription" into one
- * `{ allowed: false }`; this constant is what stops the ROUTE from
- * reintroducing a distinction the use-case deliberately erased (e.g. by
- * some future edit adding a message that names which check failed).
+ * "no such stream", "a stream that is not live", "an unrecognised namespace",
+ * "bad signature", "expired token", "a token naming a DIFFERENT stream" and
+ * "not a member" into one `{ allowed: false }`; this constant is what stops
+ * the ROUTE from reintroducing a distinction the use-case deliberately erased
+ * (e.g. by some future edit adding a message that names which check failed).
+ * The list above shrank with retire-telegram Task 6 — the community `event`
+ * refusals it used to name went with the world that produced them — and the
+ * rule did not: whatever the reasons ARE, the wire never tells them apart.
  */
 const REFUSED_BODY = { ok: false } as const;
 const ALLOWED_BODY = { ok: true } as const;
