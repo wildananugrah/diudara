@@ -54,7 +54,8 @@
 ```tsx
 test("the old dashboard routes are gone — /dashboard falls through to not-found", async () => {
   renderAt("/dashboard");
-  expect((await screen.findByTestId("not-found")).textContent).toContain("Halaman tidak ditemukan");
+  // NotFoundPage has NO data-testid — assert on the copy it actually renders.
+  expect(await screen.findByText("Halaman tidak ditemukan")).toBeTruthy();
 });
 
 test("the landing page still renders at /", async () => {
@@ -94,13 +95,13 @@ git add -A && git commit -m "chore(web): delete the creator dashboard"
 - Delete: `apps/api/src/routes/{channels,join-requests}.ts`
 - Delete: use cases `grant-channel-access`, `revoke-channel-access`, `manage-channels`, `record-channel-join`, `decide-join-request`, `notify-join-request`
 - Delete: ports `channel-repository`, `channel-membership-repository`, `join-request-repository`, `join-request-unit-of-work`; and their drizzle repositories
-- Modify: `apps/api/src/app.ts`, `apps/api/src/bootstrap.ts`, `apps/api/src/bootstrap.test.ts`
+- Modify: `apps/api/src/app.ts`, `apps/api/src/bootstrap.ts`, `apps/api/src/bootstrap.test.ts`, **`apps/api/src/worker-bootstrap.ts`**
 
 **Interfaces:**
 - Consumes: nothing.
 - Produces: a container with no channel or join-request dependencies.
 
-**The outbox handlers go with them.** `notify_join_request` is registered against `ProcessOutbox`; removing the use case without removing its registration leaves a handler that throws on a row nothing writes any more.
+**The outbox handlers go with them, and they are registered in `worker-bootstrap.ts`, not `bootstrap.ts`** (around lines 120 and 310). `notify_join_request` is registered against `ProcessOutbox`; removing the use case without removing its registration leaves a handler that throws on a row nothing writes any more.
 
 - [ ] **Step 1: Write the failing test**
 
