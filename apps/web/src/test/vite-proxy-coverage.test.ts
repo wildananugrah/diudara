@@ -154,15 +154,17 @@ const NOT_FETCHED_BY_THIS_APP: Record<string, string> = {
   // app. Proxied so a webhook can be replayed against the dev origin by hand
   // (`curl localhost:5173/webhooks/...`) instead of remembering :3000.
   "/webhooks": "inbound provider callbacks; no browser caller by design",
-  // `/auth` (creator signup/login) and `/payment-account` (creator payout
-  // setup) are the OLD creator world's API. Retire-telegram deleted every page
-  // that called them; the ROUTES survive because the `creator` table does —
-  // migrating those rows into `app_user` is explicitly out of scope for the
-  // phase (design spec §9). These two entries are the honest record of that:
-  // API surface with no surviving web caller, kept reachable rather than
-  // silently unproxied, and due to go with the routes themselves.
-  "/auth": "creator-world API kept until `creator` rows are migrated (spec §9)",
-  "/payment-account": "creator-world API kept until `creator` rows are migrated (spec §9)",
+  // ONE ENTRY, AND THAT IS THE POINT. This list opened with three: `/auth`
+  // (the old creator login) and `/payment-account` (a creator's Xendit
+  // onboarding) sat here for one commit, written down as "API surface with no
+  // surviving web caller". That framing was wrong. They were not surface to
+  // keep — they were two dead apps/api mounts, and a documented exception
+  // would have given them a permanent home. Retire-telegram Task 7's fix round
+  // deleted both routes, all four use cases behind them,
+  // `CreatorRepositoryPort` and its Drizzle adapter, the creator token issuer
+  // and the creator `requireAuth` middleware. The reverse check below is what
+  // surfaced them; an exception belongs here only for a key that genuinely has
+  // no browser caller BY DESIGN, like the one above.
 };
 
 /** Whether `key` forwards something this app fetches, or is an accounted-for exception. */

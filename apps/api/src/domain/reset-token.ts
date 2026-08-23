@@ -25,7 +25,7 @@ export const RESET_TOKEN_TTL_MS = 30 * 60 * 1000;
  * NOT a uuid. A uuid's job is to identify a row cheaply and uniquely; it is
  * not drawn from a CSPRNG and several of its bits are fixed by the version,
  * so it is unsuitable as a bearer secret. `randomBytes` from `node:crypto`
- * is the CSPRNG this process already trusts `HonoJwtTokenIssuer` and
+ * is the CSPRNG this process already trusts `HonoJwtUserTokenIssuer` and
  * `user-watch-token.ts` to sit on top of.
  */
 const TOKEN_BYTES = 32;

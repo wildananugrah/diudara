@@ -68,8 +68,9 @@ export const EXISTING_EMAIL_SIGNUP_NOTICE =
  * handle check (a taken handle is disclosed outright via its own 409
  * message, so there is nothing to hide there and no reason to pay for a
  * hash first) but before the duplicate-email check and every path beyond
- * it. That is for the same reason `AuthenticateCreator`/`AuthenticateUser`
- * pay the argon2id cost on every rejection path: skipping the hash on the
+ * it. That is for the same reason `AuthenticateUser` pays the argon2id cost on
+ * every rejection path (and the deleted `AuthenticateCreator` did before it):
+ * skipping the hash on the
  * duplicate-email branch would make it measurably faster than a fresh
  * signup, and that timing gap is itself an oracle even though the response
  * body is identical.

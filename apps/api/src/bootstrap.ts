@@ -1,12 +1,8 @@
 import { db, sql } from "./db/client";
-import { DrizzleCreatorRepository } from "./infrastructure/repositories/drizzle-creator.repository";
 import { DrizzleUserRepository } from "./infrastructure/repositories/drizzle-user.repository";
 import { DrizzleUserPayoutRepository } from "./infrastructure/repositories/drizzle-user-payout.repository";
 import { BunPasswordHasher } from "./infrastructure/auth/bun-password.hasher";
-import { HonoJwtTokenIssuer } from "./infrastructure/auth/hono-jwt.token-issuer";
 import { HonoJwtUserTokenIssuer } from "./infrastructure/auth/hono-jwt.user-token-issuer";
-import { RegisterCreator } from "./application/use-cases/register-creator";
-import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
 import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
@@ -27,8 +23,6 @@ import { CompletePasswordReset } from "./application/use-cases/complete-password
 import { DrizzlePasswordResetRepository } from "./infrastructure/repositories/drizzle-password-reset.repository";
 import { DrizzlePasswordResetUnitOfWork } from "./infrastructure/repositories/drizzle-password-reset-unit-of-work";
 import { DrizzleSignupNoticeRepository } from "./infrastructure/repositories/drizzle-signup-notice.repository";
-import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
-import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
 import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
 import { DrizzleUserTierRepository } from "./infrastructure/repositories/drizzle-user-tier.repository";
@@ -62,11 +56,9 @@ import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { MediaStoragePort } from "./application/ports/media-storage.port";
 import type { MediaRepositoryPort } from "./application/ports/media-repository.port";
-import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { UserPayoutRepositoryPort } from "./application/ports/user-payout-repository.port";
 import type { UserTierRepositoryPort } from "./application/ports/user-tier-repository.port";
-import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 import type { EmailProviderPort } from "./application/ports/email-provider.port";
@@ -98,16 +90,14 @@ export type DatabasePing = (
  * use-case tests can inject plain-object fakes without casts.
  */
 export interface Dependencies {
-  creatorRepository: CreatorRepositoryPort;
-  tokenIssuer: TokenIssuerPort;
   /**
    * The payment adapter THIS process selected — `null` when
    * `selectPaymentProvider` decided the box has no payment provider at all
    * (see that function's own docstring). Exposed for the same reason
    * `messaging`/`aiProvider` are: a test must be able to prove what a given
-   * environment actually wired. `null` here is why `startCheckout` and
-   * `createPaymentAccount` below are themselves optional — there is nothing
-   * to construct either against.
+   * environment actually wired. `null` here is why `connectUserPayout` and
+   * `startUserSubscription` below are themselves optional — there is
+   * nothing to construct either against.
    */
   payments: PaymentProviderPort | null;
   /**
@@ -121,20 +111,18 @@ export interface Dependencies {
    * this field happens to be `truthy` for — to send a reset link over.
    */
   email: EmailProviderPort | null;
-  registerCreator: RegisterCreator;
-  authenticateCreator: AuthenticateCreator;
   /**
-   * Phase 9's personal-account identity, distinct from `creatorRepository`
-   * above. Exposed here for the same reason `creatorRepository` is: a test
-   * must be able to seed/read `app_user` rows through the port rather than
-   * poking Drizzle directly.
+   * Phase 9's personal-account identity, and — since retire-telegram
+   * Task 7's fix round deleted `creatorRepository` alongside it — the ONLY
+   * identity this process has. Exposed here so a test can seed/read
+   * `app_user` rows through the port rather than poking Drizzle directly.
    */
   userRepository: UserRepositoryPort;
   /**
    * Phase 5a's payout column on `app_user`, kept off `userRepository` so that
    * `UserRecord` — which is projected straight into profile responses — never
    * carries a provider account id. Exposed here for the same reason
-   * `creatorRepository` is: a test must be able to put the column into its
+   * `userRepository` is: a test must be able to put the column into its
    * claimed state WITHOUT going through the POST route, which in the real
    * adapter provisions a KYC entity that has no delete endpoint.
    */
@@ -148,10 +136,14 @@ export interface Dependencies {
    */
   userTierRepository: UserTierRepositoryPort;
   /**
-   * Signs and verifies user-session tokens. A SEPARATE class from
-   * `tokenIssuer` even though both share `JWT_SECRET` — see
-   * `HonoJwtUserTokenIssuer`'s own docstring for why the `typ` claim, not a
-   * different secret, is what keeps the two session kinds apart.
+   * Signs and verifies user-session tokens, and since retire-telegram
+   * Task 7's fix round they are the only session kind there is. This was a
+   * SEPARATE class from the creator `tokenIssuer`, sharing the same
+   * `JWT_SECRET` and kept apart by a `typ` claim rather than a second
+   * secret; that issuer went with the creator login it served. `typ: "user"`
+   * stays and is still checked — see `HonoJwtUserTokenIssuer`'s own
+   * docstring, and `user-auth.middleware.test.ts`, which now FORGES the
+   * other audience's token rather than minting one.
    */
   userTokenIssuer: UserTokenIssuerPort;
   /** `POST /users/signup`. Returns `{ ok: true }` only — see the use case's own docstring. */
@@ -237,37 +229,15 @@ export interface Dependencies {
    */
   completePasswordReset: CompletePasswordReset;
   /**
-   * `POST /payment-account`. `undefined` EXACTLY when `payments` is `null` —
-   * mirrors `sendAiMessage`'s undefined-ness: there is no `PaymentProviderPort`
-   * to construct this against when payments are disabled, so connecting a
-   * creator to one makes no sense on this box. `routes/payment-account.ts`
-   * checks this and answers 503 rather than crashing on a null provider it was
-   * never handed — the shape `routes/ai.ts` established for `sendAiMessage`
-   * before retire-telegram Task 4 deleted it, and that `POST /users/me/payout`
-   * and `POST /users/:handle/subscribe` still follow.
-   */
-  createPaymentAccount: CreatePaymentAccount | undefined;
-  /**
-   * `GET /payment-account` (Phase 7 carry-forward from Phase 6): whether the
-   * AUTHENTICATED creator has connected payments, read from
-   * `creator.xendit_account_id` through the same `isConnectedPaymentAccount` /
-   * `isProvisioningPlaceholder` predicates `CreatePaymentAccount` uses. Read-only
-   * and safe to call on every page load — unlike the POST route above, it
-   * provisions nothing at Xendit. It answers off `creator`, the OLD world's
-   * identity: retire-telegram deleted every screen that called it (the
-   * dashboard in Task 1, the AI co-builder that displayed it in Task 4), so
-   * `GET /payment-account` currently has no caller in this repository. The
-   * route survives because `POST /payment-account` — creator payment
-   * onboarding — does, and a write endpoint whose matching read had been
-   * deleted would be worse than an unused read.
-   */
-  getPaymentAccountStatus: GetPaymentAccountStatus;
-  /**
-   * `POST /users/me/payout` (Phase 5a). `undefined` EXACTLY when `payments` is
-   * `null`, mirroring `createPaymentAccount` above: there is no
-   * `PaymentProviderPort` to construct it against on a box with payments
-   * disabled, and `routes/users.ts` answers 503 rather than crashing on a
-   * provider it was never handed.
+   * `POST /users/me/payout` (Phase 5a). `undefined` EXACTLY when `payments`
+   * is `null`: there is no `PaymentProviderPort` to construct it against on
+   * a box with payments disabled, and `routes/users.ts` answers 503 rather
+   * than crashing on a provider it was never handed. (The creator-world
+   * `CreatePaymentAccount` this docstring used to mirror went with
+   * `POST /payment-account` in retire-telegram Task 7's fix round. The
+   * ADAPTER method both use cases call, `PaymentProviderPort
+   * .createPaymentAccount`, is UNTOUCHED — it is what this one still
+   * provisions through.)
    */
   connectUserPayout: ConnectUserPayout | undefined;
   /**
@@ -618,10 +588,12 @@ function presentOrUndefined(value: string | undefined): string | undefined {
  * rather than ever taking fake money for real.
  *
  * The fake adapter settles nothing while looking, from the outside, exactly
- * like it did. Worse, `CreatePaymentAccount` writes its `fake-acct-*` id into
- * `creator.xendit_account_id` and then 409s forever, so a creator onboarded on
- * a misconfigured production box can never connect a real Xendit sub-account
- * without manual SQL. A `console.log` is not a safety mechanism — these two
+ * like it did. Worse, a connect use case writes its `fake-acct-*` id into the
+ * payout column and then 409s forever, so anyone onboarded on a misconfigured
+ * production box can never connect a real Xendit sub-account without manual
+ * SQL. (Measured on the creator flow, whose `CreatePaymentAccount` went with
+ * `POST /payment-account` in retire-telegram Task 7's fix round;
+ * `ConnectUserPayout` writes `app_user.xendit_account_id` the same way.) A `console.log` is not a safety mechanism — these two
  * guards are (see the plan's Global Constraints):
  *
  *   1. PARTIAL configuration throws in EVERY environment. A set secret key with
@@ -639,19 +611,20 @@ function presentOrUndefined(value: string | undefined): string | undefined {
  * became the unhelpful one. `null` — see the return type — is what replaced
  * the throw:
  *
- *   - The fake adapter writes unrecoverable `fake-acct-*` ids into
- *     `creator.xendit_account_id`, so falling back to it here (`?? new
+ *   - The fake adapter writes unrecoverable `fake-acct-*` ids into the payout
+ *     column, so falling back to it here (`?? new
  *     FakePaymentAdapter()`, or any other stand-in that answers real calls)
  *     would ship exactly the disaster the original throw existed to prevent
  *     — a box that LOOKS like it takes payments and only takes fake ones.
  *   - `null` is genuinely absent instead: `bootstrap()` does not construct
- *     `StartUserSubscription`, `ConnectUserPayout` or `CreatePaymentAccount`
- *     when this returns `null`, and each of their routes answers 503 off its
- *     own `undefined` dependency. There is nothing left in the process for a
- *     caller to reach that would pretend to take a payment. (Before
- *     retire-telegram Task 4 there was a fourth, `StartCheckout`, whose
- *     `POST /c/:slug/checkout` route was not even registered in that case —
- *     the community checkout and that asymmetry went together.)
+ *     `StartUserSubscription` or `ConnectUserPayout` when this returns `null`,
+ *     and each of their routes answers 503 off its own `undefined` dependency.
+ *     There is nothing left in the process for a caller to reach that would
+ *     pretend to take a payment. (There were four. Retire-telegram Task 4
+ *     deleted `StartCheckout`, whose `POST /c/:slug/checkout` route was not
+ *     even registered in that case — the community checkout and that
+ *     asymmetry went together; Task 7's fix round deleted
+ *     `CreatePaymentAccount` with `POST /payment-account`.)
  *
  * Mirrors `assertUsableJwtSecret` above in shape and error wording for the
  * two cases that still throw.
@@ -1388,20 +1361,26 @@ function logProviderChoice(nodeEnv: string | undefined, message: string): void {
 export function bootstrap(): Dependencies {
   const jwtSecret = assertUsableJwtSecret(process.env.JWT_SECRET);
 
-  const creatorRepository = new DrizzleCreatorRepository(db);
   const passwordHasher = new BunPasswordHasher();
-  const tokenIssuer = new HonoJwtTokenIssuer(jwtSecret);
-  const registerCreator = new RegisterCreator(creatorRepository, passwordHasher, tokenIssuer);
-  const authenticateCreator = new AuthenticateCreator(
-    creatorRepository,
-    passwordHasher,
-    tokenIssuer
-  );
 
-  // Phase 9's personal accounts. `userTokenIssuer` deliberately reuses the
-  // SAME `jwtSecret` as the creator `tokenIssuer` above — see
-  // `HonoJwtUserTokenIssuer`'s own docstring for why the `typ` claim is what
-  // keeps the two session kinds apart, not a second secret.
+  // Phase 9's personal accounts, and since retire-telegram Task 7's fix round
+  // the ONLY accounts. This block used to be preceded by four lines building
+  // the creator identity `/auth` served — a `DrizzleCreatorRepository`, a
+  // second `HonoJwtTokenIssuer` on this same `jwtSecret`, `RegisterCreator`
+  // and `AuthenticateCreator`. Task 1 deleted the dashboard that was their
+  // only caller; the fix round deleted the routes, the use cases, the
+  // repository, both ports and the creator `requireAuth` middleware behind
+  // them.
+  //
+  // `passwordHasher` above is SHARED and stays: `RegisterUser` and
+  // `AuthenticateUser` need it exactly as the creator pair did.
+  //
+  // ONE `typ` CLAIM, STILL CHECKED. `HonoJwtUserTokenIssuer` stamps and
+  // verifies `typ: "user"`; it was what kept two audiences on one `JWT_SECRET`
+  // apart, and with one audience left it is what stops any OTHER token signed
+  // with this secret from being accepted as a session. See that class's own
+  // docstring, and `user-auth.middleware.test.ts`, which now forges the
+  // creator-shaped token it used to mint.
   const userRepository = new DrizzleUserRepository(db);
   // Phase 5a. Its own repository over the same table — see the port's docstring
   // for why the payout column is not on `userRepository`.
@@ -1533,16 +1512,17 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
-  // `undefined` EXACTLY when `payments` is `null` — see `createPaymentAccount`'s
-  // own field docstring on `Dependencies`.
-  const createPaymentAccount = payments
-    ? new CreatePaymentAccount(creatorRepository, payments)
-    : undefined;
-  const getPaymentAccountStatus = new GetPaymentAccountStatus(creatorRepository);
-  // Phase 5a's parallel flow for `app_user`. `undefined` on the same condition
-  // `createPaymentAccount` is, and for the same reason; the STATUS reader below
-  // is always constructed, because a box with payments disabled must still be
-  // able to answer the question.
+  // Phase 5a's payout flow for `app_user`, and the only one left: the
+  // creator-scoped `CreatePaymentAccount`/`GetPaymentAccountStatus` pair that
+  // stood here went with `POST|GET /payment-account` in retire-telegram
+  // Task 7's fix round. `undefined` EXACTLY when `payments` is `null` — see
+  // `connectUserPayout`'s own field docstring on `Dependencies`. The STATUS
+  // reader below is always constructed, because a box with payments disabled
+  // must still be able to answer the question.
+  //
+  // `PaymentProviderPort.createPaymentAccount` — the ADAPTER method both the
+  // deleted use case and this one call — is untouched, and so is every
+  // adapter implementing it.
   const connectUserPayout = payments
     ? new ConnectUserPayout(userPayoutRepository, payments)
     : undefined;
@@ -1553,10 +1533,11 @@ export function bootstrap(): Dependencies {
   const manageUserTiers = new ManageUserTiers(userTierRepository, userPayoutRepository);
   // After selectPaymentProvider on purpose — two reasons, one of them dated.
   //
-  // STILL TRUE: `createPaymentAccount` above needs `payments` already resolved,
+  // STILL TRUE: `connectUserPayout` above needs `payments` already resolved,
   // so this call has to happen no later than it does regardless of anything
   // below it. (Retire-telegram Task 4 deleted `createCommunity`/
-  // `updateCommunity`, which shared that constraint.)
+  // `updateCommunity`, which shared that constraint; Task 7's fix round
+  // deleted `createPaymentAccount`, which this sentence used to name.)
   //
   // NO LONGER TRUE (fix round 1 correction): this comment used to say the order
   // matters because "you are about to take fake money" is the more urgent of two
@@ -1776,12 +1757,8 @@ export function bootstrap(): Dependencies {
     : undefined;
 
   return {
-    creatorRepository,
-    tokenIssuer,
     payments,
     email,
-    registerCreator,
-    authenticateCreator,
     userRepository,
     userPayoutRepository,
     userTierRepository,
@@ -1801,8 +1778,6 @@ export function bootstrap(): Dependencies {
     listUserPosts,
     requestPasswordReset,
     completePasswordReset,
-    createPaymentAccount,
-    getPaymentAccountStatus,
     connectUserPayout,
     getUserPayoutStatus,
     manageUserTiers,

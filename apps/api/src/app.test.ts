@@ -8,10 +8,18 @@ import type { Dependencies } from "./bootstrap";
  * The routing table, pinned as an EXACT SET.
  *
  * Retire-telegram Task 4 deleted the community-scoped API — `/ai`, `/communities`,
- * `/communities/:communityId/tiers` and the two public `/c` routers. A
- * `not.toContain("/communities")` check would have passed just as happily with
+ * `/communities/:communityId/tiers` and the two public `/c` routers — and Task 7's
+ * fix round deleted the last two OLD-world mounts, `/auth` (creator signup and
+ * login) and `/payment-account` (a creator's Xendit onboarding). Task 1 had
+ * deleted the dashboard that was their only caller, so both had been
+ * unreachable for six tasks while this table still protected them. SEVEN
+ * MOUNTS NOW, all of them new-world.
+ *
+ * A `not.toContain("/communities")` check would have passed just as happily with
  * `/ai` still mounted, which is why every assertion in this file compares a whole
- * sorted set against literals rather than probing for absences.
+ * sorted set against literals rather than probing for absences. That is also
+ * what made the two dead mounts visible: they had to be spelled out here to
+ * stay green.
  *
  * `createApp` is driven with an EMPTY dependency object on purpose: route
  * registration must not read a single dependency, and after Task 4 it does not.
@@ -50,9 +58,7 @@ describe("the app's routing table", () => {
 
   it("mounts exactly the surviving routers", () => {
     expect(mountedPrefixes()).toEqual([
-      "/auth",
       "/health",
-      "/payment-account",
       "/streams",
       "/users",
       "/webhooks",
@@ -62,12 +68,10 @@ describe("the app's routing table", () => {
 
   it("registers exactly these routes and no others", () => {
     expect(registeredRoutes()).toEqual([
-      "ALL /payment-account/*",
       "DELETE /streams/:id",
       "DELETE /users/:handle/follow",
       "DELETE /users/posts/:id",
       "GET /health",
-      "GET /payment-account",
       "GET /streams",
       "GET /users/:handle/followers",
       "GET /users/:handle/following",
@@ -86,9 +90,6 @@ describe("the app's routing table", () => {
       "PATCH /users/me",
       "PATCH /users/me/tiers/:tierId",
       "PATCH /users/posts/:id",
-      "POST /auth/login",
-      "POST /auth/signup",
-      "POST /payment-account",
       "POST /streams",
       "POST /streams/:id/watch-token",
       "POST /users/:handle/follow",

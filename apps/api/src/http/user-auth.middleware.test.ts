@@ -3,8 +3,6 @@ import { Hono } from "hono";
 import { sign } from "hono/jwt";
 import { errorHandler } from "./error-handler";
 import { requireUserAuth, type UserAuthVariables } from "./user-auth.middleware";
-import { requireAuth, type AuthVariables } from "./auth.middleware";
-import { HonoJwtTokenIssuer } from "../infrastructure/auth/hono-jwt.token-issuer";
 import { HonoJwtUserTokenIssuer } from "../infrastructure/auth/hono-jwt.user-token-issuer";
 import type { UserRecord, UserRepositoryPort } from "../application/ports/user-repository.port";
 import type { UserTokenIssuerPort, UserTokenPayload } from "../application/ports/user-token-issuer.port";
@@ -147,57 +145,55 @@ describe("requireUserAuth", () => {
 });
 
 /**
- * Both directions, in one file, using the REAL issuers sharing the SAME
- * secret — not the string-format fakes above, which would pass trivially
- * without proving anything about `typ`.
+ * FOREIGN-TOKEN REJECTION, using the REAL user issuer — not the string-format
+ * fake above, which would pass trivially without proving anything about `typ`.
  *
- * The first two tests below are NOT sufficient on their own, and a review
- * caught it: `HonoJwtTokenIssuer.issue` stamps only `creatorId`, and
- * `HonoJwtUserTokenIssuer.issue` stamps only `userId`/`sessionEpoch` — the
- * two payload shapes are DISJOINT. A genuine creator token handed to
- * `requireUserAuth` fails there because `userId`/`sessionEpoch` are simply
- * absent (the `typeof userId !== "string"` guard rejects it), and the
- * mirror image is true for a user token handed to `requireAuth`. Deleting
- * the `typ` check from BOTH issuers at once still passes those two tests —
- * confirmed by doing exactly that. So the first two tests below exercise
- * the field guards, not `typ`.
+ * THIS FILE USED TO TEST BOTH DIRECTIONS. Two token audiences shared one
+ * `JWT_SECRET`: creator sessions (`HonoJwtTokenIssuer`, `typ: "creator"`,
+ * behind `requireAuth`) and user sessions. Retire-telegram Task 7's fix round
+ * deleted the creator audience outright — its issuer, its port, its
+ * middleware, and the `/auth` and `/payment-account` routes that were the only
+ * things behind it. The two tests whose SUBJECT was `requireAuth` went with
+ * it: there is no `requireAuth` to reject anything any more.
  *
- * The third and fourth tests isolate `typ` on its own: a token forged with
- * BOTH audiences' claims present (`creatorId` AND `userId`/`sessionEpoch`),
- * differing only in which `typ` it carries. With both payload shapes
- * satisfied, only the `typ` check can reject it — which is what actually
- * proves `typ` is the boundary the brief describes, once both token kinds
- * share one `JWT_SECRET`.
+ * THE SURVIVING PROPERTY IS THE ONE THAT MATTERS, and it is unchanged: a token
+ * signed with this process's `JWT_SECRET` that is NOT a genuine user token is
+ * refused. Nothing mints a `typ: "creator"` token now, so both tests below
+ * FORGE their input with `sign()` rather than asking an issuer for one —
+ * which is exactly how the `typ`-isolating case already worked, and it loses
+ * no coverage: what is being verified is the VERIFIER, never the minter.
+ *
+ * TWO CASES, BECAUSE ONE IS NOT ENOUGH, and a review caught that the first
+ * time. `HonoJwtUserTokenIssuer.verify` requires `userId`/`sessionEpoch` to be
+ * present AND `typ` to be `"user"`. A creator-shaped token fails on the FIELD
+ * guards alone (its payload has no `userId`), so deleting the `typ` check
+ * would still pass the first test — confirmed by doing exactly that. The
+ * second case forges a token carrying BOTH audiences' claims, so every field
+ * guard is satisfied and only `typ` can reject it. That is what proves `typ`
+ * is a real boundary rather than decoration, and it is why the claim survives
+ * the other audience's deletion: `typ` now says "this secret signs more than
+ * sessions; only a session is accepted here".
  */
-describe("cross-audience token rejection (real issuers, shared JWT_SECRET)", () => {
+describe("foreign-token rejection (real user issuer, shared JWT_SECRET)", () => {
   const SHARED_SECRET = "shared-jwt-secret-for-cross-audience-test";
-  const realCreatorIssuer = new HonoJwtTokenIssuer(SHARED_SECRET);
   const realUserIssuer = new HonoJwtUserTokenIssuer(SHARED_SECRET);
   const FAR_FUTURE = Math.floor(Date.now() / 1000) + 3600;
 
-  it("requireUserAuth rejects a creator token (payload also lacks userId/sessionEpoch)", async () => {
+  it("requireUserAuth rejects a creator-shaped token (payload lacks userId/sessionEpoch)", async () => {
     const app = new Hono<{ Variables: UserAuthVariables }>();
     app.onError(errorHandler);
     app.use("/me", requireUserAuth(realUserIssuer, fakeUserRepository([record()])));
     app.get("/me", (c) => c.json({ userId: c.get("userId") }));
 
-    const creatorToken = await realCreatorIssuer.issue({ creatorId: "creator-1" });
+    // The exact payload the deleted `HonoJwtTokenIssuer.issue` stamped:
+    // `creatorId` and `typ: "creator"`, nothing else.
+    const creatorToken = await sign(
+      { creatorId: "creator-1", typ: "creator", exp: FAR_FUTURE },
+      SHARED_SECRET,
+      "HS256"
+    );
     const res = await app.request("/me", {
       headers: { Authorization: `Bearer ${creatorToken}` },
-    });
-
-    expect(res.status).toBe(401);
-  });
-
-  it("requireAuth rejects a user token (payload also lacks creatorId)", async () => {
-    const app = new Hono<{ Variables: AuthVariables }>();
-    app.onError(errorHandler);
-    app.use("/me", requireAuth(realCreatorIssuer));
-    app.get("/me", (c) => c.json({ creatorId: c.get("creatorId") }));
-
-    const userToken = await realUserIssuer.issue({ userId: "user-9", sessionEpoch: 0 });
-    const res = await app.request("/me", {
-      headers: { Authorization: `Bearer ${userToken}` },
     });
 
     expect(res.status).toBe(401);
@@ -211,15 +207,5 @@ describe("cross-audience token rejection (real issuers, shared JWT_SECRET)", () 
     );
 
     expect(await realUserIssuer.verify(both)).toBeNull();
-  });
-
-  it("requireAuth rejects a token carrying BOTH audiences' claims but typ: \"user\" — isolates typ", async () => {
-    const both = await sign(
-      { creatorId: "creator-1", userId: "user-9", sessionEpoch: 0, typ: "user", exp: FAR_FUTURE },
-      SHARED_SECRET,
-      "HS256"
-    );
-
-    expect(await realCreatorIssuer.verify(both)).toBeNull();
   });
 });

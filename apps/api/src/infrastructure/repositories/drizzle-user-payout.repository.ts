@@ -29,8 +29,11 @@ const payoutColumns = {
  * check-then-act cannot arbitrate two simultaneous callers — the creator flow
  * proved it at 30 concurrent requests, which produced 30 Xendit sub-accounts and
  * orphaned 29 of them permanently (MANAGED sub-accounts are KYC entities with no
- * delete endpoint). See `domain/payment-account.ts` and
- * `CreatorRepositoryPort`'s docstrings for the full account.
+ * delete endpoint). See `domain/payment-account.ts` for the full account. (It
+ * used to point at `CreatorRepositoryPort` alongside it; retire-telegram
+ * Task 7's fix round deleted that port with the creator payout flow whose
+ * incident this is. The incident is why the shape here is claim-first, and it
+ * outlived the code it happened to.)
  *
  * Deliberately its own class over `app_user` rather than three more methods on
  * `DrizzleUserRepository`: this is the only place the payout column is read or

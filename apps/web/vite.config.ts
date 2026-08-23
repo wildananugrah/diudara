@@ -42,8 +42,12 @@ export default defineConfig({
       // a new tab, a curl typed with -H "Accept: text/html" while debugging —
       // silently answer with index.html instead of the API's JSON or 401.
       // ---------------------------------------------------------------
-      "/auth": "http://localhost:3000",
-      "/payment-account": "http://localhost:3000",
+      // Retire-telegram Task 7's fix round removed `/auth` and
+      // `/payment-account` from here, with the apps/api mounts they forwarded
+      // to: the OLD creator login and the creator's Xendit onboarding, whose
+      // only caller was the dashboard Task 1 deleted. They are the two entries
+      // `vite-proxy-coverage.test.ts`'s reverse check caught as forwarding
+      // nothing this app fetches.
       // THE THIRD INSTANCE OF THE SAME BUG CLASS (Task 6). Every `/users/...`
       // call (signup, login, by-handle, /users/me, both password-reset
       // endpoints — apps/web/src/user/apiClient.ts) had no entry here at

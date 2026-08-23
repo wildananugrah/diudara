@@ -16,9 +16,11 @@ export class FakePaymentAdapter implements PaymentProviderPort {
   failNextInvoice = false;
   /**
    * Makes the next `createPaymentAccount` throw. Exists so a test can exercise
-   * `CreatePaymentAccount`'s release-the-claim path: since Task 7 the creator's
-   * row is claimed with a sentinel BEFORE this call, so a provider failure that
-   * did not release the claim would wedge the creator permanently.
+   * a caller's release-the-claim path: the row is claimed with a sentinel
+   * BEFORE this call, so a provider failure that did not release the claim
+   * would wedge that owner permanently. `ConnectUserPayout` is the caller
+   * today; the creator-side `CreatePaymentAccount` this was first written for
+   * went with `POST /payment-account` in retire-telegram Task 7's fix round.
    */
   failNextPaymentAccount = false;
   /**

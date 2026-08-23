@@ -1,24 +1,28 @@
 import { Hono } from "hono";
 import { healthRoute } from "./routes/health";
-import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
 import { postRoutes } from "./routes/posts";
 import { mediaRoutes } from "./routes/media";
-import { paymentAccountRoutes } from "./routes/payment-account";
 import { webhookRoutes } from "./routes/webhooks";
 import { mediamtxWebhookRoutes } from "./routes/mediamtx-webhooks";
 import { streamRoutes } from "./routes/streams";
 import { errorHandler } from "./http/error-handler";
-import type { AuthVariables } from "./http/auth.middleware";
+import type { UserAuthVariables } from "./http/user-auth.middleware";
 import type { Dependencies } from "./bootstrap";
 
 export function createApp(deps: Dependencies) {
-  const app = new Hono<{ Variables: AuthVariables }>();
+  const app = new Hono<{ Variables: UserAuthVariables }>();
   app.onError(errorHandler);
   app.route("/health", healthRoute(deps));
-  app.route("/auth", authRoutes(deps));
-  // Phase 9's personal accounts — distinct from creator auth above. A
-  // separate top-level path, so mount order relative to /auth does not matter.
+  // Phase 9's personal accounts. Retire-telegram Task 7's fix round deleted
+  // the `/auth` mount that used to sit directly above this one — the OLD
+  // creator login (`registerCreator`/`authenticateCreator`, the `creator`
+  // table) — along with `/payment-account`, the creator's Xendit onboarding.
+  // Task 1 deleted the dashboard that was the only caller of either, so both
+  // had been unreachable for six tasks. Their whole audience went with them:
+  // there is one token issuer left, one auth middleware, and `AuthVariables`
+  // (which carried `creatorId`) is replaced here by `UserAuthVariables`, the
+  // generic every surviving router below already used.
   //
   // TWO routers share this one prefix, deliberately (Task 2 of
   // posts-and-feed): mounting `postRoutes` here rather than growing
@@ -55,7 +59,6 @@ export function createApp(deps: Dependencies) {
   // shadow it. Mount order relative to `postRoutes` does not matter: neither
   // router declares a literal segment the other one does.
   app.route("/users", mediaRoutes(deps));
-  app.route("/payment-account", paymentAccountRoutes(deps));
   // Public by design and authenticated by X-CALLBACK-TOKEN instead of a bearer
   // token — see routes/webhooks.ts. Never put this behind requireAuth.
   app.route("/webhooks", webhookRoutes(deps));

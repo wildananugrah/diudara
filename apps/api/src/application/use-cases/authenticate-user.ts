@@ -24,8 +24,10 @@ const GENERIC_FAILURE = "invalid email or password";
  * account exist", defeating the point of throwing the same error message and
  * status for both. It is a fixed literal, not generated via a concrete
  * hasher adapter, so this use-case still depends only on
- * `PasswordHasherPort`. Copied from `AuthenticateCreator` — see that class
- * for the fuller version of this comment.
+ * `PasswordHasherPort`. It was copied from the creator `AuthenticateCreator`,
+ * which carried the fuller version of this comment; retire-telegram Task 7's
+ * fix round deleted that class with `POST /auth/login`, so the reasoning is
+ * written out in full here instead of pointed at.
  */
 const DUMMY_PASSWORD_HASH =
   "$argon2id$v=19$m=65536,t=2,p=1$mp2H4MO93kjLmqFmRPSChc1lkd95sGhDurct9QF1r1Y$AsKnl0EP46H06OJkSQAaQdESQGGIAZGMHJ+O+TSirbc";

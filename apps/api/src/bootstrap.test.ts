@@ -34,8 +34,6 @@ import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapt
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
 import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter";
-import { RegisterCreator } from "./application/use-cases/register-creator";
-import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
 import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
@@ -52,18 +50,11 @@ import type {
   PasswordResetUnitOfWorkPort,
 } from "./application/ports/password-reset-unit-of-work.port";
 import type { SignupNoticeRepositoryPort } from "./application/ports/signup-notice-repository.port";
-import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
-import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
 import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
 import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
 import { StartUserSubscription } from "./application/use-cases/start-user-subscription";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
-import { XENDIT_ACCOUNT_PROVISIONING } from "./domain/payment-account";
-import type {
-  CreatorRecord,
-  CreatorRepositoryPort,
-} from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { UserPayoutRepositoryPort } from "./application/ports/user-payout-repository.port";
 import type { UserTierRepositoryPort } from "./application/ports/user-tier-repository.port";
@@ -83,7 +74,6 @@ import type { PaymentActivationUnitOfWorkPort } from "./application/ports/paymen
 import type { UserPurchaseUnitOfWorkPort } from "./application/ports/user-purchase-unit-of-work.port";
 import type { PostWriteUnitOfWorkPort } from "./application/ports/post-write-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
-import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 
 /**
@@ -93,19 +83,19 @@ import type { PaymentProviderPort } from "./application/ports/payment-provider.p
  * and `bun run typecheck` fails. No `as` casts are allowed in this file — a cast
  * would hide exactly the regression this test exists to catch.
  *
- * `registerCreator`/`authenticateCreator`/`createPaymentAccount` are typed as the
- * concrete use-case classes (there's only one implementation of each, so no
- * port exists for them) — a class with private members can't be satisfied by
- * a plain object literal without a cast, so the fakes below construct real
- * instances of those classes wrapping hand-written fake ports instead.
+ * Most use-case fields are typed as the concrete use-case classes (there is
+ * only one implementation of each, so no port exists for them) — a class with
+ * private members can't be satisfied by a plain object literal without a cast,
+ * so the fakes below construct real instances of those classes wrapping
+ * hand-written fake ports instead.
  */
 /**
  * Task 5's delivery routes need `mediaRepository` on `Dependencies` in
  * addition to `uploadMedia`, and Task 6's post use cases take it as a
  * constructor argument. No test that builds a `Dependencies` by hand below
  * calls any of it — every use of this fake is here purely to satisfy a shape —
- * so one shared fake, reused at every call site, is enough; unlike
- * `fakeCreatorRepository` below it needs no per-test state.
+ * so one shared fake, reused at every call site, is enough — it needs no
+ * per-test state.
  */
 const fakeMediaRepository: MediaRepositoryPort = {
   async create(): Promise<never> {
@@ -131,15 +121,6 @@ const fakeMediaRepository: MediaRepositoryPort = {
   },
   async deleteIfUnclaimed() {
     return false;
-  },
-};
-
-const fakeTokenIssuer: TokenIssuerPort = {
-  async issue() {
-    return "fake.token.value";
-  },
-  async verify() {
-    return null;
   },
 };
 
@@ -515,257 +496,20 @@ const fakePaymentProvider: PaymentProviderPort = {
 };
 
 describe("Dependencies (composition root contract)", () => {
-  it("accepts a hand-written fake CreatorRepositoryPort with no casts", async () => {
-    const stored: CreatorRecord[] = [];
-
-    const fakeCreatorRepository: CreatorRepositoryPort = {
-      async create(input) {
-        const record: CreatorRecord = {
-          id: `fake-${stored.length + 1}`,
-          name: input.name,
-          whatsappNumber: input.whatsappNumber ?? null,
-          email: input.email ?? null,
-          tierPlan: "starter",
-          xenditAccountId: null,
-          createdAt: new Date(0),
-        };
-        stored.push(record);
-        return record;
-      },
-      async findById(id) {
-        return stored.find((record) => record.id === id) ?? null;
-      },
-      async findByEmail(email) {
-        return stored.find((record) => record.email === email) ?? null;
-      },
-      async findCredentialsByEmail() {
-        return null;
-      },
-      // Mirrors the real repository's three conditional UPDATEs: only the caller
-      // that finds the column EMPTY claims it, and only the caller holding the
-      // sentinel may replace or release it.
-      async beginXenditAccountProvisioning(id) {
-        const record = stored.find((r) => r.id === id);
-        if (!record || record.xenditAccountId !== null) return false;
-        record.xenditAccountId = XENDIT_ACCOUNT_PROVISIONING;
-        return true;
-      },
-      async finishXenditAccountProvisioning(id, accountId) {
-        const record = stored.find((r) => r.id === id);
-        if (!record || record.xenditAccountId !== XENDIT_ACCOUNT_PROVISIONING) return false;
-        record.xenditAccountId = accountId;
-        return true;
-      },
-      async abandonXenditAccountProvisioning(id) {
-        const record = stored.find((r) => r.id === id);
-        if (!record || record.xenditAccountId !== XENDIT_ACCOUNT_PROVISIONING) return false;
-        record.xenditAccountId = null;
-        return true;
-      },
-    };
-
-    const deps: Dependencies = {
-      creatorRepository: fakeCreatorRepository,
-      tokenIssuer: fakeTokenIssuer,
-      payments: fakePaymentProvider,
-      email: null,
-      registerCreator: new RegisterCreator(
-        fakeCreatorRepository,
-        fakePasswordHasher,
-        fakeTokenIssuer
-      ),
-      authenticateCreator: new AuthenticateCreator(
-        fakeCreatorRepository,
-        fakePasswordHasher,
-        fakeTokenIssuer
-      ),
-      userRepository: fakeUserRepository,
-      userPayoutRepository: fakeUserPayoutRepository,
-      userTierRepository: fakeUserTierRepository,
-      userTokenIssuer: fakeUserTokenIssuer,
-      registerUser: new RegisterUser(
-        fakeUserRepository,
-        fakePasswordHasher,
-        null,
-        fakeMessagingProvider,
-        fakeSignupNoticeRepository,
-        fakeClock
-      ),
-      authenticateUser: new AuthenticateUser(
-        fakeUserRepository,
-        fakePasswordHasher,
-        fakeUserTokenIssuer
-      ),
-      getUserProfile: new GetUserProfile(
-        fakeUserRepository,
-        fakeFollowRepository,
-        fakeUserTierRepository,
-        // Task 10's fourth dependency: the REAL `IsMemberOf` over the two
-        // fakes already in this file, never a stub of its own.
-        new IsMemberOf(fakeUserSubscriptionRepository, fakeClock)
-      ),
-      updateUserProfile: new UpdateUserProfile(fakeUserRepository),
-      followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
-      listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
-      exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
-      createPost: new CreatePost(fakePostWriteUnitOfWork),
-      maxPostImages: 5,
-      editPost: new EditPost(fakePostWriteUnitOfWork),
-      deletePost: new DeletePost(fakePostRepository),
-      listFeed: new ListFeed(
-        fakePostRepository,
-        fakeMediaRepository,
-        fakeUserSubscriptionRepository,
-        fakeClock
-      ),
-      listUserPosts: new ListUserPosts(
-        fakeUserRepository,
-        fakePostRepository,
-        fakeMediaRepository,
-        fakeUserSubscriptionRepository,
-        fakeClock
-      ),
-      requestPasswordReset: new RequestPasswordReset(
-        fakeUserRepository,
-        fakePasswordResetRepository,
-        null,
-        fakeMessagingProvider,
-        fakeClock,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
-      completePasswordReset: new CompletePasswordReset(
-        fakePasswordResetRepository,
-        fakePasswordHasher,
-        new FakePasswordResetUnitOfWork(),
-        fakeClock
-      ),
-      createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
-      getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
-      connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
-      getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
-      manageUserTiers: new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository),
-      startUserSubscription: new StartUserSubscription(
-        fakeUserRepository,
-        fakeUserTierRepository,
-        fakeUserPayoutRepository,
-        fakeUserSubscriptionRepository,
-        fakeUserPurchaseUnitOfWork,
-        fakePaymentProvider,
-        fakeClock,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
-      listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
-      handlePaymentWebhook: new HandlePaymentWebhook(
-        fakeUserSubscriptionRepository,
-        fakePaymentActivationUnitOfWork,
-        fakeClock
-      ),
-      messaging: { notifier: fakeMessagingProvider },
-      xenditCallbackToken: "fake-callback-token",
-      appBaseUrl: "https://app.diudara.test",
-      sql: async () => [{ one: 1 }],
-      // Task 2's streaming provider. Same reasoning: `undefined` (disabled)
-      // needs no fake adapter to satisfy the type, and these tests are not
-      // about the streaming path.
-      streamingProvider: undefined,
-      // Task 3 of Phase 7's Siaran. `startUserStream` mirrors
-      // `streamingProvider`'s undefined-ness (it needs a real one, and there is
-      // none here); the other two are never undefined on a real `Dependencies`,
-      // so they need fakes.
-      startUserStream: undefined,
-      listLiveStreams: new ListLiveStreams(
-        fakeUserStreamRepository,
-        fakeUserSubscriptionRepository,
-        fakeClock
-      ),
-      endOwnUserStream: new EndOwnUserStream(fakeUserStreamRepository, fakeClock),
-      // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`
-      // below (both need STREAM_TOKEN_SECRET, absent here).
-      mintUserWatchToken: undefined,
-      // Task 4's authorisation webhook. `authoriseStream` needs
-      // STREAM_TOKEN_SECRET, which is absent here; these tests are not about the
-      // streaming path.
-      authoriseStream: undefined,
-      mediamtxWebhookSecret: undefined,
-      // The lifecycle webhook's only remaining handler, since retire-telegram
-      // Task 3 deleted `handleStreamLifecycle` and `resolveWatchToken` beside it.
-      // Same undefined-ness reasoning as `authoriseStream`.
-      endUserStream: undefined,
-      // Phase 4's image storage. Never undefined/null in a real Dependencies —
-      // see `mediaStorage`'s own field docstring — so this needs a real fake,
-      // unlike the streaming fields just above.
-      mediaStorage: new FakeMediaStorageAdapter(),
-      // Task 4's upload endpoint. Never undefined/null either — mirrors
-      // `mediaStorage` just above. Neither of these two tests calls
-      // `uploadMedia.execute`, so its repository fake (the module-level
-      // `fakeMediaRepository`) never needs to do anything but satisfy the
-      // port's shape.
-      uploadMedia: new UploadMedia(fakeMediaRepository, new FakeMediaStorageAdapter()),
-      // Task 5's delivery routes. Same fake as `uploadMedia` above — neither
-      // test calls `mediaRepository.findById` either.
-      mediaRepository: fakeMediaRepository,
-      // Phase 6's barrier two. Built from the module-level fakes rather than
-      // `null`ed out, because this block's whole job is to prove a
-      // hand-written `Dependencies` still SATISFIES the container's type with
-      // no casts — a field that only `bootstrap()` can supply would defeat it.
-      mediaEntitlement: new MediaEntitlement(
-        fakeMediaRepository,
-        fakePostRepository,
-        fakeUserSubscriptionRepository,
-        fakeClock
-      ),
-    };
-
-    const created = await deps.creatorRepository.create({
-      name: "Fake Creator",
-      whatsappNumber: "+6281000000000",
-      email: "fake@example.com",
-    });
-
-    expect(await deps.creatorRepository.findByEmail("fake@example.com")).toEqual(created);
-    expect(await deps.creatorRepository.findById("nope")).toBeNull();
-  });
-
+  /*
+   * ONE CONTAINER TEST, NOT TWO. A sibling above this one ("accepts a
+   * hand-written fake CreatorRepositoryPort with no casts") built the same
+   * `Dependencies` literal and then round-tripped a creator through its fake
+   * repository. Retire-telegram Task 7's fix round deleted
+   * `CreatorRepositoryPort` with `/auth` and `/payment-account`, so that
+   * test's SUBJECT no longer exists and it went with it. Everything it
+   * actually guarded is guarded here: this test builds the identical literal,
+   * with no `as` casts anywhere, and then drives the real app through it.
+   */
   it("lets a fully faked Dependencies drive the app with no database", async () => {
-    const fakeCreatorRepository: CreatorRepositoryPort = {
-      async create() {
-        throw new Error("not used");
-      },
-      async findById() {
-        return null;
-      },
-      async findByEmail() {
-        return null;
-      },
-      async findCredentialsByEmail() {
-        return null;
-      },
-      async beginXenditAccountProvisioning() {
-        return false;
-      },
-      async finishXenditAccountProvisioning() {
-        return false;
-      },
-      async abandonXenditAccountProvisioning() {
-        return false;
-      },
-    };
-
     const deps: Dependencies = {
-      creatorRepository: fakeCreatorRepository,
-      tokenIssuer: fakeTokenIssuer,
       payments: fakePaymentProvider,
       email: null,
-      registerCreator: new RegisterCreator(
-        fakeCreatorRepository,
-        fakePasswordHasher,
-        fakeTokenIssuer
-      ),
-      authenticateCreator: new AuthenticateCreator(
-        fakeCreatorRepository,
-        fakePasswordHasher,
-        fakeTokenIssuer
-      ),
       userRepository: fakeUserRepository,
       userPayoutRepository: fakeUserPayoutRepository,
       userTierRepository: fakeUserTierRepository,
@@ -826,8 +570,6 @@ describe("Dependencies (composition root contract)", () => {
         new FakePasswordResetUnitOfWork(),
         fakeClock
       ),
-      createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
-      getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
       connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
       getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
       manageUserTiers: new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository),
@@ -1302,8 +1044,8 @@ describe("selectPaymentProvider", () => {
   // NEGATIVE assertion is the one that matters here, not just the `null`: a
   // future "helpful" fallback to the fake adapter must not satisfy this test
   // (see the CRITICAL comment above this describe block's predecessor tests
-  // — `FakePaymentAdapter` writes unrecoverable `fake-acct-*` ids into
-  // `creator.xendit_account_id`).
+  // — `FakePaymentAdapter` writes unrecoverable `fake-acct-*` ids into the
+  // payout column `ConnectUserPayout` provisions).
   it("disables payments (returns null, never the fake adapter) in production with no Xendit configuration", () => {
     const logs = captureConsoleLog(() => {
       const provider = selectPaymentProvider({
@@ -1501,13 +1243,14 @@ describe("bootstrap() payment provider selection", () => {
             }).not.toThrow();
             expect(deps!.payments).toBeNull();
             expect(deps!.payments).not.toBeInstanceOf(FakePaymentAdapter);
-            // The two money use cases this root still builds. `startCheckout` used
-            // to be a third; retire-telegram Task 4 deleted the community checkout
-            // it opened. Both must be UNCONSTRUCTED, not merely unreachable — see
+            // The two money use cases this root still builds. There were four:
+            // retire-telegram Task 4 deleted `startCheckout` with the community
+            // checkout it opened, and Task 7's fix round deleted
+            // `createPaymentAccount` with `POST /payment-account`. Both of the
+            // survivors must be UNCONSTRUCTED, not merely unreachable — see
             // each field's own docstring on `Dependencies`.
             expect(deps!.startUserSubscription).toBeUndefined();
             expect(deps!.connectUserPayout).toBeUndefined();
-            expect(deps!.createPaymentAccount).toBeUndefined();
             expect(deps!.xenditCallbackToken).toBeUndefined();
           });
         }
