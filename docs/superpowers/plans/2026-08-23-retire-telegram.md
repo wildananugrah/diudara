@@ -336,6 +336,21 @@ git add -A && git commit -m "refactor(api): one namespace, still an allow-list"
 - Modify: `apps/api/src/domain/user-watch-token.ts` (drop the duplication note now `watch-token.ts` is gone)
 - Modify: `CONTRIBUTING.md` — its "Live streaming" section describes the community flow, which is gone by Task 6. Task 3 flagged it and correctly did not touch prose it did not own; **this task owns it.**
 
+**A dangling-reference sweep, gathered from three task reviews.** Each is a live reference to something
+already deleted, and none had an owner:
+
+- `apps/web/vite.config.ts:82` still proxies the deleted `/streaming`. `vite-proxy-coverage.test.ts`
+  only checks the forward direction, so **nothing reddens** — fix the test's blind spot too, or say why
+  not.
+- `infra/nginx/whip-proxy-test/run-dashboard.sh:134,137` hard-gates on `GET /streaming/status`. This is
+  **executable, not a comment**: it now always fails with "apps/api never came up".
+- `apps/web/src/user/SiaranPage.test.tsx:12` names the deleted `GET /c/watch/:token`.
+- `get-subscription-status.ts:45` carries the repo's **only** `eslint-disable` comment, and this
+  project has no ESLint at all.
+- `DrizzleOutboxRepository.enqueueMany` is now uncalled **and** untested — its only real-database
+  coverage went with `drizzle-stream-lifecycle.unit-of-work.test.ts`. Decide: delete it, or restore
+  coverage and say why it stays.
+
 **`activity_log` itself is untouched** — the table stays this phase, so only its old-world writers go. Whether the new world should keep writing it belongs to the follow-up that drops the tables.
 
 **The rename is why this is a task and not a footnote.** Phase 6 deferred it explicitly: `CreatePost` uses a port named `Edit`, and the fix "should be its own reviewable commit rather than buried in a fix diff at the tail of a phase." This is that commit.
