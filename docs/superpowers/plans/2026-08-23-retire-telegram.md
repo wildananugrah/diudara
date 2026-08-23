@@ -174,6 +174,21 @@ git add -A && git commit -m "chore(api): delete the community streaming stack"
   There is **no `checkout.ts`** — the community checkout lives in the `StartCheckout` use case, reached
   through `public-subscription.ts`; delete the use case, not a route that does not exist.
 - Delete: their use cases, ports and drizzle repositories
+
+**Task 2's review left two defects here deliberately, and this task is where they die.** Both live in
+old-world code that would be pointless to repair a task before deleting — **but if either survives this
+task, it ships as a real defect**, so both are binding:
+
+1. **`DrizzleSubscriptionRepository` (and its `markPaid`) must be gone.** Task 2 deleted
+   `renewal-payment.test.ts`, which held the only coverage of four `markPaid` behaviours — proven by
+   mutation: breaking all four at once leaves the api suite fully green. That gap is acceptable **only
+   because the code dies here.**
+2. **`GetPublicCommunity` and the `/c/:slug` route must be gone.** Its `joinPathExists` still reasons
+   that `POST /c/:slug/join-request` "is registered unconditionally" — Task 2 deleted it — so the route
+   currently reports `acceptingNewMembers: true` for a request-mode community with **no join path**,
+   a state the community spec forbids, and `get-public-community.test.ts:176` pins that wrong answer.
+
+**State in your report that both are deleted**, and name the tests that went with them.
 - Delete: `apps/api/src/application/use-cases/{process-renewals,process-churn}.ts`
 - Modify: `apps/api/src/app.ts`, `bootstrap.ts`, `bootstrap.test.ts`, `apps/worker/src/main.ts`, `apps/worker/src/scheduled-passes.ts`
 
