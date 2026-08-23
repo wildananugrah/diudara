@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import SiaranPage from "./SiaranPage";
 import type { AttachHlsInput, StreamPlayerHandle } from "./StreamPlayer";
@@ -666,17 +666,29 @@ describe("SiaranPage — Akhiri siaran survives a reload (I2)", () => {
    * dismissed.
    */
   it("stays ended after Akhiri siaran, even though the stale listing still lists the row", async () => {
-    mockReload([OWN_LIVE_STREAM]);
+    const calls = mockReload([OWN_LIVE_STREAM]);
     await renderReloaded([OWN_LIVE_STREAM]);
 
     fireEvent.click(await screen.findByRole("button", { name: "Akhiri siaran" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.url === "/streams/stream-mine" && c.init?.method === "DELETE")).toBe(
+        true
+      )
+    );
 
-    await waitFor(() =>
-      expect(screen.queryAllByRole("button", { name: "Mulai siaran" }).length).toBe(1)
-    );
-    await waitFor(() =>
-      expect(screen.queryAllByRole("button", { name: "Akhiri siaran" }).length).toBe(0)
-    );
+    // **SETTLED STATE, NOT A POLLED ONE.** `waitFor` alone was NOT enough
+    // here, and finding that out is the reason this comment exists: with the
+    // `endedIdsRef` guard deleted, the re-adoption happens one effect pass
+    // AFTER the panel closes, so a polling `waitFor("Mulai siaran")` catches
+    // the transient form and reports green against a component that has
+    // already put the panel back. Flushing every pending effect first and
+    // then asserting ONCE, synchronously, is what actually pins this.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryAllByRole("button", { name: "Akhiri siaran" }).length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: "Mulai siaran" }).length).toBe(1);
   });
 });
 
@@ -713,3 +725,4 @@ describe("SiaranPage — POST /streams 409s when a stream is already running", (
     expect(alert.textContent).not.toContain("sudah ada siaran yang sedang berlangsung");
   });
 });
+
