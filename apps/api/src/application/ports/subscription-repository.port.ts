@@ -175,6 +175,34 @@ export type MarkPaidOutcome =
  * migration constraint forbids hand-written SQL). Every method here that
  * updates either table MUST set `updatedAt: new Date()` explicitly, or the
  * column silently freezes at creation time.
+ *
+ * **THIRTEEN OF THE SIXTEEN METHODS BELOW HAVE NO PRODUCTION CALLER**, since
+ * retire-telegram Task 4 deleted `StartCheckout`, `GetSubscriptionStatus`,
+ * `ProcessRenewals`, `ProcessChurn` and `SendRenewalReminder`. Exactly three
+ * are still called, and both callers are seams another task owns:
+ *
+ *   `findTransactionByExternalId`  handle-payment-webhook.ts:403  (Task 5)
+ *   `markPaid`                     handle-payment-webhook.ts:486  (Task 5)
+ *   `findByIdWithCommunity`        authorise-stream.ts:613        (Task 6)
+ *
+ * The other thirteen — `createPending`, `createActiveWithoutBilling`,
+ * `findCurrentSubscriptionForTier`, `findById`, `createTransaction`,
+ * `attachGatewayReference`, `findDueForRenewal`, `markPastDue`,
+ * `findPastGraceDeadline`, `markChurned`, `hasLiveSubscriptionInCommunity`,
+ * `findRenewalContext`, `listActiveForCommunity` — are dead and are KEPT AS A
+ * SET, deliberately. Task 4 could not delete this port or
+ * `DrizzleSubscriptionRepository` without editing those two seams (removing the
+ * implementation file yields exactly two production typecheck errors,
+ * `bootstrap.ts` and `drizzle-payment-activation.unit-of-work.ts`), so the whole
+ * file dies at Task 5 instead. Trimming an arbitrary subset first would delete
+ * working, repository-tested code one task before the rest of it goes, and would
+ * imply by omission that whatever survived the trim still had a caller. Nothing
+ * here does except the three named above.
+ *
+ * DO NOT read "no caller" as "safe to change": every one of these is still
+ * covered by `drizzle-subscription.repository.test.ts` against a real database,
+ * and `markPaid` in particular has four behaviours whose only integration
+ * coverage Task 2 deleted with `renewal-payment.test.ts`.
  */
 export interface SubscriptionRepositoryPort {
   createPending(input: { memberId: string; tierId: string }): Promise<SubscriptionRecord>;

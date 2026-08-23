@@ -36,8 +36,10 @@ export function paymentAccountRoutes(
     // `undefined` EXACTLY when this box has no payment provider at all — see
     // `createPaymentAccount`'s own docstring on `Dependencies`. Same 503, not
     // a 500: this box is fine, there is just nothing to connect a creator's
-    // account to (`routes/ai.ts`'s `sendAiMessage` guard is the model this
-    // mirrors).
+    // account to. `POST /users/me/payout` and `POST /users/:handle/subscribe`
+    // make the same check with the same wording; `routes/ai.ts`'s
+    // `sendAiMessage` guard was the original model, and went with the
+    // co-builder in retire-telegram Task 4.
     if (!deps.createPaymentAccount) {
       throw new ServiceUnavailableError("pembayaran belum dikonfigurasi di server ini.");
     }

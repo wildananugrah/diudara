@@ -6,18 +6,21 @@
  * inside its own transaction and returns, and this process claims those rows and
  * performs the effects OUTSIDE any transaction, because an effect is an external HTTP
  * call and a provider outage must delay it, never roll back the payment that caused it
- * (plan, Global Constraints). Retire-telegram removed every handler that used to sit
+ * (plan, Global Constraints). Retire-telegram removed every HANDLER that used to sit
  * at the far end of that queue — the Telegram invite Phase 4 built it for, and Task
- * 4's renewal reminder last of all — so nothing enqueues today. See `bootstrapWorker`.
+ * 4's renewal reminder last of all — but NOT every writer:
+ * `handle-payment-webhook.ts:640` still enqueues `grant_access` on an activated
+ * community payment, and removing that writer is Task 5's. See `bootstrapWorker`.
  *
  * It runs SIX loops, on two cadences:
  *
  *   - the OUTBOX, every 5 seconds, because that interval is the delay a paying member
  *     sees between their payment settling and whatever the row promised them arriving.
  *     Retire-telegram Task 4 removed the last registered handler, so the map this loop
- *     dispatches through is EMPTY today (see `bootstrapWorker`) — the loop stays
- *     because the table and its claim/retry machinery stay, and because a row of an
- *     unregistered type must fail loudly rather than sit unclaimed;
+ *     dispatches through is EMPTY today — while a live writer remains (see
+ *     `bootstrapWorker`). The loop stays BECAUSE of that writer, not despite the empty
+ *     map: it is what makes an unhandleable row fail loudly instead of sitting
+ *     `pending` and unread;
  *   - the orphan MEDIA SWEEP, the MEMBERSHIP SWEEP, the MEMBERSHIP REMINDER pass, the
  *     PENDING-CHECKOUT CLEANUP and the USER-STREAM SWEEP, hourly. None is
  *     latency-sensitive the way the outbox is, and in every case the pass's OWN window

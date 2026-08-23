@@ -25,9 +25,15 @@ export interface WorkerDependencies {
    * The outbox dispatcher. It claims rows and hands each to a registered handler
    * — and since retire-telegram Task 4 deleted `ProcessRenewals` and
    * `SendRenewalReminder`, THE HANDLER MAP IS EMPTY (see `bootstrapWorker`).
-   * The dispatcher is kept deliberately: it is the mechanism the outbox table
-   * exists for, nothing in the new world enqueues yet, and a row of any type
-   * fails loudly with "no handler is registered" rather than sitting unclaimed.
+   *
+   * THE QUEUE STILL HAS A WRITER, and that — not its absence — is why this pass
+   * is kept. `handle-payment-webhook.ts:640` enqueues `grant_access` on every
+   * activated COMMUNITY payment, inside the activation's own transaction; Task 2
+   * deleted that type's handler and Task 5 deletes the writer, so between those
+   * two tasks every such row is claimed, fails "no handler is registered", and
+   * retries to permanent failure. Losing the dispatcher would not stop the write
+   * — it would leave those rows unclaimed and SILENT instead of failing loudly,
+   * which is strictly worse. See `bootstrapWorker`.
    */
   processOutbox: ProcessOutbox;
   /**
@@ -105,16 +111,26 @@ export function bootstrapWorker(): WorkerDependencies {
   // removed the last one, `send_renewal_reminder`, with `SendRenewalReminder`
   // and the `ProcessRenewals` pass that was its only writer.
   //
-  // Nothing in the surviving world enqueues an outbox row today: the user
-  // membership reminder is a SCHEDULED pass that sends directly
-  // (`RemindExpiringMembership`), not a queued one. The dispatcher stays because
-  // the table and its claim/retry machinery stay, and because a row of an
-  // unknown type must fail loudly rather than sit unclaimed.
+  // AN EMPTY MAP IS NOT AN EMPTY QUEUE, and getting that the wrong way round is
+  // how the writer below gets deleted without anyone checking what it fed.
+  // `handle-payment-webhook.ts:640` STILL ENQUEUES `grant_access` — the same
+  // type Task 2 unregistered — on every activated community payment, written
+  // inside the activation's own transaction. That writer is Task 5's to remove,
+  // not Task 4's, so today the queue has exactly one live writer and no handler
+  // for what it writes. (The user world's own membership reminder is NOT a
+  // second writer: `RemindExpiringMembership` is a scheduled pass that sends
+  // directly.)
   //
-  // An unregistered type is NOT silent: `ProcessOutbox` fails the row (bounded
-  // retry, then permanent) with "no handler is registered", which is what
-  // `worker-bootstrap.test.ts` asserts on — and with an empty map that is now
-  // the outcome for EVERY type.
+  // SO THE DISPATCHER STAYS BECAUSE SOMETHING WRITES, not because nothing does.
+  // An unregistered type is NOT silent: `ProcessOutbox` claims the row and fails
+  // it (bounded retry, then permanent) with "no handler is registered", which is
+  // what `worker-bootstrap.test.ts` asserts on — and with an empty map that is
+  // now the outcome for EVERY type. Remove this pass and those rows would sit
+  // `pending` and unread instead, which is the same money-taken-nothing-happened
+  // state with the alarm switched off. The consequence is pre-existing and
+  // accepted (Task 2's review recorded it: a doomed row cannot fail the pass,
+  // abort the batch or poison a sibling, and the enqueue commits, so the money
+  // side is untouched) and it ends when Task 5 removes the branch.
   const handlers = new Map<string, OutboxHandler>();
   // Task 4 of Phase 5b: reminding a member BEFORE their membership ends. Selected
   // through the SAME allowlist the API root uses, and it may legitimately be `null` —

@@ -26,10 +26,11 @@ import { DEFAULT_EXPLORE_LIMIT } from "../application/use-cases/explore-users";
 import type { Dependencies } from "../bootstrap";
 
 /**
- * Largest page a caller may ask for — same shape as `routes/analytics.ts`'s
- * `MAX_PAGE_LIMIT`, and for the same reason: a REFUSAL rather than a silent
- * clamp, so a client asking for more than this can tell "you get 100" from
- * "that was a malformed request".
+ * Largest page a caller may ask for. A REFUSAL rather than a silent clamp, so a
+ * client asking for more than this can tell "you get 100" from "that was a
+ * malformed request". (This rule was shared with `routes/analytics.ts`'s
+ * `MAX_PAGE_LIMIT`, which retire-telegram Task 4 deleted; the reasoning is
+ * spelled out here now rather than borrowed from a file that is gone.)
  */
 const MAX_FOLLOW_LIST_LIMIT = 100;
 
@@ -37,7 +38,7 @@ const followListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(MAX_FOLLOW_LIST_LIMIT).optional(),
 });
 
-/** `?limit=` for the follower/following lists, parsed and defaulted — mirrors `routes/analytics.ts`'s `parsePageQuery`. */
+/** `?limit=` for the follower/following lists, parsed and defaulted against `MAX_FOLLOW_LIST_LIMIT` above. */
 function parseFollowListLimit(raw: string | undefined): number {
   const parsed = followListQuerySchema.safeParse({
     // Omitted rather than passed as `undefined`-from-empty-string: `?limit=`
@@ -220,8 +221,9 @@ export function clientIp(c: Context): string | null {
  * profile without authenticating, by design (spec §3.2) — but
  * `GET /users/me` and `PATCH /users/me` are behind `requireUserAuth`, applied
  * per-route rather than via `app.use("*", ...)` so it never accidentally
- * guards signup/login/by-handle too (the same reason `routes/analytics.ts`
- * mounts `requireAuth` per-route instead of on `"*"`).
+ * guards signup/login/by-handle too. (`routes/analytics.ts` mounted
+ * `requireAuth` per-route for the same reason — a `*` under its prefix also
+ * matched the prefix itself — until retire-telegram Task 4 deleted it.)
  *
  * Task 2 (profiles and following) adds four more: `POST`/`DELETE
  * /:handle/follow` (behind `requireUserAuth` — following requires a session)
@@ -372,9 +374,10 @@ export function userRoutes(
 
   /**
    * Task 4 of Phase 5a. Pengaturan's tier editor: what a creator sells on
-   * their OWN profile, distinct from `/dashboard/*`'s community tiers
-   * (`routes/tiers.ts`, table `membership_tier`) — see `ManageUserTiers`'s
-   * own docstring.
+   * their OWN profile, over `user_tier`. It was once one of two tier surfaces —
+   * `routes/tiers.ts` served `/dashboard/*`'s community tiers over
+   * `membership_tier` — and retire-telegram Task 4 deleted that one, so this is
+   * the only tier editor left. See `ManageUserTiers`'s own docstring.
    *
    * Static segments (`me/tiers`, `me/tiers/:tierId`), like `me/payout` above
    * — nothing a handle could ever shadow, since `me` is 2 characters and
@@ -530,8 +533,10 @@ export function userRoutes(
   app.post<"/:handle/subscribe">("/:handle/subscribe", requireAuth, async (c) => {
     // `undefined` EXACTLY when this box has no payment provider at all — same
     // 503 and the same wording as `POST /users/me/payout` above. The route stays
-    // registered either way, unlike `/c/:slug/checkout`, so a buyer is told why
-    // rather than getting the 404 of a path that does not exist.
+    // registered either way, so a buyer is told WHY rather than getting the 404
+    // of a path that does not exist. (The community checkout made the opposite
+    // choice — `/c/:slug/checkout` was not registered at all on such a box — and
+    // retire-telegram Task 4 deleted it, so this shape is now the only one.)
     if (!deps.startUserSubscription) {
       throw new ServiceUnavailableError("pembayaran belum dikonfigurasi di server ini.");
     }

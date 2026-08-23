@@ -243,8 +243,10 @@ export interface Dependencies {
    * mirrors `sendAiMessage`'s undefined-ness: there is no `PaymentProviderPort`
    * to construct this against when payments are disabled, so connecting a
    * creator to one makes no sense on this box. `routes/payment-account.ts`
-   * checks this the same way `routes/ai.ts` checks `sendAiMessage` and answers
-   * 503 rather than crashing on a null provider it was never handed.
+   * checks this and answers 503 rather than crashing on a null provider it was
+   * never handed — the shape `routes/ai.ts` established for `sendAiMessage`
+   * before retire-telegram Task 4 deleted it, and that `POST /users/me/payout`
+   * and `POST /users/:handle/subscribe` still follow.
    */
   createPaymentAccount: CreatePaymentAccount | undefined;
   /**

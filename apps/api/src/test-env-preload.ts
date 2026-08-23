@@ -105,7 +105,7 @@ if (!process.env.DATABASE_URL) {
  * `bun test` auto-loads that file — which means EVERY bare `bootstrap()`
  * call in EVERY test file (not just the ones that test streaming) is
  * exposed to it: `routes/health.test.ts`'s `createApp(bootstrap())`,
- * `routes/auth.test.ts`, `routes/tiers.test.ts`, and roughly a dozen more,
+ * `routes/auth.test.ts`, `routes/posts.test.ts`, and roughly a dozen more,
  * none of which set up or care about streaming at all.
  *
  * A `beforeEach` inside one test file was tried first and was not enough —

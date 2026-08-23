@@ -111,9 +111,8 @@ export { DEFAULT_FOLLOW_LIST_LIMIT };
  * wider here for a spread to leak.
  *
  * `limit` is resolved by the caller (the route), which owns the "defaults to
- * 50, capped at 100" contract the same way `routes/analytics.ts`'s
- * `parsePageQuery` owns its own page size — this class only forwards
- * whatever positive integer it is given. `FollowRepositoryPort.listFollowers`
+ * 50, capped at 100" contract — see `parseFollowListLimit` in `routes/users.ts`.
+ * This class only forwards whatever positive integer it is given. `FollowRepositoryPort.listFollowers`
  * /`listFollowing` still clamp a non-positive or non-finite value to zero
  * rows as their OWN backstop; that is not duplicated here.
  *
