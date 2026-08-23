@@ -366,7 +366,19 @@ already deleted, and none had an owner:
   may have left) is real but thin. **What matters is that this is tracked rather than deferred onward
   by comment**: either retire `processOutbox`, `enqueueMany` and the `outbox` table together here, or
   record the decision in the ledger naming exactly what goes together and when.
-- **Stale comments naming deleted things**, found by Task 5's review and not yet owned:
+- **`StreamNamespace` still declares `"live" | "u"`.** Task 6 removed `live/` from the authoriser's
+  allow-list but left the *construction* side's type wider than the *authorisation* side accepts. It
+  fails **closed** — a `live/` publish is refused — but at runtime rather than at compile time, and the
+  port's docstring used to claim the two matched. Narrow it to `"u"`, or say why the wider type earns
+  its place.
+- **`infra/nginx/live-hls.conf.template` still carries `^~ /live/` and `^~ /whip/` blocks.** Task 6
+  left them deliberately: they fail closed (403), an nginx change cannot be verified under this
+  project's no-server constraint, and the surviving `/u/` blocks' location-precedence comments are
+  written in terms of `/live/` existing. **Decide it here**: remove both blocks and rewrite the
+  precedence reasoning, or record why dead config stays. Whatever you choose, the gate checklist must
+  say which.
+- **Stale comments naming deleted things**, found by Task 5's and Task 6's reviews and not yet owned,
+  now including `CONTRIBUTING.md:413`'s `X-Mtx-Event-Id` contract:
   `.env.example`'s `WORKER_POLL_INTERVAL_MS` still calls the interval "the delay before their invite
   arrives"; `outbox-repository.port.ts:4` names `HandlePaymentWebhook` as "the writer";
   `billing-cycle.ts:60` points at the deleted `renewalAnchor`. **`schema.ts` stays untouched** — its
