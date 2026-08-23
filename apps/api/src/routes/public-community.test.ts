@@ -152,8 +152,21 @@ describe("GET /c/:slug", () => {
   });
 });
 
-describe("POST /c/:slug/join-request", () => {
-  it("returns 201 with a joinRequestId for a free community", async () => {
+/**
+ * Retire-telegram Task 2 replaced two whole blocks here — nine tests across
+ * `POST /c/:slug/join-request` and `GET /c/:slug/request/:joinRequestId` — with
+ * these two. Both routes went with `RequestToJoin`/`GetJoinRequestStatus`, which
+ * went with the join-request repository and unit of work.
+ *
+ * The blocks are replaced rather than simply deleted because `/c/:slug` — the
+ * public community read this file's first block covers — is still mounted at the
+ * same prefix, and `publicSubscriptionRoutes` is mounted at `/c` too. A route that
+ * is "gone" but is really being absorbed by a sibling handler on the same prefix is
+ * exactly the state a deletion can leave behind, and only a request can tell the
+ * difference.
+ */
+describe("the join-request routes are gone from /c", () => {
+  it("no longer accepts POST /c/:slug/join-request", async () => {
     const a = app();
     const { community, tier } = await seedFreeCommunity(a);
 
@@ -166,141 +179,25 @@ describe("POST /c/:slug/join-request", () => {
         payerWhatsappNumber: "+6281234567890",
       }),
     });
-    expect(res.status).toBe(201);
 
-    const body = await res.json();
-    expect(typeof body.joinRequestId).toBe("string");
-    expect(body.joinRequestId.length).toBeGreaterThan(0);
-  });
-
-  // THE guard this whole phase exists for: a `paid` community must never
-  // accept a free join, whatever this deployment's payment configuration is.
-  it("returns 404 for a paid community", async () => {
-    const a = app();
-    const { community, tier } = await seedCommunity(a);
-
-    const res = await a.request(`/c/${community.slug}/join-request`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tierId: tier.id,
-        payerName: "Siti",
-        payerWhatsappNumber: "+6281234567890",
-      }),
-    });
+    // 404, and — the part a status alone would not prove — nothing was written:
+    // no join request, and no `notify_join_request` row for a worker that has no
+    // handler for one any more.
     expect(res.status).toBe(404);
-  });
-
-  it("returns 409 for a second pending request from the same WhatsApp number", async () => {
-    const a = app();
-    const { community, tier } = await seedFreeCommunity(a);
-    const payload = JSON.stringify({
-      tierId: tier.id,
-      payerName: "Siti",
-      payerWhatsappNumber: "+6281234567890",
-    });
-
-    const first = await a.request(`/c/${community.slug}/join-request`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload,
-    });
-    expect(first.status).toBe(201);
-
-    const second = await a.request(`/c/${community.slug}/join-request`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload,
-    });
-    expect(second.status).toBe(409);
-
-    // THE assertion the brief calls out explicitly: the refused duplicate
-    // must enqueue NO outbox row. An orphaned `notify_join_request` for a
-    // request that does not exist would tell the owner about something they
-    // can never find — only the FIRST request's row may exist.
     const notifyRows = await db
       .select()
       .from(outbox)
       .where(eq(outbox.eventType, "notify_join_request"));
-    expect(notifyRows).toHaveLength(1);
+    expect(notifyRows).toHaveLength(0);
   });
 
-  it("returns 400 for an invalid body, mirroring startCheckoutSchema's own rejections", async () => {
-    const a = app();
-    const { community, tier } = await seedFreeCommunity(a);
-
-    const res = await a.request(`/c/${community.slug}/join-request`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tierId: tier.id, payerName: "", payerWhatsappNumber: "123" }),
-    });
-    expect(res.status).toBe(400);
-  });
-});
-
-describe("GET /c/:slug/request/:joinRequestId", () => {
-  it("returns the pending status without a name or WhatsApp number", async () => {
-    const a = app();
-    const { community, tier } = await seedFreeCommunity(a);
-
-    const created = await (
-      await a.request(`/c/${community.slug}/join-request`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tierId: tier.id,
-          payerName: "Siti",
-          payerWhatsappNumber: "+6281234567890",
-        }),
-      })
-    ).json();
-
-    const res = await a.request(`/c/${community.slug}/request/${created.joinRequestId}`);
-    expect(res.status).toBe(200);
-
-    const body = await res.json();
-    expect(body.status).toBe("pending");
-    expect(body.communitySlug).toBe(community.slug);
-    expect(body.subscriptionId).toBeNull();
-
-    // THE assertion that matters: this URL is guessable, exactly like the
-    // subscription status URL, and must never become a lookup for who joined
-    // what.
-    expect(Object.keys(body).sort()).toEqual(["communitySlug", "status", "subscriptionId"]);
-    const text = JSON.stringify(body);
-    expect(text).not.toContain("Siti");
-    expect(text).not.toContain("+6281234567890");
-    expect(text).not.toContain("6281234567890");
-  });
-
-  it("returns 404 for an unknown joinRequestId", async () => {
+  it("no longer serves GET /c/:slug/request/:joinRequestId", async () => {
     const a = app();
     const { community } = await seedFreeCommunity(a);
 
     const res = await a.request(
       `/c/${community.slug}/request/00000000-0000-0000-0000-000000000000`
     );
-    expect(res.status).toBe(404);
-  });
-
-  it("returns 404 when the joinRequestId belongs to a different community's slug", async () => {
-    const a = app();
-    const { community: communityA, tier: tierA } = await seedFreeCommunity(a);
-    const { community: communityB } = await seedFreeCommunity(a);
-
-    const created = await (
-      await a.request(`/c/${communityA.slug}/join-request`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tierId: tierA.id,
-          payerName: "Siti",
-          payerWhatsappNumber: "+6281234567890",
-        }),
-      })
-    ).json();
-
-    const res = await a.request(`/c/${communityB.slug}/request/${created.joinRequestId}`);
     expect(res.status).toBe(404);
   });
 });
@@ -371,9 +268,7 @@ describe("POST /c/:slug/checkout, payments disabled", () => {
         XENDIT_SECRET_KEY: undefined,
         XENDIT_SPLIT_RULE_ID: undefined,
         XENDIT_CALLBACK_TOKEN: undefined,
-        TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
         FONNTE_API_TOKEN: "real-fonnte-token",
-        TELEGRAM_WEBHOOK_SECRET: "tg_" + "S".repeat(40),
         // Task 2 (images): selectMediaStorage now block-boots NODE_ENV=production
         // with no S3 vars set — fully configured here so this test stays isolated
         // to the payments dimension, same reasoning as the messaging tokens above.
@@ -434,9 +329,7 @@ describe("GET /c/:slug, payments disabled", () => {
         XENDIT_SECRET_KEY: undefined,
         XENDIT_SPLIT_RULE_ID: undefined,
         XENDIT_CALLBACK_TOKEN: undefined,
-        TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
         FONNTE_API_TOKEN: "real-fonnte-token",
-        TELEGRAM_WEBHOOK_SECRET: "tg_" + "S".repeat(40),
         // Task 2 (images): selectMediaStorage now block-boots NODE_ENV=production
         // with no S3 vars set — fully configured here so this test stays isolated
         // to the payments dimension, same reasoning as the messaging tokens above.
@@ -472,9 +365,7 @@ describe("GET /c/:slug, payments disabled", () => {
         XENDIT_SECRET_KEY: undefined,
         XENDIT_SPLIT_RULE_ID: undefined,
         XENDIT_CALLBACK_TOKEN: undefined,
-        TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
         FONNTE_API_TOKEN: "real-fonnte-token",
-        TELEGRAM_WEBHOOK_SECRET: "tg_" + "S".repeat(40),
         // Task 2 (images): selectMediaStorage now block-boots NODE_ENV=production
         // with no S3 vars set — fully configured here so this test stays isolated
         // to the payments dimension, same reasoning as the messaging tokens above.

@@ -2,12 +2,9 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { eq } from "drizzle-orm";
 import { db } from "./db/client";
 import {
-  channelMemberships,
-  channels,
   communities,
   creators,
   events,
-  joinRequests,
   members,
   membershipTiers,
   appUsers,
@@ -89,59 +86,6 @@ async function seedPastDueMember(slug: string) {
     .returning();
   await db.insert(renewalReminders).values({ subscriptionId: subscription.id, stage: "due" });
   return { community, member, subscription };
-}
-
-/**
- * A member whose subscription the churn pass has just ended, still holding the Telegram
- * access it paid for — i.e. exactly what `ProcessChurn` enqueues a
- * `revoke_subscription_access` row for.
- */
-async function seedChurnedMemberWithAccess() {
-  const [creator] = await db.insert(creators).values({ name: "Rina" }).returning();
-  const [community] = await db
-    .insert(communities)
-    .values({ creatorId: creator.id, name: "Kelas Rina", slug: `kelas-churn-${Date.now()}` })
-    .returning();
-  const [tier] = await db
-    .insert(membershipTiers)
-    .values({
-      communityId: community.id,
-      name: "Basic",
-      priceAmount: 50_000,
-      billingCycle: "monthly",
-    })
-    .returning();
-  const [member] = await db
-    .insert(members)
-    .values({ whatsappNumber: `+6281391${Date.now() % 100000}`, name: "Siti" })
-    .returning();
-  const [channel] = await db
-    .insert(channels)
-    .values({
-      communityId: community.id,
-      platform: "telegram",
-      externalGroupId: `-100${Date.now()}`,
-    })
-    .returning();
-  await db.insert(channelMemberships).values({
-    memberId: member.id,
-    channelId: channel.id,
-    inviteLink: `https://t.me/+churn-${Date.now()}`,
-    // What POST /webhooks/telegram records when the member joins, and the only thing
-    // `banChatMember` can be aimed at.
-    externalMemberId: "987654321",
-  });
-  const [subscription] = await db
-    .insert(subscriptions)
-    .values({
-      memberId: member.id,
-      tierId: tier.id,
-      status: "churned",
-      nextBillingDate: "2026-03-10",
-      graceEndsAt: new Date("2026-03-17T00:00:00.000Z"),
-    })
-    .returning();
-  return { community, member, channel, subscription };
 }
 
 /**
@@ -258,55 +202,6 @@ async function seedLiveEventWithActiveMember() {
 }
 
 /**
- * A creator with a real WhatsApp number → free community → tier → member →
- * pending join request — the minimum `NotifyJoinRequest` (Task 5) needs to
- * send exactly one WhatsApp message to the OWNER.
- */
-async function seedPendingJoinRequest() {
-  const [creator] = await db
-    .insert(creators)
-    .values({ name: "Rina", whatsappNumber: `+6281395${Date.now() % 100000}` })
-    .returning();
-  const [community] = await db
-    .insert(communities)
-    .values({
-      creatorId: creator.id,
-      name: "Kelas Rina",
-      slug: `kelas-join-${Date.now()}`,
-      accessMode: "request",
-    })
-    .returning();
-  const [tier] = await db
-    .insert(membershipTiers)
-    .values({ communityId: community.id, name: "Free", priceAmount: 0, billingCycle: "monthly" })
-    .returning();
-  const [member] = await db
-    .insert(members)
-    .values({ whatsappNumber: `+6281396${Date.now() % 100000}`, name: "Siti" })
-    .returning();
-  const [request] = await db
-    .insert(joinRequests)
-    .values({ communityId: community.id, tierId: tier.id, memberId: member.id })
-    .returning();
-  return { creator, community, tier, member, request };
-}
-
-/**
- * A gating adapter this root selected, narrowed to the fake. An `instanceof` check
- * rather than a cast, for the same reason as `fakeNotifierOf`.
- */
-function fakeGatingOf(
-  worker: ReturnType<typeof bootstrapWorker>,
-  platform: string
-): FakeMessagingAdapter {
-  const provider = worker.messaging.gating.get(platform);
-  if (!(provider instanceof FakeMessagingAdapter)) {
-    throw new Error(`expected the worker to select FakeMessagingAdapter for ${platform}`);
-  }
-  return provider;
-}
-
-/**
  * The notifier this root selected, narrowed to the fake so its recorded sends can be
  * read. An `instanceof` check rather than a cast: this file forbids casts for the same
  * reason bootstrap.test.ts does, and the check itself is worth making — under
@@ -376,56 +271,6 @@ async function seedMembershipEndingInDays(days: number) {
 }
 
 describe("bootstrapWorker", () => {
-  it("dispatches a real grant_access row to GrantChannelAccess, not to nothing", async () => {
-    const repository = new DrizzleOutboxRepository(db);
-    // A well-formed payload for a subscription that does not exist: it reaches
-    // the use-case and fails THERE. The point is which error comes back — an
-    // unwired handler would say "no handler is registered", which is the
-    // failure mode this test exists to catch.
-    const { id } = await repository.enqueue({
-      eventType: OUTBOX_GRANT_ACCESS,
-      payload: { subscriptionId: "3f1c9e0a-1111-4222-8333-444455556666" },
-    });
-
-    const result = await bootstrapWorker().processOutbox.execute();
-
-    expect(result.claimed).toBe(1);
-    expect(result.sent).toBe(0);
-    const row = await rowById(id);
-    expect(row.lastError).toContain("subscription");
-    expect(row.lastError).not.toContain("no handler is registered");
-  });
-
-  /**
-   * I3, final whole-branch review. A failed platform removal now becomes a
-   * `revoke_access` row, and this proves the WORKER actually handles it — a row
-   * nothing is wired for would fail permanently five attempts later, which is exactly
-   * the "no durable, actionable record" state the finding was about.
-   */
-  it("dispatches a real revoke_access row to the revocation retry, not to nothing", async () => {
-    const repository = new DrizzleOutboxRepository(db);
-    // A well-formed payload for a membership that does not exist. It reaches the
-    // use-case, which reports "nothing outstanding" and COMPLETES — so the row is
-    // `sent`. An unwired handler would instead leave "no handler is registered".
-    const { id } = await repository.enqueue({
-      eventType: OUTBOX_REVOKE_ACCESS,
-      payload: {
-        membershipId: "3f1c9e0a-1111-4222-8333-444455556666",
-        communityId: "3f1c9e0a-1111-4222-8333-444455556667",
-        memberId: "3f1c9e0a-1111-4222-8333-444455556668",
-      },
-    });
-
-    const result = await bootstrapWorker().processOutbox.execute();
-
-    expect(result.claimed).toBe(1);
-    expect(result.sent).toBe(1);
-    const row = await rowById(id);
-    expect(row.status).toBe("sent");
-    // Null, not an unwired-handler message: it never failed at all.
-    expect(row.lastError).toBeNull();
-  });
-
   /**
    * Phase 5. `ProcessRenewals` runs in this same process and enqueues these rows, so an
    * unregistered handler here would mean every reminder failing five times and then
@@ -488,40 +333,6 @@ describe("bootstrapWorker", () => {
   });
 
   /**
-   * Phase 5, Task 5. `ProcessChurn` enqueues these, and an unregistered handler would
-   * mean every churned member staying in the paid group for ever with nothing but
-   * `outbox.last_error` to say a removal was owed — which is the exact gap Phase 4's
-   * retry path was added to close, arriving by a different route.
-   *
-   * It also proves WHICH use-case is wired: the removal completes with no creator id
-   * anywhere in the payload, so it cannot be the creator-scoped path.
-   */
-  it("dispatches a real revoke_subscription_access row to the system revoke, not to nothing", async () => {
-    const { channel, subscription } = await seedChurnedMemberWithAccess();
-    const { id } = await new DrizzleOutboxRepository(db).enqueue({
-      eventType: OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
-      payload: { subscriptionId: subscription.id },
-    });
-    const worker = bootstrapWorker();
-    const telegram = fakeGatingOf(worker, "telegram");
-
-    const result = await worker.processOutbox.execute();
-
-    expect(result.claimed).toBe(1);
-    expect(result.sent).toBe(1);
-    const row = await rowById(id);
-    expect(row.status).toBe("sent");
-    expect(row.lastError).toBeNull();
-    // The member was actually removed, by THIS process, with the id the join webhook
-    // recorded — not merely "a handler exists".
-    expect(telegram.revocations).toEqual([
-      { externalGroupId: channel.externalGroupId!, externalMemberId: "987654321" },
-    ]);
-    const [membership] = await db.select().from(channelMemberships);
-    expect(membership.status).toBe("revoked");
-  });
-
-  /**
    * Task 5. `HandleStreamLifecycle` (in `apps/api`'s own webhook route) enqueues
    * these; an unregistered handler here would mean a `notify_stream_live` row
    * failing five times and then permanently, with every active member of the
@@ -560,39 +371,6 @@ describe("bootstrapWorker", () => {
       if (original === undefined) delete process.env.STREAM_TOKEN_SECRET;
       else process.env.STREAM_TOKEN_SECRET = original;
     }
-  });
-
-  /**
-   * Task 5, free communities. `RequestToJoin` (in `apps/api`'s own join-request
-   * route) enqueues these; an unregistered handler here would mean every
-   * `notify_join_request` row failing five times and then permanently, with the
-   * owner never told a member asked to join — Task 7's dashboard list is the
-   * documented FALLBACK for an undeliverable WhatsApp, not the primary channel,
-   * so this wiring is what makes the primary channel real.
-   *
-   * Unlike `notify_stream_live`, no environment variable gates this handler's
-   * registration — see `WorkerDependencies.notifyJoinRequest`'s own docstring —
-   * so this test needs no STREAM_TOKEN_SECRET-style setup/teardown.
-   */
-  it("dispatches a real notify_join_request row to NotifyJoinRequest, not to nothing", async () => {
-    const { creator, request } = await seedPendingJoinRequest();
-    const { id } = await new DrizzleOutboxRepository(db).enqueue({
-      eventType: OUTBOX_NOTIFY_JOIN_REQUEST,
-      payload: { joinRequestId: request.id },
-    });
-    const worker = bootstrapWorker();
-    const notifier = fakeNotifierOf(worker);
-
-    const result = await worker.processOutbox.execute();
-
-    expect(result.claimed).toBe(1);
-    expect(result.sent).toBe(1);
-    const row = await rowById(id);
-    expect(row.status).toBe("sent");
-    expect(row.lastError).toBeNull();
-    // The OWNER was actually messaged, over WhatsApp, by THIS process.
-    expect(notifier.notifications).toHaveLength(1);
-    expect(notifier.notifications[0].toWhatsappNumber).toBe(creator.whatsappNumber!);
   });
 
   /**
@@ -840,13 +618,50 @@ describe("bootstrapWorker", () => {
     expect(Math.abs(clock.now().getTime() - Date.now())).toBeLessThan(60_000);
   });
 
-  it("selects the fake messaging adapters under NODE_ENV=test", () => {
-    // `bun test` sets NODE_ENV=test, and the whole suite depends on the fakes.
-    // Constructing the root at all is the assertion: with real tokens absent and
+  /**
+   * Retire-telegram Task 2. The four event types whose handlers went with the
+   * use-cases that served them.
+   *
+   * A registration left behind is INVISIBLE from the outside — the worker boots,
+   * the pass runs, and the handler simply never fires — so nothing but a row
+   * pushed through `ProcessOutbox` can tell the two states apart. `ProcessOutbox`
+   * fails an unregistered type with `no handler is registered for outbox event
+   * type "..."`, which is the literal this asserts on.
+   *
+   * These four replace the "dispatches a real <type> row to <use-case>" tests
+   * that lived here: those pinned exactly the registrations this task removes,
+   * so they are the guard being deleted and this is its replacement.
+   */
+  it.each([
+    OUTBOX_GRANT_ACCESS,
+    OUTBOX_REVOKE_ACCESS,
+    OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
+    OUTBOX_NOTIFY_JOIN_REQUEST,
+  ])("registers no handler for %s any more", async (eventType) => {
+    const repository = new DrizzleOutboxRepository(db);
+    const { id } = await repository.enqueue({
+      eventType,
+      payload: { subscriptionId: "3f1c9e0a-1111-4222-8333-444455556666" },
+    });
+
+    const result = await bootstrapWorker().processOutbox.execute();
+
+    expect(result.claimed).toBe(1);
+    expect(result.sent).toBe(0);
+    const row = await rowById(id);
+    expect(row.lastError).toContain("no handler is registered");
+  });
+
+  it("selects the fake messaging adapter under NODE_ENV=test", () => {
+    // `bun test` sets NODE_ENV=test, and the whole suite depends on the fake.
+    // Constructing the root at all is the assertion: with the real token absent and
     // a NODE_ENV outside the allowlist, selectMessagingProviders throws.
+    //
+    // Retire-telegram Task 2 dropped this test's second assertion, on
+    // `messaging.gating.get("telegram")` — there is no gating map any more, and the
+    // one provider left is the WhatsApp notifier asserted on above.
     const worker = bootstrapWorker();
     expect(worker.messaging.notifier.capabilities().canGateAccess).toBe(false);
-    expect(worker.messaging.gating.get("telegram")?.capabilities().canGateAccess).toBe(true);
   });
 });
 

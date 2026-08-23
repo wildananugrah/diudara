@@ -7,7 +7,6 @@ import {
   RENEWAL_REMINDER_QUEUED,
   RENEWAL_REMINDER_SKIPPED,
 } from "./use-cases/process-renewals";
-import { ACCESS_NOT_REVOKED } from "./use-cases/revoke-channel-access";
 import {
   RENEWAL_REMINDER_NOT_SENT,
   RENEWAL_REMINDER_SENT,
@@ -28,6 +27,12 @@ import {
  *
  * It asserts against the EXPORTED CONSTANTS rather than string literals, so renaming an
  * event type in code fails here until the spec is updated with it.
+ *
+ * Retire-telegram Task 2 removed one of the eight, `ACCESS_NOT_REVOKED`, when
+ * `RevokeChannelAccess` was deleted. The spec still documents it — that is the
+ * correct direction of this check, which fails on a type the code writes and the
+ * spec does not mention, never the reverse: a spec paragraph describing a phase
+ * that has been retired is history, not a broken contract.
  */
 
 // src/application/ -> apps/api/ -> apps/ -> repo root
@@ -47,7 +52,6 @@ const PHASE_5_EVENT_TYPES: Record<string, string> = {
   RENEWAL_REMINDER_NOT_SENT,
   CHURNED,
   CHURN_REVOKE_SKIPPED,
-  ACCESS_NOT_REVOKED,
   RENEWED,
 };
 

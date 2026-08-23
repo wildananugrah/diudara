@@ -15,7 +15,6 @@ import {
 } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { FakeMessagingAdapter } from "../../infrastructure/messaging/fake-messaging.adapter";
-import { TelegramBotAdapter } from "../../infrastructure/messaging/telegram-bot.adapter";
 import { DrizzleActivityLogRepository } from "../../infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleMemberRepository } from "../../infrastructure/repositories/drizzle-member.repository";
 import { DrizzleOutboxRepository } from "../../infrastructure/repositories/drizzle-outbox.repository";
@@ -271,18 +270,12 @@ describe("SendRenewalReminder", () => {
     expect(telegram.notifications).toHaveLength(0);
   });
 
-  it("is a LOUD failure if it is ever wired to the Telegram adapter", async () => {
-    // Not a hypothetical: `MessagingProviders` has two fields precisely because a
-    // composition root passing `gating.get("telegram")` here would compile. Phase 4
-    // made the adapter throw so the mistake cannot be silent, and this pins it for the
-    // reminder path too.
-    await seed();
-    const { useCase } = wire({ notifier: new TelegramBotAdapter({ botToken: "test-token" }) });
-
-    await expect(
-      useCase.execute({ subscriptionId: await onlySubscriptionId(), stage: "due" })
-    ).rejects.toThrow(/telegram cannot send a WhatsApp notification/i);
-  });
+  // Retire-telegram Task 2 deleted the test that stood here: "is a LOUD failure if
+  // it is ever wired to the Telegram adapter". It constructed a `TelegramBotAdapter`
+  // to prove `notify` throws rather than silently reaching nobody. That adapter is
+  // gone, and so is the two-field `MessagingProviders` that made the mis-wiring
+  // possible — `selectMessagingProviders` now returns exactly one provider, the
+  // WhatsApp notifier, so there is no second one a root could pass here by mistake.
 
   it("puts NO invite link in the message", async () => {
     // Invite links are bearer credentials, and the member already has theirs — a

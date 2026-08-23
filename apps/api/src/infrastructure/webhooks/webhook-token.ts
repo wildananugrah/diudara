@@ -23,7 +23,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
  * webhook-token.test.ts pins the mechanism so it fails if you do.
  *
  * `expected` is `string | undefined` on purpose: it comes from configuration
- * (`process.env.XENDIT_CALLBACK_TOKEN`, `process.env.TELEGRAM_WEBHOOK_SECRET`),
+ * (`process.env.XENDIT_CALLBACK_TOKEN`),
  * and an unset or empty configured token must never vouch for anything. An empty `expected` used to match an
  * empty `received`, so a request carrying `X-CALLBACK-TOKEN:` with no value
  * would have been accepted as genuine on a box that had not been configured —

@@ -38,8 +38,6 @@ import {
   ListTiers,
   UpdateTier,
 } from "./application/use-cases/manage-tiers";
-import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
-import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
@@ -50,15 +48,9 @@ import { DrizzleUserSubscriptionRepository } from "./infrastructure/repositories
 import { StartUserSubscription } from "./application/use-cases/start-user-subscription";
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
-import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
-import { DecideJoinRequest, ListJoinRequests } from "./application/use-cases/decide-join-request";
-import { DrizzleJoinRequestRepository } from "./infrastructure/repositories/drizzle-join-request.repository";
-import { DrizzleJoinRequestUnitOfWork } from "./infrastructure/repositories/drizzle-join-request-unit-of-work";
 import { DrizzlePostEditUnitOfWork } from "./infrastructure/repositories/drizzle-post-edit-unit-of-work";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
-import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
-import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
 import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
@@ -68,7 +60,6 @@ import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-m
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
 import { DrizzleUserPurchaseUnitOfWork } from "./infrastructure/repositories/drizzle-user-purchase.unit-of-work";
-import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
 import { DrizzleAnalyticsRepository } from "./infrastructure/repositories/drizzle-analytics.repository";
 import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
@@ -79,7 +70,6 @@ import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-o
 import { SystemClock } from "./infrastructure/clock/system.clock";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
-import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
 import { FAKE_AI_BEHAVIOURS, FakeAiAdapter, type FakeAiBehaviour } from "./infrastructure/ai/fake-ai.adapter";
 import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
 import { DrizzleAiConversationRepository } from "./infrastructure/repositories/drizzle-ai-conversation.repository";
@@ -294,8 +284,6 @@ export interface Dependencies {
   defineTier: DefineMembershipTier;
   listTiers: ListTiers;
   updateTier: UpdateTier;
-  connectChannel: ConnectChannel;
-  listChannels: ListChannels;
   /**
    * `POST /payment-account`. `undefined` EXACTLY when `payments` is `null` —
    * mirrors `sendAiMessage`'s undefined-ness: there is no `PaymentProviderPort`
@@ -376,28 +364,6 @@ export interface Dependencies {
    * that does exist.
    */
   startCheckout: StartCheckout | undefined;
-  /**
-   * `POST /c/:slug/join-request`. Constructed unconditionally, unlike
-   * `startCheckout` — whether a community accepts a free join is decided by
-   * its own `accessMode`, never by this deployment's payment configuration.
-   * See `RequestToJoin`'s own docstring for the 404 that keeps a `paid`
-   * community from ever falling back to this path.
-   */
-  requestToJoin: RequestToJoin;
-  /** `GET /c/:slug/request/:joinRequestId`. See `GetJoinRequestStatus`'s own docstring. */
-  getJoinRequestStatus: GetJoinRequestStatus;
-  /**
-   * Task 4's `GET /communities/:communityId/join-requests` — the owner's
-   * pending-requests dashboard list.
-   */
-  listJoinRequests: ListJoinRequests;
-  /**
-   * Task 4's `POST /communities/:communityId/join-requests/:requestId/approve`
-   * and `.../reject`. ONE use case for both decisions — see its own docstring
-   * for why splitting it into two would let the ownership check, the
-   * already-decided check and the `activity_log` write drift apart.
-   */
-  decideJoinRequest: DecideJoinRequest;
   getSubscriptionStatus: GetSubscriptionStatus;
   handlePaymentWebhook: HandlePaymentWebhook;
   /**
@@ -415,24 +381,6 @@ export interface Dependencies {
    * authenticated like everything else and never logged.
    */
   exportCommunityMembers: ExportCommunityMembers;
-  /**
-   * The creator's manual "remove this member" action. It lives in the API rather
-   * than the worker because revocation is SYNCHRONOUS: a creator removing someone
-   * expects to be told whether it worked (see the use-case docstring). That is
-   * also why the API selects messaging providers at all — the grant path never
-   * calls one from this process.
-   */
-  revokeChannelAccess: RevokeChannelAccess;
-  /**
-   * Attaches a joining member's Telegram user id to the membership whose
-   * single-use invite link they used. It lives in the API rather than the worker
-   * because it is driven by an INBOUND webhook — see routes/webhooks.ts for why a
-   * webhook rather than a `getUpdates` poll.
-   *
-   * Without it `channel_membership.external_member_id` is NULL forever and
-   * `RevokeChannelAccess` can only report `no_provider_member_id_recorded`.
-   */
-  recordChannelJoin: RecordChannelJoin;
   /**
    * Phase 5's renewal reminder delivery.
    *
@@ -459,15 +407,6 @@ export interface Dependencies {
    * prove only that the test can call the fake.
    */
   messaging: MessagingProviders;
-  /**
-   * The static secret Telegram sends as `X-Telegram-Bot-Api-Secret-Token`, the
-   * ONLY thing authenticating `POST /webhooks/telegram`. `undefined` when the box
-   * is not configured for it (never outside the NODE_ENV allowlist —
-   * `resolveTelegramWebhookSecret` throws there), in which case
-   * `verifyCallbackToken` rejects every delivery rather than accepting any. Not
-   * narrowed to `string` for the same reason as `xenditCallbackToken`.
-   */
-  telegramWebhookSecret: string | undefined;
   /**
    * The static token Xendit sends as `X-CALLBACK-TOKEN`, the ONLY thing
    * authenticating the webhook route. `undefined` when the box is not
@@ -624,7 +563,7 @@ export interface Dependencies {
    * can carry, since it has no way to attach a custom header — see
    * `routes/mediamtx-webhooks.ts`'s docstring). It is the ONLY
    * authentication on that route either way, exactly like
-   * `xenditCallbackToken`/`telegramWebhookSecret` above. `undefined` in
+   * `xenditCallbackToken` above. `undefined` in
    * lockstep with `authoriseStream` (see that field — and see that field
    * for why "in lockstep with `authoriseStream`" is NOT the same thing as
    * "in lockstep with `streamingProvider`"), in which case
@@ -911,25 +850,22 @@ export function selectPaymentProvider(env: {
 }
 
 /**
- * The messaging providers a process needs to turn a payment into access.
+ * The messaging providers a process needs to reach a person.
  *
- * Two fields rather than one map, because notifying and gating are different
- * capabilities and conflating them is a real bug: `TelegramBotAdapter.notify`
- * THROWS (it addresses a WhatsApp number it cannot reach), so a member who paid
- * would never be told anything.
+ * ONE field now. It used to carry a second — `gating`, a map of providers keyed
+ * by `channel.platform`, whose only consumers were the channel-access use cases
+ * retire-telegram Task 2 deleted along with the Telegram adapter that was the
+ * only thing in it that could actually gate. The distinction it encoded
+ * (notifying and gating are different capabilities, and `TelegramBotAdapter.notify`
+ * THREW) has no second side left to be confused with.
+ *
+ * Still a wrapper rather than a bare `MessagingProviderPort`: both composition
+ * roots expose this so a test can prove which adapters an environment selected,
+ * and the field name is what makes "the WhatsApp one" explicit at every call
+ * site.
  */
 export interface MessagingProviders {
-  /**
-   * Gating providers keyed by `channel.platform`.
-   *
-   * WhatsApp is in here too, even though it cannot gate: a `whatsapp` channel must
-   * resolve to a provider that reports `canGateAccess: false` — which
-   * `GrantChannelAccess` turns into "a human will add you", recorded in
-   * `activity_log` — rather than to nothing, which it treats as an unwired
-   * platform and an error.
-   */
-  gating: ReadonlyMap<string, MessagingProviderPort>;
-  /** How the MEMBER is reached. WhatsApp, always. */
+  /** How the PERSON is reached. WhatsApp, always. */
   notifier: MessagingProviderPort;
 }
 
@@ -940,13 +876,8 @@ export interface MessagingProviders {
  * Deliberately the same shape, thresholds and reasoning as
  * `selectPaymentProvider` above:
  *
- *   1. Both tokens set -> the real adapters, in every environment.
- *   2. PARTIAL configuration throws EVERYWHERE. A Telegram token with no Fonnte
- *      token mints a single-use invite link and has no way to deliver it: the
- *      member pays, a credential is created, and nobody is told. A Fonnte token
- *      with no Telegram token notifies members that they have access to a group
- *      nothing ever added them to.
- *   3. ABSENT configuration selects `FakeMessagingAdapter` ONLY when `NODE_ENV`
+ *   1. `FONNTE_API_TOKEN` set -> the real adapter, in every environment.
+ *   2. ABSENT configuration selects `FakeMessagingAdapter` ONLY when `NODE_ENV`
  *      is in `RELAXED_NODE_ENVS` — so `undefined`, `"staging"`, `"prod"` and
  *      `"production"` all throw. The fake records sends into an array instead of
  *      making them, so a box running it looks exactly like a working one from the
@@ -954,69 +885,47 @@ export interface MessagingProviders {
  *      arrive. That is this phase's worst failure mode (plan, Global
  *      Constraints), and it is worth refusing to boot over.
  *
- * Both tokens are bearer credentials — the Telegram one is part of every Bot API
- * request PATH — so the startup line names the adapters and never the values.
+ * `FONNTE_API_TOKEN` is a bearer credential, so the startup line names the
+ * adapter and never the value.
+ *
+ * Retire-telegram Task 2 removed the `TELEGRAM_BOT_TOKEN` half. There is no
+ * half-configured case left to throw over — one token cannot disagree with
+ * itself — so case 2 above is gone with it, and the block-boot guard on the
+ * ABSENT case, which is the one that actually protects a paying member, is
+ * unchanged.
  */
 export function selectMessagingProviders(env: {
-  telegramBotToken: string | undefined;
   fonnteApiToken: string | undefined;
   nodeEnv: string | undefined;
 }): MessagingProviders {
-  const telegramBotToken = presentOrUndefined(env.telegramBotToken);
   const fonnteApiToken = presentOrUndefined(env.fonnteApiToken);
 
-  if (telegramBotToken && fonnteApiToken) {
+  if (fonnteApiToken) {
     logProviderChoice(
       env.nodeEnv,
-      "[bootstrap] messaging providers: TelegramBotAdapter (gating) + FonnteWhatsAppAdapter " +
-        "(notification) — TELEGRAM_BOT_TOKEN and FONNTE_API_TOKEN are set, so real invites " +
-        "will be issued and real messages sent"
+      "[bootstrap] messaging provider: FonnteWhatsAppAdapter (notification) — " +
+        "FONNTE_API_TOKEN is set, so real messages will be sent"
     );
-    const notifier = new FonnteWhatsAppAdapter({ apiToken: fonnteApiToken });
-    return {
-      gating: new Map<string, MessagingProviderPort>([
-        ["telegram", new TelegramBotAdapter({ botToken: telegramBotToken })],
-        ["whatsapp", notifier],
-      ]),
-      notifier,
-    };
-  }
-
-  if (telegramBotToken || fonnteApiToken) {
-    const missing = telegramBotToken ? "FONNTE_API_TOKEN" : "TELEGRAM_BOT_TOKEN";
-    const present = telegramBotToken ? "TELEGRAM_BOT_TOKEN" : "FONNTE_API_TOKEN";
-    throw new Error(
-      `Messaging is half-configured: ${present} is set but ${missing} is not. Set both or ` +
-        "neither — see apps/api/.env.example. Refusing to start rather than issuing invite " +
-        "links nobody can be told about, or telling members about access nobody granted."
-    );
+    return { notifier: new FonnteWhatsAppAdapter({ apiToken: fonnteApiToken }) };
   }
 
   if (!isRelaxedNodeEnv(env.nodeEnv)) {
     throw new Error(
-      "TELEGRAM_BOT_TOKEN and FONNTE_API_TOKEN are not set, and NODE_ENV is " +
+      "FONNTE_API_TOKEN is not set, and NODE_ENV is " +
         `${describeNodeEnv(env.nodeEnv)}. FakeMessagingAdapter is permitted ONLY when ` +
         `NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}: it appends sends to an array, so a ` +
-        "box running it looks like it is inviting paying members while nobody receives " +
-        "anything. Add the tokens to apps/api/.env — see .env.example — or set " +
+        "box running it looks like it is messaging paying members while nobody receives " +
+        "anything. Add the token to apps/api/.env — see .env.example — or set " +
         "NODE_ENV=development."
     );
   }
 
   logProviderChoice(
     env.nodeEnv,
-    "[bootstrap] messaging providers: FakeMessagingAdapter for both gating and notification " +
-      "(TELEGRAM_BOT_TOKEN/FONNTE_API_TOKEN not set — no invite is issued and no message is " +
-      "sent; set both to switch to the real adapters)"
+    "[bootstrap] messaging provider: FakeMessagingAdapter for notification " +
+      "(FONNTE_API_TOKEN not set — no message is sent; set it to switch to the real adapter)"
   );
-  const fakeNotifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
-  return {
-    gating: new Map<string, MessagingProviderPort>([
-      ["telegram", new FakeMessagingAdapter({ platform: "telegram", canGateAccess: true })],
-      ["whatsapp", fakeNotifier],
-    ]),
-    notifier: fakeNotifier,
-  };
+  return { notifier: new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false }) };
 }
 
 /**
@@ -1330,9 +1239,9 @@ export function resolveMaxPostImages(value: string | undefined): number {
 
 /**
  * Minimum `MEDIAMTX_WEBHOOK_SECRET`/`STREAM_TOKEN_SECRET` length, the same
- * floor as `JWT_SECRET`/`XENDIT_CALLBACK_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`
- * above and for the same reason: `MEDIAMTX_WEBHOOK_SECRET` is the ONLY
- * authentication on both MediaMTX webhooks (Task 4), and
+ * floor as `JWT_SECRET`/`XENDIT_CALLBACK_TOKEN` above and for the same reason:
+ * `MEDIAMTX_WEBHOOK_SECRET` is the ONLY authentication on both MediaMTX
+ * webhooks (Task 4), and
  * `STREAM_TOKEN_SECRET` signs every watch token
  * (`apps/api/src/domain/watch-token.ts`) — a short one is
  * offline-brute-forceable from a single leaked token or webhook payload, and
@@ -1728,132 +1637,6 @@ export function resolveCallbackToken(env: {
 }
 
 /**
- * The secret `resolveTelegramWebhookSecret` hands back under `NODE_ENV=test`, and
- * the one value it refuses to accept anywhere else — same rule, and the same
- * reason, as `TEST_CALLBACK_TOKEN` above: it is committed to this repository, so
- * treating it as real would ship a publicly known webhook password.
- */
-export const TEST_TELEGRAM_WEBHOOK_SECRET = "test-telegram-webhook-secret";
-
-/**
- * Minimum `TELEGRAM_WEBHOOK_SECRET` length, mirroring `MIN_CALLBACK_TOKEN_LENGTH`
- * and `MIN_JWT_SECRET_LENGTH` on purpose. This secret is the ONLY authentication
- * on `POST /webhooks/telegram`, and forging a `chat_member` update means writing
- * an attacker-chosen `external_member_id` onto a membership — which is the id
- * `banChatMember` is aimed at, so it would turn a revocation into "remove somebody
- * else from the creator's group".
- */
-const MIN_TELEGRAM_WEBHOOK_SECRET_LENGTH = 32;
-
-/**
- * Characters Telegram's `setWebhook` accepts in `secret_token`: 1–256 of
- * `A-Z a-z 0-9 _ -`. Checked here so a secret with a space or a `+` in it fails at
- * BOOT with an explanation, rather than as an opaque 400 from `setWebhook` on a
- * box where the endpoint then rejects every real delivery.
- */
-const TELEGRAM_WEBHOOK_SECRET_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
-
-/**
- * Resolves the static secret that is the ONLY authentication on
- * `POST /webhooks/telegram`, delivered in the `X-Telegram-Bot-Api-Secret-Token`
- * header that `setWebhook`'s `secret_token` parameter installs.
- *
- * Deliberately the same four cases, thresholds and wording as
- * `resolveCallbackToken` above, because it is the same kind of thing: a STATIC
- * token that authenticates the sender and not the message.
- *
- *   1. A configured secret is used as-is (empty and whitespace-only count as
- *      unset), subject to the length floor and Telegram's charset.
- *   2. PARTIAL configuration throws in EVERY environment. A box with
- *      `TELEGRAM_BOT_TOKEN` set is gating real Telegram groups; without this
- *      secret the join endpoint rejects every delivery, so no
- *      `external_member_id` is ever recorded and revocation can never be
- *      automated — the exact gap this feature exists to close.
- *   3. ABSENT configuration returns `undefined` when `NODE_ENV` is one of
- *      `RELAXED_NODE_ENVS`, and throws for EVERYTHING else — `undefined`,
- *      `"staging"`, `"prod"`, `"PRODUCTION"`. A developer must be able to
- *      `bun run dev` without a public URL to point Telegram at.
- *   4. The committed test value is refused outside `NODE_ENV=test`.
- *
- * `undefined` fails CLOSED: `verifyCallbackToken` refuses an unset `expected`
- * before any comparison, so an unconfigured box rejects every update rather than
- * accepting every forged one.
- */
-export function resolveTelegramWebhookSecret(env: {
-  webhookSecret: string | undefined;
-  telegramBotToken: string | undefined;
-  nodeEnv: string | undefined;
-}): string | undefined {
-  const secret = presentOrUndefined(env.webhookSecret);
-
-  if (secret !== undefined) {
-    if (secret === TEST_TELEGRAM_WEBHOOK_SECRET) {
-      if (env.nodeEnv !== "test") {
-        throw new Error(
-          "TELEGRAM_WEBHOOK_SECRET is the value committed to this repository for tests. " +
-            "Anyone can read it, so it would authenticate a forged chat_member update — and " +
-            "that update writes the very user id banChatMember is aimed at. Generate a real " +
-            "one: openssl rand -hex 32"
-        );
-      }
-      // Exempt from the length floor: it is the suite's own known value, and it is
-      // already refused everywhere else by the branch above.
-      return secret;
-    }
-    if (secret.length < MIN_TELEGRAM_WEBHOOK_SECRET_LENGTH) {
-      throw new Error(
-        `TELEGRAM_WEBHOOK_SECRET is too short (${secret.length} characters; ` +
-          `${MIN_TELEGRAM_WEBHOOK_SECRET_LENGTH} required). It is the ONLY authentication on ` +
-          "POST /webhooks/telegram, and a forged update writes an attacker-chosen member id " +
-          "onto a membership. Generate one: openssl rand -hex 32"
-      );
-    }
-    if (!TELEGRAM_WEBHOOK_SECRET_PATTERN.test(secret)) {
-      throw new Error(
-        "TELEGRAM_WEBHOOK_SECRET contains characters Telegram's setWebhook will not accept " +
-          "(only A-Z, a-z, 0-9, _ and - are allowed, 1-256 of them). Refusing to start " +
-          "rather than serving an endpoint whose secret can never be installed. Generate " +
-          "one: openssl rand -hex 32"
-      );
-    }
-    return secret;
-  }
-
-  // Before the production rule, so the suite — which never sets the variable —
-  // keeps working even when a test hands this a configured bot token.
-  if (env.nodeEnv === "test") {
-    return TEST_TELEGRAM_WEBHOOK_SECRET;
-  }
-
-  if (presentOrUndefined(env.telegramBotToken)) {
-    throw new Error(
-      "TELEGRAM_BOT_TOKEN is set but TELEGRAM_WEBHOOK_SECRET is not. Real invite links " +
-        "would be issued and no chat_member update could be authenticated, so no member's " +
-        "Telegram user id would ever be recorded — and RevokeChannelAccess needs one, so " +
-        "the creator could never remove anybody. Set both — see apps/api/.env.example."
-    );
-  }
-
-  if (!isRelaxedNodeEnv(env.nodeEnv)) {
-    throw new Error(
-      "TELEGRAM_WEBHOOK_SECRET is not set, and NODE_ENV is " +
-        `${describeNodeEnv(env.nodeEnv)}. Booting without it is permitted ONLY when ` +
-        `NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}. Add it to apps/api/.env — see ` +
-        ".env.example — or set NODE_ENV=development. Refusing to start rather than serving " +
-        "a webhook endpoint that rejects every real delivery."
-    );
-  }
-
-  logProviderChoice(
-    env.nodeEnv,
-    "[bootstrap] TELEGRAM_WEBHOOK_SECRET not set — POST /webhooks/telegram will reject " +
-      "every delivery, so no member's Telegram user id will be recorded and revocation " +
-      "cannot be automated. Set it (and setWebhook's secret_token to match) to exercise it."
-  );
-  return undefined;
-}
-
-/**
  * The `APP_BASE_URL` a developer gets for free: Vite's default dev-server
  * origin, which is what `apps/web` serves the confirmation page from.
  */
@@ -2058,10 +1841,6 @@ export function bootstrap(): Dependencies {
   const listTiers = new ListTiers(communityRepository, tierRepository);
   const updateTier = new UpdateTier(communityRepository, tierRepository);
 
-  const channelRepository = new DrizzleChannelRepository(db);
-  const connectChannel = new ConnectChannel(communityRepository, channelRepository);
-  const listChannels = new ListChannels(communityRepository, channelRepository);
-
   const payments: PaymentProviderPort | null = selectPaymentProvider({
     secretKey: process.env.XENDIT_SECRET_KEY,
     splitRuleId: process.env.XENDIT_SPLIT_RULE_ID,
@@ -2192,39 +1971,6 @@ export function bootstrap(): Dependencies {
       )
     : undefined;
 
-  // Task 3 (free communities): constructed UNCONDITIONALLY, unlike
-  // `startCheckout` above — see `Dependencies.requestToJoin`'s own docstring
-  // for why a community's `accessMode`, not this deployment's payment
-  // configuration, is what decides whether a free join is accepted.
-  const joinRequestRepository = new DrizzleJoinRequestRepository(db);
-  const joinRequestUnitOfWork = new DrizzleJoinRequestUnitOfWork(db);
-  const requestToJoin = new RequestToJoin(
-    communityRepository,
-    tierRepository,
-    memberRepository,
-    subscriptionRepository,
-    joinRequestUnitOfWork
-  );
-  const getJoinRequestStatus = new GetJoinRequestStatus(
-    communityRepository,
-    joinRequestRepository,
-    subscriptionRepository
-  );
-  // Task 4: the owner's decisions. `decideJoinRequest` shares
-  // `joinRequestUnitOfWork` with `requestToJoin` above — same transaction
-  // mechanism, different use of it — and reads `joinRequestRepository`/
-  // `subscriptionRepository` off the pool for its pre-transaction checks
-  // (ownership, the request lookup, the tier-active check, and the graceful
-  // already-active pre-check), exactly like `requestToJoin` does.
-  const listJoinRequests = new ListJoinRequests(communityRepository, joinRequestRepository);
-  const decideJoinRequest = new DecideJoinRequest(
-    communityRepository,
-    tierRepository,
-    joinRequestRepository,
-    subscriptionRepository,
-    joinRequestUnitOfWork
-  );
-
   // Task 8's watch link. Read directly off `process.env` here (rather than
   // derived from `streamingProvider`'s truthiness) for the exact reason
   // `authoriseStream`/`mediamtxWebhookSecret` do this further down: by the
@@ -2269,14 +2015,13 @@ export function bootstrap(): Dependencies {
     analyticsRepository
   );
 
-  // Revocation used to be the ONE messaging call the API process made outside
-  // signup/login (granting happens in apps/worker) — Task 5's password reset and
-  // its existing-email signup notice are the second and third. Same allowlist as
-  // the payment adapter either way: on a box with no tokens and a NODE_ENV
-  // outside the allowlist this throws rather than booting a fake that would
-  // report a send it never performed.
+  // What this process still messages people about: Task 5's password reset and
+  // its existing-email signup notice. (Revocation used to be the first of these,
+  // and granting has always happened in apps/worker.) Same allowlist as the
+  // payment adapter: on a box with no token and a NODE_ENV outside the allowlist
+  // this throws rather than booting a fake that would report a send it never
+  // performed.
   const messaging = selectMessagingProviders({
-    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
     fonnteApiToken: process.env.FONNTE_API_TOKEN,
     nodeEnv: process.env.NODE_ENV,
   });
@@ -2337,28 +2082,9 @@ export function bootstrap(): Dependencies {
     clock
   );
 
-  const channelMembershipRepository = new DrizzleChannelMembershipRepository(db);
-  const revokeChannelAccess = new RevokeChannelAccess(
-    communityRepository,
-    channelMembershipRepository,
-    new DrizzleActivityLogRepository(db),
-    messaging.gating,
-    // A removal the provider could not perform is enqueued here, and apps/worker
-    // retries it — see OUTBOX_REVOKE_ACCESS. The POOLED client: this use-case is
-    // synchronous and opens no transaction, so an outbox failure must not be able to
-    // undo a revocation the creator has already been told about.
-    new DrizzleOutboxRepository(db)
-  );
-
-  // The other half of revocation, and the half that was missing: without a
-  // recorded platform member id, `revokeChannelAccess` above can only ever report
-  // `no_provider_member_id_recorded`.
-  const recordChannelJoin = new RecordChannelJoin(channelMembershipRepository);
-
-  // Phase 5. Built with the SAME `appBaseUrl` StartCheckout received above, and with
-  // `messaging.notifier` rather than a gating provider: `TelegramBotAdapter.notify`
-  // throws. See the `sendRenewalReminder` field on `Dependencies` for why the API root
-  // builds a use-case the worker dispatches.
+  // Phase 5. Built with the SAME `appBaseUrl` StartCheckout received above. See
+  // the `sendRenewalReminder` field on `Dependencies` for why the API root builds
+  // a use-case the worker dispatches.
   const sendRenewalReminder = new SendRenewalReminder(
     subscriptionRepository,
     memberRepository,
@@ -2366,12 +2092,6 @@ export function bootstrap(): Dependencies {
     messaging.notifier,
     { appBaseUrl }
   );
-  const telegramWebhookSecret = resolveTelegramWebhookSecret({
-    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
-    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
-    nodeEnv: process.env.NODE_ENV,
-  });
-
   // Phase 7's AI co-builder. The ONE feature in this codebase that boots
   // disabled rather than refusing to start — see selectAiProvider.
   // `sendAiMessage` mirrors `aiProvider`'s undefined-ness exactly, which is
@@ -2567,8 +2287,6 @@ export function bootstrap(): Dependencies {
     defineTier,
     listTiers,
     updateTier,
-    connectChannel,
-    listChannels,
     createPaymentAccount,
     getPaymentAccountStatus,
     connectUserPayout,
@@ -2578,21 +2296,14 @@ export function bootstrap(): Dependencies {
     listSubscribers,
     getPublicCommunity,
     startCheckout,
-    requestToJoin,
-    getJoinRequestStatus,
-    listJoinRequests,
-    decideJoinRequest,
     getSubscriptionStatus,
     handlePaymentWebhook,
     getCommunityMetrics,
     getCommunityActivity,
     listCommunityMembers,
     exportCommunityMembers,
-    revokeChannelAccess,
-    recordChannelJoin,
     sendRenewalReminder,
     messaging,
-    telegramWebhookSecret,
     xenditCallbackToken,
     appBaseUrl,
     sql,

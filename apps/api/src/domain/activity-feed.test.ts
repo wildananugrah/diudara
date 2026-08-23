@@ -10,20 +10,32 @@ import {
 } from "../application/use-cases/notify-stream-live";
 import { CHURNED, CHURN_REVOKE_SKIPPED } from "../application/use-cases/process-churn";
 import {
-  JOIN_REQUEST_APPROVED_EVENT,
-  JOIN_REQUEST_REJECTED_EVENT,
-} from "../application/use-cases/decide-join-request";
-import { JOIN_REQUEST_NOTIFY_SKIPPED_EVENT } from "../application/use-cases/notify-join-request";
-import {
   RENEWAL_REMINDER_QUEUED,
   RENEWAL_REMINDER_SKIPPED,
 } from "../application/use-cases/process-renewals";
-import { ACCESS_NOT_REVOKED } from "../application/use-cases/revoke-channel-access";
 import {
   RENEWAL_REMINDER_NOT_SENT,
   RENEWAL_REMINDER_SENT,
 } from "../application/use-cases/send-renewal-reminder";
 import { CREATOR_VISIBLE_EVENTS, describeActivityEvent } from "./activity-feed";
+
+/**
+ * Four event types whose WRITERS retire-telegram Task 2 deleted — the two
+ * join-request decisions, the join-request notify skip, and the failed platform
+ * removal — but which `activity-feed.ts` still describes, because that module
+ * belongs to the creator dashboard and goes in Task 4.
+ *
+ * Declared here as literals rather than imported, which is a deliberate downgrade
+ * from the rule the rest of this list follows (assert against the exported
+ * constant, so a rename in the writer reddens here). There is no writer left to
+ * rename: these are now the literals `activity_log` already holds for rows written
+ * before the deletion, and the feed's job until Task 4 is to keep rendering them
+ * rather than showing a creator a blank line.
+ */
+const JOIN_REQUEST_APPROVED_EVENT = "join_request_approved";
+const JOIN_REQUEST_REJECTED_EVENT = "join_request_rejected";
+const JOIN_REQUEST_NOTIFY_SKIPPED_EVENT = "join_request_notify_skipped";
+const ACCESS_NOT_REVOKED = "access_not_revoked";
 
 /**
  * Every `activity_log.event_type` written anywhere in this codebase, which is the

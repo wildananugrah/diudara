@@ -136,30 +136,31 @@ for (const key of [
   "STREAM_TOKEN_SECRET",
   // THE SAME HOLE, for the provider credentials that select a REAL OUTBOUND
   // ADAPTER. The five above were deleted when streaming put real values in
-  // `apps/api/.env`; the four below went on being read, and a developer whose
-  // `.env` drives a local Telegram bot got a suite where `selectMessagingProviders`
-  // returns TelegramBotAdapter + FonnteWhatsAppAdapter — the branch whose own
-  // startup line says "real invites will be issued and real messages sent"
-  // (bootstrap.ts). `bootstrap.ts` states the invariant plainly ("the whole suite
-  // depends on the fake adapter") and nothing enforced it.
+  // `apps/api/.env`; the three below went on being read, and a developer whose
+  // `.env` holds a live Fonnte token got a suite where `selectMessagingProviders`
+  // returns FonnteWhatsAppAdapter — the branch whose own startup line says "real
+  // messages will be sent" (bootstrap.ts). `bootstrap.ts` states the invariant
+  // plainly ("the whole suite depends on the fake adapter") and nothing enforced it.
   //
-  // Measured on such a box: 13 failures across `worker-bootstrap.test.ts`,
-  // `routes/communities.test.ts` and the channel-access lifecycle, every one of
-  // them a test asserting the fake was selected. The failures are the harmless
-  // half — the same configuration lets a bare `bootstrap()` in any test file hold
-  // a live bot token and a live WhatsApp token.
+  // Measured before the fix, on such a box: 13 failures across
+  // `worker-bootstrap.test.ts`, `routes/communities.test.ts` and the channel-access
+  // lifecycle, every one of them a test asserting the fake was selected. The
+  // failures are the harmless half — the same configuration lets a bare
+  // `bootstrap()` in any test file hold a live messaging token.
+  //
+  // Retire-telegram Task 2 removed `TELEGRAM_BOT_TOKEN` from this list: nothing
+  // reads it any more, so deleting it protected nothing.
   //
   // `XENDIT_CALLBACK_TOKEN` is deliberately NOT in this list: it authenticates
   // INBOUND webhooks and selects no adapter, so deleting it would newly exercise
   // the payments-disabled branch rather than close a hazard.
-  "TELEGRAM_BOT_TOKEN",
   "FONNTE_API_TOKEN",
   "XENDIT_SECRET_KEY",
   "XENDIT_SPLIT_RULE_ID",
   // Task 2 (images): the same hole, pre-emptively closed this time. A real
   // bucket's credentials in `apps/api/.env` would make `selectMediaStorage`
   // hand every bare `bootstrap()` a REAL `S3MediaStorageAdapter` — and unlike
-  // Telegram/Fonnte/Xendit above, that adapter is untested against a live
+  // Fonnte/Xendit above, that adapter is untested against a live
   // bucket on purpose (no credentials exist anywhere in this repository's
   // history to test one against — see `s3-media-storage.adapter.ts`), so a
   // developer's local bucket becomes reachable-but-unverified by the suite

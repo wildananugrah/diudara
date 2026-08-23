@@ -6,9 +6,6 @@ import { postRoutes } from "./routes/posts";
 import { mediaRoutes } from "./routes/media";
 import { communityRoutes } from "./routes/communities";
 import { tierRoutes } from "./routes/tiers";
-import { channelRoutes } from "./routes/channels";
-import { membershipRoutes } from "./routes/memberships";
-import { joinRequestRoutes } from "./routes/join-requests";
 import { analyticsRoutes } from "./routes/analytics";
 import { paymentAccountRoutes } from "./routes/payment-account";
 import { publicCommunityRoutes } from "./routes/public-community";
@@ -83,23 +80,19 @@ export function createApp(deps: Dependencies) {
   // webhook (`/lifecycle`). Public by design and authenticated the same way
   // as the routes above — a shared secret (a `secret` query parameter or
   // X-Mediamtx-Secret header) rather than a bearer token — so never put
-  // either behind requireAuth. A distinct path prefix from /webhooks/xendit
-  // and /webhooks/telegram, so mount order relative to webhookRoutes above
-  // does not matter.
+  // either behind requireAuth. A distinct path prefix from /webhooks/xendit,
+  // so mount order relative to webhookRoutes above does not matter.
   app.route("/webhooks/mediamtx", mediamtxWebhookRoutes(deps));
-  // Nested routes for tiers/channels (Tasks 10, 11) mount at
-  // /communities/:communityId/tiers and /communities/:communityId/channels.
-  // They must be registered BEFORE this line so the more specific path
-  // matches first — keep this route the last one mounted under /communities.
+  // Nested routes for tiers (Task 10) mount at
+  // /communities/:communityId/tiers. They must be registered BEFORE the
+  // catch-all /communities mount below so the more specific path matches first
+  // — keep that route the last one mounted under /communities.
+  //
+  // Retire-telegram Task 2 removed the /channels, /members and /join-requests
+  // mounts that used to sit here; the ordering rule they shared is unchanged for
+  // the ones that remain.
   app.route("/communities/:communityId/tiers", tierRoutes(deps));
-  app.route("/communities/:communityId/channels", channelRoutes(deps));
-  app.route("/communities/:communityId/members", membershipRoutes(deps));
-  // Task 4 of free communities: the owner's decisions on free-community join
-  // requests. Same reason as tiers/channels/members above: it must be
-  // registered before the catch-all /communities mount so this more specific
-  // path matches first.
-  app.route("/communities/:communityId/join-requests", joinRequestRoutes(deps));
-  // Task 3's scheduling endpoint. Same reason as tiers/channels above: it must
+  // Task 3's scheduling endpoint. Same reason as tiers above: it must
   // be registered before the catch-all /communities mount so this more
   // specific path matches first.
   app.route("/communities/:communityId/events", eventRoutes(deps));

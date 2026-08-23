@@ -709,16 +709,20 @@ describe("GET /communities/:communityId/members", () => {
     ).toBe(400);
   });
 
-  it("leaves the existing revoke endpoint reachable", async () => {
-    // `POST /communities/:id/members/:memberId/revoke` is a DIFFERENT sub-app mounted
-    // at `/communities/:communityId/members`, and this new GET shares that path. Hono
-    // composes every matching handler, so this is the test that would notice one
-    // shadowing the other.
-    //
-    // Asserted on the MESSAGE, not on a 200: this member has no `channel_membership`
-    // row (nothing granted them access), and `RevokeChannelAccess` answers that with
-    // its own 404. That message is the proof the request reached the revoke use-case
-    // rather than being swallowed by the roster handler — a 404 alone would not be.
+  /**
+   * Retire-telegram Task 2 replaced this test, which used to be called "leaves the
+   * existing revoke endpoint reachable". `POST /communities/:id/members/:memberId/revoke`
+   * was a DIFFERENT sub-app mounted at the same `/communities/:communityId/members`
+   * prefix as the roster GET above, and the old test proved the two did not shadow
+   * each other by asserting on `RevokeChannelAccess`'s own 404 MESSAGE.
+   *
+   * That sub-app went with `RevokeChannelAccess`. The check that matters now is the
+   * opposite one: the path must be genuinely unmounted, answering Hono's ordinary
+   * not-found rather than reaching the roster handler that still owns the prefix. A
+   * bare status check would not tell those apart, so this asserts the body is NOT the
+   * use-case's message — i.e. nothing survived to answer it.
+   */
+  it("no longer mounts the revoke endpoint at all", async () => {
     const a = app();
     const { token } = await signupAndGetToken(a);
     const community = await makeCommunity(a, token);
@@ -729,9 +733,8 @@ describe("GET /communities/:communityId/members", () => {
       `/communities/${community.id}/members/${member.member.id}/revoke`,
       { method: "POST", headers: bearer(token) }
     );
-    expect(await res.json()).toEqual({
-      error: "member has no active access to this community",
-    });
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain("member has no active access to this community");
   });
 });
 

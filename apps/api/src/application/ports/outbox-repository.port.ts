@@ -16,6 +16,13 @@ export const OUTBOX_GRANT_ACCESS = "grant_access";
  * `automated: false` was returned, and NOTHING ever retried — which for a creator
  * clicking a button is honest, but for Phase 5's churn job means a churned member
  * stays in the paid group forever with no record that a removal is owed.
+ *
+ * RETIRE-TELEGRAM TASK 2 DELETED BOTH ENDS: `RevokeChannelAccess` wrote these rows
+ * and `RetryChannelAccessRevocation` handled them. Nothing writes this type any
+ * more, and the worker registers no handler for it — a row of it now fails with
+ * "no handler is registered", which `worker-bootstrap.test.ts` pins. The constant
+ * survives because `outbox` rows written before the deletion still carry the
+ * literal, and because that test names it rather than a bare string.
  */
 export const OUTBOX_REVOKE_ACCESS = "revoke_access";
 
@@ -115,6 +122,10 @@ export const OUTBOX_NOTIFY_STREAM_LIVE = "notify_stream_live";
  * `OUTBOX_NOTIFY_STREAM_LIVE`'s payload carries ids and not a snapshot: a request
  * can sit queued long enough for the community's slug or the creator's own
  * WhatsApp number to have changed underneath it.
+ *
+ * RETIRE-TELEGRAM TASK 2 DELETED BOTH ENDS, exactly as for `OUTBOX_REVOKE_ACCESS`
+ * above: `RequestToJoin` wrote these rows and `NotifyJoinRequest` handled them.
+ * Nothing writes this type any more and no handler is registered for it.
  */
 export const OUTBOX_NOTIFY_JOIN_REQUEST = "notify_join_request";
 

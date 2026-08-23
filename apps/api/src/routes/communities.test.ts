@@ -57,9 +57,7 @@ const PAYMENTS_DISABLED_ENV = {
   // boot outside RELAXED_NODE_ENVS when absent — fully configuring it here
   // isolates the assertion to the payments dimension, exactly as
   // bootstrap.test.ts's own rewritten tests do.
-  TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
   FONNTE_API_TOKEN: "real-fonnte-token",
-  TELEGRAM_WEBHOOK_SECRET: "tg_" + "S".repeat(40),
   // Task 2 (images): selectMediaStorage now block-boots NODE_ENV=production
   // with no S3 vars set — same reasoning as the messaging tokens just above,
   // fully configured here so this test stays isolated to the payments

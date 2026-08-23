@@ -11,7 +11,6 @@ import {
   resolveAppBaseUrl,
   resolveCallbackToken,
   resolveMaxPostImages,
-  resolveTelegramWebhookSecret,
   selectAiProvider,
   selectEmailProvider,
   selectMediaStorage,
@@ -19,14 +18,12 @@ import {
   selectPaymentProvider,
   selectStreamingProvider,
   TEST_CALLBACK_TOKEN,
-  TEST_TELEGRAM_WEBHOOK_SECRET,
   type Dependencies,
 } from "./bootstrap";
 import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-storage.adapter";
 import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage.adapter";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
-import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
 import { FAKE_AI_BEHAVIOURS, FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
 import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
 import { SendAiMessage } from "./application/use-cases/send-ai-message";
@@ -72,7 +69,6 @@ import {
   ListTiers,
   UpdateTier,
 } from "./application/use-cases/manage-tiers";
-import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
@@ -82,11 +78,7 @@ import { StartUserSubscription } from "./application/use-cases/start-user-subscr
 import { GetPublicCommunity } from "./application/use-cases/get-public-community";
 import { StartCheckout } from "./application/use-cases/start-checkout";
 import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
-import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
-import { DecideJoinRequest, ListJoinRequests } from "./application/use-cases/decide-join-request";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
-import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
-import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
 import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
 import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
 import { GetCommunityActivity } from "./application/use-cases/get-community-activity";
@@ -112,20 +104,16 @@ import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.
 import type { ClockPort } from "./application/ports/clock.port";
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
 import type { MembershipTierRepositoryPort } from "./application/ports/membership-tier-repository.port";
-import type { ChannelRepositoryPort } from "./application/ports/channel-repository.port";
 import type { MemberRepositoryPort } from "./application/ports/member-repository.port";
 import type { SubscriptionRepositoryPort } from "./application/ports/subscription-repository.port";
 import type { WebhookEventRepositoryPort } from "./application/ports/webhook-event-repository.port";
 import type { ActivityLogRepositoryPort } from "./application/ports/activity-log-repository.port";
 import type { AnalyticsRepositoryPort } from "./application/ports/analytics-repository.port";
-import type { ChannelMembershipRepositoryPort } from "./application/ports/channel-membership-repository.port";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
 import type { EventRepositoryPort } from "./application/ports/event-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
 import type { UserPurchaseUnitOfWorkPort } from "./application/ports/user-purchase-unit-of-work.port";
-import type { JoinRequestRepositoryPort } from "./application/ports/join-request-repository.port";
-import type { JoinRequestUnitOfWorkPort } from "./application/ports/join-request-unit-of-work.port";
 import type { PostEditUnitOfWorkPort } from "./application/ports/post-edit-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
 import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
@@ -139,8 +127,8 @@ import type { PaymentProviderPort } from "./application/ports/payment-provider.p
  * would hide exactly the regression this test exists to catch.
  *
  * `registerCreator`/`authenticateCreator`/`createCommunity`/`listCommunities`/
- * `updateCommunity`/`defineTier`/`listTiers`/`updateTier`/`connectChannel`/
- * `listChannels`/`createPaymentAccount`/`getPublicCommunity`/`startCheckout`/
+ * `updateCommunity`/`defineTier`/`listTiers`/`updateTier`/
+ * `createPaymentAccount`/`getPublicCommunity`/`startCheckout`/
  * `getSubscriptionStatus` are typed as the
  * concrete use-case classes (there's only one implementation of each, so no
  * port exists for them) — a class with private members can't be satisfied by
@@ -452,15 +440,6 @@ const fakeMembershipTierRepository: MembershipTierRepositoryPort = {
   },
 };
 
-const fakeChannelRepository: ChannelRepositoryPort = {
-  async create() {
-    throw new Error("not used");
-  },
-  async listByCommunity() {
-    return [];
-  },
-};
-
 const fakeEventRepository: EventRepositoryPort = {
   async createForCreator() {
     throw new Error("not used");
@@ -719,71 +698,12 @@ const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
   },
 };
 
-const fakeJoinRequestRepository: JoinRequestRepositoryPort = {
-  async createPending() {
-    return null;
-  },
-  async findById() {
-    return null;
-  },
-  async listPendingForCommunity() {
-    return [];
-  },
-  async findNotificationContext() {
-    return null;
-  },
-  async decide() {
-    return false;
-  },
-};
-
-/** Runs the work inline — no real transaction is needed to satisfy the type. */
-const fakeJoinRequestUnitOfWork: JoinRequestUnitOfWorkPort = {
-  async run(work) {
-    return work({
-      joinRequests: fakeJoinRequestRepository,
-      outbox: fakeOutboxRepository,
-      activityLog: fakeActivityLogRepository,
-      // Task 4's addition to the port — `createActiveWithoutBilling` runs in
-      // the same transaction as `joinRequests.decide` now.
-      subscriptions: fakeSubscriptionRepository,
-    });
-  },
-};
-
-/**
- * `RevokeChannelAccess` is a concrete class with private members, so — like the
- * other use-cases above — the fake is a REAL instance wrapping hand-written fake
- * ports. Nothing here reaches a database or a provider.
- */
-const fakeChannelMembershipRepository: ChannelMembershipRepositoryPort = {
-  async claim() {
-    throw new Error("not used");
-  },
-  async recordGrant() {
-    return true;
-  },
-  async releaseMintWindow() {
-    // not used
-  },
-  async recordPlatformMemberIdByInviteLink() {
-    return { outcome: "unknown_invite_link" };
-  },
-  async revoke() {
-    return false;
-  },
-  async listActiveForMemberInCommunity() {
-    return [];
-  },
-  async findByIdWithChannel() {
-    return null;
-  },
-};
-
 const fakeMessagingProvider: MessagingProviderPort = {
-  platform: "telegram",
+  // The WhatsApp notifier is the only provider left on `MessagingProviders` after
+  // retire-telegram Task 2, and it is the one that cannot gate.
+  platform: "whatsapp",
   capabilities() {
-    return { canGateAccess: true };
+    return { canGateAccess: false };
   },
   async grantAccess() {
     throw new Error("not used");
@@ -943,8 +863,6 @@ describe("Dependencies (composition root contract)", () => {
       defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
       listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
       updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
-      connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
-      listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
       getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
       connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
@@ -975,26 +893,6 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
-      requestToJoin: new RequestToJoin(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeMemberRepository,
-        fakeSubscriptionRepository,
-        fakeJoinRequestUnitOfWork
-      ),
-      getJoinRequestStatus: new GetJoinRequestStatus(
-        fakeCommunityRepository,
-        fakeJoinRequestRepository,
-        fakeSubscriptionRepository
-      ),
-      listJoinRequests: new ListJoinRequests(fakeCommunityRepository, fakeJoinRequestRepository),
-      decideJoinRequest: new DecideJoinRequest(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeJoinRequestRepository,
-        fakeSubscriptionRepository,
-        fakeJoinRequestUnitOfWork
-      ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
         streamTokenSecret: undefined,
       }),
@@ -1011,14 +909,6 @@ describe("Dependencies (composition root contract)", () => {
         fakeCommunityRepository,
         fakeAnalyticsRepository
       ),
-      revokeChannelAccess: new RevokeChannelAccess(
-        fakeCommunityRepository,
-        fakeChannelMembershipRepository,
-        fakeActivityLogRepository,
-        new Map([["telegram", fakeMessagingProvider]]),
-        fakeOutboxRepository
-      ),
-      recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
       sendRenewalReminder: new SendRenewalReminder(
         fakeSubscriptionRepository,
         fakeMemberRepository,
@@ -1026,11 +916,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeMessagingProvider,
         { appBaseUrl: "https://app.diudara.test" }
       ),
-      messaging: {
-        gating: new Map([["telegram", fakeMessagingProvider]]),
-        notifier: fakeMessagingProvider,
-      },
-      telegramWebhookSecret: "fake-telegram-webhook-secret",
+      messaging: { notifier: fakeMessagingProvider },
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
@@ -1217,8 +1103,6 @@ describe("Dependencies (composition root contract)", () => {
       defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
       listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
       updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
-      connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
-      listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
       getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
       connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
@@ -1249,26 +1133,6 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
-      requestToJoin: new RequestToJoin(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeMemberRepository,
-        fakeSubscriptionRepository,
-        fakeJoinRequestUnitOfWork
-      ),
-      getJoinRequestStatus: new GetJoinRequestStatus(
-        fakeCommunityRepository,
-        fakeJoinRequestRepository,
-        fakeSubscriptionRepository
-      ),
-      listJoinRequests: new ListJoinRequests(fakeCommunityRepository, fakeJoinRequestRepository),
-      decideJoinRequest: new DecideJoinRequest(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeJoinRequestRepository,
-        fakeSubscriptionRepository,
-        fakeJoinRequestUnitOfWork
-      ),
       getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
         streamTokenSecret: undefined,
       }),
@@ -1285,14 +1149,6 @@ describe("Dependencies (composition root contract)", () => {
         fakeCommunityRepository,
         fakeAnalyticsRepository
       ),
-      revokeChannelAccess: new RevokeChannelAccess(
-        fakeCommunityRepository,
-        fakeChannelMembershipRepository,
-        fakeActivityLogRepository,
-        new Map([["telegram", fakeMessagingProvider]]),
-        fakeOutboxRepository
-      ),
-      recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
       sendRenewalReminder: new SendRenewalReminder(
         fakeSubscriptionRepository,
         fakeMemberRepository,
@@ -1300,11 +1156,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeMessagingProvider,
         { appBaseUrl: "https://app.diudara.test" }
       ),
-      messaging: {
-        gating: new Map([["telegram", fakeMessagingProvider]]),
-        notifier: fakeMessagingProvider,
-      },
-      telegramWebhookSecret: "fake-telegram-webhook-secret",
+      messaging: { notifier: fakeMessagingProvider },
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
@@ -1518,6 +1370,32 @@ describe("resolveAppBaseUrl", () => {
   });
 });
 
+/**
+ * Retire-telegram Task 2. The container is the one place every deleted use-case
+ * would still be reachable from, so this asserts on the SHAPE of what
+ * `bootstrap()` returns rather than on any one field: a key whose name mentions
+ * a channel or a join request means the machinery is still wired, whatever the
+ * route table says.
+ *
+ * A literal empty array, never a count — the failure message has to name what
+ * survived.
+ */
+describe("bootstrap() after the Telegram and channel deletion", () => {
+  it("wires no channel or join-request dependency", () => {
+    withJwtSecret("x".repeat(32), () => {
+      const keys = Object.keys(bootstrap()).filter((k) => /channel|joinrequest/i.test(k));
+      expect(keys).toEqual([]);
+    });
+  });
+
+  it("wires no telegram dependency", () => {
+    withJwtSecret("x".repeat(32), () => {
+      const keys = Object.keys(bootstrap()).filter((k) => /telegram/i.test(k));
+      expect(keys).toEqual([]);
+    });
+  });
+});
+
 describe("bootstrap() APP_BASE_URL", () => {
   it("builds a checkout redirect from the configured origin", async () => {
     // End-to-end through the composition root: the value in the environment has
@@ -1591,7 +1469,10 @@ describe(".env.example", () => {
     const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
     const lines = example.split("\n");
 
-    for (const name of ["TELEGRAM_BOT_TOKEN", "FONNTE_API_TOKEN", "TELEGRAM_WEBHOOK_SECRET"]) {
+    // Retire-telegram Task 2 dropped TELEGRAM_BOT_TOKEN and
+    // TELEGRAM_WEBHOOK_SECRET from this list: `bootstrap()` reads neither, so
+    // `.env.example` documenting them would be documenting nothing.
+    for (const name of ["FONNTE_API_TOKEN"]) {
       const line = lines.find((l) => l.trim().startsWith(`# ${name}=`));
       expect(line).toBeDefined();
       // No committed value — these are bearer credentials.
@@ -1608,18 +1489,9 @@ describe(".env.example", () => {
     }
   });
 
-  it("tells an operator how to install the Telegram webhook, including allowed_updates", () => {
-    // The one step nothing in the code can do for them, and the one that silently
-    // breaks everything if it is missed: Telegram does NOT send `chat_member`
-    // updates unless `allowed_updates` asks for them, so a bot with a webhook
-    // installed the obvious way records no member ids at all and revocation stays
-    // unautomatable with no error anywhere.
-    const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
-    expect(example).toContain("setWebhook");
-    expect(example).toContain("secret_token=");
-    expect(example).toContain("allowed_updates");
-    expect(example).toContain("chat_member");
-  });
+  // Retire-telegram Task 2 deleted the test that stood here: "tells an operator how
+  // to install the Telegram webhook, including allowed_updates". The block it read
+  // is gone from `.env.example` along with `POST /webhooks/telegram`.
 
   /**
    * Same shape as the messaging-tokens test above, extended to five
@@ -1962,9 +1834,7 @@ describe("bootstrap() payment provider selection", () => {
           XENDIT_SECRET_KEY: undefined,
           XENDIT_SPLIT_RULE_ID: undefined,
           XENDIT_CALLBACK_TOKEN: undefined,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -2019,8 +1889,7 @@ const REAL_CALLBACK_TOKEN = `xnd_${"R".repeat(40)}`;
  * with no S3 vars set (Task 2, images), so every test in this file that
  * simulates a production box to isolate some OTHER provider's own disabled
  * path (payments/email/AI/streaming) must supply this too, or `bootstrap()`
- * throws on media storage before it ever reaches the guard under test — same
- * reasoning as `TELEGRAM_WEBHOOK_SECRET` joining those same blocks in Task 7b.
+ * throws on media storage before it ever reaches the guard under test.
  */
 const REAL_S3_CONFIG = {
   S3_ACCESS_KEY_ID: "test-s3-access-key",
@@ -2302,15 +2171,11 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          // Phase 4: the API now selects messaging providers too (revocation is
-          // synchronous), under the same allowlist. A production box must
-          // configure them, so "fully configured" means all SIX variables —
-          // TELEGRAM_WEBHOOK_SECRET joined the set in Task 7b, because a bot token
-          // without it means no member's Telegram user id is ever recorded and the
-          // creator can never remove anybody.
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+          // Phase 4: the API selects a messaging provider too, under the same
+          // allowlist, so a production box must configure it. Retire-telegram
+          // Task 2 took TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET out of
+          // this set — bootstrap() no longer reads either.
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -2336,9 +2201,7 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           XENDIT_SECRET_KEY: undefined,
           XENDIT_SPLIT_RULE_ID: undefined,
           XENDIT_CALLBACK_TOKEN: undefined,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -2357,10 +2220,10 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
 });
 
 describe("bootstrap() messaging provider selection", () => {
-  it("refuses to boot a production process with no messaging tokens", () => {
+  it("refuses to boot a production process with no messaging token", () => {
     // Reached through bootstrap(), not just the selector in isolation: the API
-    // process performs REVOCATION, and a fake adapter there would report a
-    // removal it never performed.
+    // process sends password-reset and signup notices, and a fake adapter there
+    // would report a send it never performed.
     //
     // APP_BASE_URL is set explicitly, not inherited, for the same reason as the
     // callback-token tests above: resolveAppBaseUrl is the guard immediately
@@ -2374,119 +2237,82 @@ describe("bootstrap() messaging provider selection", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          TELEGRAM_BOT_TOKEN: undefined,
           FONNTE_API_TOKEN: undefined,
         },
         () => {
           captureConsoleLog(() => {
-            expect(() => bootstrap()).toThrow(/TELEGRAM_BOT_TOKEN and FONNTE_API_TOKEN/);
+            expect(() => bootstrap()).toThrow(/FONNTE_API_TOKEN is not set/);
           });
         }
       );
     });
   });
-
-  it("wires the revocation use-case, so the route is not calling nothing", () => {
-    const deps = bootstrap();
-    // A wiring assertion, like the appBaseUrl one: Phase 3 shipped a whole phase
-    // with an unreachable confirmation page because nothing checked the root.
-    expect(deps.revokeChannelAccess).toBeInstanceOf(RevokeChannelAccess);
-  });
 });
 
+/**
+ * Retire-telegram Task 2 removed two tests from this block along with the
+ * `TELEGRAM_BOT_TOKEN` half of this selector: one asserted the gating map held a
+ * `TelegramBotAdapter` and a `FonnteWhatsAppAdapter`, and one — "refuses HALF
+ * configuration in every environment" — pinned the throw when exactly one of the
+ * two tokens was set. There is no half to be in any more: one token cannot
+ * disagree with itself, so that guard has no state to detect and was deleted with
+ * the branch it guarded. The ALLOWLIST guard below, which is the one that stops a
+ * production box booting a fake, is untouched and still covers every nodeEnv.
+ */
 describe("selectMessagingProviders", () => {
-  it("selects the real adapters when both tokens are set", () => {
+  it("selects the real adapter when the token is set", () => {
     const providers = captureConsoleLogValue(() =>
       selectMessagingProviders({
-        telegramBotToken: "123456:real-bot-token",
         fonnteApiToken: "real-fonnte-token",
         nodeEnv: "production",
       })
     );
 
-    expect(providers.gating.get("telegram")).toBeInstanceOf(TelegramBotAdapter);
-    // WhatsApp is in the GATING map on purpose: a whatsapp channel must resolve
-    // to a provider that reports `canGateAccess: false` — which the grant
-    // use-case turns into "a human will add you" — rather than to nothing, which
-    // it treats as an unwired platform and an error.
-    expect(providers.gating.get("whatsapp")).toBeInstanceOf(FonnteWhatsAppAdapter);
     expect(providers.notifier).toBeInstanceOf(FonnteWhatsAppAdapter);
   });
 
-  it("selects the fake adapters when neither token is set, in development or test", () => {
+  it("selects the fake adapter when the token is not set, in development or test", () => {
     captureConsoleLog(() => {
       for (const nodeEnv of [...RELAXED_NODE_ENVS]) {
-        const providers = selectMessagingProviders({
-          telegramBotToken: undefined,
-          fonnteApiToken: undefined,
-          nodeEnv,
-        });
-        expect(providers.gating.get("telegram")).toBeInstanceOf(FakeMessagingAdapter);
+        const providers = selectMessagingProviders({ fonnteApiToken: undefined, nodeEnv });
         expect(providers.notifier).toBeInstanceOf(FakeMessagingAdapter);
+        // Never a gating provider: the one thing this notifier is for is reaching
+        // a person, and `canGateAccess` is what the rest of the codebase reads to
+        // tell the two apart.
+        expect(providers.notifier.capabilities().canGateAccess).toBe(false);
       }
     });
   });
 
   /**
    * Same allowlist, same reason as the payment adapter: a box that looks like it
-   * is inviting paying members while only appending to an array is this phase's
-   * worst failure mode — the member appears granted and is not.
+   * is messaging paying members while only appending to an array is this phase's
+   * worst failure mode — the member appears told and is not.
    */
   it("refuses to start for ANY nodeEnv outside the allowlist, including unset", () => {
     for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "dev", "", "production"]) {
-      expect(() =>
-        selectMessagingProviders({
-          telegramBotToken: undefined,
-          fonnteApiToken: undefined,
-          nodeEnv,
-        })
-      ).toThrow(/permitted ONLY/);
+      expect(() => selectMessagingProviders({ fonnteApiToken: undefined, nodeEnv })).toThrow(
+        /permitted ONLY/
+      );
     }
-  });
-
-  it("refuses HALF configuration in every environment", () => {
-    // A set Telegram token with no Fonnte token means invites are created and
-    // never delivered: the member pays, a link is minted, and nobody is told.
-    expect(() =>
-      selectMessagingProviders({
-        telegramBotToken: "123456:real",
-        fonnteApiToken: undefined,
-        nodeEnv: "test",
-      })
-    ).toThrow(/FONNTE_API_TOKEN/);
-
-    expect(() =>
-      selectMessagingProviders({
-        telegramBotToken: undefined,
-        fonnteApiToken: "real",
-        nodeEnv: "test",
-      })
-    ).toThrow(/TELEGRAM_BOT_TOKEN/);
   });
 
   it("treats a blank token as unset rather than as configuration", () => {
     captureConsoleLog(() => {
-      const providers = selectMessagingProviders({
-        telegramBotToken: "   ",
-        fonnteApiToken: "",
-        nodeEnv: "test",
-      });
-      expect(providers.gating.get("telegram")).toBeInstanceOf(FakeMessagingAdapter);
+      const providers = selectMessagingProviders({ fonnteApiToken: "   ", nodeEnv: "test" });
+      expect(providers.notifier).toBeInstanceOf(FakeMessagingAdapter);
     });
   });
 
-  it("keeps the tokens out of the startup log line", () => {
+  it("keeps the token out of the startup log line", () => {
     const lines = captureConsoleLog(() => {
       selectMessagingProviders({
-        telegramBotToken: "123456:AA-secret-bot-token",
         fonnteApiToken: "secret-fonnte-token",
         nodeEnv: "production",
       });
     });
 
-    const printed = lines.join("\n");
-    expect(printed).not.toContain("AA-secret-bot-token");
-    expect(printed).not.toContain("secret-fonnte-token");
+    expect(lines.join("\n")).not.toContain("secret-fonnte-token");
   });
 });
 
@@ -2709,9 +2535,7 @@ describe("bootstrap() email provider selection", () => {
           XENDIT_SECRET_KEY: undefined,
           XENDIT_SPLIT_RULE_ID: undefined,
           XENDIT_CALLBACK_TOKEN: undefined,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -2746,236 +2570,16 @@ function captureConsoleLogValue<T>(fn: () => T): T {
   return value;
 }
 
-/**
- * Task 7b. `TELEGRAM_WEBHOOK_SECRET` is the ONLY authentication on
- * `POST /webhooks/telegram`, and it is a sharper weapon than it looks: a forged
- * `chat_member` update writes an attacker-chosen `external_member_id` onto a
- * membership, and that is the id a later `banChatMember` is aimed at. Forging one
- * turns a creator's "remove this member" into "remove somebody else from my group".
- *
- * So it is held to the SAME four rules as `resolveCallbackToken` above, and these
- * tests are deliberately its mirror image.
+/*
+ * Retire-telegram Task 2 deleted two whole blocks that stood here — sixteen tests
+ * for `resolveTelegramWebhookSecret` and three for the `bootstrap()`
+ * TELEGRAM_WEBHOOK_SECRET guard. They pinned the ONLY authentication on
+ * `POST /webhooks/telegram`; that route, its secret resolver and the
+ * `RecordChannelJoin` behind it are all gone. `resolveCallbackToken`'s block above
+ * — which those tests were written as the mirror image of — is untouched and still
+ * covers the same four rules for the Xendit token, which is the one static webhook
+ * secret this process still has.
  */
-const REAL_TELEGRAM_WEBHOOK_SECRET = `tg_${"S".repeat(40)}`;
-const NO_TELEGRAM_BOT = { telegramBotToken: undefined };
-const CONFIGURED_TELEGRAM_BOT = { telegramBotToken: "123456:ABC-DEF" };
-
-describe("resolveTelegramWebhookSecret", () => {
-  it("uses a configured secret as-is", () => {
-    expect(
-      resolveTelegramWebhookSecret({
-        webhookSecret: REAL_TELEGRAM_WEBHOOK_SECRET,
-        ...CONFIGURED_TELEGRAM_BOT,
-        nodeEnv: "production",
-      })
-    ).toBe(REAL_TELEGRAM_WEBHOOK_SECRET);
-  });
-
-  it("refuses a secret shorter than 32 characters, in EVERY environment", () => {
-    for (const nodeEnv of ["production", "development", "test", undefined]) {
-      for (const short of ["x", "tg_short", "a".repeat(31)]) {
-        expect(() =>
-          resolveTelegramWebhookSecret({
-            webhookSecret: short,
-            ...NO_TELEGRAM_BOT,
-            nodeEnv,
-          })
-        ).toThrow(/TELEGRAM_WEBHOOK_SECRET is too short/);
-      }
-      expect(
-        resolveTelegramWebhookSecret({
-          webhookSecret: "a".repeat(32),
-          ...NO_TELEGRAM_BOT,
-          nodeEnv,
-        })
-      ).toBe("a".repeat(32));
-    }
-  });
-
-  it("refuses characters Telegram's setWebhook will not accept", () => {
-    // secret_token is 1-256 of A-Z a-z 0-9 _ - only. Caught at BOOT rather than as
-    // an opaque 400 from setWebhook on a box whose endpoint then rejects everything.
-    for (const bad of [`${"a".repeat(32)} b`, `${"a".repeat(32)}+`, `${"a".repeat(32)}=`, `å${"a".repeat(32)}`]) {
-      expect(() =>
-        resolveTelegramWebhookSecret({
-          webhookSecret: bad,
-          ...NO_TELEGRAM_BOT,
-          nodeEnv: "production",
-        })
-      ).toThrow(/setWebhook will not accept/);
-    }
-    // The output of the command the error message suggests.
-    expect(
-      resolveTelegramWebhookSecret({
-        webhookSecret: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: "production",
-      })
-    ).toBeTruthy();
-  });
-
-  it("defaults ONLY under NODE_ENV=test", () => {
-    expect(
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: "test",
-      })
-    ).toBe(TEST_TELEGRAM_WEBHOOK_SECRET);
-  });
-
-  it("lets a DEVELOPER boot without it — a webhook needs a public URL they may not have", () => {
-    captureConsoleLog(() => {
-      expect(
-        resolveTelegramWebhookSecret({
-          webhookSecret: undefined,
-          ...NO_TELEGRAM_BOT,
-          nodeEnv: "development",
-        })
-      ).toBeUndefined();
-    });
-  });
-
-  it("refuses to boot without it for ANY nodeEnv outside the allowlist", () => {
-    // Including UNSET, which is what a real deployment has: nothing in this
-    // repository sets NODE_ENV.
-    for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "Production", "dev", ""]) {
-      expect(() =>
-        resolveTelegramWebhookSecret({ webhookSecret: undefined, ...NO_TELEGRAM_BOT, nodeEnv })
-      ).toThrow(/permitted ONLY when NODE_ENV is exactly/);
-    }
-  });
-
-  it("distinguishes an unset NODE_ENV from an unrecognised one", () => {
-    expect(() =>
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: undefined,
-      })
-    ).toThrow(/NODE_ENV is not set/);
-    expect(() =>
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: "staging",
-      })
-    ).toThrow(/NODE_ENV is staging/);
-  });
-
-  it("refuses to start on PARTIAL configuration in every environment", () => {
-    // A bot token with no webhook secret means real invite links are issued and no
-    // join can be authenticated — so no member's Telegram user id is ever recorded
-    // and the creator can never remove anybody. Never intentional.
-    for (const nodeEnv of ["development", "production", "staging", undefined]) {
-      expect(() =>
-        resolveTelegramWebhookSecret({
-          webhookSecret: undefined,
-          ...CONFIGURED_TELEGRAM_BOT,
-          nodeEnv,
-        })
-      ).toThrow(/TELEGRAM_BOT_TOKEN is set but TELEGRAM_WEBHOOK_SECRET is not/);
-    }
-  });
-
-  it("treats empty and whitespace-only configuration as unset", () => {
-    for (const blank of ["", "   ", "\t", "\n"]) {
-      expect(() =>
-        resolveTelegramWebhookSecret({
-          webhookSecret: blank,
-          ...NO_TELEGRAM_BOT,
-          nodeEnv: "production",
-        })
-      ).toThrow(/NODE_ENV is production/);
-      expect(
-        resolveTelegramWebhookSecret({ webhookSecret: blank, ...NO_TELEGRAM_BOT, nodeEnv: "test" })
-      ).toBe(TEST_TELEGRAM_WEBHOOK_SECRET);
-    }
-  });
-
-  it("refuses the committed test secret outside tests", () => {
-    for (const nodeEnv of ["production", "development", undefined]) {
-      expect(() =>
-        resolveTelegramWebhookSecret({
-          webhookSecret: TEST_TELEGRAM_WEBHOOK_SECRET,
-          ...NO_TELEGRAM_BOT,
-          nodeEnv,
-        })
-      ).toThrow(/committed to this repository/);
-    }
-  });
-
-  it("never returns an empty string, which would vouch for an empty header", () => {
-    for (const nodeEnv of ["test", "development"]) {
-      let secret: string | undefined;
-      captureConsoleLog(() => {
-        secret = resolveTelegramWebhookSecret({
-          webhookSecret: undefined,
-          ...NO_TELEGRAM_BOT,
-          nodeEnv,
-        });
-      });
-      expect(secret).not.toBe("");
-    }
-  });
-
-  it("says out loud in development that revocation cannot be automated without it", () => {
-    const loud = captureConsoleLog(() => {
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: "development",
-      });
-    });
-    expect(loud.some((line) => /TELEGRAM_WEBHOOK_SECRET not set/.test(line))).toBe(true);
-    expect(loud.some((line) => /revocation cannot be automated/.test(line))).toBe(true);
-
-    const quiet = captureConsoleLog(() => {
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: "test",
-      });
-    });
-    expect(quiet).toEqual([]);
-  });
-
-  it("mentions the file an operator has to edit", () => {
-    expect(() =>
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...CONFIGURED_TELEGRAM_BOT,
-        nodeEnv: "production",
-      })
-    ).toThrow(/apps\/api\/\.env/);
-  });
-});
-
-describe("bootstrap() TELEGRAM_WEBHOOK_SECRET guard", () => {
-  it("wires the configured secret into Dependencies", () => {
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET }, () => {
-        expect(bootstrap().telegramWebhookSecret).toBe(REAL_TELEGRAM_WEBHOOK_SECRET);
-      });
-    });
-  });
-
-  it("falls back to the test secret under bun test, so the suite can sign updates", () => {
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ TELEGRAM_WEBHOOK_SECRET: undefined }, () => {
-        expect(bootstrap().telegramWebhookSecret).toBe(TEST_TELEGRAM_WEBHOOK_SECRET);
-      });
-    });
-  });
-
-  it("wires a RecordChannelJoin into Dependencies", () => {
-    // Without it nothing populates channel_membership.external_member_id, and
-    // RevokeChannelAccess can only ever report no_provider_member_id_recorded.
-    withJwtSecret("x".repeat(32), () => {
-      expect(bootstrap().recordChannelJoin).toBeInstanceOf(RecordChannelJoin);
-    });
-  });
-});
 
 describe("selectAiProvider", () => {
   it("selects OpenRouterAiAdapter when both env vars are set", () => {
@@ -3375,9 +2979,7 @@ describe("bootstrap() AI provider wiring", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           OPENROUTER_API_KEY: undefined,
           OPENROUTER_MODEL: undefined,
           AI_DAILY_MESSAGE_LIMIT: "fifty",
@@ -3647,9 +3249,7 @@ describe("bootstrap() streaming provider wiring", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -3730,9 +3330,7 @@ describe("bootstrap() streaming provider wiring", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -3763,9 +3361,7 @@ describe("bootstrap() media storage selection", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           S3_ACCESS_KEY_ID: undefined,
           S3_SECRET_ACCESS_KEY: undefined,
           S3_BUCKET: undefined,

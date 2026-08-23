@@ -98,9 +98,7 @@ describe("GET /payment-account, payments disabled on the server", () => {
         XENDIT_SECRET_KEY: undefined,
         XENDIT_SPLIT_RULE_ID: undefined,
         XENDIT_CALLBACK_TOKEN: undefined,
-        TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
         FONNTE_API_TOKEN: "real-fonnte-token",
-        TELEGRAM_WEBHOOK_SECRET: "tg_" + "S".repeat(40),
         // Task 2 (images): selectMediaStorage now block-boots NODE_ENV=production
         // with no S3 vars set — fully configured here so this test stays isolated
         // to the payments dimension, same reasoning as the messaging tokens above.
