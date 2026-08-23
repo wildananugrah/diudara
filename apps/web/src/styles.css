@@ -26,21 +26,54 @@
  * The surviving pages below still draw from the same palette.
  */
 
+/*
+ * REDESIGN TOKENS (DIUDARA Redesign.dc.html).
+ *
+ * The palette moved from sRGB hex to oklch, and the whole thing is tinted: every
+ * neutral carries a trace of the brand's green hue (145) rather than being a pure
+ * grey, which is what makes the surfaces read as warm paper instead of as chrome.
+ * Lightness is the first number, so a rule that needs "one step darker" changes
+ * that and nothing else — the reason for choosing oklch over hex here.
+ *
+ * The variable NAMES are unchanged. Every existing rule in this file — including
+ * the dashboard's — keeps working and simply inherits the new palette, so this is
+ * a re-tint rather than a rewrite.
+ */
 :root {
-  --green: #16a34a;
-  --green-dark: #15803d;
-  --red: #b91c1c;
-  --red-bg: #fef2f2;
+  --green: oklch(0.52 0.12 145);
+  --green-dark: oklch(0.45 0.115 145);
+  --green-wash: oklch(0.93 0.02 145);
+  --red: oklch(0.5 0.15 25);
+  --red-bg: oklch(0.96 0.02 25);
+  --live: oklch(0.55 0.16 25);
   --amber: #92400e;
   --amber-bg: #fffbeb;
   --amber-border: #fcd34d;
-  --ink: #111827;
-  --ink-soft: #4b5563;
-  --ink-faint: #6b7280;
-  --line: #e5e7eb;
-  --surface: #ffffff;
-  --canvas: #f8f9fa;
-  --radius: 8px;
+  --ink: oklch(0.22 0.02 145);
+  --ink-soft: oklch(0.45 0.012 145);
+  --ink-faint: oklch(0.55 0.012 145);
+  --line: oklch(0.9 0.008 145);
+  --line-soft: oklch(0.93 0.008 145);
+  --surface: oklch(0.99 0.004 90);
+  --surface-sunk: oklch(0.975 0.005 145);
+  --canvas: oklch(0.955 0.006 145);
+  /* The dark action behind a paywall — deliberately NOT the brand green, so
+     "become a member" never reads as the same weight as an ordinary primary. */
+  --gate: oklch(0.24 0.02 145);
+  --gate-dark: oklch(0.18 0.02 145);
+  /* Flatter than the 8px it replaces: the redesign's frames are square-ish and
+     a large radius fights the hairline rules it leans on. */
+  --radius: 4px;
+  --radius-panel: 6px;
+  --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
+  /* The diagonal hatch that stands in for content a viewer may not see. One
+     definition, used by the locked media panel and the gated stream tile. */
+  --hatch: repeating-linear-gradient(
+    135deg,
+    oklch(0.975 0.005 145) 0 10px,
+    oklch(0.955 0.007 145) 10px 20px
+  );
 }
 
 * {
@@ -49,7 +82,8 @@
 
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
   color: var(--ink);
   background: var(--canvas);
   line-height: 1.5;
@@ -1097,5 +1131,418 @@ button:disabled {
   .app-shell-main {
     margin-left: 220px;
     padding-bottom: 0;
+  }
+}
+
+/* ===============================================================
+   REDESIGN — DIUDARA Redesign.dc.html
+   ===============================================================
+
+   Applied as a layer at the end of the file rather than by editing the rules
+   above, for two reasons. The tokens were re-tinted in `:root`, so everything
+   already inherits the new palette; what remains is the redesign's *structural*
+   moves, and keeping them together means the next person can read the whole
+   redesign as one thing instead of hunting for it in 1,500 lines.
+
+   Several targets here — `.post-card-locked`, `.stream-lock`, `.stream-card`,
+   `.siaran-page` — had NO rules at all before this. Phase 6's lock panel and
+   Phase 7's Siaran shipped with classes and no styles, so this is the first
+   time they are dressed rather than restyled.
+
+   The mockups draw the >=md left-rail shape only. The bottom-tab shape below md
+   is NOT drawn, and is deliberately kept: the audience is phone-first (member-UI
+   spec §3), so it gets the new visual language rather than being deleted for
+   being absent from a desktop comp.
+   --------------------------------------------------------------- */
+
+/* --- Display type. The serif is the redesign's whole voice: it appears on
+       page titles, the landing hero, and prices, and nowhere else. --------- */
+.user-page > h1,
+.beranda-page > h1,
+.jelajah-page > h1,
+.siaran-page > h1,
+.profile-name,
+.landing-hero h1,
+.landing-section > h2 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
+.landing-hero h1 {
+  font-size: clamp(2.25rem, 6vw, 3.75rem);
+  line-height: 1.06;
+  letter-spacing: -0.015em;
+  text-wrap: pretty;
+}
+
+.landing-lede,
+.profile-bio,
+.post-card-body {
+  text-wrap: pretty;
+}
+
+.landing-eyebrow {
+  font-size: 0.75rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--green);
+}
+
+/* The wordmark is tracked wide enough to read as a lockup rather than a word. */
+.brand {
+  letter-spacing: 0.22em;
+  font-weight: 600;
+}
+
+/* --- The shell. Rail above md, tabs below — same two shapes, new surfaces. -- */
+.side-rail {
+  background: var(--surface-sunk);
+  border-right: 1px solid var(--line-soft);
+}
+
+.side-rail a,
+.bottom-nav a {
+  border-radius: var(--radius);
+}
+
+.side-rail a.active,
+.bottom-nav a.active {
+  background: var(--green-wash);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* The LIVE marker beside Siaran. Red is reserved for exactly this and for
+   ending a broadcast — it never means "primary". */
+.side-rail a .live-dot,
+.bottom-nav a .live-dot {
+  color: var(--live);
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+/* --- Feed tabs: the active one is underlined by an inset shadow rather than a
+       border, so switching tabs cannot shift the row by a pixel. ----------- */
+.feed-tabs button {
+  font-family: inherit;
+  font-size: 0.9375rem;
+  color: var(--ink-faint);
+  background: none;
+  border: none;
+  padding: 0 0 0.875rem;
+  margin-right: 1.5rem;
+  cursor: pointer;
+}
+
+.feed-tabs button[aria-selected="true"],
+.feed-tabs button.active {
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--green);
+}
+
+/* --- Composer: a bordered card whose actions sit on their own hairline row. - */
+.post-composer,
+.stream-composer {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+}
+
+.post-composer-actions {
+  border-top: 1px solid var(--line-soft);
+  padding: 0.75rem 1.125rem;
+}
+
+.post-composer-members-only {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 0.625rem;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+
+/* --- The paywall. Hatched fill for content withheld, and a DARK action rather
+       than the brand green: buying access is a different kind of decision from
+       posting, and the two must not look interchangeable. ------------------ */
+.post-card-locked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.375rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--hatch);
+}
+
+.post-card-locked-count {
+  margin: 0;
+  font-size: 0.9375rem;
+  color: var(--ink-soft);
+}
+
+.post-card-locked-link {
+  display: inline-flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 1.125rem;
+  border-radius: var(--radius);
+  background: var(--gate);
+  color: oklch(0.99 0.004 90);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.post-card-locked-link:hover {
+  background: var(--gate-dark);
+}
+
+/* --- Siaran. Tiles are 16:9 because that is what a camera produces; a gated
+       tile keeps the frame so the grid does not reflow when you become a
+       member and the video arrives. ---------------------------------------- */
+.stream-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  border: none;
+}
+
+/* The comp stacks the frame ABOVE the title, while the DOM puts the header
+   first — `order` matches the drawing without moving markup that tests and
+   screen readers already read in a sensible sequence. */
+.stream-card > .stream-lock,
+.stream-card > .stream-player,
+.stream-card > .stream-media {
+  order: -1;
+}
+
+.stream-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.stream-card-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  text-wrap: pretty;
+}
+
+/* The gated tile keeps the 16:9 frame so the grid does not reflow when a
+   viewer becomes a member and a real video arrives in its place. */
+.stream-lock {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--hatch);
+  text-decoration: none;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+/* The anchor is the frame; the CTA inside it is what looks like a button. */
+.stream-lock-cta {
+  display: inline-flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 1.125rem;
+  border-radius: var(--radius);
+  background: var(--gate);
+  color: oklch(0.99 0.004 90);
+}
+
+.stream-lock:hover .stream-lock-cta {
+  background: var(--gate-dark);
+}
+
+.badge-live {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 0.625rem;
+  border-radius: 3px;
+  background: var(--live);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.badge-members {
+  position: absolute;
+  z-index: 1;
+  top: 10px;
+  left: 10px;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 0.625rem;
+  border-radius: 3px;
+  background: var(--gate);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.stream-card-owner {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--ink-faint);
+}
+
+.stream-player {
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: oklch(0.28 0.012 145);
+}
+
+/* The publish credentials are monospace because they are copied, not read. */
+.stream-obs-details code,
+.stream-obs-details pre {
+  display: block;
+  padding: 0.5625rem 0.6875rem;
+  background: oklch(0.965 0.006 145);
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Ending a broadcast is destructive-ish and outlined, never filled: it should
+   take a deliberate look to find, not sit next to the primary as an equal. */
+.stream-composer-live .button-danger {
+  background: none;
+  border: 1px solid oklch(0.6 0.14 25);
+  color: var(--red);
+}
+
+.stream-composer-live .button-danger:hover {
+  background: var(--red-bg);
+}
+
+/* --- Membership offer: the price is the one number on the page that should
+       stop the eye, so it takes the serif. --------------------------------- */
+.membership-offer {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.membership-tier {
+  padding: 1.125rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.membership-tier:last-child {
+  border-bottom: none;
+}
+
+.membership-tier .price {
+  font-family: var(--font-display);
+  font-size: 1.625rem;
+  color: var(--ink);
+}
+
+/* --- Jelajah: section labels are small, tracked and upper-case so they read as
+       furniture rather than as content. ------------------------------------ */
+.jelajah-page h2 {
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  font-weight: 400;
+}
+
+.follow-row {
+  padding: 0.875rem 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+/* --- Landing: the feature grid is a single hairline mesh — one shared border
+       with 1px gaps showing through — rather than nine separate boxes. ----- */
+.landing-features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+
+.landing-feature {
+  background: var(--surface);
+  padding: 1.75rem;
+  margin: 0;
+}
+
+.landing-feature h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.landing-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.landing-steps > * {
+  padding: 2.5rem 2.5rem 2.75rem;
+  border-right: 1px solid var(--line-soft);
+}
+
+.landing-steps > *:last-child {
+  border-right: none;
+}
+
+/* --- Buttons. Flatter, and the primary keeps its own hover one step down. -- */
+.button-primary {
+  background: var(--green);
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
+.button-primary:hover {
+  background: var(--green-dark);
+}
+
+.button-secondary {
+  border: 1px solid var(--green);
+  color: var(--green-dark);
+  background: none;
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
+.button-secondary:hover {
+  background: var(--green-wash);
+}
+
+@media (min-width: 768px) {
+  .landing-steps > * {
+    padding: 2.5rem;
   }
 }

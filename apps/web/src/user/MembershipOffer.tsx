@@ -229,7 +229,10 @@ export default function MembershipOffer({
             <div>
               <strong>{tier.name}</strong>
               <p className="muted">
-                {formatRupiah(tier.priceAmount)} {billingCycleLabel(tier.billingCycle)}
+                {/* The price is the one number on this card that should stop the
+                    eye, so the redesign gives it the display serif. */}
+                <span className="price">{formatRupiah(tier.priceAmount)}</span>{" "}
+                {billingCycleLabel(tier.billingCycle)}
               </p>
             </div>
             {signedIn ? (
