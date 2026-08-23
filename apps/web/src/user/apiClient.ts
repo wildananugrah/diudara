@@ -1271,3 +1271,129 @@ export interface SubscriberEntry {
 export function listSubscribers(): Promise<{ subscribers: SubscriberEntry[] }> {
   return apiFetch<{ subscribers: SubscriberEntry[] }>("/users/me/subscribers");
 }
+
+/**
+ * One live stream as `GET /streams` renders it — mirrors the API's own
+ * `StreamView` (`apps/api/src/application/use-cases/stream-views.ts`)
+ * exactly, field for field, for the reason that file's own docstring gives:
+ * the projection is CLOSED, so this type must not widen it either.
+ *
+ * `hlsPlaybackPath` is **ABSENT, never `null`**, on a row this viewer is
+ * locked out of — see the API's own docstring on that field. `SiaranPage`
+ * and `StreamPlayer` both key their behaviour off `locked`, never off
+ * whether `hlsPlaybackPath` happens to be present, for the same reason
+ * `PostCard` keys a lock off `lockedMediaCount` rather than an empty
+ * `media` array: `locked` is the field the SERVER computed the answer into,
+ * and re-deriving the same answer from a different field is exactly the
+ * kind of client-side paywall spec §5.1 forbids.
+ */
+export interface StreamView {
+  id: string;
+  title: string;
+  /** `"public"` | `"members"` — a plain string for the same reason `PostView.membersOnly`'s sibling fields are: the column is a widened `varchar` server-side. */
+  visibility: string;
+  owner: { handle: string; displayName: string };
+  locked: boolean;
+  hlsPlaybackPath?: string;
+}
+
+/**
+ * `GET /streams` — **PUBLIC BUT NOT ANONYMOUS**, the same shape as
+ * `getProfileByHandle`/`listFeed("untuk-anda")`: it goes through
+ * `publicGet`, which attaches the viewer's token when there is one and
+ * sends nothing at all when there is not, and which never clears the
+ * session on a 401 (this route never answers one — a signed-out visitor
+ * gets `locked: true` rows, not a refusal). Sending the token is not
+ * optional here: it is the ONLY input `ListLiveStreams` has for deciding
+ * whether a gated row's `locked` is `true` or `false` for THIS viewer.
+ */
+export function listStreams(): Promise<{ streams: StreamView[] }> {
+  return publicGet<{ streams: StreamView[] }>("/streams", "gagal memuat siaran");
+}
+
+/** `POST /streams/:id/watch-token`'s response shape — mirrors the API's own `MintedWatchToken` (`application/use-cases/start-user-stream.ts`). */
+export interface WatchTokenResult {
+  token: string;
+  /** ISO-8601, ten minutes out — never parsed to a `Date` here; `StreamPlayer` only ever compares tokens by re-minting, never by reading this field. */
+  expiresAt: string;
+}
+
+/**
+ * `POST /streams/:id/watch-token` — mints (or RE-mints) a ten-minute
+ * credential naming the signed-in viewer and this stream. Requires a live
+ * session (`apiFetch`, same as every other authenticated call in this
+ * file): the entitlement check this endpoint runs needs to know WHO is
+ * asking, which is exactly why a forwarded token can never be renewed
+ * (design spec §5).
+ *
+ * **Refuses a PUBLIC stream** — `MintUserWatchToken` throws a 400
+ * (`NOTHING_TO_GATE_MESSAGE`) for one, because there is nothing to gate.
+ * `StreamPlayer` never calls this for a stream whose `visibility` is
+ * `"public"`; see its own docstring.
+ *
+ * Every refusal (a 400 for a public stream, a 403 for somebody no longer a
+ * member, a 401 for a dead session, a network drop) is handled identically
+ * by `StreamPlayer`: any rejection here means "stop playback and show the
+ * lock," never a distinction the player tries to read out of the error.
+ */
+export function mintStreamWatchToken(streamId: string): Promise<WatchTokenResult> {
+  return apiFetch<WatchTokenResult>(`/streams/${encodeURIComponent(streamId)}/watch-token`, {
+    method: "POST",
+  });
+}
+
+/**
+ * `POST /streams`'s response — mirrors the API's own `StartedUserStream`
+ * (`apps/api/src/application/use-cases/start-user-stream.ts`) exactly, field
+ * for field. **THE ONLY RESPONSE IN THIS CODEBASE'S NEW WORLD THAT CARRIES
+ * `streamKey`** — see that interface's own docstring. `SiaranPage` holds it
+ * in local state only, for exactly as long as the broadcast it belongs to:
+ * never logged, never put in a URL, and cleared the moment *Akhiri siaran*
+ * runs. See `SiaranPage.tsx`'s own docstring for the full reasoning.
+ */
+export interface StartedStream {
+  id: string;
+  title: string;
+  visibility: string;
+  whipUrl: string;
+  rtmpUrl: string;
+  streamKey: string;
+  hlsPlaybackPath: string;
+}
+
+/**
+ * `POST /streams` (201) — *Mulai siaran* (design spec §7/§8). Requires a
+ * live session, same as every other `apiFetch` call.
+ *
+ * `visibility` follows `createPost`'s own convention exactly: **omitted
+ * entirely**, never sent as a literal, when the caller passes nothing — the
+ * route's own schema default is `public` (`user_stream.visibility`'s column
+ * default), and there is no edit path here that an omission could silently
+ * un-gate, unlike a post. There is no way to ask this function for an
+ * explicit `"public"` for the same reason `createPost` has none: every
+ * caller only ever has `"members"` to say, from *Khusus anggota*.
+ *
+ * **503s when this box has no streaming provider configured**
+ * (`routes/streams.ts`) — a condition no retry clears. `SiaranPage` never
+ * shows the general "coba lagi sebentar lagi" sentence for that shape; see
+ * `describeStreamStartFailure` in `errorCopy.ts`.
+ */
+export function startOwnStream(input: { title: string; visibility?: "members" }): Promise<StartedStream> {
+  const payload: { title: string; visibility?: "members" } = { title: input.title };
+  if (input.visibility !== undefined) payload.visibility = input.visibility;
+  return apiFetch<StartedStream>("/streams", { method: "POST", body: JSON.stringify(payload) });
+}
+
+/**
+ * `DELETE /streams/:id` — *Akhiri siaran*, ending the caller's own stream.
+ *
+ * **Works even on a box with no streaming provider configured** — ending a
+ * row that already exists needs nothing from the provider (`routes/streams.ts`'s
+ * own docstring), which is deliberate: without it, a creator on a box whose
+ * streaming was switched off mid-broadcast could never end their own row,
+ * and the partial `user_stream_one_live` index would then pin them `live`
+ * for ever — the exact ghost-row failure design spec §7 exists to prevent.
+ */
+export function endOwnStream(id: string): Promise<{ ended: boolean }> {
+  return apiFetch<{ ended: boolean }>(`/streams/${encodeURIComponent(id)}`, { method: "DELETE" });
+}

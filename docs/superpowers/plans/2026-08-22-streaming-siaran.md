@@ -19,9 +19,10 @@
 - **Both guard tests live in `apps/web/src/test/`** — `no-raw-server-errors.test.ts` and `no-hanging-dom-assertions.test.ts`. There is no `apps/api` copy. That directory holds **three** files; run the whole directory, not two files by name.
 - **Never put a DOM node on either side of an assertion that can fail** — it serialises the node's whole object graph and has OOM-killed this machine. Use `isNode` in `BerandaPage.test.tsx`, or compare `textContent` strings.
 - Tests assert **literal values**, never the constant they check.
+- **Delete the guard your test NAMES, and confirm that test fails.** This phase produced six tests that passed for the wrong reason, and every one had the same shape: the setup made an *earlier, correct* guard fire, so the test never reached the guard in its own name. A test called "a TAMPERED token is refused" that tampers the stream id is refused by the wrong-stream check, and would pass with the signature check deleted. The check is **per test name**, not per feature — running the whole suite against one mutant will not find it.
 - **`toContain` and regex matchers accept a superstring** — they cannot see text appended to a string. Every user-facing string needs at least one assertion that fails when text is added to it.
 - **Read the clock once per operation** and pass the `Date` down.
-- **The api suite takes ~340s.** Run it in the FOREGROUND with `timeout: 500000`; a backgrounded run never wakes a subagent.
+- **NEVER background the api suite.** It takes ~360s, so run it in the FOREGROUND with `timeout: 500000`. A backgrounded run does **not** wake a subagent — it parks, the coordinator has to notice and nudge it, and this has now stalled **eight** agents across three phases. If you catch yourself reaching for `run_in_background` or a Monitor to wait on a test run: don't. Pass the timeout instead.
 - Never run a dev server, bind a port, or drive a browser.
 
 ## File Structure
@@ -263,6 +264,23 @@ unique index loses, and **four contenders proved far too few** — measure the n
 record it beside the test. Warm the pool first: `postgres.js` connects lazily, and 5b confirmed an
 unwarmed race test can measure connection serialisation rather than the arbitration it names.
 
+- [ ] **Step 1b: Handle a box with no streaming provider**
+
+`Dependencies.streamingProvider` is `StreamingProviderPort | undefined` — **optional at boot**, exactly
+like the payments provider, and `scheduleLiveSession` already models the pattern: the use case is
+`undefined` exactly when the provider is. Follow it.
+
+```ts
+test("a box with no streaming provider refuses to start a stream, and says so", async () => {
+  const res = await request("/streams", { method: "POST", body: { title: "Halo" }, headers: rinaAuth });
+  expect(res.status).toBe(503);
+});
+```
+
+**`GET /streams` must still work on such a box** — it lists rows from the database and needs no
+provider. A listing that 503s because nobody configured MediaMTX would take Siaran down for readers
+over a writer's dependency.
+
 - [ ] **Step 2: Run, watch fail. Step 3: implement, letting the database arbitrate**
 
 Insert and let `user_stream_one_live` refuse the loser; translate the unique violation into a 409.
@@ -278,7 +296,77 @@ git add -A && git commit -m "feat(api): a creator goes live, once at a time"
 
 ---
 
-### Task 4: Watching
+### Task 4: The user namespace reaches production
+
+**Files:**
+- Modify: `apps/api/src/application/ports/streaming-provider.port.ts`
+- Modify: `apps/api/src/infrastructure/streaming/mediamtx.adapter.ts`, `fake-streaming.adapter.ts` (+ their tests)
+- Modify: `apps/api/src/application/use-cases/authorise-stream.ts` (a by-id read entry point, and the stale docstring)
+- Modify: `infra/nginx/live-hls.conf.template`
+- Test: the adapter tests, `authorise-stream.test.ts`
+
+**Interfaces:**
+- Consumes: `parseStreamPath` (Task 2); `UserStreamRepositoryPort.findById` (Task 1).
+- Produces: `createSession({ streamKey, namespace: "live" | "u" })`; `AuthoriseStream`'s by-id read path for the user world.
+
+**This task exists because Task 3's review found the namespace unreachable in production.** The adapter
+builds `live/<key>` with no namespace parameter, and `infra/nginx/` contains no `/u/` anywhere — so a
+real user publish parses as `world: "community"` and never reaches the user branch. Task 2's work is
+correct and currently unusable.
+
+**Follow the old world's shipped pattern; do not invent one.** It already solves this exact problem:
+`authoriseReadByEventId` resolves a read by **id**, and the template's
+`proxy_redirect /live/$mtx_key/ /live/$mtx_event/` (around line 409) is what lets a public URL name an
+id while MediaMTX serves the path it was published to. Read that pair before writing anything.
+
+Three pieces, and a half-fix is worse than none — an adapter emitting `u/<key>` with no matching nginx
+location would look closed and be broken:
+
+1. **A namespace parameter** on `createSession`, threaded through both adapters.
+2. **A by-id read entry point** on `AuthoriseStream` for the user world, mirroring `authoriseReadByEventId`.
+3. **An `^~ /u/` read location** in the nginx template mirroring `/live/`, and **`/whip/` learning its namespace** — it currently hard-rewrites onto `/live/<key>/whip`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+test("createSession builds a u/ path when the namespace says so", () => {
+  const s = adapter.createSession({ streamKey: "abc", namespace: "u" });
+  expect(s.hlsPlaybackPath).toContain("/u/abc/");
+});
+
+test("createSession still builds live/ for the community world — unchanged", () => {
+  const s = adapter.createSession({ streamKey: "abc", namespace: "live" });
+  expect(s.hlsPlaybackPath).toContain("/live/abc/");
+});
+
+test("a user-world read resolves by STREAM ID, never by the publish key", async () => {
+  expect(await authorise({ action: "read", path: `u/${stream.id}`, query: "" })).toEqual({ allowed: true });
+});
+
+test("a user-world read naming the KEY instead of the id is refused", async () => {
+  expect(await authorise({ action: "read", path: `u/${stream.streamKey}`, query: "" })).toEqual({ allowed: false });
+});
+```
+
+The fourth is the one that matters: it proves the publish secret is not a second way in.
+
+- [ ] **Step 2: Run, watch fail. Step 3: implement all three pieces**
+
+**Fix the stale docstring** in `authorise-stream.ts` that says *"Task 3 teaches an adapter to construct
+`u/<key>` paths"* — Task 3 never owned that, and a docstring naming the wrong owner is how this gap
+survived review once already.
+
+- [ ] **Step 4: Run, mutation-test, commit**
+
+The nginx template is **not testable here.** Say so in the report, and it goes on the gate checklist.
+
+```bash
+git add -A && git commit -m "feat(api,infra): the user namespace reaches MediaMTX"
+```
+
+---
+
+### Task 5: Watching
 
 **Files:**
 - Create: `apps/api/src/domain/user-watch-token.ts`
@@ -290,7 +378,14 @@ git add -A && git commit -m "feat(api): a creator goes live, once at a time"
 - Consumes: `parseStreamPath` (Task 2); `isMemberOf`.
 - Produces: `mintUserWatchToken({ viewerId, streamId, now, ttlMs, secret })`, `verifyUserWatchToken(token, secret, now)`; `POST /streams/:id/watch-token` → `{ token, expiresAt }`.
 
-**Write a new token module. Do not widen `watch-token.ts`** — it serves the old world, which Phase 8
+**First, close the publish hole.** Task 4's review flagged that a **user-world PUBLISH is still
+refused** and no task owned it — so nobody can actually go live. It is small (~4 lines in
+`AuthoriseStream`'s user branch, resolving `u/<key>` via `findByStreamKey` and allowing only a `live`
+row), and **the existing pinned refusal test must be replaced by a pinned allowance**, not merely
+deleted. Add its mirror too: a publish naming a stream that is already `ended` is refused, exactly as
+the community world refuses a publish to a non-publishable status.
+
+**Then the watch token. Do not widen `watch-token.ts`** — it serves the old world, which Phase 8
 deletes, and widening it would couple a thing being removed to a thing being built.
 
 `USER_WATCH_TOKEN_TTL_MS = 10 * 60 * 1000`.
@@ -344,7 +439,7 @@ git add -A && git commit -m "feat(api): a watch token names its viewer and dies 
 
 ---
 
-### Task 5: Ending, and the stream that never ends
+### Task 6: Ending, and the stream that never ends
 
 **Files:**
 - Create: `apps/api/src/application/use-cases/end-user-stream.ts`
@@ -390,7 +485,7 @@ git add -A && git commit -m "feat(api,worker): a stream ends, and a lost webhook
 
 ---
 
-### Task 6: Siaran — who is live
+### Task 7: Siaran — who is live
 
 **Files:**
 - Modify: `apps/web/src/user/SiaranPage.tsx`
@@ -445,7 +540,7 @@ git add -A && git commit -m "feat(web): Siaran shows who is live, and what you c
 
 ---
 
-### Task 7: Going live from the browser
+### Task 8: Going live from the browser
 
 **Files:**
 - Move: `apps/web/src/dashboard/whip-publisher.ts` → `apps/web/src/user/whip-publisher.ts` (and its test)
@@ -482,7 +577,7 @@ git add -A && git commit -m "feat(web): go live from the browser, or from OBS"
 
 ---
 
-### Task 8: The gate checklist
+### Task 9: The gate checklist
 
 **Files:**
 - Create: `docs/superpowers/sdd/2026-08-22-streaming-siaran/gate-checklist.md`
@@ -501,8 +596,8 @@ Written by the controller, run by the owner. It must cover what no suite here ca
 
 ## Self-Review
 
-**Spec coverage.** §4 model → Task 1. §6 namespaces → Task 2. §7 going live → Task 3, §7's sweep →
-Task 5. §5 watching → Task 4. §8 Siaran → Tasks 6, 7. §9 testing → distributed. §10 out of scope →
+**Spec coverage.** §4 model → Task 1. §6 namespaces → Tasks 2 and 4. §7 going live → Task 3, §7's
+sweep → Task 6. §5 watching → Task 5. §8 Siaran → Tasks 7, 8. §9 testing → distributed. §10 out of scope →
 respected.
 
 **Gap found and fixed in review:** Task 6 consumed a `GET /streams` that no task built — the same

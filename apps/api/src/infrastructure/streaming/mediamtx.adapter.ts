@@ -1,4 +1,7 @@
-import type { StreamingProviderPort } from "../../application/ports/streaming-provider.port";
+import type {
+  StreamingProviderPort,
+  StreamNamespace,
+} from "../../application/ports/streaming-provider.port";
 
 /** MediaMTX's default RTMP ingest port (infra/mediamtx.yml, Task 6). */
 const RTMP_PORT = 1935;
@@ -68,11 +71,41 @@ export class MediaMtxAdapter implements StreamingProviderPort {
    */
   createSession(input: {
     streamKey: string;
+    namespace: StreamNamespace;
   }): { rtmpUrl: string; whipUrl: string; hlsPlaybackPath: string } {
+    // The MediaMTX path this session publishes to and is read from —
+    // `live/<key>` or `u/<key>`, the two segments `parseStreamPath`
+    // recognises. RTMP and HLS both carry it verbatim; WHIP does not, for
+    // the reason below.
+    const mtxPath = `${input.namespace}/${input.streamKey}`;
     return {
-      rtmpUrl: `rtmp://${this.rtmpHost}:${RTMP_PORT}/live/${input.streamKey}`,
-      whipUrl: `${this.whipBaseUrl}/whip/${input.streamKey}`,
-      hlsPlaybackPath: `${this.hlsBaseUrl}/live/${input.streamKey}/index.m3u8`,
+      rtmpUrl: `rtmp://${this.rtmpHost}:${RTMP_PORT}/${mtxPath}`,
+      whipUrl: `${this.whipBaseUrl}/whip/${whipSuffix(input.namespace, input.streamKey)}`,
+      hlsPlaybackPath: `${this.hlsBaseUrl}/${mtxPath}/index.m3u8`,
     };
   }
+}
+
+/**
+ * The part of the public WHIP url after `/whip/` — and the one place the two
+ * namespaces are NOT symmetrical.
+ *
+ * The community world's WHIP url is `<base>/whip/<key>`, with no namespace
+ * segment at all: a shape verified against a real MediaMTX and a real
+ * browser publish (Task 1 of the browser-publishing phase), already
+ * deployed, and one Task 4 was explicitly forbidden from changing by a
+ * single byte. So the USER world takes the extra segment instead —
+ * `<base>/whip/u/<key>` — rather than the community world losing its bare
+ * shape for the sake of a tidier pair.
+ *
+ * nginx is what keeps the two apart, and it needs no regex to do it:
+ * `^~ /whip/u/` is a strictly LONGER literal prefix than `^~ /whip/`, and
+ * nginx selects the longest matching prefix location independent of source
+ * order (see `infra/nginx/live-hls.conf.template`, which carries the same
+ * argument at length for `/live/`). The two can never collide: `newStreamKey`
+ * mints 32 lowercase hex characters, so a community key can never itself be
+ * the single character `u`.
+ */
+function whipSuffix(namespace: StreamNamespace, streamKey: string): string {
+  return namespace === "live" ? streamKey : `${namespace}/${streamKey}`;
 }

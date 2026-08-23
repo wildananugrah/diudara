@@ -312,12 +312,17 @@ carry the same empirical findings (the `$arg_token`-is-empty-in-subrequests bug,
 error-log token exposure, the trailing-slash regex bug, all found running this for real) at
 the point in the config they apply to. In short:
 
-- It is **four `location` blocks, not a standalone `server`** (three at the time this
-  paragraph was first written — the browser-publishing phase's Task 1 added the fourth, the
-  `/whip/` location covered in its own "Browser publishing (WebRTC / WHIP)" section above; the
-  count is worth keeping current here because it is the operator-facing description of a
+- It is **seven `location` blocks, not a standalone `server`** (three at the time this
+  paragraph was first written; the browser-publishing phase's Task 1 added the fourth, the
+  `/whip/` location covered in its own "Browser publishing (WebRTC / WHIP)" section above; and
+  the Siaran phase's Task 4 added the last three, `^~ /u/`, `^~ /whip/u/` and
+  `= /_internal/mediamtx-user-auth-request`, for the per-user `u/<streamKey>` namespace — see
+  "Pre-deploy checklist: browser publishing and Siaran" below for what an operator has to do
+  about them; the count is worth keeping current here because it is the operator-facing description of a
   manual step `scripts/deploy.sh` explicitly does not automate — a real deploy has to notice a
-  new block was added, not just re-paste however many it remembers) — meant to be pasted (or,
+  new block was added, not just re-paste however many it remembers. **The one authority on
+  the count is `grep -c '^location' infra/nginx/live-hls.conf.template`; run it rather than
+  trusting this sentence, which has been wrong before.**) — meant to be pasted (or,
   after rendering `${MEDIAMTX_WEBHOOK_SECRET}`, `include`d) inside the real public HTTPS
   server block that already serves this app's SPA and API paths, not a second listener on a
   second port. (An earlier version of the template WAS its own `server { listen 8443; }` —
@@ -874,11 +879,17 @@ commit before it reaches production. A push to `main` deploys whether the tests 
 not — which is why "Both must be green before a commit" above is a real obligation rather
 than a formality.
 
-### Pre-deploy checklist: browser publishing (WHIP)
+### Pre-deploy checklist: browser publishing and Siaran (WHIP, `/u/`)
 
 `scripts/deploy.sh` pulls, builds, migrates, and reloads pm2 — full stop. It does not touch
 nginx, the host firewall, or the VPS provider's own network layer, so browser publishing
 needs four manual steps on the box that nothing in the automated deploy performs for you.
+
+**All four apply to Siaran (`/siaran`, a person going live from their own profile) exactly
+as they do to a community event's browser publish** — same MediaMTX, same WHIP signalling,
+same UDP media port, same `MEDIAMTX_WHIP_BASE_URL`. The one difference is step 3: Siaran
+added three `location` blocks of its own, and an operator who re-pastes the four they
+remember leaves Siaran dark while every other part of the deploy looks healthy.
 Do them in this order — the `.env` variables first, because a missing one restart-loops the
 API the moment `git pull` lands the code that requires it; the reload and the firewall
 changes are independent of each other but both have to be done before a creator can
@@ -900,13 +911,38 @@ actually go live from a browser:
    completes, no error appears on either side, and media never connects, because MediaMTX
    only offers a LOCAL-interface ICE candidate that no browser on the public internet can
    route to.
-3. **Install the new fourth nginx `location` block and reload nginx.** `scripts/deploy.sh`
-   explicitly does not deploy nginx config. Paste (or re-`include`) the `/whip/` block from
-   `infra/nginx/live-hls.conf.template` into the real server block — see "The nginx location
-   block the real VPS needs" above for the full template and citation — then `nginx -t` and
-   reload. Skip this and the WHIP POST never reaches MediaMTX at all: nginx has no route for
-   it, so a creator never gets past the negotiation step. RTMP and HLS keep working
-   unaffected, so this is easy to miss until a creator actually tries browser publishing.
+3. **Re-install the WHOLE nginx fragment — all seven `location` blocks — and reload nginx.**
+   `scripts/deploy.sh` explicitly does not deploy nginx config. This step used to say
+   "install the new *fourth* block" and name only `/whip/`, which was correct for the
+   browser-publishing phase and has been wrong ever since Siaran's Task 4 added three more.
+   **Do not count from this sentence; count from the file** —
+   `grep -c '^location' infra/nginx/live-hls.conf.template` is the authority, and it answers
+   **7** at the time of writing:
+
+   | block | what goes dark if it is missing |
+   |---|---|
+   | `^~ /webhooks/mediamtx/ { deny all; }` | the auth surface is reachable from the public internet |
+   | `^~ /whip/` | community browser publishing — the WHIP POST never reaches MediaMTX |
+   | `^~ /whip/u/` | **Siaran browser publishing** — a creator's *Mulai siaran* never gets past negotiation |
+   | `^~ /live/` | community HLS playback |
+   | `^~ /u/` | **Siaran playback** — every member's player 404s on the manifest |
+   | `= /_internal/mediamtx-auth-request` | `^~ /live/`'s `auth_request` has no upstream; community playback fails closed |
+   | `= /_internal/mediamtx-user-auth-request` | `^~ /u/`'s `auth_request` has no upstream; Siaran playback fails closed |
+
+   Render the template with `envsubst` (it carries `${MEDIAMTX_WEBHOOK_SECRET}`) into a
+   snippet, `include` that snippet from the real server block rather than re-pasting the
+   bodies by hand, then `nginx -t` and reload — an `include` is the only form of this step
+   that cannot silently ship a subset. See "The nginx location block the real VPS needs"
+   above for the full reasoning and citations, and note that `^~ /whip/u/` and `^~ /u/` are
+   ORDER-INDEPENDENT with respect to `^~ /whip/` and any regex location (nginx picks the
+   longest matching prefix and, for `^~`, then skips every regex) — but they must both
+   actually be present, because `^~ /whip/` hard-rewrites onto the community path and would
+   otherwise swallow `/whip/u/...` into the wrong namespace.
+
+   **Skip any of this and RTMP and community HLS keep working, `deploy.sh`'s health check
+   still passes, and the whole test suite is still green** — which is exactly how Siaran
+   ships dark. This is the step to suspect first when the code is right and the feature is
+   not there.
 4. **Open UDP 8189 at two layers: the host firewall AND the VPS provider's network-level
    firewall or security group.** See "The ports, and why the split exists" above — this is
    the media, not the signalling, and it is published directly and publicly, never through
@@ -928,10 +964,11 @@ not their network.
 ### Pre-deploy checklist: photo uploads (`client_max_body_size`)
 
 **The production nginx configuration does not live in this repository.** The only nginx
-artifact here is `infra/nginx/live-hls.conf.template`, and it is a *fragment* — four
-`location` blocks for `/live/`, `/whip/` and the internal auth subrequest, meant to be
-pasted into the real server block on the VPS. The server block itself, with the SPA root and
-the `/users/` and `/c/` proxies, exists only on that box and is edited by hand. So the
+artifact here is `infra/nginx/live-hls.conf.template`, and it is a *fragment* — seven
+`location` blocks for `/live/`, `/whip/`, `/u/`, `/whip/u/`, the webhook `deny all`, and the
+two internal auth subrequests, meant to be pasted into the real server block on the VPS.
+The server block itself, with the SPA root and the `/users/` and `/c/` proxies, exists only
+on that box and is edited by hand. So the
 setting below cannot be shipped by `git pull`; somebody has to type it on the server.
 
 **One line, on the box, in the server block that proxies `/users/`:**

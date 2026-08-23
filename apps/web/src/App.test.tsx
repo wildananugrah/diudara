@@ -215,10 +215,15 @@ describe("routing — the app shell", () => {
     await screen.findAllByText("Belum ada akun.");
   });
 
-  it("resolves /siaran inside the shell, with Siaran's empty-state copy", () => {
+  it("resolves /siaran inside the shell, with Siaran's empty-state copy", async () => {
+    // Task 7: Siaran now LOADS `GET /streams`, so its empty-state copy only
+    // appears once that first fetch resolves — same reasoning, and same
+    // fix, as the /beranda and /jelajah tests just above.
+    global.fetch = mock(async () => jsonResponse({ streams: [] })) as unknown as typeof fetch;
+
     renderAt("/siaran");
 
-    expect(screen.getByText("Belum ada siaran langsung.")).toBeTruthy();
+    expect(await screen.findByText("Belum ada siaran langsung.")).toBeTruthy();
     expect(screen.getAllByRole("navigation").length).toBeGreaterThan(0);
   });
 

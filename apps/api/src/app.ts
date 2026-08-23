@@ -18,6 +18,7 @@ import { mediamtxWebhookRoutes } from "./routes/mediamtx-webhooks";
 import { aiRoutes } from "./routes/ai";
 import { eventRoutes } from "./routes/events";
 import { streamingRoutes } from "./routes/streaming";
+import { streamRoutes } from "./routes/streams";
 import { errorHandler } from "./http/error-handler";
 import type { AuthVariables } from "./http/auth.middleware";
 import type { Dependencies } from "./bootstrap";
@@ -119,5 +120,13 @@ export function createApp(deps: Dependencies) {
   // the same shape as /ai/status above. A distinct top-level path (the flag
   // is not community-scoped), so mount order does not matter here either.
   app.route("/streaming", streamingRoutes(deps));
+  // Phase 7's Siaran (Task 3): GET /streams (public), POST /streams and
+  // DELETE /streams/:id (a person's own broadcast). A distinct top-level path
+  // — /streams, plural — from /streaming above, whose single route is the
+  // dashboard's "is live streaming configured" flag for the OLD, community
+  // world. Neither is a prefix of the other, so mount order does not matter
+  // here; the near-identical names are worth reading twice before adding a
+  // route to either.
+  app.route("/streams", streamRoutes(deps));
   return app;
 }

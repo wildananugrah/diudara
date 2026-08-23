@@ -95,6 +95,32 @@ describe("ScheduleLiveSession", () => {
     expect(result.status).toBe("scheduled");
   });
 
+  /**
+   * PHASE 7, TASK 4 — the community world's namespace, pinned to a literal.
+   * Task 4 gave `createSession` a required `namespace` parameter for the sake
+   * of the NEW world; this test exists so that changing what the OLD world
+   * asks for can never be a silent edit. Every assertion above this one is
+   * `toContain`, which a `u/<key>` path would satisfy just as happily.
+   */
+  it("asks the provider for the COMMUNITY namespace — the publish URLs name live/<key>", async () => {
+    const { repository } = fakeEventRepository({ "community-1": "creator-1" });
+    const provider = new FakeStreamingAdapter();
+    const useCase = new ScheduleLiveSession(repository, provider);
+
+    const result = await useCase.execute({
+      creatorId: "creator-1",
+      communityId: "community-1",
+      title: "Live Q&A",
+    });
+
+    expect(provider.sessions).toEqual([{ streamKey: result.streamKey, namespace: "live" }]);
+    expect(result.rtmpUrl).toBe(`rtmp://fake-mediamtx.local:1935/live/${result.streamKey}`);
+    expect(result.whipUrl).toBe(`https://fake-mediamtx.local/whip/${result.streamKey}`);
+    expect(result.hlsPlaybackPath).toBe(
+      `https://fake-mediamtx.local/live/${result.streamKey}/index.m3u8`
+    );
+  });
+
   it("mints a DIFFERENT key for a second session in the same community", async () => {
     const { repository } = fakeEventRepository({ "community-1": "creator-1" });
     const useCase = new ScheduleLiveSession(repository, new FakeStreamingAdapter());

@@ -1,4 +1,4 @@
-import { streamKeyFromPath } from "./authorise-stream";
+import { parseStreamPath } from "./authorise-stream";
 import type { EventRepositoryPort } from "../ports/event-repository.port";
 import { OUTBOX_NOTIFY_STREAM_LIVE } from "../ports/outbox-repository.port";
 import type {
@@ -29,10 +29,22 @@ export type StreamLifecycleHook = "online" | "offline";
  * hooks documentation ("MTX_PATH: path name") rather than assumed: under this
  * codebase's catch-all path config, a publish to `rtmp://<host>:1935/live/<key>` makes
  * `$MTX_PATH` equal `live/<key>` — the exact same shape `AuthoriseStream` parses out of
- * the auth webhook's `path` field. So `streamKeyFromPath` is REUSED here rather than
- * re-implemented: requiring the `live/` prefix (Task 4, review round 2) is what stops a
+ * the auth webhook's `path` field. So `parseStreamPath` (Phase 7's widened
+ * `streamKeyFromPath` — see its own docstring in `authorise-stream.ts`) is REUSED here
+ * rather than re-implemented: requiring a recognised namespace prefix is what stops a
  * stray or malicious path this codebase's own adapter never constructs from marking an
- * event live whose members would then be sent an HLS URL that points nowhere.
+ * event live whose members would then be sent an HLS URL that points nowhere. THIS
+ * CLASS ONLY EVER ACTS ON THE `community` WORLD — a `u/<key>` path parses cleanly (it is
+ * a real namespace now) but is treated exactly like an unparseable path below, because the
+ * user world has its own use case. **M7 (final whole-branch review): this used to say
+ * "`user_stream` lifecycle handling does not exist yet; wiring it up is later work", which
+ * is false at HEAD** — `EndUserStream` exists, and `routes/mediamtx-webhooks.ts`'s
+ * `/lifecycle` dispatches a `u/<key>` hook to it BEFORE this class is ever reached.
+ *
+ * That makes the `parsed.world !== "community"` guard below unreachable FROM THE ROUTE,
+ * and it stays anyway as defence in depth for any future second caller: neutralising it
+ * reddens "a `u/<key>` hook is ignored even when a community event happens to share that
+ * exact key". Fix the sentence; do not delete the branch.
  *
  * ==========================================================================
  * OUT-OF-ORDER AND REPEATED HOOKS ARE THE NORMAL CASE, NOT AN EDGE CASE
@@ -114,23 +126,35 @@ export class HandleStreamLifecycle {
   ) {}
 
   async execute(input: { hook: StreamLifecycleHook; streamKey: string }): Promise<void> {
-    const key = streamKeyFromPath(input.streamKey);
-    if (key === "") {
+    const parsed = parseStreamPath(input.streamKey);
+    if (!parsed) {
       // NEVER log `input.streamKey` itself here — see the class docstring. It may be
       // the real secret, sent in a shape this class does not recognise.
       console.warn(
         `[lifecycle] ignoring a "${input.hook}" hook: streamKey did not parse as ` +
-          '"live/<key>" (see streamKeyFromPath in authorise-stream.ts) — if this is not ' +
-          "a one-off, check infra/mediamtx.yml's path configuration and $MTX_PATH's " +
-          "actual runtime shape, since every event will otherwise silently stay " +
-          "scheduled/live forever"
+          '"<namespace>/<key>" for a recognised namespace (see parseStreamPath in ' +
+          "authorise-stream.ts) — if this is not a one-off, check infra/mediamtx.yml's " +
+          "path configuration and $MTX_PATH's actual runtime shape, since every event " +
+          "will otherwise silently stay scheduled/live forever"
       );
       return;
     }
 
+    if (parsed.world !== "community") {
+      // The `u/<key>` namespace parses cleanly — it is a real namespace — but this
+      // class has no `user_stream` lifecycle handling yet; see the class docstring.
+      // NEVER log the key itself, same as the branch above.
+      console.warn(
+        `[lifecycle] ignoring a "${input.hook}" hook: the user-stream world is not ` +
+          "handled by this class yet"
+      );
+      return;
+    }
+    const key = parsed.key;
+
     // OUTSIDE the unit of work — see the class docstring's third banner. A malformed
-    // path never reaches here at all (returned above); this is the "does the key
-    // resolve to a real event" gate for everything else that doesn't.
+    // or user-world path never reaches here at all (returned above); this is the
+    // "does the key resolve to a real event" gate for everything else that doesn't.
     const event = await this.events.findByStreamKey(key);
     if (!event) {
       // Unknown key. See the class docstring for why this logs and returns quietly

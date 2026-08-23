@@ -222,3 +222,51 @@ export function describeSubscribeFailure(err: unknown): string {
   }
   return describeRequestFailure(err);
 }
+
+/**
+ * A failed *Mulai siaran* — `POST /streams` needs one distinction the
+ * general sentence gets wrong: its 503 fires ONLY when this box has no
+ * streaming provider configured (`routes/streams.ts`'s own docstring), a
+ * condition **no retry ever clears**. `describeRequestFailure`'s 5xx branch
+ * says "coba lagi sebentar lagi," which is the "confidently wrong" shape
+ * `describeUploadFailure`/`describeSubscribeFailure` were both written to
+ * avoid — telling a creator to retry a request that cannot succeed sends
+ * them round a loop with no exit, exactly the failure this codebase has
+ * already named and fixed twice.
+ *
+ * **AND ITS 409, which is the SAME class one status family further down**
+ * (I2, final whole-branch review). `POST /streams` answers 409 from the
+ * `user_stream_one_live` partial unique index whenever the caller already
+ * holds a `live` row, and `describeRequestFailure`'s catch-all 4xx branch
+ * says "Permintaan tidak dapat diproses. Coba lagi." — which cannot
+ * terminate: every retry hits the same index and 409s again, for up to the
+ * twelve hours `SweepStaleUserStreams` allows a row to sit. That is the loop
+ * with no exit this file's own 503 note describes, arrived at from the other
+ * direction.
+ *
+ * It is not a hypothetical state. A creator whose browser publish fails —
+ * no `mediaDevices`, a denied camera, a WHIP negotiation that never
+ * completes — is left holding a `live` row no publisher ever connected to,
+ * so MediaMTX never fires `offline` and nothing ends it. The sentence
+ * therefore names the ONE thing that does work, *Akhiri siaran*, which
+ * `SiaranPage` now rehydrates from `GET /streams` so it is actually on
+ * screen when this sentence is read (see `StreamComposer`'s own docstring).
+ *
+ * Nothing is read off `err.message`, even though this route's 409 body is
+ * itself Bahasa ("sudah ada siaran yang sedang berlangsung") — the rule is
+ * that a screen never prints what the wire sent, not that English is banned;
+ * `src/test/no-raw-server-errors.test.ts`.
+ *
+ * Every other shape (a 429, an expired session, a network drop, a 400 from
+ * an over-long title) is delegated unchanged — for those, "coba lagi" is
+ * genuinely right.
+ */
+export function describeStreamStartFailure(err: unknown): string {
+  if (err instanceof UserApiError && err.status === 503) {
+    return "Siaran langsung belum dikonfigurasi di server ini. Coba lagi nanti atau hubungi admin.";
+  }
+  if (err instanceof UserApiError && err.status === 409) {
+    return "Anda masih punya siaran yang sedang berlangsung. Akhiri siaran itu dulu, lalu mulai lagi.";
+  }
+  return describeRequestFailure(err);
+}

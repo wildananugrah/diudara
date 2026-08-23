@@ -1,23 +1,25 @@
 /**
- * Phase 5's two CLOCK-driven passes, plus Task 10's orphan-media sweep and Phase 5b's
+ * Phase 5's two CLOCK-driven passes, plus Task 10's orphan-media sweep, Phase 5b's
  * expired-membership sweep (Task 3), membership-reminder pass (Task 4) and
- * pending-checkout cleanup (Task 5), as loops this process can run.
+ * pending-checkout cleanup (Task 5), and Phase 7's user-stream sweep (Task 6), as
+ * loops this process can run.
  *
  * Everything in `apps/worker` before this file was request-triggered at one remove:
- * a payment wrote an outbox row and the worker delivered it. These six are triggered
- * by nothing but the passage of time, which is why they need a schedule at all — and
- * why this module exists separately from `main.ts`: the composition root cannot be
- * imported by a test (it reaches `db/client.ts`), and "a throwing pass does not take
- * the process down" is exactly the property that must be pinned by one.
+ * a payment wrote an outbox row and the worker delivered it. These seven are
+ * triggered by nothing but the passage of time, which is why they need a schedule at
+ * all — and why this module exists separately from `main.ts`: the composition root
+ * cannot be imported by a test (it reaches `db/client.ts`), and "a throwing pass does
+ * not take the process down" is exactly the property that must be pinned by one.
  *
  * It deliberately imports only the API's dependency-free `log-safety` helper at
  * runtime; the renewal/churn result shapes come in as TYPES, which erase.
- * `SweepOrphanMedia`, `SweepExpiredMemberships` and `SweepStalePendingCheckouts` are
- * the exceptions to "the pass lives in `apps/api`" — none has domain logic worth the
- * name (no WIB days, no grace periods, just a cutoff/predicate and a try/catch), so
- * unlike `ProcessRenewals`/`ProcessChurn`/`RemindExpiringMembership` each is defined
- * and tested entirely IN this file, against structural interfaces the caller
- * supplies — never against a database.
+ * `SweepOrphanMedia`, `SweepExpiredMemberships`, `SweepStalePendingCheckouts` and
+ * `SweepStaleUserStreams` are the exceptions to "the pass lives in `apps/api`" — none
+ * has domain logic worth the name (no WIB days, no grace periods, just a
+ * cutoff/predicate and a try/catch), so unlike
+ * `ProcessRenewals`/`ProcessChurn`/`RemindExpiringMembership` each is defined and
+ * tested entirely IN this file, against structural interfaces the caller supplies —
+ * never against a database.
  */
 import { redactLinks, safeErrorSummary } from "../../api/src/application/log-safety";
 import type { ProcessChurnResult } from "../../api/src/application/use-cases/process-churn";
@@ -145,7 +147,8 @@ export function formatPassFailure(
     | "media"
     | "memberships"
     | "membership-reminders"
-    | "pending-checkouts",
+    | "pending-checkouts"
+    | "user-streams",
   err: unknown
 ): string {
   return `[${pass}] pass failed: ${redactLinks(safeErrorSummary(err))}`;
@@ -798,6 +801,149 @@ export function formatStalePendingSweepLine(result: StalePendingSweepResult): st
 }
 
 /**
+ * Phase 7's backstop against a LOST `user_stream` lifecycle webhook (design spec
+ * §7). The failure mode: `HandleStreamLifecycle`'s sibling for the `u/<key>` world —
+ * `apps/api/src/application/use-cases/end-user-stream.ts`'s `EndUserStream` — ends a
+ * stream the moment MediaMTX's `offline` hook arrives, but that hook is a
+ * fire-and-forget shell command (`runOnOffline`), and a crash, a restart, or a
+ * network blip can lose it. A row stuck `live` is not merely stale data: `user_stream`
+ * carries a PARTIAL UNIQUE INDEX (`user_stream_one_live`, one live row per owner), so
+ * a lost webhook does not just leave a ghost in Siaran's listing — it leaves that
+ * creator permanently unable to go live again, since every `startLive` attempt hits
+ * the same index the ghost is still holding.
+ *
+ * THIS IS A CAP ON AGE, NOT A LIVENESS CHECK, and that is deliberate, not an
+ * oversight — MediaMTX reports `online`/`offline`, it is NOT POLLED, and with nobody
+ * watching a gated (or even a public, unwatched) stream, no read authorisation fires
+ * either. There is therefore NO SIGNAL that distinguishes "publishing quietly to an
+ * empty room" from "gone": inventing one would mean either a heartbeat MediaMTX does
+ * not send, or querying its API, and either buys a precision this failure mode does
+ * not need. So the window must exceed any plausible broadcast — the cost of getting
+ * it wrong is cutting off a stream that is genuinely still running, and that cost is
+ * cheap: a creator ended early can start another stream immediately, while a creator
+ * blocked forever by a ghost row cannot do anything at all until an operator
+ * intervenes by hand.
+ */
+export const MAX_USER_STREAM_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * The narrow, structural slice of `UserStreamRepositoryPort` (Task 1, `apps/api`)
+ * this pass needs — `DrizzleUserStreamRepository` satisfies this directly, without
+ * being declared against it, the same arrangement `ExpiredMembershipRepository` and
+ * `StalePendingCheckoutRepository` use above and for the identical reason: this pass
+ * is defined and tested entirely in THIS file, against a fake, never against a
+ * database (see this file's own top-of-module docstring).
+ *
+ * Unlike `ExpiredMembershipRepository.listExpiredActive`, `listStaleLive` takes no
+ * `limit` — Task 1's own port signature has none, so there is no batching to do
+ * here; every stale row is looked at in one pass.
+ */
+export interface StaleUserStreamRepository {
+  listStaleLive(olderThan: Date): Promise<{ id: string }[]>;
+  /**
+   * Ends ONE stale row, answering `null` when it did not actually transition —
+   * see `UserStreamRepositoryPort.endById`'s own docstring for why `status = 'live'`
+   * alone is the whole arbiter: a `null` here means the lifecycle webhook (or a
+   * concurrent sweep pass) already ended this row between the list and this row's
+   * turn, not that this pass read stale data and acted on it wrongly.
+   */
+  endById(id: string, endedAt: Date): Promise<{ id: string } | null>;
+}
+
+export interface UserStreamSweepResult {
+  /** `live` rows, past the cap, this pass looked at. */
+  considered: number;
+  /** Rows this pass flipped `live` → `ended`. */
+  ended: number;
+  /** Rows whose `endById` call threw and were left `live` for the next pass to retry. */
+  failed: number;
+}
+
+export interface SweepStaleUserStreamsOptions {
+  /** Defaults to the real clock. Overridden in tests to place the boundary precisely. */
+  now?: () => Date;
+  /**
+   * Where a single row's `endById` failure is reported. Defaults to `console.error`,
+   * matching every other per-item failure this worker logs — injectable here only so
+   * a test can capture the line without capturing the real console.
+   */
+  logError?: (line: string) => void;
+}
+
+/**
+ * The hourly sweep itself. Modelled on `SweepExpiredMemberships`, for the identical
+ * reason that class gives: `endById` is a single UPDATE against a live connection
+ * and CAN throw (the database briefly unreachable, a statement timeout), and a naive
+ * loop over rows would die on the first such throw and skip every stale stream after
+ * it — silently, and forever, since the next pass hits the very same row first. So
+ * each row is ended in its own try/catch: a failure is counted, logged, and the row
+ * is left `live` for the next pass to retry, and the loop moves on.
+ *
+ * NO PAGING, unlike `SweepExpiredMemberships`/`SweepStalePendingCheckouts` — Task 1's
+ * `listStaleLive` takes no `limit`, and a realistic number of simultaneously-live
+ * streams stuck past a 12-hour cap is nowhere near the size that would make batching
+ * worth the complexity those two passes carry it for.
+ *
+ * THE CLOCK IS READ ONCE PER PASS and passed down: every row is judged against, and
+ * every row this pass ends is stamped with, the SAME instant — the same reasoning
+ * `SweepExpiredMemberships.execute` gives for reading its own clock once.
+ */
+export class SweepStaleUserStreams {
+  private readonly now: () => Date;
+  private readonly logError: (line: string) => void;
+
+  constructor(
+    private readonly streams: StaleUserStreamRepository,
+    options: SweepStaleUserStreamsOptions = {}
+  ) {
+    this.now = options.now ?? (() => new Date());
+    this.logError = options.logError ?? ((line) => console.error(line));
+  }
+
+  async execute(): Promise<UserStreamSweepResult> {
+    const now = this.now();
+    const cutoff = new Date(now.getTime() - MAX_USER_STREAM_MS);
+    const result: UserStreamSweepResult = { considered: 0, ended: 0, failed: 0 };
+
+    const rows = await this.streams.listStaleLive(cutoff);
+    result.considered = rows.length;
+
+    for (const row of rows) {
+      try {
+        const updated = await this.streams.endById(row.id, now);
+        if (updated !== null) result.ended += 1;
+        // A `null` here is a race — see `StaleUserStreamRepository.endById`'s own
+        // docstring — and is neither `ended` nor `failed`: the row is simply no
+        // longer this pass's concern.
+      } catch (err) {
+        result.failed += 1;
+        // NEVER the row's id in the message — see `EndUserStream`'s own docstring
+        // for why `user_stream` treats its key as a secret; this id is the row's
+        // primary key, not the key, but there is no legitimate reason to name a row
+        // in a log line either, and every other sweep in this file omits it too.
+        this.logError(
+          `[user-streams] a stream was NOT ended and is left live for the next ` +
+            `pass — endById failed: ${redactLinks(safeErrorSummary(err))}`
+        );
+      }
+    }
+
+    return result;
+  }
+}
+
+/** The user-stream sweep's summary line, or `null` when there is nothing to say. Counts only, as above. */
+export function formatUserStreamSweepLine(result: UserStreamSweepResult): string | null {
+  if (result.considered === 0 && result.ended === 0 && result.failed === 0) {
+    return null;
+  }
+  return (
+    `[user-streams] considered=${result.considered} ended=${result.ended} ` +
+    `failed=${result.failed}`
+  );
+}
+
+/**
  * The reminder pass's summary line, or `null` when there is nothing to say. Counts
  * only, as above — the rows this pass walks carry a member's EMAIL and WhatsApp
  * number, and neither may ever appear in a log line.
@@ -870,6 +1016,10 @@ export interface MembershipReminderPass {
 export interface StalePendingSweepPass {
   execute(): Promise<StalePendingSweepResult>;
 }
+/** Same shape, for `SweepStaleUserStreams` — or any test double with a matching `execute()`. */
+export interface UserStreamSweepPass {
+  execute(): Promise<UserStreamSweepResult>;
+}
 
 export interface ScheduledPassLoopsOptions {
   processRenewals: RenewalPass;
@@ -878,42 +1028,50 @@ export interface ScheduledPassLoopsOptions {
   processMembershipSweep: MembershipSweepPass;
   processMembershipReminder: MembershipReminderPass;
   processStalePendingSweep: StalePendingSweepPass;
+  processUserStreamSweep: UserStreamSweepPass;
   intervalMs: number;
   log?: (line: string) => void;
   logError?: (line: string) => void;
 }
 
 /**
- * The renewal, churn, orphan-sweep, membership-retirement, membership-reminder AND
- * stale-pending-checkout passes as six `PollLoop`s — the SAME loop the outbox uses,
- * so they inherit both of its properties for free: passes of one type never overlap
- * (each pass pages through the whole backlog, and a second copy of itself would be
- * reading the same rows), and `stop()` wakes the loop immediately instead of
- * sleeping out an interval, which is what makes an hour-long interval survivable
- * under SIGTERM.
+ * The renewal, churn, orphan-sweep, membership-retirement, membership-reminder,
+ * stale-pending-checkout AND user-stream sweep passes as SEVEN `PollLoop`s — the SAME
+ * loop the outbox uses, so they inherit both of its properties for free: passes of
+ * one type never overlap (each pass pages through the whole backlog, and a second
+ * copy of itself would be reading the same rows), and `stop()` wakes the loop
+ * immediately instead of sleeping out an interval, which is what makes an hour-long
+ * interval survivable under SIGTERM.
  *
- * SIX LOOPS, not one pass that does everything, for one reason: a renewal pass that
+ * SEVEN LOOPS, not one pass that does everything, for one reason: a renewal pass that
  * throws every time — a query the schema no longer matches, say — must not also stop
- * churn, the orphan sweep, the membership sweep, the reminders, or the pending-checkout
- * cleanup from running, and vice versa. That last pairing is the one that matters most
- * in Phase 5b: the sweep frees a lapsed member to buy again and the reminder is what
- * tells them to, so a shared failure would silently disable renewal in both directions
- * at once. Each loop's `onError` is its own, so a failing pass costs its own retries
- * and nothing else's. All six share an interval because they share a cadence — none
- * of them is latency-sensitive the way the outbox's 5-second poll is, INCLUDING the
- * pending-checkout cleanup: its own window (`STALE_PENDING_CHECKOUT_WINDOW_MS`, two
- * hours) is what actually protects a live checkout, not this cadence — and they never
- * share a failure. The membership sweep is Task 3's hygiene pass (spec — Phase 5b): a
- * member who never returns must not sit `active` forever, but nothing about noticing
- * that is urgent, so it shares the renewal/churn/media cadence rather than inventing a
- * fifth interval knob nobody would ever have reason to set differently — see
+ * churn, the orphan sweep, the membership sweep, the reminders, the pending-checkout
+ * cleanup, or the user-stream sweep from running, and vice versa. That last pairing —
+ * the user-stream sweep and everything else — matters for a reason specific to Phase
+ * 7: a lost `user_stream` lifecycle webhook leaves a creator permanently unable to go
+ * live again (see `MAX_USER_STREAM_MS`'s own docstring), so the ONE pass that fixes
+ * that must keep running even on a box where, say, the membership-reminder query has
+ * started failing for an unrelated reason. Each loop's `onError` is its own, so a
+ * failing pass costs its own retries and nothing else's. All seven share an interval
+ * because they share a cadence — none of them is latency-sensitive the way the
+ * outbox's 5-second poll is, INCLUDING the pending-checkout cleanup (its own window,
+ * `STALE_PENDING_CHECKOUT_WINDOW_MS`, is what actually protects a live checkout, not
+ * this cadence) and the user-stream sweep (its own 12-hour cap, `MAX_USER_STREAM_MS`,
+ * is what actually protects a genuinely-running stream — an hourly cadence against a
+ * 12-hour cap closes a lost-webhook gap within about an hour of it opening, nowhere
+ * near urgent enough to earn its own knob) — and none of the seven ever share a
+ * failure. The membership sweep is Task 3's hygiene pass (spec — Phase 5b): a member
+ * who never returns must not sit `active` forever, but nothing about noticing that is
+ * urgent, so it shares the renewal/churn/media cadence rather than inventing a fifth
+ * interval knob nobody would ever have reason to set differently — see
  * `apps/worker/src/main.ts`'s own docstring for the same reasoning about the media
  * sweep, and Task 5's pending-checkout cleanup shares it for the identical reason.
  *
  * Per-row failures never reach this level at all: `SweepOrphanMedia`,
- * `SweepExpiredMemberships`, `RemindExpiringMembership` and `SweepStalePendingCheckouts`
- * each catch them internally (see their own docstrings), so `onError` here only fires
- * on something the pass-level query itself could not survive, same as renewals/churn.
+ * `SweepExpiredMemberships`, `RemindExpiringMembership`, `SweepStalePendingCheckouts`
+ * and `SweepStaleUserStreams` each catch them internally (see their own docstrings),
+ * so `onError` here only fires on something the pass-level query itself could not
+ * survive, same as renewals/churn.
  *
  * No loop is started here. The caller runs them alongside the outbox loop and decides
  * when they stop.
@@ -925,6 +1083,7 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
   membershipSweepLoop: PollLoop;
   membershipReminderLoop: PollLoop;
   stalePendingSweepLoop: PollLoop;
+  userStreamSweepLoop: PollLoop;
 } {
   const log = options.log ?? ((line: string) => console.log(line));
   const logError = options.logError ?? ((line: string) => console.error(line));
@@ -989,6 +1148,15 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
     onError: (err) => logError(formatPassFailure("pending-checkouts", err)),
   });
 
+  const userStreamSweepLoop = new PollLoop({
+    intervalMs: options.intervalMs,
+    poll: async () => {
+      const line = formatUserStreamSweepLine(await options.processUserStreamSweep.execute());
+      if (line !== null) log(line);
+    },
+    onError: (err) => logError(formatPassFailure("user-streams", err)),
+  });
+
   return {
     renewalLoop,
     churnLoop,
@@ -996,5 +1164,6 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
     membershipSweepLoop,
     membershipReminderLoop,
     stalePendingSweepLoop,
+    userStreamSweepLoop,
   };
 }

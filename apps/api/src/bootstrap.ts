@@ -90,8 +90,16 @@ import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.
 import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
 import { DrizzleStreamLifecycleUnitOfWork } from "./infrastructure/repositories/drizzle-stream-lifecycle.unit-of-work";
 import { ScheduleLiveSession, ListLiveSessions } from "./application/use-cases/schedule-live-session";
+import {
+  StartUserStream,
+  ListLiveStreams,
+  EndOwnUserStream,
+  MintUserWatchToken,
+} from "./application/use-cases/start-user-stream";
+import { DrizzleUserStreamRepository } from "./infrastructure/repositories/drizzle-user-stream.repository";
 import { AuthoriseStream } from "./application/use-cases/authorise-stream";
 import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lifecycle";
+import { EndUserStream } from "./application/use-cases/end-user-stream";
 import { ResolveWatchToken } from "./application/use-cases/resolve-watch-token";
 import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-storage.adapter";
 import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage.adapter";
@@ -539,6 +547,50 @@ export interface Dependencies {
    */
   listLiveSessions: ListLiveSessions;
   /**
+   * Task 3 of Phase 7's `POST /streams` — a person goes live on their own
+   * profile. `undefined` EXACTLY when `streamingProvider` is, mirroring
+   * `scheduleLiveSession` immediately above: `StartUserStream` requires a
+   * real `StreamingProviderPort` rather than accepting `| undefined` and
+   * checking internally, so there is nothing to construct it against when
+   * streaming is disabled. `routes/streams.ts` checks THIS and answers 503.
+   */
+  startUserStream: StartUserStream | undefined;
+  /**
+   * Task 3's `GET /streams` — Siaran's listing. NEVER `undefined`, and that
+   * is load-bearing rather than incidental: the listing reads `user_stream`
+   * rows and derives each row's playback path from its own id
+   * (`userStreamPlaybackPath`), so it needs no provider at all. A listing
+   * that failed over a WRITER's dependency would take Siaran down for every
+   * reader on a box where nobody configured MediaMTX — the same argument
+   * `listLiveSessions` above makes, with one fewer moving part (it does not
+   * even take an optional provider).
+   */
+  listLiveStreams: ListLiveStreams;
+  /**
+   * Task 3's `DELETE /streams/:id` — a creator ends their own broadcast.
+   * NEVER `undefined`, same reasoning as `listLiveStreams`: ending a row that
+   * already exists needs nothing from the provider, and a creator on a box
+   * whose streaming was switched off after they went live must still be able
+   * to stop.
+   */
+  endOwnUserStream: EndOwnUserStream;
+  /**
+   * Task 5's `POST /streams/:id/watch-token` — the credential a gated user
+   * stream's player carries (design spec §5), and the ONE place membership is
+   * actually checked for watching.
+   *
+   * `undefined` EXACTLY when `streamTokenSecret` is — in LOCKSTEP with
+   * `authoriseStream` and `resolveWatchToken`, not with `startUserStream`.
+   * The distinction is real and is pinned by a test: a relaxed dev box
+   * (`development`/`test` with no streaming vars) gets a truthy
+   * `FakeStreamingAdapter`, so `startUserStream` is DEFINED while
+   * `STREAM_TOKEN_SECRET` is absent — such a box can go live and cannot mint
+   * a watch token, and `routes/streams.ts` answers 503 off each dependency
+   * separately rather than inferring one from the other. Signing a token
+   * needs the secret and nothing else; there is no provider in the picture.
+   */
+  mintUserWatchToken: MintUserWatchToken | undefined;
+  /**
    * Task 4's `POST /webhooks/mediamtx/auth` decision logic — `undefined`
    * EXACTLY when `streamTokenSecret` is. Mirrors `scheduleLiveSession`'s
    * undefined-ness rather than `listLiveSessions`'s: unlike listing,
@@ -595,6 +647,18 @@ export interface Dependencies {
    * the class itself.
    */
   handleStreamLifecycle: HandleStreamLifecycle | undefined;
+  /**
+   * Task 6 of Phase 7's `POST /webhooks/mediamtx/lifecycle` decision logic for the
+   * `u/<key>` world — `undefined` in lockstep with `mediamtxWebhookSecret`, same
+   * reasoning as `handleStreamLifecycle` immediately above (this class needs no
+   * secret of its own either; it only reads and writes `user_stream`, unscoped by
+   * owner, same as that class). The route (`routes/mediamtx-webhooks.ts`) parses
+   * `$MTX_PATH` with `parseStreamPath` itself and dispatches to THIS field when the
+   * path names the user world, and to `handleStreamLifecycle` otherwise — see that
+   * route's own docstring for why the dispatch lives there rather than inside either
+   * class.
+   */
+  endUserStream: EndUserStream | undefined;
   /**
    * Task 8's `GET /c/watch/:token` decision logic — `undefined` in lockstep
    * with `authoriseStream` (both are read off `STREAM_TOKEN_SECRET`; see
@@ -2369,6 +2433,29 @@ export function bootstrap(): Dependencies {
   // otherwise, rather than needing a second undefined-ness story here.
   const listLiveSessions = new ListLiveSessions(eventRepository, streamingProvider);
 
+  // Task 3 of Phase 7 — the NEW, user-scoped world beside the community
+  // `event` one above. `userStreamRepository` is constructed here and shared
+  // by all three use-cases rather than exposed on `Dependencies`, the same
+  // rule `eventRepository` and the tier/channel repositories follow.
+  const userStreamRepository = new DrizzleUserStreamRepository(db);
+  // Gated on `streamingProvider` for the identical reason
+  // `scheduleLiveSession` is: the constructor requires a real provider, and
+  // "is streaming configured" is this file's decision, not the use-case's.
+  const startUserStream = streamingProvider
+    ? new StartUserStream(userStreamRepository, streamingProvider)
+    : undefined;
+  // NOT gated, and not even handed a `streamingProvider | undefined` the way
+  // `listLiveSessions` is — see the field docstrings above. The SAME
+  // `userSubscriptionRepository` and the SAME `clock` `isMemberOf` and
+  // `listFeed` read, so Siaran's gate and the feed's gate cannot disagree
+  // about who is a paying member at a given instant.
+  const listLiveStreams = new ListLiveStreams(
+    userStreamRepository,
+    userSubscriptionRepository,
+    clock
+  );
+  const endOwnUserStream = new EndOwnUserStream(userStreamRepository, clock);
+
   // Task 4's publish/read authorisation. The webhook secret is read directly
   // here rather than re-derived from `streamingProvider`'s truthiness, and
   // `streamTokenSecret` itself was already resolved earlier (alongside
@@ -2383,7 +2470,19 @@ export function bootstrap(): Dependencies {
   // selectors agreeing forever about what "configured" means.
   const mediamtxWebhookSecret = presentOrUndefined(process.env.MEDIAMTX_WEBHOOK_SECRET);
   const authoriseStream = streamTokenSecret
-    ? new AuthoriseStream(eventRepository, subscriptionRepository, { streamTokenSecret })
+    ? new AuthoriseStream(eventRepository, subscriptionRepository, userStreamRepository, {
+        streamTokenSecret,
+      })
+    : undefined;
+
+  // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`
+  // above (both need only `STREAM_TOKEN_SECRET`), and handed the SAME
+  // `isMemberOf` the public profile and the feed already ask — so Siaran's
+  // paywall, the profile's `viewerIsMember` and the feed's lock cannot
+  // disagree about who is a paying member at a given instant. `isMemberOf`
+  // itself is untouched by this task (spec §10).
+  const mintUserWatchToken = streamTokenSecret
+    ? new MintUserWatchToken(userStreamRepository, isMemberOf, clock, { streamTokenSecret })
     : undefined;
 
   // Task 8's `GET /c/watch/:token`. `undefined` in lockstep with
@@ -2420,6 +2519,19 @@ export function bootstrap(): Dependencies {
   // docstring for why).
   const handleStreamLifecycle = mediamtxWebhookSecret
     ? new HandleStreamLifecycle(eventRepository, new DrizzleStreamLifecycleUnitOfWork(db))
+    : undefined;
+
+  // Task 6 of Phase 7's `POST /webhooks/mediamtx/lifecycle` for the `u/<key>` world —
+  // see the `endUserStream` field's own docstring for why this is a separate class
+  // rather than a branch inside `HandleStreamLifecycle`, and for why the route
+  // decides which of the two to call. `userStreamRepository` is the SAME pooled
+  // instance `startUserStream`/`listLiveStreams`/`endOwnUserStream` already share —
+  // this class needs no transaction of its own, unlike `handleStreamLifecycle`,
+  // because `user_stream`'s `endById` is a single atomic UPDATE with nothing else to
+  // commit alongside it (no activity_log row, no per-member notify — see the class's
+  // own docstring for why the two worlds' `online` hooks differ this much).
+  const endUserStream = mediamtxWebhookSecret
+    ? new EndUserStream(userStreamRepository, clock)
     : undefined;
 
   return {
@@ -2489,10 +2601,15 @@ export function bootstrap(): Dependencies {
     streamingProvider,
     scheduleLiveSession,
     listLiveSessions,
+    startUserStream,
+    listLiveStreams,
+    endOwnUserStream,
+    mintUserWatchToken,
     authoriseStream,
     resolveWatchToken,
     mediamtxWebhookSecret,
     handleStreamLifecycle,
+    endUserStream,
     mediaStorage,
     uploadMedia,
     mediaRepository,

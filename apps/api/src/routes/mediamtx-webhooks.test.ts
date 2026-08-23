@@ -6,6 +6,7 @@ import { bootstrap } from "../bootstrap";
 import { db } from "../db/client";
 import {
   activityLogs,
+  appUsers,
   communities,
   creators,
   events,
@@ -18,11 +19,18 @@ import { resetDatabase } from "../db/test-helpers";
 import { errorHandler } from "../http/error-handler";
 import { AuthoriseStream } from "../application/use-cases/authorise-stream";
 import { HandleStreamLifecycle } from "../application/use-cases/handle-stream-lifecycle";
+import { EndUserStream } from "../application/use-cases/end-user-stream";
 import { OUTBOX_NOTIFY_STREAM_LIVE } from "../application/ports/outbox-repository.port";
+import { SystemClock } from "../infrastructure/clock/system.clock";
 import { mintWatchToken, WATCH_TOKEN_TTL_MS } from "../domain/watch-token";
 import { DrizzleEventRepository } from "../infrastructure/repositories/drizzle-event.repository";
 import { DrizzleStreamLifecycleUnitOfWork } from "../infrastructure/repositories/drizzle-stream-lifecycle.unit-of-work";
 import { DrizzleSubscriptionRepository } from "../infrastructure/repositories/drizzle-subscription.repository";
+import { DrizzleUserStreamRepository } from "../infrastructure/repositories/drizzle-user-stream.repository";
+import {
+  mintUserWatchToken,
+  USER_WATCH_TOKEN_TTL_MS,
+} from "../domain/user-watch-token";
 import { mediamtxWebhookRoutes } from "./mediamtx-webhooks";
 
 beforeEach(resetDatabase);
@@ -32,31 +40,56 @@ const HEADER = "X-Mediamtx-Secret";
 
 const eventRepository = new DrizzleEventRepository(db);
 const subscriptionRepository = new DrizzleSubscriptionRepository(db);
-const authoriseStream = new AuthoriseStream(eventRepository, subscriptionRepository, {
-  streamTokenSecret: SECRET,
-});
+const userStreamRepository = new DrizzleUserStreamRepository(db);
+const authoriseStream = new AuthoriseStream(
+  eventRepository,
+  subscriptionRepository,
+  userStreamRepository,
+  { streamTokenSecret: SECRET }
+);
 const handleStreamLifecycle = new HandleStreamLifecycle(
   eventRepository,
   new DrizzleStreamLifecycleUnitOfWork(db)
 );
+const endUserStream = new EndUserStream(userStreamRepository, new SystemClock());
 
 /**
- * A REAL `AuthoriseStream`, subclassed only to make `execute` throw. Used
- * exclusively for the "no database read" test below: since `execute` is
- * the ONLY thing in this codebase that reads the database for this
- * decision, a request that reaches 401 without this throwing proves the
- * route never called it — a stronger guarantee than asserting on outcome
- * alone, and one that needs no instrumentation of the database client
- * itself. Extending the real class (rather than a plain object literal)
- * is required for the type to structurally match `AuthoriseStream`, which
- * has private constructor parameters.
+ * A REAL `AuthoriseStream`, subclassed only to make its decision methods
+ * throw. Used exclusively for the "no database read" tests below: these
+ * three methods are the ONLY things in this codebase that read the database
+ * for this decision, so a request that reaches 401 without any of them
+ * throwing proves the route never called them — a stronger guarantee than
+ * asserting on outcome alone, and one that needs no instrumentation of the
+ * database client itself. Extending the real class (rather than a plain
+ * object literal) is required for the type to structurally match
+ * `AuthoriseStream`, which has private constructor parameters.
+ *
+ * FIX ROUND 1 (Task 4 review, Major 1 and Minor 2): only `execute` used to
+ * throw here, which meant the `/auth-request` route's own "never calls
+ * AuthoriseStream at all" tests proved nothing — that route never calls
+ * `execute`. Both by-id entry points now throw too, so those tests mean what
+ * their names say, and so the both-or-neither guard can be pinned by the one
+ * property that actually distinguishes it: it must refuse BEFORE either
+ * resolution is attempted.
  */
 class ThrowingAuthoriseStream extends AuthoriseStream {
   constructor() {
-    super(eventRepository, subscriptionRepository, { streamTokenSecret: SECRET });
+    super(eventRepository, subscriptionRepository, userStreamRepository, {
+      streamTokenSecret: SECRET,
+    });
   }
   override async execute(): Promise<{ allowed: boolean }> {
     throw new Error("AuthoriseStream.execute must not run before the secret header is verified");
+  }
+  override async authoriseReadByEventId(): Promise<{ allowed: false }> {
+    throw new Error(
+      "AuthoriseStream.authoriseReadByEventId must not run before the secret header is verified, nor for a request carrying no event id"
+    );
+  }
+  override async authoriseUserReadByStreamId(): Promise<{ allowed: false }> {
+    throw new Error(
+      "AuthoriseStream.authoriseUserReadByStreamId must not run before the secret header is verified, nor for a request carrying no stream id"
+    );
   }
 }
 
@@ -72,9 +105,26 @@ class ThrowingHandleStreamLifecycle extends HandleStreamLifecycle {
   }
 }
 
+/**
+ * Same purpose as `ThrowingHandleStreamLifecycle` above, and used the same way — but
+ * for Task 6's `EndUserStream`, the `u/<key>` world's own lifecycle handler. Its
+ * `execute` throwing PROVES the route never reaches it, whether because the secret
+ * check refused first or because `parseStreamPath` sent this hook to
+ * `HandleStreamLifecycle` instead.
+ */
+class ThrowingEndUserStream extends EndUserStream {
+  constructor() {
+    super(userStreamRepository, new SystemClock());
+  }
+  override async execute(): Promise<void> {
+    throw new Error("EndUserStream.execute must not run for a path it does not own");
+  }
+}
+
 function app(
   authorise: AuthoriseStream = authoriseStream,
-  lifecycle: HandleStreamLifecycle = handleStreamLifecycle
+  lifecycle: HandleStreamLifecycle = handleStreamLifecycle,
+  userLifecycle: EndUserStream = endUserStream
 ) {
   const a = new Hono();
   a.onError(errorHandler);
@@ -84,6 +134,7 @@ function app(
       authoriseStream: authorise,
       mediamtxWebhookSecret: SECRET,
       handleStreamLifecycle: lifecycle,
+      endUserStream: userLifecycle,
     })
   );
   return a;
@@ -332,6 +383,72 @@ describe("POST /webhooks/mediamtx/auth — publish", () => {
   });
 });
 
+/**
+ * TASK 5 — the user world at the wire, through the endpoint a real MediaMTX
+ * actually calls. This is the hole Task 4's review found: the namespace, the
+ * nginx locations and the by-id read entry point all shipped, and a `u/`
+ * PUBLISH was still refused, so nobody could go live at all. Every test here
+ * would have failed before this task.
+ */
+describe("POST /webhooks/mediamtx/auth — the user world", () => {
+  it("returns 2xx for a publish to a LIVE user stream", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await post(a, { action: "publish", path: `u/${stream.streamKey}`, query: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+  });
+
+  it("refuses (non-2xx) a publish to an ENDED user stream", async () => {
+    const stream = await seedUserStream("public");
+    await userStreamRepository.endById(stream.id, new Date());
+    const a = app();
+
+    const res = await post(a, { action: "publish", path: `u/${stream.streamKey}`, query: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+  });
+
+  it("returns 2xx for a read of a PUBLIC user stream with no token", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await post(a, { action: "read", path: `u/${stream.streamKey}`, query: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+  });
+
+  it("refuses (non-2xx) a read of a GATED user stream with no token", async () => {
+    const stream = await seedUserStream("members");
+    const a = app();
+
+    const res = await post(a, { action: "read", path: `u/${stream.streamKey}`, query: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+  });
+
+  it("returns 2xx for a read of a GATED user stream with a token naming it", async () => {
+    const stream = await seedUserStream("members");
+    const token = mintUserWatchToken({
+      viewerId: "55555555-5555-4555-8555-555555555555",
+      streamId: stream.id,
+      now: Date.now(),
+      ttlMs: USER_WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const a = app();
+
+    const res = await post(a, {
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: `token=${token}`,
+    });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+  });
+});
+
 describe("POST /webhooks/mediamtx/auth — read", () => {
   it("returns 2xx for a valid token against an active, matching subscription", async () => {
     const community = await seedCommunity();
@@ -485,14 +602,44 @@ describe("POST /webhooks/mediamtx/auth — end-to-end wiring", () => {
  */
 function getAuthRequest(
   a: Hono<any>,
-  params: { eventId?: string; token?: string },
+  params: { eventId?: string; streamId?: string; token?: string },
   secret: string | null = SECRET
 ) {
   const headers: Record<string, string> = {};
   if (secret !== null) headers[HEADER] = secret;
   if (params.eventId !== undefined) headers["X-Mtx-Event-Id"] = params.eventId;
+  // Task 4: the user world's header. Exactly ONE of the two ids may be
+  // present on a request — see the route's own docstring.
+  if (params.streamId !== undefined) headers["X-Mtx-Stream-Id"] = params.streamId;
   if (params.token !== undefined) headers["X-Watch-Token"] = params.token;
   return a.request("/webhooks/mediamtx/auth-request", { headers });
+}
+
+let userSeedCounter = 0;
+
+/** One person, and one `live` user stream of theirs — Task 4's user world. */
+async function seedUserStream(visibility: string) {
+  userSeedCounter += 1;
+  const [owner] = await db
+    .insert(appUsers)
+    .values({
+      handle: `rina${userSeedCounter}`,
+      email: `rina${userSeedCounter}@example.com`,
+      whatsappNumber: null,
+      passwordHash: "irrelevant-hash",
+      displayName: "Rina",
+      bio: null,
+    })
+    .returning();
+  // 32 lowercase hex, exactly as `newStreamKey` mints — see
+  // `authorise-stream.test.ts`'s own seed for why the shape matters.
+  const streamKey = userSeedCounter.toString(16).padStart(32, "c");
+  return userStreamRepository.startLive({
+    ownerId: owner!.id,
+    title: "Bedah karya",
+    visibility,
+    streamKey,
+  });
 }
 
 describe("GET /webhooks/mediamtx/auth-request — secret verification", () => {
@@ -510,6 +657,40 @@ describe("GET /webhooks/mediamtx/auth-request — secret verification", () => {
     const res = await getAuthRequest(
       a,
       { eventId: "00000000-0000-4000-8000-000000000000" },
+      "wrong-secret"
+    );
+
+    expect(res.status).toBe(401);
+  });
+
+  /**
+   * FIX ROUND 1 — Task 4 review, MAJOR 1. Both 401 tests above name an
+   * EVENT id, so a mutant that skipped `verifyCallbackToken` whenever
+   * `X-Mtx-Stream-Id` was present ran this entire file green.
+   *
+   * The shared secret is the ONE control that makes `X-Mtx-Stream-Id`
+   * non-forgeable, and the by-id user path trusts that header completely:
+   * whatever it names is resolved, and its stream key comes back in a
+   * response header. `location ^~ /webhooks/mediamtx/ { deny all; }` is the
+   * second layer, but it lives in a config fragment the real server block
+   * must remember to include — which is exactly why that block exists at
+   * all. So the secret gets pinned for the surface it now guards, not only
+   * for the one it guarded before.
+   */
+  it("401s a missing secret header on the USER-world path too, and never resolves the stream id", async () => {
+    const a = app(new ThrowingAuthoriseStream());
+
+    const res = await getAuthRequest(a, { streamId: "00000000-0000-4000-8000-000000000000" }, null);
+
+    expect(res.status).toBe(401);
+  });
+
+  it("401s a wrong secret header on the USER-world path too, and never resolves the stream id", async () => {
+    const a = app(new ThrowingAuthoriseStream());
+
+    const res = await getAuthRequest(
+      a,
+      { streamId: "00000000-0000-4000-8000-000000000000" },
       "wrong-secret"
     );
 
@@ -666,6 +847,7 @@ describe("GET /webhooks/mediamtx/auth-request — read", () => {
         authoriseStream: undefined,
         mediamtxWebhookSecret: SECRET,
         handleStreamLifecycle: undefined,
+        endUserStream: undefined,
       })
     );
 
@@ -675,6 +857,228 @@ describe("GET /webhooks/mediamtx/auth-request — read", () => {
     });
 
     expect(isSuccessStatus(res.status)).toBe(false);
+  });
+});
+
+/**
+ * Task 4 — the USER world's half of this same route. nginx's `^~ /u/`
+ * location sends `X-Mtx-Stream-Id` (the id it captured from the public
+ * `/u/<streamId>/...` URL) where `^~ /live/` sends `X-Mtx-Event-Id`, and
+ * gets the same `X-Stream-Key` header back so it can rewrite onto
+ * MediaMTX's unchanged `u/<streamKey>` internal path.
+ */
+describe("GET /webhooks/mediamtx/auth-request — the user world", () => {
+  it("authorises a PUBLIC user stream by its stream id and returns the key via X-Stream-Key — never in the body", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.id });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+    expect(res.headers.get("X-Stream-Key")).toBe(stream.streamKey);
+    const body = await res.text();
+    expect(body).not.toContain(stream.streamKey);
+  });
+
+  it("refuses a user stream named by its publish KEY instead of its id", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.streamKey });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+    expect(res.headers.get("X-Stream-Key")).toBeNull();
+  });
+
+  /**
+   * TASK 5 REPLACED THE NAME, NOT THE ASSERTION. This test used to read "the
+   * gate itself arrives in Task 5" and pinned a blanket refusal of every
+   * gated stream. The gate has arrived, and a gated stream with no token
+   * still refuses — but now because `authoriseUserStreamRead` found no token,
+   * not because the method refused everything. Its counterpart immediately
+   * below is what proves that difference at THIS layer: a valid token, sent
+   * the way nginx sends one, opens it.
+   */
+  it("refuses a MEMBERS-only user stream carrying no watch token", async () => {
+    const stream = await seedUserStream("members");
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.id });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+  });
+
+  /**
+   * THE ROUTE'S OWN HALF OF THE PAYWALL, and nothing pinned it for the user
+   * world before: `/auth-request` reads `X-Watch-Token` and rebuilds it into
+   * the `token=...` query string `AuthoriseStream` parses. The use-case tests
+   * pass that query string in directly and would go on passing if this route
+   * dropped the header on the user path — the community world's tests do not
+   * cover it either, since they exercise a different branch of the same
+   * handler.
+   */
+  it("authorises a MEMBERS-only user stream with a valid watch token, and returns the key", async () => {
+    const stream = await seedUserStream("members");
+    const token = mintUserWatchToken({
+      viewerId: "55555555-5555-4555-8555-555555555555",
+      streamId: stream.id,
+      now: Date.now(),
+      ttlMs: USER_WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.id, token });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+    expect(res.headers.get("X-Stream-Key")).toBe(stream.streamKey);
+    expect(await res.text()).not.toContain(stream.streamKey);
+  });
+
+  it("refuses a MEMBERS-only user stream with a token minted for ANOTHER stream", async () => {
+    const target = await seedUserStream("members");
+    const other = await seedUserStream("members");
+    const token = mintUserWatchToken({
+      viewerId: "55555555-5555-4555-8555-555555555555",
+      streamId: other.id,
+      now: Date.now(),
+      ttlMs: USER_WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: target.id, token });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+    expect(res.headers.get("X-Stream-Key")).toBeNull();
+  });
+
+  /**
+   * Ambiguity is refused rather than resolved by precedence. nginx sends
+   * exactly one of these two headers per location; a request carrying both
+   * did not come from a location in this repository's template, and picking
+   * a winner would make which world authorises the request depend on a rule
+   * nobody deploying nginx can see.
+   */
+  it("refuses a request carrying BOTH ids — nginx sends exactly one", async () => {
+    const community = await seedCommunity();
+    const { event } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = mintWatchToken({
+      subscriptionId: subscription.id,
+      eventId: event.id,
+      now: Date.now(),
+      ttlMs: WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await getAuthRequest(a, { eventId: event.id, streamId: stream.id, token });
+
+    expect(isSuccessStatus(res.status)).toBe(false);
+  });
+
+  /**
+   * FIX ROUND 1 — Task 4 review, MINOR 2. This test used to pass whether or
+   * not the both-or-neither guard existed: without it, `eventId!` is
+   * `undefined`, `findById(undefined)` stringifies to `"undefined"`, and the
+   * uuid guard turns that into a miss and a 403 anyway. The named test did
+   * not test the line it was written against.
+   *
+   * `ThrowingAuthoriseStream` is what makes it bite. The property that
+   * actually distinguishes the guard is not the status code — it is that the
+   * route refuses BEFORE attempting either resolution. Delete the guard and
+   * `authoriseReadByEventId` throws, which the error handler turns into a
+   * 500, not a 403.
+   */
+  it("refuses a request carrying NEITHER id, without attempting either resolution", async () => {
+    const a = app(new ThrowingAuthoriseStream());
+
+    const res = await getAuthRequest(a, { token: "anything" });
+
+    expect(res.status).toBe(403);
+  });
+
+  /**
+   * FIX ROUND 2 — the four tests below remove a bet, they do not add a
+   * feature.
+   *
+   * The two internal `auth_request` locations each CLEAR the other world's
+   * id header (`proxy_set_header X-Mtx-... "";`), and nginx's documented
+   * response to an empty value is to drop the field. Fix round 1 rested the
+   * whole exactly-one-id rule on that: if some nginx version forwarded the
+   * field present-and-empty instead, EVERY request would carry both ids and
+   * BOTH worlds' HLS would go dark at once — a total outage resting on a
+   * behaviour nobody in this project has run.
+   *
+   * `presentId` (mediamtx-webhooks.ts) now treats an empty — or
+   * whitespace-only — id header as ABSENT, which is the only sane reading:
+   * an empty string is not an id and nothing can ever legitimately send one.
+   * These tests pin that from BOTH sides, so the nginx directives are
+   * belt-and-braces rather than the thing the system depends on.
+   */
+  it("an EMPTY X-Mtx-Stream-Id alongside a real event id resolves the COMMUNITY world, not a 403", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "live");
+    const subscription = await seedActiveSubscription(community.id);
+    const token = mintWatchToken({
+      subscriptionId: subscription.id,
+      eventId: event.id,
+      now: Date.now(),
+      ttlMs: WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const a = app();
+
+    const res = await getAuthRequest(a, { eventId: event.id, streamId: "", token });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+    expect(res.headers.get("X-Stream-Key")).toBe(streamKey);
+  });
+
+  it("an EMPTY X-Mtx-Event-Id alongside a real stream id resolves the USER world, not a 403", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.id, eventId: "" });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+    expect(res.headers.get("X-Stream-Key")).toBe(stream.streamKey);
+  });
+
+  /**
+   * A whitespace-only field is the SAME case as an empty one by the time it
+   * reaches here — HTTP strips optional whitespace around a field value, so
+   * `"   "` arrives as `""` (measured, see `presentId`'s docstring). Kept as
+   * its own test because it is the shape a hand-written nginx variable
+   * expansion would most plausibly produce, and a reader should not have to
+   * know the transport rule to be sure it is handled.
+   */
+  it("a WHITESPACE-ONLY id header is absent too — the user world still resolves", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.id, eventId: "   " });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+    expect(res.headers.get("X-Stream-Key")).toBe(stream.streamKey);
+  });
+
+  it("BOTH ids empty is still the NEITHER case — refused, without attempting either resolution", async () => {
+    const a = app(new ThrowingAuthoriseStream());
+
+    const res = await getAuthRequest(a, { eventId: "", streamId: "" });
+
+    expect(res.status).toBe(403);
+  });
+
+  it("refuses a malformed stream id rather than answering 500", async () => {
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: "../../etc/passwd" });
+
+    expect(res.status).toBe(403);
   });
 });
 
@@ -910,5 +1314,120 @@ describe("POST /webhooks/mediamtx/lifecycle — end-to-end wiring", () => {
       "wrong-secret"
     );
     expect(wrongSecret.status).toBe(401);
+  });
+
+  /**
+   * Same purpose, for the OTHER world Task 6 adds: proves `bootstrap()` really does
+   * wire `EndUserStream` off `MEDIAMTX_WEBHOOK_SECRET` too, and that the real route
+   * dispatches a `u/<key>` hook to it rather than to `HandleStreamLifecycle`.
+   */
+  it("ends a user stream through the real bootstrap() when streaming is fully configured", async () => {
+    const stream = await seedUserStream("public");
+
+    const originals = {
+      MEDIAMTX_RTMP_HOST: process.env.MEDIAMTX_RTMP_HOST,
+      MEDIAMTX_HLS_BASE_URL: process.env.MEDIAMTX_HLS_BASE_URL,
+      MEDIAMTX_WHIP_BASE_URL: process.env.MEDIAMTX_WHIP_BASE_URL,
+      MEDIAMTX_WEBHOOK_SECRET: process.env.MEDIAMTX_WEBHOOK_SECRET,
+      STREAM_TOKEN_SECRET: process.env.STREAM_TOKEN_SECRET,
+    };
+    process.env.MEDIAMTX_RTMP_HOST = "mediamtx.internal";
+    process.env.MEDIAMTX_HLS_BASE_URL = "https://hls.diudara.test";
+    process.env.MEDIAMTX_WHIP_BASE_URL = "https://whip.diudara.test";
+    process.env.MEDIAMTX_WEBHOOK_SECRET = SECRET;
+    process.env.STREAM_TOKEN_SECRET = SECRET;
+
+    let a: ReturnType<typeof createApp>;
+    try {
+      a = createApp(bootstrap());
+    } finally {
+      for (const [key, value] of Object.entries(originals)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+
+    const res = await postLifecycle(a, {
+      hook: "offline",
+      streamKey: `u/${stream.streamKey}`,
+    });
+    expect(res.status).toBe(200);
+
+    const reloaded = await userStreamRepository.findById(stream.id);
+    expect(reloaded!.status).toBe("ended");
+  });
+});
+
+/**
+ * Task 6 of Phase 7: the route's own dispatch between the two lifecycle classes,
+ * told apart by `parseStreamPath` — see `mediamtx-webhooks.ts`'s `/lifecycle`
+ * docstring. These tests are about the ROUTE's own decision, not either class's
+ * internal behaviour (that is `end-user-stream.test.ts`'s and
+ * `handle-stream-lifecycle.test.ts`'s job) — so each uses the OTHER world's
+ * throwing double to prove mutual isolation: a `u/<key>` hook must never reach
+ * `HandleStreamLifecycle`, and a `live/<key>` (or unparseable) hook must never reach
+ * `EndUserStream`.
+ */
+describe("POST /webhooks/mediamtx/lifecycle — dispatch between the two worlds", () => {
+  it("a u/<key> offline hook ends the user stream, and never calls HandleStreamLifecycle", async () => {
+    const stream = await seedUserStream("public");
+    const a = app(authoriseStream, new ThrowingHandleStreamLifecycle());
+
+    const res = await postLifecycle(a, {
+      hook: "offline",
+      streamKey: `u/${stream.streamKey}`,
+    });
+
+    expect(res.status).toBe(200);
+    const reloaded = await userStreamRepository.findById(stream.id);
+    expect(reloaded!.status).toBe("ended");
+  });
+
+  it("a live/<key> hook never calls EndUserStream", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "scheduled");
+    const a = app(authoriseStream, handleStreamLifecycle, new ThrowingEndUserStream());
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
+
+    expect(res.status).toBe(200);
+    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
+    expect(reloaded!.status).toBe("live");
+  });
+
+  it("an unparseable streamKey falls through to HandleStreamLifecycle, unchanged, and never calls EndUserStream", async () => {
+    const a = app(authoriseStream, handleStreamLifecycle, new ThrowingEndUserStream());
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: "not-a-namespaced-path" });
+
+    expect(res.status).toBe(200);
+    const activity = await db.select().from(activityLogs);
+    expect(activity).toHaveLength(0);
+  });
+
+  it("a u/<key> hook acks 200 without throwing when streaming is not configured (endUserStream undefined)", async () => {
+    const stream = await seedUserStream("public");
+    const a = new Hono();
+    a.onError(errorHandler);
+    a.route(
+      "/webhooks/mediamtx",
+      mediamtxWebhookRoutes({
+        authoriseStream,
+        mediamtxWebhookSecret: SECRET,
+        handleStreamLifecycle,
+        endUserStream: undefined,
+      })
+    );
+
+    const res = await postLifecycle(a, {
+      hook: "offline",
+      streamKey: `u/${stream.streamKey}`,
+    });
+
+    expect(res.status).toBe(200);
+    // Nothing ran — the row is untouched, exactly as `handleStreamLifecycle undefined`
+    // leaves a community event untouched.
+    const reloaded = await userStreamRepository.findById(stream.id);
+    expect(reloaded!.status).toBe("live");
   });
 });

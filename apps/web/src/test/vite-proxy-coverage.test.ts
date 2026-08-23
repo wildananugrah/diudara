@@ -57,7 +57,9 @@ function sourceFiles(dir: string): string[] {
  * still reported every check green, exactly the failure mode this file
  * exists to catch. Captures the literal path argument — a plain string or a
  * template literal — and deliberately does NOT match a bare identifier
- * (`fetch(url, init)` in `dashboard/whip-publisher.ts` is exactly that: an
+ * (`fetch(url, init)` in `user/whip-publisher.ts` — moved there from
+ * `dashboard/whip-publisher.ts` by Task 8 of the streaming-siaran phase,
+ * since Phase 8 deletes the directory it used to live in — is exactly that: an
  * absolute URL handed in from elsewhere, not a same-origin app path, and
  * has nothing here to proxy).
  */

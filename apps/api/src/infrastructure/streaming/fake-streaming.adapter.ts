@@ -1,4 +1,7 @@
-import type { StreamingProviderPort } from "../../application/ports/streaming-provider.port";
+import type {
+  StreamingProviderPort,
+  StreamNamespace,
+} from "../../application/ports/streaming-provider.port";
 
 /**
  * In-memory `StreamingProviderPort` for tests, and for `development`/`test`
@@ -32,18 +35,32 @@ import type { StreamingProviderPort } from "../../application/ports/streaming-pr
  * `/live/` — so this fake matches that exactly rather than inventing its own
  * shape. A fake that drifts from its real counterpart is how integration
  * bugs hide.
+ *
+ * `namespace` (Task 4) is held to that same rule once more, including the one
+ * place `MediaMtxAdapter` is deliberately asymmetric: `live` keeps the bare
+ * `/whip/<key>` shape and `u` takes an extra segment, `/whip/u/<key>`. See
+ * that adapter's `whipSuffix` for why the community world could not be
+ * changed to match.
  */
 export class FakeStreamingAdapter implements StreamingProviderPort {
-  readonly sessions: { streamKey: string }[] = [];
+  readonly sessions: { streamKey: string; namespace: StreamNamespace }[] = [];
 
   createSession(input: {
     streamKey: string;
+    namespace: StreamNamespace;
   }): { rtmpUrl: string; whipUrl: string; hlsPlaybackPath: string } {
-    this.sessions.push({ streamKey: input.streamKey });
+    // Recorded WITH the namespace: "which world did the caller say this
+    // stream belongs to" is exactly the question Task 4 exists because
+    // nobody could previously ask it, and a test asserting on
+    // `sessions` should be able to.
+    this.sessions.push({ streamKey: input.streamKey, namespace: input.namespace });
+    const mtxPath = `${input.namespace}/${input.streamKey}`;
+    const whipSuffix =
+      input.namespace === "live" ? input.streamKey : `${input.namespace}/${input.streamKey}`;
     return {
-      rtmpUrl: `rtmp://fake-mediamtx.local:1935/live/${input.streamKey}`,
-      whipUrl: `https://fake-mediamtx.local/whip/${input.streamKey}`,
-      hlsPlaybackPath: `https://fake-mediamtx.local/live/${input.streamKey}/index.m3u8`,
+      rtmpUrl: `rtmp://fake-mediamtx.local:1935/${mtxPath}`,
+      whipUrl: `https://fake-mediamtx.local/whip/${whipSuffix}`,
+      hlsPlaybackPath: `https://fake-mediamtx.local/${mtxPath}/index.m3u8`,
     };
   }
 }

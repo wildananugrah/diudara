@@ -7,13 +7,13 @@
  * transaction, because an invite is an external HTTP call and a Telegram outage
  * must delay an invite, never roll back a payment (plan, Global Constraints).
  *
- * It runs SEVEN loops, on two cadences:
+ * It runs EIGHT loops, on two cadences:
  *
  *   - the OUTBOX, every 5 seconds, because that interval is the delay a paying member
  *     sees between their payment settling and their invite arriving;
  *   - RENEWALS, CHURN, the orphan MEDIA SWEEP, the MEMBERSHIP SWEEP, the
- *     MEMBERSHIP REMINDER pass and the PENDING-CHECKOUT CLEANUP, hourly.
- *     Renewals/churn decide whole Asia/Jakarta calendar days (see
+ *     MEMBERSHIP REMINDER pass, the PENDING-CHECKOUT CLEANUP and the USER-STREAM
+ *     SWEEP, hourly. Renewals/churn decide whole Asia/Jakarta calendar days (see
  *     `DEFAULT_RENEWAL_INTERVAL_MS` for why hourly and not daily, and why not 5s); the
  *     media sweep shares that cadence for a simpler reason — spec §8's 24-hour window
  *     is generous on purpose, so it is no more latency-sensitive than the other two.
@@ -30,9 +30,13 @@
  *     sweep: what actually protects a live checkout is its own two-hour window
  *     (`STALE_PENDING_CHECKOUT_WINDOW_MS`), not how often this loop wakes up — an hourly
  *     cadence against a two-hour window still closes the dead-invoice gap within about an
- *     hour of it opening, nowhere near urgent enough to earn its own knob.
+ *     hour of it opening, nowhere near urgent enough to earn its own knob. The
+ *     user-stream sweep (Task 6, Phase 7) shares it for the identical reason again: its
+ *     own 12-hour cap (`MAX_USER_STREAM_MS`) is what actually protects a genuinely-live
+ *     stream, not this cadence — an hourly wake-up against a 12-hour cap still closes a
+ *     lost-webhook gap within about an hour of it opening.
  *
- * All seven are the same `PollLoop`, so all seven inherit its two properties: passes of
+ * All eight are the same `PollLoop`, so all eight inherit its two properties: passes of
  * one kind never overlap, and a signal wakes them out of their interval instead of
  * letting it expire. They are separate loops rather than one pass doing everything so
  * that a renewal query that fails every time cannot also stop invites being delivered.
@@ -72,6 +76,7 @@ import {
   SweepExpiredMemberships,
   SweepOrphanMedia,
   SweepStalePendingCheckouts,
+  SweepStaleUserStreams,
 } from "./scheduled-passes";
 
 // BEFORE the composition root is even imported. Bun auto-loads `.env` from the
@@ -94,6 +99,13 @@ const { DrizzleMediaRepository } = await import(
 // the API's.
 const { DrizzleUserSubscriptionRepository } = await import(
   "../../api/src/infrastructure/repositories/drizzle-user-subscription.repository"
+);
+// Task 6's user-stream sweep (Phase 7, design spec §7). Same reasoning as
+// `DrizzleUserSubscriptionRepository` above — constructed here rather than returned
+// from `bootstrapWorker()` because `SweepStaleUserStreams`, like the other sweeps in
+// this file, is defined in THIS package, not the API's.
+const { DrizzleUserStreamRepository } = await import(
+  "../../api/src/infrastructure/repositories/drizzle-user-stream.repository"
 );
 // The SAME selector the API's own `bootstrap()` uses for `POST /users/media` and the
 // delivery routes — reused rather than re-derived so the worker and the API can never
@@ -159,6 +171,13 @@ const processStalePendingSweep = new SweepStalePendingCheckouts(
     nodeEnv: process.env.NODE_ENV,
   })
 );
+// Task 6's backstop against a LOST `user_stream` lifecycle webhook (Phase 7, design
+// spec §7): `user_stream_one_live`'s partial unique index means a row stuck `live`
+// forever leaves its owner permanently unable to go live again. See
+// `MAX_USER_STREAM_MS`'s own docstring in `scheduled-passes.ts` for why the window is
+// a cap on age, not a liveness check. Its own `DrizzleUserStreamRepository` instance,
+// same pattern as the sweeps above.
+const processUserStreamSweep = new SweepStaleUserStreams(new DrizzleUserStreamRepository(db));
 const intervalMs = resolvePollIntervalMs(process.env.WORKER_POLL_INTERVAL_MS);
 const renewalIntervalMs = resolveRenewalIntervalMs(process.env.WORKER_RENEWAL_INTERVAL_MS);
 
@@ -190,10 +209,11 @@ const outboxLoop = new PollLoop({
   },
 });
 
-// Phase 5's two clock-driven passes plus Task 10's orphan sweep and Phase 5b's
-// retirement sweep and reminder pass, on their own much longer, shared cadence. Five
-// loops, not one: a renewal pass that throws every time must not stop churn, the media
-// sweep, the membership sweep or the reminders, and none of them must stop the outbox
+// Phase 5's two clock-driven passes plus Task 10's orphan sweep, Phase 5b's
+// retirement sweep and reminder pass, and Phase 7's user-stream sweep (Task 6), on
+// their own much longer, shared cadence. Seven loops, not one: a renewal pass that
+// throws every time must not stop churn, the media sweep, the membership sweep, the
+// reminders, or the user-stream sweep, and none of them must stop the outbox
 // delivering invites people have already paid for.
 const {
   renewalLoop,
@@ -202,6 +222,7 @@ const {
   membershipSweepLoop,
   membershipReminderLoop,
   stalePendingSweepLoop,
+  userStreamSweepLoop,
 } = createScheduledPassLoops({
   processRenewals,
   processChurn,
@@ -213,10 +234,11 @@ const {
   // member finds out by discovering they cannot see something.
   processMembershipReminder: remindExpiringMemberships,
   processStalePendingSweep,
+  processUserStreamSweep,
   intervalMs: renewalIntervalMs,
 });
 
-// ONE handler for all SEVEN loops, so there is no ordering in which some are stopped
+// ONE handler for all EIGHT loops, so there is no ordering in which some are stopped
 // and others keep polling — and the process cannot exit while any of them holds the
 // pool open.
 const uninstallSignals = installShutdownSignals(
@@ -226,15 +248,16 @@ const uninstallSignals = installShutdownSignals(
   orphanSweepLoop,
   membershipSweepLoop,
   membershipReminderLoop,
-  stalePendingSweepLoop
+  stalePendingSweepLoop,
+  userStreamSweepLoop
 );
 
 console.log(
   `[worker] polling the outbox every ${intervalMs}ms; running the renewal, churn, ` +
-    `media-sweep, membership-sweep, membership-reminder and pending-checkout-cleanup ` +
-    `passes every ${renewalIntervalMs}ms`
+    `media-sweep, membership-sweep, membership-reminder, pending-checkout-cleanup ` +
+    `and user-stream-sweep passes every ${renewalIntervalMs}ms`
 );
-// All seven concurrently. `Promise.all` and not a sequential await: each loop runs
+// All eight concurrently. `Promise.all` and not a sequential await: each loop runs
 // until it is stopped, so awaiting one would never start the others.
 await Promise.all([
   outboxLoop.run(),
@@ -244,6 +267,7 @@ await Promise.all([
   membershipSweepLoop.run(),
   membershipReminderLoop.run(),
   stalePendingSweepLoop.run(),
+  userStreamSweepLoop.run(),
 ]);
 uninstallSignals();
 

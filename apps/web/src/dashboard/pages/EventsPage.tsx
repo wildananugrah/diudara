@@ -5,7 +5,7 @@ import { formatDateTime, liveSessionStatusExplanation, liveSessionStatusLabel } 
 import { CommunityHeader, CopyableLink, EmptyState, ErrorPanel, Field, NotFoundPanel } from "../ui";
 import { useCommunity } from "../useCommunity";
 import { useLoad } from "../useLoad";
-import { publishToWhip, type PublishHandle } from "../whip-publisher";
+import { publishToWhip, type PublishHandle } from "../../user/whip-publisher";
 import type { CreatedLiveSession, LiveSession, StreamingStatus } from "../types";
 
 /**

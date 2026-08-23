@@ -1,5 +1,7 @@
 # Task 9 (+ final whole-branch review FIX 1/2/3): the `location` blocks the
-# real VPS's PUBLIC nginx needs for `/live/`, re-authorising EVERY HLS
+# real VPS's PUBLIC nginx needs for `/live/` — and, as of Phase 7's Task 4,
+# for `/u/` too (see the blocks marked "PHASE 7, TASK 4" below) —
+# re-authorising EVERY HLS
 # request against apps/api instead of trusting MediaMTX's own read-auth
 # cache (which authorises once per viewer session, not once per request —
 # see mediamtx-webhooks.ts's `/auth-request` docstring and
@@ -93,7 +95,8 @@
 #
 # — belongs on the `location /users/` block (or the enclosing `server`)
 # that proxies this app's API, and that block is NOT in this repository:
-# this file is only the /live/, /whip/ and internal-auth locations. It is
+# this file is only the /live/, /u/, /whip/, /whip/u/ and internal-auth
+# locations. It is
 # written up as its own pre-deploy step in CONTRIBUTING.md ("Pre-deploy
 # checklist: photo uploads"), with a curl that verifies it through the
 # public origin. It is deliberately NOT declared here: a directive in the
@@ -260,6 +263,72 @@ location ^~ /whip/ {
     proxy_set_header Connection "";
 }
 
+# PHASE 7, TASK 4 — the WHIP location for the USER namespace.
+#
+# WHY THIS EXISTS AT ALL: the `/whip/` location above HARD-REWRITES onto
+# `http://127.0.0.1:8889/live/$whip_key/whip`. A person broadcasting from
+# their own profile publishes to `u/<streamKey>`, not `live/<streamKey>` —
+# apps/api's `parseStreamPath` is what tells the two worlds apart, and a
+# WHIP publish landing on `/live/...` would be authorised (or refused)
+# against the wrong table entirely. Without this block, browser publishing
+# for a user stream is silently wrong: the location above would still match,
+# still proxy, and still put the stream in the community world.
+#
+# A SECOND LOCATION, NOT A NAMESPACE VARIABLE INSIDE THE FIRST ONE, and that
+# is the one judgement call here. The community `/whip/` block above is
+# DEPLOYED and was proven against a real MediaMTX and a real browser publish
+# (see its own header comment and CONTRIBUTING.md's transcript); Phase 7 is
+# forbidden from changing the community world's behaviour by a byte. Adding a
+# `$whip_ns` variable would have meant rewriting that block's `proxy_pass`
+# and `proxy_redirect` lines — the two lines the proof was about — to serve a
+# world it has nothing to do with. A separate location leaves them untouched.
+#
+# ORDERING IS A NON-QUESTION, the same property the `/live/` location's
+# comment establishes at length. `^~ /whip/u/` (9 characters) is a strictly
+# LONGER literal prefix than `^~ /whip/` (7), nginx selects the longest
+# matching PREFIX location independent of source order, and `^~` then stops
+# the regex phase entirely. So `/whip/u/<key>` always lands here and
+# `/whip/<key>` always lands above, wherever either block is pasted. The two
+# can never collide: `newStreamKey` (streaming-provider.port.ts) mints 32
+# lowercase hex characters, so a community stream key can never itself be the
+# single character `u`.
+#
+# THE PUBLIC SHAPE IS `<base>/whip/u/<streamKey>[/<sessionId>]`, built by
+# `MediaMtxAdapter.createSession` when it is given `namespace: "u"` — see
+# `whipSuffix` in that file for why the user world carries the extra segment
+# rather than the community world losing its bare one. Everything else in
+# this block is the block above with `live` replaced by `u` and the public
+# prefix lengthened by one segment: the same `access_log off` (the stream key
+# is in this path), the same `proxy_hide_header WWW-Authenticate` (MediaMTX
+# answers a refused publish with a Basic-auth challenge our own origin must
+# never relay to a browser), the same two-direction rewrite, and deliberately
+# the same absence of `auth_request` — a publish is authorised by MediaMTX's
+# own `authHTTPAddress` call straight to apps/api, never through this nginx.
+#
+# THE ERROR LOG CARRIES THIS KEY TOO, on the same most-ordinary failure the
+# block above documents (MediaMTX unreachable during a redeploy). Same trade,
+# same consequence: this server's nginx error log is a secret-bearing file.
+location ^~ /whip/u/ {
+    set $whip_ukey "";
+    set $whip_usession "";
+    # $request_uri is RAW, not percent-decoded — the same assumption, with the
+    # same 32-hex-key justification, the community block above records.
+    if ($request_uri ~ "^/whip/u/([^/?]+)(/[^/?]+)?") {
+        set $whip_ukey $1;
+        set $whip_usession $2;
+    }
+
+    access_log off;
+
+    proxy_hide_header WWW-Authenticate;
+
+    proxy_pass http://127.0.0.1:8889/u/$whip_ukey/whip$whip_usession$is_args$args;
+    proxy_redirect /u/$whip_ukey/whip/ /whip/u/$whip_ukey/;
+    proxy_set_header Host $host;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+
 # FIX 1 (final whole-branch review, Critical) + FIX 2 (Important, the
 # location-matching half): the PUBLIC path a member's browser ever
 # requests is now `/live/<eventId>/...` — an opaque row id, never the
@@ -412,6 +481,91 @@ location ^~ /live/ {
     proxy_set_header Connection "";
 }
 
+# PHASE 7, TASK 4 — the HLS read location for the USER namespace, and the
+# mirror of `^~ /live/` above in every respect that matters.
+#
+# THE PUBLIC PATH IS `/u/<streamId>/...` — a `user_stream` row id, never its
+# stream key. `GET /streams` (apps/api's `userStreamPlaybackPath`) publishes
+# exactly this, and it is PUBLIC: signed in or not, anyone can list who is
+# live. Putting `createSession`'s key-bearing `hlsPlaybackPath` on that
+# listing would hand every reader every creator's PUBLISH credential — the
+# old world's own Critical (see `ResolveWatchToken`'s docstring in apps/api)
+# with a wider blast radius. So the same answer as the old world's: the
+# public URL names an id, the auth subrequest turns it into a key, and this
+# location rewrites onto MediaMTX's unchanged internal `u/<streamKey>` path.
+#
+# MediaMTX was never taught about stream ids and is not taught about them
+# here either. It only ever sees `u/<streamKey>` — the path a creator's OBS
+# or browser actually published to.
+#
+# `^~`, NOT a `~` regex location, for the identical reason the `/live/` block
+# above spends two paragraphs on: a pre-existing `\.(m3u8|ts)$` regex
+# location declared earlier in the real server block would otherwise
+# intercept every segment request with no `auth_request` at all. `^~` makes
+# nginx skip the regex phase entirely for this prefix, whatever the source
+# order. (Same caveat as above: grep the real server block for `^~ /u` and
+# `location = /u` before pasting, since another equal-or-longer `^~` prefix
+# would win instead.)
+#
+# `/u/` IS A SHORT, GENERIC PREFIX — worth one sentence of its own, because
+# `/live/` was not. Anything else the real server block wants to serve under
+# `/u/...` (a vanity profile URL, say) would be swallowed by this location.
+# This app's own user-facing profile route is `/@<handle>`, not `/u/<handle>`,
+# so nothing collides today; a future route under `/u/` would have to be
+# declared as a longer `^~` prefix or moved.
+#
+# NO SEPARATE `$mtx_*` NAMING ACCIDENT: `$mtx_stream`/`$mtx_urest`/`$mtx_ukey`
+# are deliberately distinct from the `/live/` block's `$mtx_event`/`$mtx_rest`/
+# `$mtx_key`. nginx variables are per-request, so reuse would have been safe —
+# distinct names are for the reader, so the internal auth location below can
+# never be mistaken for the community one.
+location ^~ /u/ {
+    set $mtx_stream "";
+    set $mtx_urest "";
+    if ($request_uri ~ "^/u/([^/?]+)(/[^?]*)?") {
+        set $mtx_stream $1;
+        set $mtx_urest $2;
+    }
+
+    # Captured BEFORE `auth_request` fires — load-bearing ordering, proven
+    # for the `/live/` location above: an `auth_request` subrequest does NOT
+    # inherit `$args`/`$arg_*`, but a plain `set` variable DOES persist into
+    # it. The token itself is Task 5's (`user-watch-token.ts`); this line is
+    # here now so that adding the gate is a change in apps/api alone and not
+    # a second, later edit to a config file no test can exercise.
+    set $watch_token $arg_token;
+    auth_request /_internal/mediamtx-user-auth-request;
+
+    # The stream key, from the auth subrequest's `X-Stream-Key` RESPONSE
+    # header — the ONLY way a value from that subrequest reaches this
+    # location. Only ever read after a successful authorisation: if
+    # `auth_request` refused, nginx stopped processing before this line.
+    auth_request_set $mtx_ukey $upstream_http_x_stream_key;
+
+    # Off for the same two reasons the `/live/` location gives: the watch
+    # token would otherwise be written to disk on every segment request, and
+    # this project keeps nginx's ERROR log at its default level, which means
+    # that file must be treated as secret-bearing regardless. (The stream id
+    # itself is not a secret.)
+    access_log off;
+
+    proxy_pass http://127.0.0.1:8888/u/$mtx_ukey$mtx_urest$is_args$args;
+
+    # MediaMTX answers a stream's FIRST HLS request with its own `302`
+    # cookie-check redirect whose `Location` echoes back the path IT
+    # received — which, after the rewrite above, is the INTERNAL, key-bearing
+    # one. Without this line that key reaches the viewer's browser through a
+    # response header, reintroducing exactly what the id-in-the-URL decision
+    # exists to prevent. Found running the community equivalent for real, not
+    # anticipated from the design; see that location's own comment for the
+    # captured before/after. Sub-manifest URIs are relative and need no
+    # equivalent rewrite.
+    proxy_redirect /u/$mtx_ukey/ /u/$mtx_stream/;
+    proxy_set_header Host $host;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+
 # `internal;` — reachable only via `auth_request` above, never directly
 # from outside this nginx (matching apps/api's own security note: the
 # actual /webhooks/mediamtx/auth-request endpoint this calls must never be
@@ -456,5 +610,89 @@ location = /_internal/mediamtx-auth-request {
     # the event id nginx captured from the PUBLIC request, nothing this
     # nginx has independently verified as a real stream key.
     proxy_set_header X-Mtx-Event-Id "$mtx_event";
+    # PHASE 7, TASK 4 FIX ROUND 1 — CLEARS the user world's id header, and
+    # this line is still load-bearing. An `auth_request` subrequest INHERITS
+    # the parent request's incoming headers, and `proxy_set_header` only
+    # overrides the fields it names — so without this line a client attaching
+    # its own `X-Mtx-Stream-Id: <some real id>` to an ordinary
+    # `/live/<eventId>/...` request would make apps/api see BOTH ids and
+    # refuse the read (that route rejects both-or-neither rather than
+    # resolving by precedence). Self-inflicted rather than a bypass, but it
+    # is a client choosing to break its own community-world playback, and the
+    # guarantee the route's rule rests on — one id per request — has to be
+    # enforced HERE, since this is the only place that knows which world the
+    # location means.
+    #
+    # WHAT AN EMPTY VALUE DOES, and what no longer depends on it (FIX ROUND
+    # 2): nginx's documented behaviour for `proxy_set_header field "";` is to
+    # drop the field entirely. That was previously the whole rule's
+    # foundation — if some nginx version forwarded it present-and-empty
+    # instead, EVERY request would carry both ids and both worlds' HLS would
+    # go dark at once. apps/api's `presentId` now treats an empty (or
+    # whitespace-only) id header as ABSENT, so that failure mode is gone and
+    # this directive is belt-and-braces for the EMPTY case. It remains the
+    # only defence against a forged NON-EMPTY sibling header, which is why
+    # the line stays.
+    proxy_set_header X-Mtx-Stream-Id "";
+    proxy_set_header X-Watch-Token "$watch_token";
+}
+
+# PHASE 7, TASK 4 — the USER world's own `auth_request` upstream. `internal;`
+# for the same reason the community one is: never reachable from outside this
+# nginx.
+#
+# THE SAME apps/api ROUTE, a DIFFERENT ID HEADER. `/webhooks/mediamtx/auth-request`
+# now serves both worlds and tells them apart by which header arrived:
+# `X-Mtx-Event-Id` resolves a community `event`, `X-Mtx-Stream-Id` resolves a
+# `user_stream`. That route REFUSES a request carrying both or neither rather
+# than picking a winner by precedence — so this location SENDS its own id and
+# CLEARS the other world's. A second internal location rather than a shared
+# one with two conditional headers is what makes that readable: each location
+# states both halves unconditionally, and there is no branch to get wrong.
+#
+# FIX ROUND 1 (Task 4 review, Major 2) — the clearing line is why this
+# paragraph changed from "must not grow an `X-Mtx-Event-Id` line" to "clears
+# it". An `auth_request` subrequest INHERITS the parent request's incoming
+# headers and `proxy_set_header` only overrides what it names, so the
+# original wording described a guarantee this file did not actually enforce.
+# The case that mattered was not the doubled-header 403: it was a request to
+# `/u/` whose `if` regex MISSES (a bare `GET /u/`, so `$mtx_stream` stays
+# empty and nginx omits the field) carrying a client-forged
+# `X-Mtx-Event-Id` — the route would then see only an event id and this,
+# the USER location, would authorise against the COMMUNITY world, putting
+# that event's stream key into `$mtx_ukey`. No bytes came of it (the proxied
+# `u/<eventStreamKey>` path is one nothing publishes to, and MediaMTX's own
+# hook refuses it), but a client must not get to choose which world a
+# location resolves in. That is what this clearing line prevents, and it is
+# why it stays.
+#
+# FIX ROUND 2 — what this line no longer has to be trusted for. nginx's
+# documented behaviour for `proxy_set_header field "";` is to drop the field
+# entirely; if some version instead forwarded it present-and-empty, a
+# stricter route would have seen both ids on EVERY request and refused all of
+# them, taking both worlds' HLS down together. apps/api's `presentId` now
+# reads an empty or whitespace-only id header as ABSENT, so the empty case
+# cannot break anything whichever way nginx behaves. This directive is
+# belt-and-braces there, and load-bearing only against a forged NON-EMPTY
+# sibling header — which is exactly the case above.
+#
+# Both worlds get the same `X-Stream-Key` response header back, and both read
+# it with `auth_request_set` — see the `^~ /u/` location above.
+location = /_internal/mediamtx-user-auth-request {
+    internal;
+    access_log off;
+
+    # Bounded exactly as the community location's is, and for the same
+    # reason: an unhealthy apps/api should deny the segment fast rather than
+    # hold every in-flight viewer's connection open for nginx's 60s default.
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 3s;
+
+    proxy_pass http://127.0.0.1:3000/webhooks/mediamtx/auth-request;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header X-Mediamtx-Secret "${MEDIAMTX_WEBHOOK_SECRET}";
+    proxy_set_header X-Mtx-Stream-Id "$mtx_stream";
+    proxy_set_header X-Mtx-Event-Id "";
     proxy_set_header X-Watch-Token "$watch_token";
 }

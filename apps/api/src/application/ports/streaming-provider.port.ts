@@ -28,11 +28,37 @@ export interface StreamingProviderPort {
    * the SAME stream key into the SAME session. It carries the stream key
    * exactly as `rtmpUrl` does, so it is exactly as sensitive: owner-scoped at
    * every caller, never handed to a member.
+   *
+   * `namespace` (Task 4) is REQUIRED, with no default, and that is the whole
+   * point of it: a caller must SAY which world its stream belongs to. Before
+   * this parameter existed both adapters hard-coded `live/`, so
+   * `StartUserStream` — the new world's own use case — handed a creator
+   * `rtmp://host:1935/live/<key>`, which `parseStreamPath` then read back as
+   * `world: "community"` and looked up in the `event` table it has nothing to
+   * do with. A default would have let exactly that mistake compile again.
    */
   createSession(input: {
     streamKey: string;
+    namespace: StreamNamespace;
   }): { rtmpUrl: string; whipUrl: string; hlsPlaybackPath: string };
 }
+
+/**
+ * The top-level path segment a stream is published and read under, and the
+ * ONE thing that tells the two worlds apart on the wire.
+ *
+ * These two literals are the SAME pair `parseStreamPath`'s `NAMESPACES` map
+ * (authorise-stream.ts) recognises — `live` for the community `event` world,
+ * `u` for a person's own `user_stream` (design spec §6). The two are
+ * deliberately declared separately rather than derived from one another: the
+ * map's job is to REFUSE a segment it does not know, which means it must own
+ * its own key set, and importing a use-case's constant into a port would
+ * invert this codebase's dependency direction for the sake of five
+ * characters. They must be kept in step by hand, and adding a third
+ * namespace means adding it in both places — see `NAMESPACES`' own docstring,
+ * which says the same thing from the other side.
+ */
+export type StreamNamespace = "live" | "u";
 
 /**
  * A fresh, unguessable stream key: 32 hex characters from 16 CSPRNG bytes

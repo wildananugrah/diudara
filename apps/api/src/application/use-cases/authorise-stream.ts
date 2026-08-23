@@ -1,12 +1,50 @@
+import { verifyUserWatchToken } from "../../domain/user-watch-token";
 import { verifyWatchToken } from "../../domain/watch-token";
 import type { EventRecord, EventRepositoryPort } from "../ports/event-repository.port";
 import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
+import type {
+  UserStreamRepositoryPort,
+  UserStreamRow,
+} from "../ports/user-stream-repository.port";
+import { MEMBERS_ONLY } from "./post-views";
 
 /**
  * `event.status` values a publish is allowed against. `ended` is
  * deliberately excluded — see the class docstring below.
  */
 const PUBLISHABLE_STATUSES: ReadonlySet<string> = new Set(["scheduled", "live"]);
+
+/**
+ * The one `user_stream.status` a publish is allowed against — Task 5, and the
+ * community world's `PUBLISHABLE_STATUSES` rule applied to the new table.
+ * There is no `scheduled` here: `StartUserStream` inserts a row that is
+ * already `live` (there is nothing to schedule in Siaran), so the set has one
+ * member rather than two. `ended` refuses for the identical reason the
+ * community world gives — a finished session must not be republishable by
+ * somebody who captured the RTMP URL after the creator moved on.
+ */
+const USER_PUBLISHABLE_STATUS = "live";
+
+/**
+ * The one `user_stream.status` a READ is allowed against — I3, final
+ * whole-branch review. Written as its own constant rather than reusing
+ * `USER_PUBLISHABLE_STATUS` above even though the two strings are equal
+ * today: they answer different questions ("may somebody send bytes to this
+ * path?" and "may somebody receive them?"), and a future third status —
+ * `paused`, say, or a `replay` a recording is served from — would move one
+ * without moving the other. One name per decision is what keeps that edit
+ * from silently being both.
+ */
+const USER_READABLE_STATUS = "live";
+
+/**
+ * The one `user_stream.visibility` that opens a read to everybody. Written
+ * here as a literal beside `MEMBERS_ONLY` rather than imported from anywhere,
+ * because the decision below is an ALLOW-LIST: see
+ * `authoriseUserStreamRead`'s docstring for why this file must not be able to
+ * infer "not gated" from "not the gated value".
+ */
+const PUBLIC_VISIBILITY = "public";
 
 /**
  * The one status a watch token's subscription must hold for a read to be
@@ -20,50 +58,84 @@ const PUBLISHABLE_STATUSES: ReadonlySet<string> = new Set(["scheduled", "live"])
 const ENTITLED_STATUS = "active";
 
 /**
- * The one top-level path segment MediaMTX's stream paths are ever built
- * under in this codebase — see `MediaMtxAdapter.createSession`, which
- * constructs both `rtmp://<host>:1935/live/<streamKey>` and
- * `<hlsBaseUrl>/live/<streamKey>/index.m3u8`. Every real publish and every
- * real read this route will ever see therefore has `path = "live/<key>"`,
- * nothing else.
+ * Every top-level path segment MediaMTX's stream paths are ever built
+ * under in this codebase, mapped to the world it names. `live` is the one
+ * `MediaMtxAdapter.createSession` has ever constructed — it builds both
+ * `rtmp://<host>:1935/live/<streamKey>` and
+ * `<hlsBaseUrl>/live/<streamKey>/index.m3u8` — and stays the community
+ * `event` world unchanged. `u` is the new Phase 7 namespace for a person's
+ * own `user_stream`.
+ *
+ * WHO OWNS WHAT, corrected — the previous version of this sentence named
+ * TASK 3 as the task that teaches an adapter to construct `u/<key>` paths.
+ * Task 3 never owned that, nothing did, and the gap survived a review
+ * precisely because this comment said otherwise: `MediaMtxAdapter` went on
+ * hard-coding `live/`, so a real user publish arrived here parsed as
+ * `world: "community"` and the branch below was unreachable in production.
+ * TASK 4 is what added `StreamingProviderPort`'s `namespace` parameter, the
+ * `^~ /u/` and `^~ /whip/u/` locations in
+ * `infra/nginx/live-hls.conf.template`, and
+ * `authoriseUserReadByStreamId` below. TASK 5 is what teaches `execute()`'s
+ * own read branch — MediaMTX's direct `authHTTPAddress` hook, which arrives
+ * with `u/<streamKey>` — to answer for the user world, together with the
+ * membership gate and the watch token that decide the answer.
+ *
+ * These two keys are the same pair `StreamNamespace`
+ * (`streaming-provider.port.ts`) declares for the CONSTRUCTION side; see its
+ * docstring for why they are written twice rather than derived. Adding a
+ * THIRD namespace later means adding ONE entry here and one there — see
+ * `parseStreamPath` below for why an entry not listed in this map is refused
+ * rather than guessed at.
  */
-const LIVE_PATH_SEGMENT = "live";
+const NAMESPACES: ReadonlyMap<string, "community" | "user"> = new Map([
+  ["live", "community"],
+  ["u", "user"],
+]);
 
 /**
- * Extracts the stream key from `path`, requiring EXACTLY `live/<key>` (a
- * leading/trailing slash tolerated, an empty key or extra segments not).
+ * Parses `path` into the world it names and the key inside it, requiring
+ * EXACTLY `<namespace>/<key>` for a namespace listed in `NAMESPACES` above
+ * (a leading/trailing slash tolerated, an empty key, extra segments, or an
+ * unlisted namespace not) — `null` otherwise.
  *
- * REQUIRING the `live/` prefix, rather than just taking the last segment
- * regardless of what came before it, is load-bearing and not merely tidy:
- * without it, `foo/bar/<key>` authorised a publish exactly as `live/<key>`
- * did, for any real key — an attacker (or a misconfigured MediaMTX) could
- * publish to a path our own adapter never constructs, and Task 5's
- * `runOnOnline` would then fire with `MTX_PATH=foo/bar/<key>`, mark the
- * event `live`, and notify every member with an HLS URL under
- * `live/<key>` that nothing is actually publishing to. An unknown or
- * wrongly-shaped path now refuses outright (`""`, which never resolves via
- * `findByStreamKey`), matching the ONE shape this codebase's own adapter
- * ever produces.
+ * THIS IS THE ONE PARSER. It used to be named `streamKeyFromPath`, return a
+ * bare string, and recognise only `live/`; Phase 7 widened it to cover both
+ * worlds rather than growing a second, sibling parser for `u/` — see the
+ * design spec §6 and this task's ruling in `progress.md`. A second parser
+ * would re-open, wearing a new prefix, the exact defect this one was
+ * hardened against: REQUIRING the namespace, rather than just taking the
+ * last segment regardless of what came before it, is load-bearing and not
+ * merely tidy. Without it, `foo/bar/<key>` once authorised a publish
+ * exactly as `live/<key>` did, for any real key — an attacker (or a
+ * misconfigured MediaMTX) could publish to a path our own adapter never
+ * constructs, and `HandleStreamLifecycle`'s `runOnOnline` would then fire
+ * with `MTX_PATH=foo/bar/<key>`, mark the event `live`, and notify every
+ * member with an HLS URL under `live/<key>` that nothing is actually
+ * publishing to. An unknown or wrongly-shaped path now refuses outright
+ * (`null`, which `AuthoriseStream.execute` and `HandleStreamLifecycle.execute`
+ * both treat as an immediate refusal / no-op), matching only the shapes
+ * this codebase's own adapters are ever meant to produce.
  *
- * EXPORTED for `HandleStreamLifecycle` (Task 5): MediaMTX hands
+ * EXPORTED for `HandleStreamLifecycle`: MediaMTX hands
  * `runOnOnline`/`runOnOffline` the SAME `$MTX_PATH` value — confirmed
  * against mediamtx.org's hooks documentation ("MTX_PATH: path name"),
  * which is the runtime path a client actually published to, i.e.
- * `live/<key>` under this codebase's catch-all path config, not the bare
- * key. Re-parsing it here rather than duplicating the two-segment check a
- * second time is what keeps "what path shape is legitimate" answered in
- * exactly one place; see this task's carry-forward note in
- * `progress.md` for the failure mode a second, looser parser would
- * reopen (an event marked `live` from a path this codebase's own adapter
- * never constructs, whose members are then sent an HLS URL that points
- * nowhere).
+ * `live/<key>` (or, as of Task 4, `u/<key>`) under this
+ * codebase's catch-all path config, not the bare key. Re-parsing it here
+ * rather than duplicating the segment check a second time is what keeps
+ * "what path shape is legitimate, and which world does it name" answered
+ * in exactly one place.
  */
-export function streamKeyFromPath(path: string): string {
+export function parseStreamPath(path: string): { world: "community" | "user"; key: string } | null {
   const segments = path.split("/").filter((segment) => segment.length > 0);
-  if (segments.length !== 2 || segments[0] !== LIVE_PATH_SEGMENT) {
-    return "";
+  if (segments.length !== 2) {
+    return null;
   }
-  return segments[1]!;
+  const world = NAMESPACES.get(segments[0]!);
+  if (world === undefined) {
+    return null;
+  }
+  return { world, key: segments[1]! };
 }
 
 /**
@@ -157,9 +229,37 @@ function watchTokenFromQuery(query: string): string | null {
  * never present in the two literal bodies (`ALLOWED_BODY`/`REFUSED_BODY`)
  * either endpoint ever sends to anything a browser can see.
  *
+ * A FOURTH ENTRY POINT — `authoriseUserReadByStreamId` — is the same idea
+ * again for the USER world (Task 4), and exists for the same one caller:
+ * nginx's `auth_request`, now also fronting the `^~ /u/` location. It
+ * resolves `user_stream` by its opaque row id (never by its stream key —
+ * see its own docstring) and returns that row's key on success so nginx can
+ * rewrite onto MediaMTX's internal `u/<streamKey>` path.
+ *
+ * THE USER WORLD'S OWN TWO DECISIONS — Task 5, and until it landed this
+ * branch refused everything, so nobody could go live at all:
+ *
+ *   - `publish`: allowed only if `u/<key>` resolves, via
+ *     `UserStreamRepositoryPort.findByStreamKey`, to a row whose `status` is
+ *     `live`. `ended` refuses, for the identical reason the community world
+ *     refuses one. See `authoriseUserPublish`.
+ *   - `read`: `authoriseUserStreamRead`, an ALLOW-LIST over `visibility` — a
+ *     `public` row needs no token at all, a `members` row needs a valid
+ *     `user-watch-token.ts` token NAMING THAT ROW, and any other visibility
+ *     value is refused. It is the SAME function nginx's by-id entry point
+ *     calls, deliberately: one decision, two callers, because two copies of a
+ *     paywall drift and the drift is silent.
+ *
+ * The user world's read does NOT re-check membership on every segment the
+ * way the community world's does. Its token lives ten minutes rather than
+ * six hours and the player re-mints silently, so the entitlement check lives
+ * at the MINT endpoint (`POST /streams/:id/watch-token`) where the viewer's
+ * session actually is. Design spec §5; `authoriseUserStreamRead`'s own
+ * docstring carries the full reasoning.
+ *
  * EVERY refusal — no such event, ended event, bad signature, expired token,
- * wrong event, wrong community, cancelled subscription — returns the same
- * `{ allowed: false }`. Nothing here, or in the route that calls this,
+ * wrong event, wrong community, cancelled subscription, an unknown or gated
+ * user stream — returns the same `{ allowed: false }`. Nothing here, or in the route that calls this,
  * distinguishes one refusal reason from another: doing so would let a
  * prober learn whether a stream key exists, or whether a given subscription
  * id is real, from the SHAPE of a rejection.
@@ -181,6 +281,7 @@ export class AuthoriseStream {
   constructor(
     private readonly events: EventRepositoryPort,
     private readonly subscriptions: SubscriptionRepositoryPort,
+    private readonly userStreams: UserStreamRepositoryPort,
     private readonly config: { streamTokenSecret: string }
   ) {}
 
@@ -190,11 +291,35 @@ export class AuthoriseStream {
     query: string;
     now: number;
   }): Promise<{ allowed: boolean }> {
-    const streamKey = streamKeyFromPath(input.path);
-    if (streamKey === "") {
+    const parsed = parseStreamPath(input.path);
+    if (!parsed) {
       return { allowed: false };
     }
 
+    if (parsed.world === "user") {
+      // TASK 5. This method is what MediaMTX's OWN `authHTTPAddress` hook
+      // calls, with the path a client published to or read from —
+      // `u/<streamKey>` — so BOTH actions resolve through
+      // `UserStreamRepositoryPort.findByStreamKey`, never through the
+      // `event` table this world has nothing to do with.
+      //
+      // Until Task 5 this branch refused everything, which meant nobody
+      // could go live at all: Task 4 shipped the namespace, the nginx
+      // locations and the by-id read entry point, and no task owned the
+      // publish. `authorise-stream.test.ts`'s "user world publish" describe
+      // is the replaced pin.
+      if (input.action === "publish") {
+        return this.authoriseUserPublish(parsed.key);
+      }
+      if (input.action === "read") {
+        return this.authoriseUserReadByStreamKey(parsed.key, input.query, input.now);
+      }
+      return { allowed: false };
+    }
+
+    // parsed.world === "community" from here on — EXACT current behaviour,
+    // unchanged by the addition of the user world above.
+    const streamKey = parsed.key;
     if (input.action === "publish") {
       return this.authorisePublish(streamKey);
     }
@@ -222,6 +347,209 @@ export class AuthoriseStream {
       return { allowed: false };
     }
     return this.authoriseReadForEvent(event, query, now);
+  }
+
+  /**
+   * The USER world's publish — Task 5, and the ~4 lines that let anybody go
+   * live at all.
+   *
+   * `findByStreamKey` is the ONE sanctioned unscoped lookup on this port, for
+   * the same reason it is on `EventRepositoryPort`: MediaMTX knows only the
+   * key baked into the RTMP/WHIP path and there is no authenticated creator
+   * on this call. Only a `live` row publishes (`USER_PUBLISHABLE_STATUS`);
+   * an `ended` row refuses, exactly as the community world refuses a publish
+   * to a non-publishable status.
+   *
+   * NO VISIBILITY CHECK, deliberately: `visibility` gates who may WATCH, and
+   * the person publishing is the owner, who is never gated out of their own
+   * broadcast. A gated stream must be publishable or *Khusus anggota* would
+   * be a switch that breaks going live.
+   */
+  private async authoriseUserPublish(streamKey: string): Promise<{ allowed: boolean }> {
+    const stream = await this.userStreams.findByStreamKey(streamKey);
+    if (!stream) {
+      return { allowed: false };
+    }
+    return { allowed: stream.status === USER_PUBLISHABLE_STATUS };
+  }
+
+  /**
+   * The USER world's read as MediaMTX's own hook asks it — resolved BY KEY,
+   * because that hook only ever knows the path a client actually requested.
+   * The decision itself is `authoriseUserStreamRead`, shared verbatim with
+   * `authoriseUserReadByStreamId` (nginx's by-id entry point); this method is
+   * nothing but the lookup in front of it.
+   */
+  private async authoriseUserReadByStreamKey(
+    streamKey: string,
+    query: string,
+    now: number
+  ): Promise<{ allowed: boolean }> {
+    const stream = await this.userStreams.findByStreamKey(streamKey);
+    if (!stream) {
+      return { allowed: false };
+    }
+    return this.authoriseUserStreamRead(stream, query, now);
+  }
+
+  /**
+   * nginx's `auth_request` re-authorisation for the USER world, by STREAM ID
+   * — Task 4, and deliberately the SAME shape as `authoriseReadByEventId`
+   * below rather than a second mechanism beside a working one.
+   *
+   * WHY BY ID. `GET /streams` is PUBLIC — signed in or not — and publishes
+   * `/u/<streamId>/index.m3u8` (`userStreamPlaybackPath`), never
+   * `createSession`'s `hlsPlaybackPath`, because that URL carries the stream
+   * key and a stream key authorises a PUBLISH. That is the old world's own
+   * Critical (see `ResolveWatchToken`'s docstring) with a wider blast
+   * radius, and Task 3 closed it the same way the old world did. This method
+   * is the read side meeting that decision: it resolves the PUBLIC id via
+   * `findById` and, only on success, hands the caller the stream key so
+   * nginx can rewrite onto MediaMTX's unchanged internal `u/<streamKey>`
+   * path (`auth_request_set $mtx_ukey`, then
+   * `proxy_pass .../u/$mtx_ukey$mtx_rest`). MediaMTX was never taught about
+   * stream ids and does not need to be.
+   *
+   * A PUBLISH KEY IS NOT A SECOND WAY IN. `findById` looks in the `id`
+   * column; nothing here ever consults `findByStreamKey`, and nothing here
+   * ever falls back to it when the id misses. A read path that accepted
+   * either identifier would quietly undo the entire reason ids are what get
+   * published. `authorise-stream.test.ts` pins this with a real 32-hex key.
+   *
+   * THE GATE ITSELF IS NOT HERE. It is `authoriseUserStreamRead` below, which
+   * this method and `execute()`'s own by-key user branch BOTH call — one
+   * decision, two callers. Task 5's ruling, and not a stylistic one: two
+   * copies of a paywall drift, and the drift is silent, because the copy that
+   * loosened still has its own passing tests. `query` carries the watch token
+   * (the route already forwards `X-Watch-Token` as `token=...` for both
+   * worlds) and `now` is the instant the caller read once.
+   *
+   * THE STATUS CHECK LIVES IN `authoriseUserStreamRead`, shared with the
+   * by-key entry point — see its own docstring for I3 and for why the two
+   * worlds are now allowed to disagree about this one rule.
+   */
+  async authoriseUserReadByStreamId(input: {
+    streamId: string;
+    query: string;
+    now: number;
+  }): Promise<{ allowed: false } | { allowed: true; streamKey: string }> {
+    const stream = await this.userStreams.findById(input.streamId);
+    if (!stream) {
+      return { allowed: false };
+    }
+    const result = this.authoriseUserStreamRead(stream, input.query, input.now);
+    if (!result.allowed) {
+      return { allowed: false };
+    }
+    return { allowed: true, streamKey: stream.streamKey };
+  }
+
+  /**
+   * THE USER WORLD'S READ DECISION — the whole paywall, in one place, called
+   * by both entry points: `authoriseUserReadByStreamId` (nginx's
+   * `auth_request`, resolving by the opaque row id a browser is allowed to
+   * know) and `authoriseUserReadByStreamKey` (MediaMTX's own
+   * `authHTTPAddress` hook, resolving by the key baked into the path). By the
+   * time either calls this, it has the row in hand and nothing past that
+   * point differs. This mirrors `authoriseReadForEvent`, which the community
+   * world's two entry points already share for the identical reason.
+   *
+   * DENY BY DEFAULT. The shape here is an ALLOW-LIST over `visibility` — a
+   * `public` row is authorised, a `members` row is authorised only by a valid
+   * token naming it, and ANY OTHER VALUE IS REFUSED. It is deliberately NOT
+   * the `visibility !== MEMBERS_ONLY -> allow` test the earlier version of
+   * this method used. `user_stream.visibility` is a widened `varchar`, so a
+   * typo, a migration, or a future tier name would read as "not gated" and
+   * open the stream to the public internet; `toStreamView`'s listing gate can
+   * afford that reading because the write path is the authority on what may
+   * be stored there and the worst case is a lock shown where none was meant.
+   * Here the worst case is the paywall, and an allow-by-default paywall is
+   * one typo from open.
+   *
+   * NO LIVE MEMBERSHIP RE-CHECK, and this is the ONE place the two worlds
+   * deliberately disagree. The community world re-reads the subscription on
+   * every segment (`authoriseReadForEvent`) because its token lives SIX
+   * HOURS. This one lives TEN MINUTES and the player re-mints silently while
+   * watching, so a membership that lapses mid-broadcast stops access at the
+   * next re-mint — `MintUserWatchToken` is what asks `IsMemberOf`, and it
+   * needs the viewer's own session to answer, which is exactly why a
+   * forwarded token cannot be renewed. Design spec §5 states that bargain and
+   * chooses it; this method is not the place to re-litigate it, and adding a
+   * membership query here would put one on every HLS segment request.
+   *
+   * **AN ENDED STREAM REFUSES EVERY READ — I3, final whole-branch review,
+   * and the first place the two worlds deliberately disagree about status.**
+   * This method used to have no status check, matching
+   * `authoriseReadByEventId`, on the reasoning that an `ended` stream has
+   * nothing for MediaMTX to serve anyway. That reasoning was wrong about the
+   * thing the user world added: an explicit **End** button in front of a
+   * person. `EndOwnUserStream` marks the row `ended` and NOTHING kicks the
+   * publisher — MediaMTX authorises a publish once, at connect, and is not
+   * polled — so an already-connected OBS session keeps sending, and every
+   * segment it produces was still being authorised here. A member holding
+   * the stream id kept re-minting (ten minutes at a time, silently, from the
+   * player) and kept watching a broadcast the creator believed was over.
+   *
+   * The check is FIRST, before the visibility allow-list, because it holds
+   * regardless of who is asking or what they carry: a public ended stream is
+   * refused with no token exactly as a gated one is refused with a perfectly
+   * valid one. Deny-by-default again — `!== live`, never `!== ended`, so an
+   * unrecognised status refuses rather than reading as "not finished".
+   *
+   * **WHAT THIS DOES NOT FIX, stated rather than implied:** the publisher.
+   * Kicking a connected session needs MediaMTX's own API and is out of scope
+   * here. Readers being cut is the part this codebase owns, and they are cut
+   * on the very next segment request rather than up to ten minutes later.
+   *
+   * The community world is deliberately left alone. `authoriseReadForEvent`
+   * still does not consult `event.status`, and this is not the phase to move
+   * the file that authorises every publish and every read for both worlds
+   * further than it has already moved.
+   *
+   * SYNCHRONOUS on purpose — it touches no repository. Everything it needs is
+   * the row the caller already fetched, plus the token in the query.
+   */
+  private authoriseUserStreamRead(
+    stream: UserStreamRow,
+    query: string,
+    now: number
+  ): { allowed: boolean } {
+    if (stream.status !== USER_READABLE_STATUS) {
+      // I3. Nothing a reader can carry rescues a stream the creator ended —
+      // see this method's own docstring.
+      return { allowed: false };
+    }
+    if (stream.visibility === PUBLIC_VISIBILITY) {
+      // Nothing to gate. Spec §5: "A public stream needs no token" — there is
+      // nothing to mint and nothing to refresh, and `MintUserWatchToken`
+      // refuses to issue one for such a stream rather than handing out a
+      // credential that means nothing.
+      return { allowed: true };
+    }
+    if (stream.visibility !== MEMBERS_ONLY) {
+      return { allowed: false };
+    }
+
+    const token = watchTokenFromQuery(query);
+    if (!token) {
+      return { allowed: false };
+    }
+    const claims = verifyUserWatchToken({
+      token,
+      now,
+      secret: this.config.streamTokenSecret,
+    });
+    if (!claims) {
+      return { allowed: false };
+    }
+    // A token proves "this viewer may watch stream X"; the signature never
+    // mentions which stream is being REQUESTED. Without this comparison one
+    // paid membership anywhere would open every gated broadcast on the
+    // platform — the same defect class as Phase 6's forwarded media id.
+    if (claims.streamId !== stream.id) {
+      return { allowed: false };
+    }
+    return { allowed: true };
   }
 
   /**

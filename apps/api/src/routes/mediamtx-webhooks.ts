@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { UnauthorizedError } from "../application/errors";
 import { verifyCallbackToken } from "../infrastructure/webhooks/webhook-token";
+import { parseStreamPath } from "../application/use-cases/authorise-stream";
 import type { Dependencies } from "../bootstrap";
 
 /**
@@ -112,7 +113,7 @@ const LIFECYCLE_HOOKS: ReadonlySet<string> = new Set(["online", "offline"]);
 export function mediamtxWebhookRoutes(
   deps: Pick<
     Dependencies,
-    "authoriseStream" | "mediamtxWebhookSecret" | "handleStreamLifecycle"
+    "authoriseStream" | "mediamtxWebhookSecret" | "handleStreamLifecycle" | "endUserStream"
   >
 ) {
   const app = new Hono();
@@ -205,6 +206,21 @@ export function mediamtxWebhookRoutes(
    * proxied through nginx at all (see CONTRIBUTING.md's port-asymmetry note),
    * so this route has no publish case to handle.
    *
+   * TWO WORLDS, ONE ROUTE, TOLD APART BY WHICH ID HEADER ARRIVES — Phase 7's
+   * Task 4. `X-Mtx-Event-Id` names a community `event` and resolves through
+   * `authoriseReadByEventId`; `X-Mtx-Stream-Id` names a `user_stream` and
+   * resolves through `authoriseUserReadByStreamId`. The nginx template's
+   * `^~ /live/` and `^~ /u/` locations each send exactly one, through their
+   * own internal `auth_request` location, and a request carrying BOTH or
+   * NEITHER is refused rather than resolved by precedence — see the check in
+   * the handler. Both worlds answer with the SAME `X-Stream-Key` response
+   * header, because both need the same rewrite for the same reason: the
+   * public path names an id, MediaMTX's internal path names a key. This is
+   * one route rather than two because the CONTRACT is identical (a secret
+   * header, an id header, a token header, a status code and one response
+   * header) — only the table the id lives in differs, and that is exactly
+   * what the two header names say.
+   *
    * FINAL WHOLE-BRANCH REVIEW CRITICAL, FIXED HERE: this route used to read
    * `X-Mtx-Path` (`live/<streamKey>`) and call `AuthoriseStream.execute`
    * with `action: "read"` — resolving by STREAM KEY, the same identifier
@@ -270,15 +286,38 @@ export function mediamtxWebhookRoutes(
       return c.json(REFUSED_BODY, 403);
     }
 
-    const eventId = c.req.header("X-Mtx-Event-Id") ?? "";
+    const eventId = presentId(c.req.header("X-Mtx-Event-Id"));
+    const streamId = presentId(c.req.header("X-Mtx-Stream-Id"));
     const token = c.req.header("X-Watch-Token");
     const query = token ? `token=${encodeURIComponent(token)}` : "";
 
-    const result = await deps.authoriseStream.authoriseReadByEventId({
-      eventId,
-      query,
-      now: Date.now(),
-    });
+    // EXACTLY ONE of the two ids, never both and never neither. Each nginx
+    // location sends its own and CLEARS the other's (`^~ /live/` sends the
+    // event id, `^~ /u/` the stream id — see the two internal locations in
+    // `infra/nginx/live-hls.conf.template`), so a request carrying both did
+    // not come from a location in this repository's template — and picking a
+    // winner by precedence would make which WORLD authorises a request depend
+    // on a rule nobody reading the nginx config can see. Refuse instead, with
+    // the same body every other refusal here uses.
+    //
+    // `presentId` above is what keeps this rule from depending on nginx —
+    // read its docstring before changing either.
+    if ((eventId === undefined) === (streamId === undefined)) {
+      return c.json(REFUSED_BODY, 403);
+    }
+
+    const result =
+      streamId !== undefined
+        ? await deps.authoriseStream.authoriseUserReadByStreamId({
+            streamId,
+            query,
+            now: Date.now(),
+          })
+        : await deps.authoriseStream.authoriseReadByEventId({
+            eventId: eventId!,
+            query,
+            now: Date.now(),
+          });
 
     if (!result.allowed) {
       return c.json(REFUSED_BODY, 403);
@@ -301,10 +340,29 @@ export function mediamtxWebhookRoutes(
    * second hand-rolled comparison that could silently diverge.
    *
    * THE SECRET CHECK IS STILL THE FIRST STATEMENT, before the body is parsed and
-   * before `HandleStreamLifecycle` is ever reached — identical ordering to
+   * before either lifecycle class is ever reached — identical ordering to
    * `/auth`, for the identical reason.
    *
-   * ALWAYS 200 ONCE THE SECRET CHECKS OUT, whatever `HandleStreamLifecycle.execute`
+   * TWO WORLDS, ONE ROUTE, TOLD APART BY `parseStreamPath` — Task 6 of Phase 7.
+   * `HandleStreamLifecycle` (the community `live/<key>` world, unchanged by this
+   * task — its own docstring still says the user world "is not handled by this
+   * class") and `EndUserStream` (the new `u/<key>` world) each have a real job to
+   * do only for their own namespace, so THIS ROUTE parses `body.streamKey` ONCE,
+   * itself, with the SAME parser both use-cases already import
+   * (`authorise-stream.ts`'s `parseStreamPath` — "the single parser", per that
+   * function's own docstring), and dispatches to exactly one of them. The
+   * alternative — calling both classes unconditionally and letting each ignore
+   * what is not theirs — was rejected: `HandleStreamLifecycle` already logs a
+   * warning for a path it does not own, and calling it (or the new class) on
+   * EVERY lifecycle event regardless of world would turn an ordinary community
+   * broadcast's `online`/`offline` into a spurious "ignoring" log line every
+   * single time, forever. `EndUserStream` gets the BARE key (`parsed.key`), never
+   * the raw `u/<key>` path — see its own docstring for why its signature could
+   * change (this task owns that file) while `HandleStreamLifecycle.execute`'s
+   * could not (its signature is untouched, so it still takes the raw path and
+   * re-parses it itself for the community/unparseable cases below).
+   *
+   * ALWAYS 200 ONCE THE SECRET CHECKS OUT, whatever the chosen class's `execute`
    * did or did not do: an unknown stream key, a malformed body, an out-of-order
    * hook that turned out to be a no-op — none of these are failures MediaMTX
    * should retry over. `runOnOnline`/`runOnOffline` are fire-and-forget; a 500
@@ -332,6 +390,26 @@ export function mediamtxWebhookRoutes(
       return c.json(ACKNOWLEDGED_BODY, 200);
     }
 
+    // Told apart by NAMESPACE, never by guessing — see this route's own
+    // docstring. `parsed === null` (unparseable) and `parsed.world ===
+    // "community"` both fall through to `handleStreamLifecycle` below,
+    // UNCHANGED from this route's behaviour before this task: the community
+    // world's own lifecycle logic must not move (Global Constraints).
+    const parsed = parseStreamPath(body.streamKey);
+
+    if (parsed !== null && parsed.world === "user") {
+      // Streaming not configured on this box — nothing to react to. Unreachable
+      // in practice once the secret check above holds (same lockstep pairing as
+      // `handleStreamLifecycle`/`mediamtxWebhookSecret` — see bootstrap.ts);
+      // kept for type-safety and so this route never assumes the pairing
+      // without checking.
+      if (!deps.endUserStream) {
+        return c.json(ACKNOWLEDGED_BODY, 200);
+      }
+      await deps.endUserStream.execute({ hook: body.hook, streamKey: parsed.key });
+      return c.json(ACKNOWLEDGED_BODY, 200);
+    }
+
     // Streaming not configured on this box — nothing to react to. Unreachable
     // in practice once the secret check above holds (same pairing as
     // `authoriseStream`/`mediamtxWebhookSecret` — see bootstrap.ts); kept for
@@ -349,6 +427,58 @@ export function mediamtxWebhookRoutes(
   });
 
   return app;
+}
+
+/**
+ * An id header, normalised to "present" or "absent" — where a header that
+ * arrived EMPTY, or holding nothing but whitespace, counts as **absent**.
+ *
+ * FIX ROUND 2. This exists so that the `/auth-request` route's
+ * exactly-one-id rule does not depend on a behaviour of nginx that nobody
+ * here has run. The two internal `auth_request` locations each CLEAR the
+ * other world's id header with `proxy_set_header X-Mtx-... "";`, and nginx's
+ * documented response to an empty value is to drop the field entirely. If
+ * some nginx version instead forwarded the field present-and-empty, then —
+ * with a stricter `=== undefined` test — EVERY request would arrive carrying
+ * both ids, the rule below would refuse all of them, and BOTH worlds' HLS
+ * would go dark at once. That is a total outage resting on an unverified
+ * assumption, and the assumption is not worth keeping: an empty string is
+ * not an id, nothing can ever legitimately send one, and accepting it as
+ * "present" buys nothing at all.
+ *
+ * So the nginx directives stay — they are correct, and they are what keeps a
+ * client-forged sibling header out of the subrequest in the first place —
+ * but they are now belt-and-braces rather than load-bearing.
+ *
+ * WHAT ARRIVES HERE, MEASURED RATHER THAN ASSUMED — probed with a real Hono
+ * request during fix round 2, because the whole point of this function is to
+ * stop guessing about transports:
+ *
+ *   header absent      -> `undefined`
+ *   `X-Foo: ""`        -> `""`     <- PRESENT AND EMPTY. This is exactly the
+ *                                     nginx failure mode above, reproducible
+ *                                     at this layer, which is what lets the
+ *                                     four tests for it actually bite.
+ *   `X-Foo: "   "`     -> `""`     <- HTTP strips optional whitespace around
+ *                                     a field value before anything here.
+ *   `X-Foo: "  abc  "` -> `"abc"`  <- same rule.
+ *
+ * So over HTTP the `.trim()` below is a no-op and `raw.trim() !== ""` is
+ * equivalent to `raw !== ""`. It is kept as cheap defence in depth — this
+ * function should be obviously right when read on its own, without the
+ * reader having to know that rule, and a future runtime or a non-HTTP caller
+ * is not owed the benefit of the doubt.
+ *
+ * IT IS A PRESENCE TEST ONLY; the value itself is passed on UNCHANGED, so
+ * nothing here can repair a not-quite-matching id into a matching one. That
+ * property is deliberately NOT pinned by a test: the transport already
+ * guarantees a padded value never reaches this function, so a test for it
+ * would assert against an input HTTP cannot deliver. A mutant that trims the
+ * VALUE therefore survives, for that reason and no other — see
+ * task-4-fix-2-report.md.
+ */
+function presentId(raw: string | undefined): string | undefined {
+  return raw !== undefined && raw.trim() !== "" ? raw : undefined;
 }
 
 /** The minimum shape `AuthoriseStream.execute` needs out of MediaMTX's body. */
