@@ -2,7 +2,7 @@ import {
   mintUserWatchToken,
   USER_WATCH_TOKEN_TTL_MS,
 } from "../../domain/user-watch-token";
-import { ForbiddenError, NotFoundError, ValidationError } from "../errors";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../errors";
 import type { ClockPort } from "../ports/clock.port";
 import { newStreamKey, type StreamingProviderPort } from "../ports/streaming-provider.port";
 import type {
@@ -22,6 +22,19 @@ const NOT_A_MEMBER_MESSAGE = "siaran ini khusus anggota";
 
 /** "this stream is open to everyone, no token needed" — the 400 a public stream's mint gets. */
 const NOTHING_TO_GATE_MESSAGE = "siaran ini terbuka untuk semua, tidak perlu token";
+
+/** "this broadcast has ended" — the 409 a mint against a non-`live` row gets (I3). */
+const ALREADY_ENDED_MESSAGE = "siaran ini sudah berakhir";
+
+/**
+ * The one `user_stream.status` a watch token is minted against — I3. The
+ * same string `AuthoriseStream`'s own `USER_READABLE_STATUS` holds, and
+ * deliberately not imported from it: these are two decisions that happen to
+ * agree today (may a token be ISSUED, and may a segment be SERVED), made in
+ * two layers, and a shared constant would quietly make a future edit to one
+ * an edit to both.
+ */
+const LIVE_STATUS = "live";
 
 /**
  * What `POST /streams` hands back, and the ONLY response in this codebase's
@@ -281,10 +294,29 @@ export interface MintedWatchToken {
  * indistinguishable to the client, and gives a player something to refresh
  * forever for no reason.
  *
- * NO STATUS CHECK on the stream, matching the read path exactly: an `ended`
- * stream has nothing to serve, so a token for one opens nothing, and refusing
- * here would only make the player's re-mint fail differently from the way its
- * next segment request already fails.
+ * **AN ENDED STREAM MINTS NOTHING — I3, final whole-branch review.** This
+ * used to have no status check, matching the read path, on the reasoning that
+ * an `ended` stream has nothing to serve so a token for one opens nothing.
+ * That was only true of the row; it was not true of the BYTES. Nothing kicks
+ * the publisher when a creator presses *Akhiri siaran* (MediaMTX authorises a
+ * publish once, at connect, and is not polled), so an already-connected OBS
+ * session keeps sending — and a member holding the stream id kept minting a
+ * fresh ten-minute credential every minute, silently, from the player, and
+ * kept watching a broadcast the creator believed was over. The read gate
+ * refuses an `ended` row now too (`AuthoriseStream.authoriseUserStreamRead`);
+ * this is the other half of the same decision, so nothing new is issued AND
+ * nothing already issued still opens anything.
+ *
+ * CHECKED BEFORE VISIBILITY AND BEFORE MEMBERSHIP, because "this broadcast is
+ * over" is true of the row regardless of who is asking, and answering a
+ * paying member "siaran ini khusus anggota" for a stream that simply ended
+ * would be confidently wrong. `!== live`, never `=== ended`, so an
+ * unrecognised status refuses rather than reading as "not finished".
+ *
+ * A 409, not a 404: the row exists and the caller named it correctly. The
+ * player does not read the distinction — every refusal here is the same lock
+ * to it (`StreamPlayer`'s own docstring) — but the wire should still say what
+ * happened.
  */
 export class MintUserWatchToken {
   constructor(
@@ -301,6 +333,9 @@ export class MintUserWatchToken {
     // same split `EndOwnUserStream` uses.
     const stream = await this.streams.findById(input.streamId);
     if (stream === null) throw new NotFoundError("stream not found");
+
+    // I3. The broadcast is over — see this class's own docstring.
+    if (stream.status !== LIVE_STATUS) throw new ConflictError(ALREADY_ENDED_MESSAGE);
 
     // DENY BY DEFAULT, the same shape as the read gate: a token is minted for
     // a `members` stream and for nothing else. An unrecognised `visibility`

@@ -568,6 +568,58 @@ describe("POST /streams/:id/watch-token", () => {
     });
   });
 
+  /**
+   * **I3 (final whole-branch review). A creator who presses *Akhiri siaran*
+   * has made a decision, and the mint endpoint honours it.**
+   *
+   * The mint used to have no status check — its own docstring said so — which
+   * meant a paying member holding the stream id kept re-minting a fresh
+   * ten-minute credential forever against a broadcast the creator ended. The
+   * read gate refuses an `ended` row now too (`authorise-stream.test.ts`),
+   * so this is the pair: nothing new is issued, and nothing already issued
+   * still opens anything.
+   *
+   * BUDI IS A CURRENT, PAYING MEMBER on purpose. Every other refusal this
+   * endpoint has — not a member, lapsed, a member of somebody else, a public
+   * stream — fires earlier than the status check, so a test whose viewer was
+   * refused for any of those reasons would never reach the guard in its own
+   * name.
+   */
+  it("a CURRENT member cannot mint once the creator ENDED the stream", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { rina, budi, stream } = await gated(a);
+      await subscribe(budi.userId, rina.userId, IN_A_MONTH());
+      // The positive control on the very same row and the very same member.
+      expect((await mintToken(a, stream.id, budi.token)).status).toBe(200);
+
+      const deleted = await a.request(`/streams/${stream.id}`, {
+        method: "DELETE",
+        headers: authed(rina.token),
+      });
+      expect(deleted.status).toBe(200);
+
+      const res = await mintToken(a, stream.id, budi.token);
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe("siaran ini sudah berakhir");
+    });
+  });
+
+  /** The OWNER is not a special case here — they ended it themselves. */
+  it("not even the owner can mint once their own stream has ENDED", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { rina, stream } = await gated(a);
+      await a.request(`/streams/${stream.id}`, { method: "DELETE", headers: authed(rina.token) });
+
+      const res = await mintToken(a, stream.id, rina.token);
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe("siaran ini sudah berakhir");
+    });
+  });
+
   /** Nobody subscribes to themselves; the owner is never gated out of their own broadcast. */
   it("the owner can always mint for their own stream", async () => {
     await withStreamingConfigured(async () => {

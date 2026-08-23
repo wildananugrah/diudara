@@ -26,6 +26,18 @@ const PUBLISHABLE_STATUSES: ReadonlySet<string> = new Set(["scheduled", "live"])
 const USER_PUBLISHABLE_STATUS = "live";
 
 /**
+ * The one `user_stream.status` a READ is allowed against — I3, final
+ * whole-branch review. Written as its own constant rather than reusing
+ * `USER_PUBLISHABLE_STATUS` above even though the two strings are equal
+ * today: they answer different questions ("may somebody send bytes to this
+ * path?" and "may somebody receive them?"), and a future third status —
+ * `paused`, say, or a `replay` a recording is served from — would move one
+ * without moving the other. One name per decision is what keeps that edit
+ * from silently being both.
+ */
+const USER_READABLE_STATUS = "live";
+
+/**
  * The one `user_stream.visibility` that opens a read to everybody. Written
  * here as a literal beside `MEMBERS_ONLY` rather than imported from anywhere,
  * because the decision below is an ALLOW-LIST: see
@@ -412,11 +424,9 @@ export class AuthoriseStream {
    * (the route already forwards `X-Watch-Token` as `token=...` for both
    * worlds) and `now` is the instant the caller read once.
    *
-   * NO STATUS CHECK, matching `authoriseReadByEventId` exactly: the community
-   * world's read path has never consulted `event.status` either, and an
-   * `ended` stream has nothing for MediaMTX to serve regardless. Adding one
-   * here and not there would make the two worlds disagree about a rule
-   * neither of them needs.
+   * THE STATUS CHECK LIVES IN `authoriseUserStreamRead`, shared with the
+   * by-key entry point — see its own docstring for I3 and for why the two
+   * worlds are now allowed to disagree about this one rule.
    */
   async authoriseUserReadByStreamId(input: {
     streamId: string;
@@ -467,10 +477,34 @@ export class AuthoriseStream {
    * chooses it; this method is not the place to re-litigate it, and adding a
    * membership query here would put one on every HLS segment request.
    *
-   * NO STATUS CHECK, matching both `authoriseReadByEventId` and this world's
-   * own by-id entry point: an `ended` stream has nothing for MediaMTX to
-   * serve regardless, and the player must be able to reach the point of
-   * discovering that for itself rather than being handed a dead link.
+   * **AN ENDED STREAM REFUSES EVERY READ — I3, final whole-branch review,
+   * and the first place the two worlds deliberately disagree about status.**
+   * This method used to have no status check, matching
+   * `authoriseReadByEventId`, on the reasoning that an `ended` stream has
+   * nothing for MediaMTX to serve anyway. That reasoning was wrong about the
+   * thing the user world added: an explicit **End** button in front of a
+   * person. `EndOwnUserStream` marks the row `ended` and NOTHING kicks the
+   * publisher — MediaMTX authorises a publish once, at connect, and is not
+   * polled — so an already-connected OBS session keeps sending, and every
+   * segment it produces was still being authorised here. A member holding
+   * the stream id kept re-minting (ten minutes at a time, silently, from the
+   * player) and kept watching a broadcast the creator believed was over.
+   *
+   * The check is FIRST, before the visibility allow-list, because it holds
+   * regardless of who is asking or what they carry: a public ended stream is
+   * refused with no token exactly as a gated one is refused with a perfectly
+   * valid one. Deny-by-default again — `!== live`, never `!== ended`, so an
+   * unrecognised status refuses rather than reading as "not finished".
+   *
+   * **WHAT THIS DOES NOT FIX, stated rather than implied:** the publisher.
+   * Kicking a connected session needs MediaMTX's own API and is out of scope
+   * here. Readers being cut is the part this codebase owns, and they are cut
+   * on the very next segment request rather than up to ten minutes later.
+   *
+   * The community world is deliberately left alone. `authoriseReadForEvent`
+   * still does not consult `event.status`, and this is not the phase to move
+   * the file that authorises every publish and every read for both worlds
+   * further than it has already moved.
    *
    * SYNCHRONOUS on purpose — it touches no repository. Everything it needs is
    * the row the caller already fetched, plus the token in the query.
@@ -480,6 +514,11 @@ export class AuthoriseStream {
     query: string,
     now: number
   ): { allowed: boolean } {
+    if (stream.status !== USER_READABLE_STATUS) {
+      // I3. Nothing a reader can carry rescues a stream the creator ended —
+      // see this method's own docstring.
+      return { allowed: false };
+    }
     if (stream.visibility === PUBLIC_VISIBILITY) {
       // Nothing to gate. Spec §5: "A public stream needs no token" — there is
       // nothing to mint and nothing to refresh, and `MintUserWatchToken`

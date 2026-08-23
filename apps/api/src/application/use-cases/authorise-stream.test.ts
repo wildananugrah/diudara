@@ -1106,6 +1106,103 @@ describe("AuthoriseStream — user world read by stream id (nginx auth_request)"
   });
 });
 
+/**
+ * **I3 (final whole-branch review). *Akhiri siaran* has to mean something on
+ * the read side too.**
+ *
+ * `EndOwnUserStream` marks the row `ended` and nothing kicks the publisher —
+ * MediaMTX authorises a publish once, at connect, and is not polled — so an
+ * OBS publisher that is already connected keeps sending. That half is out of
+ * scope and disclosed. What IS in scope is that the read gate used to have no
+ * status check at all, so a member holding the stream id could keep
+ * re-minting a fresh ten-minute token and keep watching a broadcast the
+ * creator believes they ended, indefinitely.
+ *
+ * **EVERY TEST HERE MINTS A VALID TOKEN FIRST, deliberately** — the same
+ * property the visibility allow-list's own tests carry, and for the same
+ * reason. A gated ended stream with no token would be refused by the
+ * missing-token guard and would never reach the status check in its own name.
+ * The public cases need no token by construction: a public stream authorises
+ * a read with none at all, so the ONLY thing that can refuse one is the
+ * status check.
+ *
+ * Both entry points, because there are two of them and one shared decision —
+ * this is exactly the pair that would drift if the check were added to one.
+ */
+describe("AuthoriseStream — an ENDED user stream refuses every read", () => {
+  /** Ends the row through the same atomic `endById` all three enders funnel into. */
+  async function end(streamId: string) {
+    const ended = await userStreamRepository.endById(streamId, new Date(NOW));
+    expect(ended?.status).toBe("ended");
+  }
+
+  it("by KEY: a PUBLIC stream that ENDED refuses a read that would have been allowed while live", async () => {
+    const stream = await seedUserStream("public");
+    // The positive control, on the very same row: while live, this exact
+    // call is allowed with no token at all.
+    expect(
+      await useCase.execute({ action: "read", path: `u/${stream.streamKey}`, query: "", now: NOW })
+    ).toEqual({ allowed: true });
+
+    await end(stream.id);
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("by KEY: a MEMBERS stream that ENDED refuses a read even with a VALID, unexpired token", async () => {
+    const stream = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", stream.id);
+    await end(stream.id);
+
+    const result = await useCase.execute({
+      action: "read",
+      path: `u/${stream.streamKey}`,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("by ID: a PUBLIC stream that ENDED refuses, and hands back no stream key", async () => {
+    const stream = await seedUserStream("public");
+    expect(
+      await useCase.authoriseUserReadByStreamId({ streamId: stream.id, query: "", now: NOW })
+    ).toEqual({ allowed: true, streamKey: stream.streamKey });
+
+    await end(stream.id);
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: stream.id,
+      query: "",
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+
+  it("by ID: a MEMBERS stream that ENDED refuses a read even with a VALID, unexpired token", async () => {
+    const stream = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", stream.id);
+    await end(stream.id);
+
+    const result = await useCase.authoriseUserReadByStreamId({
+      streamId: stream.id,
+      query: `token=${token}`,
+      now: NOW,
+    });
+
+    expect(result).toEqual({ allowed: false });
+  });
+});
+
 describe("AuthoriseStream — unrecognised actions", () => {
   it("refuses an action that is neither publish nor read", async () => {
     const community = await seedCommunity();
