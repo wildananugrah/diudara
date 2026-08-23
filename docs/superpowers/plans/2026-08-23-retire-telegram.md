@@ -377,6 +377,28 @@ already deleted, and none had an owner:
   written in terms of `/live/` existing. **Decide it here**: remove both blocks and rewrite the
   precedence reasoning, or record why dead config stays. Whatever you choose, the gate checklist must
   say which.
+
+  **Before you touch that file, read this.** Task 6's review found that `^~ /live/`'s internal auth
+  location sets `X-Mtx-Stream-Id ""`, and that line is **now the only thing stopping a client forging a
+  user-stream id onto a `/live/` URL**. It has become load-bearing *in a new way* while its own comment
+  still explains itself by the both-or-neither rule Task 6 deleted. **Deleting the block deletes that
+  protection.** Either keep it and fix the comment, or remove the block and prove the forged-header case
+  is refused some other way — do not remove it on the strength of a comment describing a rule that no
+  longer exists.
+
+  The review also corrected the *reason* for deferring: the precedence argument is true as
+  documentation — the `/u/` blocks literally cite the community blocks' prose — but a rationalisation
+  as correctness, since longest-prefix `^~` selection for `/u/` does not depend on `/live/` existing.
+  The honest reason is "removing them means re-deriving three comment blocks nobody here can test."
+
+- **Six more stale comments**, from Task 6's review: `domain/reset-token.ts:29` (the sweep fixed line 6
+  of the same file and missed this one); `mediamtx.adapter.ts:76-77` calling `live/` and `u/` "the two
+  segments `parseStreamPath` recognises"; `mediamtx-webhooks.ts`'s `REFUSED_BODY` docstring still
+  enumerating community refusal reasons; `user-stream-repository.port.ts` calling **two different
+  methods** "the ONE sanctioned unscoped lookup" and "the second sanctioned unscoped lookup" — both
+  lines are additions from Task 6; the **user** internal nginx location's docstring (~640-662) still
+  stating the deleted both-or-neither rule; and `CONTRIBUTING.md:517, 585, 595` citing the deleted
+  `PUBLISHABLE_STATUSES`.
 - **Stale comments naming deleted things**, found by Task 5's and Task 6's reviews and not yet owned,
   now including `CONTRIBUTING.md:413`'s `X-Mtx-Event-Id` contract:
   `.env.example`'s `WORKER_POLL_INTERVAL_MS` still calls the interval "the delay before their invite
