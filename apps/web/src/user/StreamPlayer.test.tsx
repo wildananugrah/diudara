@@ -6,7 +6,7 @@ import StreamPlayer, {
   type AttachHlsInput,
   type StreamPlayerHandle,
 } from "./StreamPlayer";
-import type { StreamView, WatchTokenResult } from "./apiClient";
+import { UserApiError, type StreamView, type WatchTokenResult } from "./apiClient";
 
 afterEach(() => cleanup());
 
@@ -359,8 +359,19 @@ describe("StreamPlayer — at minute eleven: a refused re-mint stops the player 
   });
 });
 
-describe("StreamPlayer — a fatal playback error is the same outcome as a refused re-mint", () => {
-  it("shows the lock when the attached player reports a fatal error", async () => {
+describe("StreamPlayer — a fatal playback error tears down like a refused re-mint, but does NOT sell a membership", () => {
+  /**
+   * **FIX WAVE 2. This test used to assert "Jadi anggota untuk menonton" on a
+   * PUBLIC stream** — a sentence with nothing behind it, since a public stream
+   * has no membership to buy and the viewer was never gated out of anything.
+   * A fatal playback error carries NO information about entitlement: it is
+   * reported by `hls.js`/the native element for a manifest that 404'd (the
+   * broadcast stopped), a network drop, a decode failure. Guessing
+   * "you should pay" out of that is the confidently-wrong shape this codebase
+   * has ruled against three times (`describeUploadFailure`,
+   * `describeSubscribeFailure`, `describeStreamStartFailure`).
+   */
+  it("shows the unavailable sentence — never the membership pitch — for a PUBLIC stream", async () => {
     const { attach, reportFatal, destroyCount } = recordingAttach();
 
     render(
@@ -377,8 +388,170 @@ describe("StreamPlayer — a fatal playback error is the same outcome as a refus
     reportFatal();
 
     const blocked = await screen.findByTestId("stream-player-blocked");
-    expect(blocked.textContent).toBe("Jadi anggota untuk menonton");
+    expect(blocked.textContent).toBe("Siaran ini tidak dapat diputar sekarang.");
+    expect(blocked.textContent).not.toBe("Jadi anggota untuk menonton");
     expect(destroyCount()).toBe(1);
+  });
+
+  /**
+   * The same on a GATED stream, and for a stronger reason: by the time a fatal
+   * error can happen the viewer has ALREADY minted successfully, so they are a
+   * member. Telling a paying member to become one is the direction that matters.
+   */
+  it("shows the unavailable sentence for a GATED stream too — the viewer already minted", async () => {
+    const { attach, reportFatal, calls } = recordingAttach();
+
+    render(
+      <StreamPlayer
+        stream={unlockedStream()}
+        attachHls={attach}
+        mintToken={async () => tokenResult("tok-1")}
+      />
+    );
+
+    await waitFor(() => expect(calls.length).toBe(1));
+    reportFatal();
+
+    const blocked = await screen.findByTestId("stream-player-blocked");
+    expect(blocked.textContent).toBe("Siaran ini tidak dapat diputar sekarang.");
+  });
+});
+
+/**
+ * **FIX WAVE 2: an ENDED stream and a stream you may not watch are two
+ * different sentences, and the API has always told them apart.**
+ *
+ * I3 gave `MintUserWatchToken` a status check, so `POST /streams/:id/watch-token`
+ * now answers **409** (`ConflictError`, "siaran ini sudah berakhir") for a row
+ * the creator ended, beside the **403** (`ForbiddenError`, "siaran ini khusus
+ * anggota") it has always answered for somebody who is not a member. Both
+ * arrive as a `UserApiError` carrying `status`.
+ *
+ * That distinction was invisible only because both mint call sites in
+ * `StreamPlayer` were written `catch {` with no binding — the error was thrown
+ * away before anyone could read it, and every refusal collapsed into the
+ * membership pitch. I3 made that collapse WORSE rather than merely imprecise:
+ * before, an ended stream reached the lock by accident (MediaMTX had nothing
+ * to serve); now it is a deliberate refusal issued within a minute every time
+ * a creator presses *Akhiri siaran* — so the sentence stopped being vague
+ * about an accident and started being wrong about a decision, in the direction
+ * that tells somebody who is already paying to go and pay again.
+ *
+ * **THE SHAPE IS READ, NEVER THE TEXT.** These branches test `err.status`
+ * only; the wire's own Bahasa sentence is never echoed (`no-raw-server-errors`,
+ * and this file's own rule that a screen never prints what the wire sent).
+ */
+describe("StreamPlayer — an ENDED stream says so, rather than selling a membership", () => {
+  it("a re-mint refused with 409 shows the ENDED sentence, never the membership pitch", async () => {
+    const { attach, calls, destroyCount } = recordingAttach();
+    let mintCallCount = 0;
+
+    render(
+      <StreamPlayer
+        stream={unlockedStream()}
+        attachHls={attach}
+        mintToken={async () => {
+          mintCallCount += 1;
+          if (mintCallCount === 1) return tokenResult("tok-1");
+          throw new UserApiError("siaran ini sudah berakhir", 409);
+        }}
+        remintIntervalMs={5}
+      />
+    );
+
+    await waitFor(() => expect(calls.length).toBe(1));
+
+    const blocked = await screen.findByTestId("stream-player-blocked");
+    expect(blocked.textContent).toBe("Siaran ini sudah berakhir.");
+    expect(blocked.textContent).not.toBe("Jadi anggota untuk menonton");
+    // Still a clean teardown, exactly as a 403 produces — only the sentence differs.
+    expect(destroyCount()).toBe(1);
+  });
+
+  it("the FIRST mint refused with 409 shows the ENDED sentence too — both call sites, not one", async () => {
+    const { attach } = recordingAttach();
+
+    render(
+      <StreamPlayer
+        stream={unlockedStream()}
+        attachHls={attach}
+        mintToken={async () => {
+          throw new UserApiError("siaran ini sudah berakhir", 409);
+        }}
+      />
+    );
+
+    const blocked = await screen.findByTestId("stream-player-blocked");
+    expect(blocked.textContent).toBe("Siaran ini sudah berakhir.");
+  });
+
+  /**
+   * THE NEGATIVE CONTROL, and the reason the 409 tests above prove anything:
+   * without it, mapping EVERY `UserApiError` to the ended sentence would pass
+   * them both. A 403 is a real member-facing refusal and must keep the pitch.
+   */
+  it("a re-mint refused with 403 STILL shows the membership pitch — the branch reads the status", async () => {
+    const { attach, calls } = recordingAttach();
+    let mintCallCount = 0;
+
+    render(
+      <StreamPlayer
+        stream={unlockedStream()}
+        attachHls={attach}
+        mintToken={async () => {
+          mintCallCount += 1;
+          if (mintCallCount === 1) return tokenResult("tok-1");
+          throw new UserApiError("siaran ini khusus anggota", 403);
+        }}
+        remintIntervalMs={5}
+      />
+    );
+
+    await waitFor(() => expect(calls.length).toBe(1));
+
+    const blocked = await screen.findByTestId("stream-player-blocked");
+    expect(blocked.textContent).toBe("Jadi anggota untuk menonton");
+  });
+
+  /** A network drop is not a `UserApiError` at all, and keeps the pitch — unchanged behaviour. */
+  it("a dropped connection keeps the membership pitch — it is not a UserApiError", async () => {
+    const { attach, calls } = recordingAttach();
+    let mintCallCount = 0;
+
+    render(
+      <StreamPlayer
+        stream={unlockedStream()}
+        attachHls={attach}
+        mintToken={async () => {
+          mintCallCount += 1;
+          if (mintCallCount === 1) return tokenResult("tok-1");
+          throw new TypeError("Failed to fetch");
+        }}
+        remintIntervalMs={5}
+      />
+    );
+
+    await waitFor(() => expect(calls.length).toBe(1));
+
+    const blocked = await screen.findByTestId("stream-player-blocked");
+    expect(blocked.textContent).toBe("Jadi anggota untuk menonton");
+  });
+
+  it("never prints the wire's own sentence, Bahasa though it is", async () => {
+    const { attach } = recordingAttach();
+
+    render(
+      <StreamPlayer
+        stream={unlockedStream()}
+        attachHls={attach}
+        mintToken={async () => {
+          throw new UserApiError("siaran ini sudah berakhir", 409);
+        }}
+      />
+    );
+
+    await screen.findByTestId("stream-player-blocked");
+    expect(document.body.innerHTML).not.toContain("siaran ini sudah berakhir");
   });
 });
 

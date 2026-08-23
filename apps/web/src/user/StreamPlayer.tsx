@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import { withToken } from "../pages/WatchPage";
-import { mintStreamWatchToken, type StreamView, type WatchTokenResult } from "./apiClient";
+import { mintStreamWatchToken, UserApiError, type StreamView, type WatchTokenResult } from "./apiClient";
 
 /**
  * `withToken` is IMPORTED from `pages/WatchPage.tsx`, not re-implemented
@@ -154,8 +154,89 @@ function parseExpiryMs(iso: string): number | null {
  */
 export const STREAM_BLOCKED_MESSAGE = "Jadi anggota untuk menonton";
 
+/**
+ * **Bahasa copy for a broadcast the creator ENDED — FIX WAVE 2, and the
+ * sentence I3 made necessary.**
+ *
+ * Before I3, a viewer whose stream ended reached the lock BY ACCIDENT:
+ * MediaMTX no longer had the path, segments 404'd, `hls.js` reported a fatal
+ * error, and `block()` showed `STREAM_BLOCKED_MESSAGE`. Merely imprecise.
+ * I3 changed the state's character — the mint endpoint now issues a
+ * DELIBERATE 409 within a minute of the creator pressing *Akhiri siaran* —
+ * and a sentence that was vague about an accident becomes WRONG about a
+ * decision, in the one direction that matters: it tells somebody who is
+ * already paying to go and pay.
+ *
+ * Exported for the same reason `STREAM_BLOCKED_MESSAGE` is: the tests assert
+ * the literal, never this constant, and exporting it is what lets a reader
+ * find both halves of the pair in one place.
+ */
+export const STREAM_ENDED_MESSAGE = "Siaran ini sudah berakhir.";
+
+/**
+ * **Bahasa copy for "playback stopped and this component cannot say why" —
+ * FIX WAVE 2.**
+ *
+ * The terminal state a FATAL PLAYBACK ERROR reaches. `hls.js` and the native
+ * element report one for a manifest that 404'd, a network drop, a decode
+ * failure — none of which says anything about entitlement, and two of which
+ * happen to viewers who are fully paid up. This used to be
+ * `STREAM_BLOCKED_MESSAGE`, i.e. a membership pitch inferred from no evidence
+ * at all, and on a PUBLIC stream it was a pitch for a membership that does
+ * not exist.
+ *
+ * Deliberately does NOT claim the stream ended. It might have; it might be
+ * this phone's connection. Vague is honest where confidently wrong is not —
+ * `describeUploadFailure`'s own rewrite recorded that ruling and this follows
+ * it. The one case that CAN be named precisely is named precisely, above.
+ */
+export const STREAM_UNAVAILABLE_MESSAGE = "Siaran ini tidak dapat diputar sekarang.";
+
 /** Bahasa copy for a browser that can play neither `hls.js` nor native HLS. */
 const STREAM_UNSUPPORTED_MESSAGE = "Peramban ini tidak mendukung pemutaran siaran langsung.";
+
+/**
+ * Why this player stopped, chosen from the SHAPE of what stopped it and never
+ * from any text — see `STREAM_ENDED_MESSAGE` above and
+ * `src/test/no-raw-server-errors.test.ts`.
+ *
+ *  - `not-entitled` — the mint refused for a reason about this VIEWER (a 403
+ *    for somebody no longer a member, a 401 for a dead session) or for a
+ *    reason this component cannot resolve at all (a network drop). The
+ *    membership pitch is the actionable sentence and this is the default.
+ *  - `ended` — the mint refused with a 409, which `MintUserWatchToken` sends
+ *    for one reason only: the row is not `live`.
+ *  - `unavailable` — a fatal playback error, which carries no information
+ *    about entitlement whatsoever.
+ */
+type BlockReason = "not-entitled" | "ended" | "unavailable";
+
+/**
+ * Maps a REJECTED MINT to a reason. Reads `err.status` and nothing else: the
+ * API's own Bahasa sentence on the wire is never shown, never compared
+ * against, and never even bound to a name here.
+ *
+ * **409 IS A SINGLE-MEANING STATUS ON THIS ROUTE.** `POST /streams/:id/watch-token`
+ * has exactly one `ConflictError` (`MintUserWatchToken`'s status check), so
+ * there is no second 409 for this branch to be wrong about — unlike, say,
+ * `POST /users/:handle/subscribe`, whose seven distinct 409s are precisely why
+ * `describeSubscribeFailure` refuses to guess between them.
+ *
+ * Everything else — 403, 401, a 400, a `TypeError` from a dropped connection —
+ * falls to `not-entitled`, which is what this component did for every refusal
+ * before fix wave 2. Nothing regresses by being unrecognised.
+ */
+function blockReasonForMintFailure(err: unknown): BlockReason {
+  if (err instanceof UserApiError && err.status === 409) return "ended";
+  return "not-entitled";
+}
+
+/** The one place a `BlockReason` becomes something a person reads. */
+function blockedMessage(reason: BlockReason): string {
+  if (reason === "ended") return STREAM_ENDED_MESSAGE;
+  if (reason === "unavailable") return STREAM_UNAVAILABLE_MESSAGE;
+  return STREAM_BLOCKED_MESSAGE;
+}
 
 export interface StreamPlayerHandle {
   destroy(): void;
@@ -318,7 +399,7 @@ export function defaultAttachHls({
 type Phase =
   | { name: "loading" }
   | { name: "ready" }
-  | { name: "blocked" }
+  | { name: "blocked"; reason: BlockReason }
   | { name: "unsupported" };
 
 export interface StreamPlayerProps {
@@ -408,8 +489,11 @@ export default function StreamPlayer({
       // Defensive only: `SiaranPage` never mounts this component for a row
       // with no playback path — that is the locked branch's own job, never
       // this one's — but a phase must still exist for that case rather
-      // than silently rendering nothing forever.
-      setPhase({ name: "blocked" });
+      // than silently rendering nothing forever. `unavailable`, not
+      // `not-entitled`: this component has learned nothing about this
+      // viewer's entitlement, and the locked branch is where the pitch
+      // belongs.
+      setPhase({ name: "blocked", reason: "unavailable" });
       return;
     }
 
@@ -434,12 +518,14 @@ export default function StreamPlayer({
         // this is set here with no gate, unlike the re-mint tick below.
         appliedExpiresAtRef.current = parseExpiryMs(minted.expiresAt);
         setPhase({ name: "ready" });
-      } catch {
-        // Any refusal — a 403 (no longer a member), a 401 (dead session), a
-        // network drop — is the identical outcome from here: no token, no
-        // playback, the lock. See `mintStreamWatchToken`'s own docstring.
+      } catch (err: unknown) {
+        // Any refusal is the same OUTCOME from here — no token, no playback,
+        // the terminal state — but no longer the same SENTENCE. Fix wave 2:
+        // a 409 means the creator ended the broadcast (I3), and `catch {`
+        // with no binding was what made that indistinguishable from a 403.
+        // The status is read; the wire's text never is.
         if (cancelled) return;
-        setPhase({ name: "blocked" });
+        setPhase({ name: "blocked", reason: blockReasonForMintFailure(err) });
       }
     })();
 
@@ -472,17 +558,24 @@ export default function StreamPlayer({
       handle = null;
     }
 
-    /** A refused re-mint or a fatal playback error — tear down AND show the lock, unlike a plain unmount. */
-    function block() {
+    /**
+     * A refused re-mint or a fatal playback error — tear down AND show the
+     * terminal state, unlike a plain unmount. `reason` is what the caller
+     * learned; see `BlockReason`.
+     */
+    function block(reason: BlockReason) {
       teardown();
-      setPhase({ name: "blocked" });
+      setPhase({ name: "blocked", reason });
     }
 
     handle = attachHls({
       video,
       hlsUrl,
       getToken: () => tokenRef.current,
-      onFatalError: block,
+      // Fix wave 2: `unavailable`, NOT the membership pitch. A fatal
+      // playback error says nothing about entitlement — and on a public
+      // stream there is no membership to sell in the first place.
+      onFatalError: () => block("unavailable"),
     });
 
     if (handle === null) {
@@ -520,16 +613,19 @@ export default function StreamPlayer({
               appliedExpiresAtRef.current = mintedExpiresAtMs;
               handle?.onTokenRefreshed?.();
             }
-          } catch {
+          } catch (err: unknown) {
             // Any refusal — a lapsed membership, a dead session, a network
-            // drop — is the identical outcome: stop playback and show the
-            // lock, the same collapse `mintStreamWatchToken`'s own
-            // docstring describes for the FIRST mint. UNCONDITIONAL, exactly
-            // as before fix round 2 — this branch does not consult
-            // `nativeReloadMarginMs` at all, so "apply later" can never
-            // become "notice a refusal later." A refusal always reaches
+            // drop, or (fix wave 2) a 409 for a stream the creator ended —
+            // is the identical outcome: stop playback and show the terminal
+            // state, the same collapse `mintStreamWatchToken`'s own
+            // docstring describes for the FIRST mint. Only the SENTENCE
+            // differs now, and it is chosen by the same function the first
+            // mint uses, so the two call sites cannot drift apart.
+            // UNCONDITIONAL, exactly as before fix round 2 — this branch does
+            // not consult `nativeReloadMarginMs` at all, so "apply later" can
+            // never become "notice a refusal later." A refusal always reaches
             // `block()` on the SAME tick it happens, on both paths.
-            block();
+            block(blockReasonForMintFailure(err));
           }
         })();
       }, remintIntervalMs);
@@ -547,7 +643,7 @@ export default function StreamPlayer({
     <div className="stream-player" data-testid="stream-player">
       {phase.name === "blocked" ? (
         <p className="stream-player-blocked" data-testid="stream-player-blocked">
-          {STREAM_BLOCKED_MESSAGE}
+          {blockedMessage(phase.reason)}
         </p>
       ) : null}
       {phase.name === "unsupported" ? (
