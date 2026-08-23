@@ -19,12 +19,6 @@ export interface XenditInvoiceCallback {
   amount: number;
   /** `invoice.paid`, `invoice.expired`, … — for `webhook_event.event_type`. */
   eventType: string;
-  /**
-   * What the callback says the payer actually used (`BANK_TRANSFER`, `EWALLET`,
-   * …), for `transaction.payment_method`. `undefined` when absent or unusable —
-   * see `optionalPaymentMethod` for why an unusable value must not be an error.
-   */
-  paymentMethod: string | undefined;
 }
 
 /** `provider_event_id` is varchar(255); leave room for the separator and status. */
@@ -33,9 +27,6 @@ const MAX_INVOICE_ID_LENGTH = 128;
 const MAX_STATUS_LENGTH = 32;
 /** Our own ids are 36-character uuids; anything longer cannot match one. */
 const MAX_EXTERNAL_ID_LENGTH = 128;
-/** `transaction.payment_method` is varchar(16) — see db/schema.ts. */
-const MAX_PAYMENT_METHOD_LENGTH = 16;
-
 function requireString(value: unknown, maxLength: number, field: string): string {
   if (typeof value !== "string") {
     throw new ValidationError(`webhook body field ${field} must be a string`);
@@ -47,31 +38,6 @@ function requireString(value: unknown, maxLength: number, field: string): string
   if (trimmed.length > maxLength) {
     throw new ValidationError(`webhook body field ${field} is too long`);
   }
-  return trimmed;
-}
-
-/**
- * Reads `payment_method` — how the payer actually paid — as OPTIONAL, non-fatal
- * metadata.
- *
- * Deliberately never throws. This field is decoration for the creator dashboard
- * (Phase 5); the amount and the invoice id are what authorise anything. A
- * `ValidationError` for an unexpected `payment_method` would mean a 400 on a
- * genuine PAID callback, so a member who really paid would never be activated —
- * an enormous cost for a display string. Anything unusable (missing, not a
- * string, empty, or too long for varchar(16) — which would otherwise be SQLSTATE
- * 22001 from the driver) becomes `undefined`, and the transaction keeps the
- * "invoice" it was created with.
- *
- * `payment_channel` (`BCA`, `OVO`, …) is deliberately NOT captured: there is no
- * column for it, and concatenating it into `payment_method` would overflow
- * varchar(16) for common combinations. It stays available on
- * `webhook_event.payload`, which stores the body verbatim.
- */
-function optionalPaymentMethod(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed.length > MAX_PAYMENT_METHOD_LENGTH) return undefined;
   return trimmed;
 }
 
@@ -116,6 +82,16 @@ function deriveProviderEventId(invoiceId: string, status: string): string {
  * an attacker-chosen 10,000-character `status` would otherwise become SQLSTATE
  * 22001 from the driver — a 500, with the failed statement on the log path.
  *
+ * ONLY THE FIVE FIELDS BELOW ARE READ, and every other key in the body is
+ * ignored rather than validated. That is deliberate and it is load-bearing: a
+ * `ValidationError` for an unexpected or unusable field would 400 a GENUINE paid
+ * callback, so a member who really paid would never be activated. The amount and
+ * the invoice id are what authorise anything; everything else the provider sends
+ * is already kept verbatim on `webhook_event.payload`. (Retire-telegram Task 5
+ * removed the one exception, `payment_method`, which was captured for
+ * `transaction.payment_method` — a column on a table the community dashboard
+ * read and nothing does now. `user_transaction` has no such column.)
+ *
  * No error message here interpolates a value from the body. A Xendit callback
  * carries `payer_email` and the payer's name, and these messages reach both the
  * HTTP response and the logs.
@@ -142,6 +118,5 @@ export function parseXenditInvoiceCallback(body: unknown): XenditInvoiceCallback
     status,
     amount,
     eventType: `invoice.${status.toLowerCase()}`,
-    paymentMethod: optionalPaymentMethod(raw.payment_method),
   };
 }

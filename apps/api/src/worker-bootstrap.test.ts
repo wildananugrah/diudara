@@ -330,6 +330,14 @@ describe("bootstrapWorker", () => {
    * second of them asserted this exact outcome for one environment, and it is now
    * the outcome in every environment.
    *
+   * TASK 5 REMOVED THE LAST WRITER TOO — the payment webhook's community branch
+   * enqueued `grant_access` until then — so nothing in the codebase can produce
+   * any of these rows any more, and the only ones that can exist were written by
+   * an earlier deploy. That does not make this block redundant: it is the assertion
+   * that such a row is claimed and FAILED LOUDLY rather than left `pending` and
+   * silent, which is the entire remaining justification for keeping `processOutbox`
+   * (see `bootstrapWorker`).
+   *
    * ONE `it.each` DECLARATION, SIX TEST RUNS.
    */
   it.each([

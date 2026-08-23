@@ -77,11 +77,8 @@ import { MediaEntitlement } from "./application/use-cases/media-entitlement";
 import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
-import type { SubscriptionRepositoryPort } from "./application/ports/subscription-repository.port";
 import type { WebhookEventRepositoryPort } from "./application/ports/webhook-event-repository.port";
-import type { ActivityLogRepositoryPort } from "./application/ports/activity-log-repository.port";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
-import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
 import type { UserPurchaseUnitOfWorkPort } from "./application/ports/user-purchase-unit-of-work.port";
 import type { PostEditUnitOfWorkPort } from "./application/ports/post-edit-unit-of-work.port";
@@ -460,102 +457,9 @@ const fakeSignupNoticeRepository: SignupNoticeRepositoryPort = {
   },
 };
 
-const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
-  async createPending() {
-    throw new Error("not used");
-  },
-  async createActiveWithoutBilling() {
-    throw new Error("not used");
-  },
-  async findCurrentSubscriptionForTier() {
-    return null;
-  },
-  async createTransaction() {
-    throw new Error("not used");
-  },
-  async findById() {
-    throw new Error("not used");
-  },
-  async findByIdWithCommunity() {
-    return null;
-  },
-  async findTransactionByExternalId() {
-    return null;
-  },
-  async attachGatewayReference() {
-    return true;
-  },
-  async findDueForRenewal() {
-    // Phase 5's renewal pass runs in the worker, not behind an HTTP route.
-    return [];
-  },
-  async markPastDue() {
-    return false;
-  },
-  async findPastGraceDeadline() {
-    // Phase 5's churn pass runs in the worker, not behind an HTTP route.
-    return [];
-  },
-  async markChurned() {
-    return false;
-  },
-  async findRenewalContext() {
-    // Phase 5's reminder delivery runs in the worker, not behind an HTTP route.
-    return null;
-  },
-  async hasLiveSubscriptionInCommunity() {
-    // Read only by the churn revoke, which runs in the worker.
-    return false;
-  },
-  async listActiveForCommunity() {
-    // Read only by the community go-live fan-out, deleted in retire-telegram
-    // Task 3. Nothing in this root calls it.
-    return [];
-  },
-  async markPaid() {
-    throw new Error("not used");
-  },
-};
-
 const fakeWebhookEventRepository: WebhookEventRepositoryPort = {
   async recordIfNew() {
     return true;
-  },
-};
-
-const fakeActivityLogRepository: ActivityLogRepositoryPort = {
-  async record() {
-    // not used
-  },
-};
-
-const fakeOutboxRepository: OutboxRepositoryPort = {
-  async enqueue() {
-    return { id: "fake-outbox-1" };
-  },
-  async enqueueMany(inputs) {
-    return inputs.map((_, index) => ({ id: `fake-outbox-${index + 1}` }));
-  },
-  async claimBatch() {
-    return [];
-  },
-  async touchProcessing() {
-    // not used
-  },
-  async releaseToPending() {
-    return 0;
-  },
-  async markSent() {
-    // not used
-  },
-  async markFailed() {
-    // not used
-  },
-  async markPermanentlyFailed() {
-    // not used
-  },
-  async reclaimStaleProcessing() {
-    return 0;
   },
 };
 
@@ -570,12 +474,9 @@ const fakeUserPurchaseUnitOfWork: UserPurchaseUnitOfWorkPort = {
 const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
   async run(work) {
     return work({
-      subscriptions: fakeSubscriptionRepository,
       userSubscriptions: fakeUserSubscriptionRepository,
       userTiers: fakeUserTierRepository,
       webhookEvents: fakeWebhookEventRepository,
-      activityLog: fakeActivityLogRepository,
-      outbox: fakeOutboxRepository,
     });
   },
 };
@@ -755,7 +656,6 @@ describe("Dependencies (composition root contract)", () => {
       ),
       listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
       handlePaymentWebhook: new HandlePaymentWebhook(
-        fakeSubscriptionRepository,
         fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
         fakeClock
@@ -943,7 +843,6 @@ describe("Dependencies (composition root contract)", () => {
       ),
       listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
       handlePaymentWebhook: new HandlePaymentWebhook(
-        fakeSubscriptionRepository,
         fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
         fakeClock

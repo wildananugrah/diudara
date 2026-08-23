@@ -23,17 +23,16 @@ import { ProcessOutbox, type OutboxHandler } from "./application/use-cases/proce
 export interface WorkerDependencies {
   /**
    * The outbox dispatcher. It claims rows and hands each to a registered handler
-   * — and since retire-telegram Task 4 deleted `ProcessRenewals` and
-   * `SendRenewalReminder`, THE HANDLER MAP IS EMPTY (see `bootstrapWorker`).
+   * — and since retire-telegram Task 4 the HANDLER MAP IS EMPTY, and since Task 5
+   * removed the payment webhook's community branch there is NO WRITER either (see
+   * `bootstrapWorker` for both, and for the recommendation that this pass be
+   * retired with the `outbox` table rather than kept indefinitely).
    *
-   * THE QUEUE STILL HAS A WRITER, and that — not its absence — is why this pass
-   * is kept. `handle-payment-webhook.ts:640` enqueues `grant_access` on every
-   * activated COMMUNITY payment, inside the activation's own transaction; Task 2
-   * deleted that type's handler and Task 5 deletes the writer, so between those
-   * two tasks every such row is claimed, fails "no handler is registered", and
-   * retries to permanent failure. Losing the dispatcher would not stop the write
-   * — it would leave those rows unclaimed and SILENT instead of failing loudly,
-   * which is strictly worse. See `bootstrapWorker`.
+   * It is kept for one time-limited reason: a database that ran the earlier code
+   * can still hold `grant_access` rows, and this pass claims them, fails them
+   * ("no handler is registered") and retries them to permanent failure. Losing
+   * the dispatcher would leave such rows unclaimed and SILENT instead of failing
+   * loudly, which is strictly worse.
    */
   processOutbox: ProcessOutbox;
   /**
@@ -101,36 +100,37 @@ export function bootstrapWorker(): WorkerDependencies {
   // clocks would be two answers to "when is now" inside the same worker.
   const clock = new SystemClock();
 
-  // THE MAP IS EMPTY, and that is the whole of retire-telegram's effect on this
-  // process's queue. Task 2 removed four registrations — `grant_access`,
-  // `revoke_access`, `revoke_subscription_access` and `notify_join_request` —
-  // whose handlers went with the channel-access and join-request use cases;
-  // Task 3 removed `notify_stream_live` with `NotifyStreamLive` (that also
-  // removed this root's ONLY reader of `STREAM_TOKEN_SECRET`, so the worker
-  // signs nothing now and no longer refuses to boot over its length); and Task 4
-  // removed the last one, `send_renewal_reminder`, with `SendRenewalReminder`
-  // and the `ProcessRenewals` pass that was its only writer.
+  // THE MAP IS EMPTY, AND SO, NOW, IS THE QUEUE'S SET OF WRITERS.
   //
-  // AN EMPTY MAP IS NOT AN EMPTY QUEUE, and getting that the wrong way round is
-  // how the writer below gets deleted without anyone checking what it fed.
-  // `handle-payment-webhook.ts:640` STILL ENQUEUES `grant_access` — the same
-  // type Task 2 unregistered — on every activated community payment, written
-  // inside the activation's own transaction. That writer is Task 5's to remove,
-  // not Task 4's, so today the queue has exactly one live writer and no handler
-  // for what it writes. (The user world's own membership reminder is NOT a
-  // second writer: `RemindExpiringMembership` is a scheduled pass that sends
-  // directly.)
+  // Task 2 removed four handler registrations — `grant_access`, `revoke_access`,
+  // `revoke_subscription_access` and `notify_join_request` — whose handlers went
+  // with the channel-access and join-request use cases; Task 3 removed
+  // `notify_stream_live` with `NotifyStreamLive` (that also removed this root's
+  // ONLY reader of `STREAM_TOKEN_SECRET`, so the worker signs nothing now and no
+  // longer refuses to boot over its length); and Task 4 removed the last one,
+  // `send_renewal_reminder`, with `SendRenewalReminder`.
   //
-  // SO THE DISPATCHER STAYS BECAUSE SOMETHING WRITES, not because nothing does.
-  // An unregistered type is NOT silent: `ProcessOutbox` claims the row and fails
-  // it (bounded retry, then permanent) with "no handler is registered", which is
-  // what `worker-bootstrap.test.ts` asserts on — and with an empty map that is
-  // now the outcome for EVERY type. Remove this pass and those rows would sit
-  // `pending` and unread instead, which is the same money-taken-nothing-happened
-  // state with the alarm switched off. The consequence is pre-existing and
-  // accepted (Task 2's review recorded it: a doomed row cannot fail the pass,
-  // abort the batch or poison a sibling, and the enqueue commits, so the money
-  // side is untouched) and it ends when Task 5 removes the branch.
+  // Until Task 5 an empty map was NOT an empty queue: `handle-payment-webhook.ts`
+  // still enqueued `grant_access` on every activated community payment — a live
+  // writer whose type had no handler, so those rows failed loudly to permanent
+  // failure. TASK 5 DELETED THAT BRANCH, and with it the last `enqueue` call in
+  // the codebase. Nothing writes an `outbox` row now, and nothing reads one that
+  // it could act on. (`RemindExpiringMembership` is not a writer and never was: it
+  // is a scheduled pass that sends directly.)
+  //
+  // SO THE REASON THIS PASS IS KEPT HAS CHANGED, and it is now a weaker and a
+  // TIME-LIMITED one. It is no longer "the dispatcher stays because something
+  // writes". It is: a database that ran the pre-Task-5 code can still hold
+  // `grant_access` rows, and this pass is what turns them into a loud, bounded
+  // permanent failure ("no handler is registered", which
+  // `worker-bootstrap.test.ts` asserts on) instead of leaving them `pending` and
+  // unread for ever. Once that is no longer possible — the same follow-up that
+  // drops the retired tables — `ProcessOutbox`, `OutboxRepositoryPort`,
+  // `DrizzleOutboxRepository`, this loop and the `outbox` table should go
+  // together, in one deliberate commit. That decision is NOT Task 5's to take
+  // silently, and it is recorded here rather than acted on. Anything added later
+  // that must happen AFTER a payment commits reinstates the real reason: see
+  // `PaymentActivationUnitOfWorkPort`.
   const handlers = new Map<string, OutboxHandler>();
   // Task 4 of Phase 5b: reminding a member BEFORE their membership ends. Selected
   // through the SAME allowlist the API root uses, and it may legitimately be `null` —

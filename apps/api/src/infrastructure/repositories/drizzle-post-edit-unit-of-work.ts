@@ -24,9 +24,9 @@ export class DrizzlePostEditUnitOfWork implements PostEditUnitOfWorkPort {
    *
    * `DrizzleMediaRepository.claim` opens a transaction OF ITS OWN
    * (`release-then-claim`, two statements, one unit). Nested inside this
-   * one, drizzle turns that into a SAVEPOINT — exactly the same shape
-   * `DrizzlePaymentActivationUnitOfWork` already relies on for `markPaid`,
-   * and verified safe here for the same reason: `claim` contains no
+   * one, drizzle turns that into a SAVEPOINT, which is exactly right: it
+   * stays atomic when `claim` is called standalone and still rolls all the
+   * way out when it throws in here. Verified safe because `claim` contains no
    * catch-driven unique-violation arbitration (it is a plain release/claim
    * UPDATE loop, not an INSERT racing a constraint), so there is nothing in
    * it that "current transaction is aborted" could poison. That hazard is

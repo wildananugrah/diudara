@@ -4,9 +4,7 @@ import {
 } from "../../domain/user-payment";
 import { ConflictError, NotFoundError, ValidationError } from "../errors";
 import type { ClockPort } from "../ports/clock.port";
-import { OUTBOX_GRANT_ACCESS } from "../ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "../ports/payment-activation-unit-of-work.port";
-import type { SubscriptionRepositoryPort } from "../ports/subscription-repository.port";
 import type { UserSubscriptionRepositoryPort } from "../ports/user-subscription-repository.port";
 
 /** The one provider status that turns money into access. Compared exactly. */
@@ -20,12 +18,6 @@ const TRANSACTION_PENDING = "pending";
 
 /** What `markTransactionPaid` writes. A transaction already here is a duplicate. */
 const TRANSACTION_PAID = "paid";
-
-/**
- * `activity_log.event_type` for a payment that EXTENDED an existing membership rather
- * than starting one. Exported so a test — and Phase 6's analytics — name the same string.
- */
-export const RENEWED = "renewed";
 
 /**
  * Renders an attacker-chosen string safe to put in a log line.
@@ -58,13 +50,6 @@ export interface HandlePaymentWebhookInput {
   /** What the BODY claims. Checked against our own record, never trusted. */
   amount: number;
   eventType: string;
-  /**
-   * What the callback reports the payer used, when it reports anything usable.
-   * Persisted on the transaction in place of the "invoice" placeholder
-   * `StartCheckout` created it with — the creator dashboard needs it, and the
-   * callback is the only place it exists.
-   */
-  paymentMethod: string | undefined;
   /** The raw body, stored verbatim on `webhook_event.payload` for audit. */
   payload: unknown;
 }
@@ -77,7 +62,7 @@ export interface HandlePaymentWebhookResult {
 }
 
 /**
- * Turns a verified provider payment event into access.
+ * Turns a verified provider payment event into an ACTIVE membership.
  *
  * The threat model this is shaped by: Xendit authenticates callbacks with a
  * STATIC `X-CALLBACK-TOKEN` header, not an HMAC over the payload. The token
@@ -86,107 +71,99 @@ export interface HandlePaymentWebhookResult {
  * replay protection whatsoever. Two consequences run through every line below:
  *
  *  1. Nothing from the body is authoritative. The amount is compared against
- *     OUR OWN `transaction.amount`, looked up by `external_id`.
+ *     OUR OWN `user_transaction.amount`, looked up by `external_id`.
  *  2. Replay defence is entirely `webhook_event.provider_event_id` (UNIQUE),
  *     arbitrated by the database.
  *
- * ONE STREAM, TWO KINDS OF INVOICE (Phase 5a, spec §7). Xendit delivers every
- * callback to one endpoint, and since Phase 5a there are two things a paid
- * invoice can mean: a community subscription under `/dashboard/*` (everything
- * below) and a membership one person bought from another
- * (`settleUserSubscription`). They are told apart by the SHAPE of `external_id`
- * — `usub_<uuid>` versus a bare `transaction.id` uuid — and never by guessing;
- * anything matching neither shape is IGNORED, because it is somebody else's
- * invoice or a probe rather than an error of ours. See
- * `routeInvoiceExternalId`, which owns that decision and is the first thing this
- * use case does, before a database is touched.
+ * ONE STREAM, AND NOT EVERYTHING ON IT IS OURS. Xendit delivers every callback
+ * to one public endpoint. Phase 5a introduced an `external_id` namespace
+ * (`usub_<uuid>`) to tell a membership invoice apart from a community one;
+ * retire-telegram Task 5 deleted the community half, and the namespace stayed —
+ * because what it really buys is the ability to answer "this is not ours at all".
  *
- * The two paths share NOTHING but this file, the clock and the unit of work.
- * They read different tables, and the community path below is reached by exactly
- * the code it always was — a property with its own named regression tests,
- * because this handler serves live money.
+ * THE OUTCOMES ARE TWO, AND COLLAPSING THEM TO ONE IS THE FAILURE THIS FILE
+ * EXISTS TO AVOID. With one kind of invoice left, an unrecognised `external_id`
+ * looks like it must be that kind. It is not: it is somebody else's invoice or a
+ * probe, and resolving it against `user_transaction` is how a payment for
+ * something else activates a membership. So the answers stay **user** and
+ * **ignored**, decided by `routeInvoiceExternalId` before a database is touched,
+ * and `execute` below has no third branch for a future change to widen.
  *
  * The order is load-bearing and each step is pinned by a test:
  *
- *  1. Find our transaction. Unknown → 404, and nothing is recorded — recording
- *     first would burn the event id, so the retry after we fixed whatever was
- *     wrong would be swallowed as a replay.
- *  2. Compare amounts. Mismatch → 400 + a security log line, before anything is
- *     written. This also denies a forger the ability to consume the event id
- *     that a genuine delivery needs.
+ *  1. Find our transaction, by the uuid BEHIND the namespace. Unknown → 404, and
+ *     nothing is recorded — recording first would burn the event id, so the
+ *     retry after we fixed whatever was wrong would be swallowed as a replay.
+ *  2. Verify `body.id` against the reference checkout stored
+ *     (`attachGatewayReference`), then the amount against OUR OWN
+ *     `user_transaction.amount`. Both before anything is written, and both with a
+ *     security log line. This also denies a forger the ability to consume the
+ *     event id that a genuine delivery needs.
  *  3. `recordIfNew`. Already seen → return, touching nothing.
- *  4. Only for `status === "PAID"`: activate, then write the audit entry. A
- *     transaction that is already `success` is a 2xx no-op; one in any other
+ *  4. Only for `status === "PAID"`: settle the transaction and activate the
+ *     subscription. A transaction already `paid` is a 2xx no-op; one in any other
  *     non-`pending` status is a 409 that records nothing, because a payment for a
- *     `failed` transaction is a person's problem and a 200 would lose it (see
- *     `MarkPaidOutcome`).
+ *     reconciled-by-hand row is a person's problem and a 200 would lose it.
  *
  * Steps 3 and 4 run inside ONE unit of work, so claiming the event id and using
  * it commit together or not at all — see `PaymentActivationUnitOfWorkPort` for
  * the failure that forces this. Steps 1 and 2 stay outside it: they are reads,
  * and a body that fails them should not open a transaction at all.
+ *
+ * WHAT THIS DOES NOT DO, and it is not an omission: no `activity_log` entry and
+ * no outbox row. Those were community concepts — a `member`, a `community_id`, a
+ * Telegram invite — and a user subscription grants access by being ACTIVE, which
+ * is the single index hit the paywall asks for (spec §8). There is nothing to
+ * send.
  */
 export class HandlePaymentWebhook {
   constructor(
-    private readonly subscriptions: SubscriptionRepositoryPort,
     /**
-     * Phase 5a's parallel flow, POOLED — used for the reads that decide whether a
-     * delivery is worth opening a transaction for at all (see the class docstring's
-     * steps 1 and 2). The writes go through the unit of work's own copy.
+     * POOLED — used for the reads that decide whether a delivery is worth opening
+     * a transaction for at all (steps 1 and 2 above). The writes go through the
+     * unit of work's own copy.
      */
     private readonly userSubscriptions: UserSubscriptionRepositoryPort,
     private readonly unitOfWork: PaymentActivationUnitOfWorkPort,
     /**
      * Where `paidAt` comes from. Injected in Phase 5, and not for tidiness: `paidAt` is
-     * what `computeNextBillingDate` anchors the next period on, so with a `new Date()`
-     * here the renewal arithmetic — the thing this phase turns on — could only ever be
-     * asserted against whatever day the suite happened to run on.
+     * what the paid period is anchored on, so with a `new Date()` here the period
+     * arithmetic could only ever be asserted against whatever day the suite happened to
+     * run on.
      *
      * It is the instant WE settled the payment, deliberately, not a timestamp from the
-     * callback body. Nothing in that body is authoritative (see the class docstring), and
-     * a forged `paid_at` would move a member's next billing date.
+     * callback body. Nothing in that body is authoritative (see above), and a forged
+     * `paid_at` would move when a member's access runs out.
      */
     private readonly clock: ClockPort
   ) {}
 
   async execute(input: HandlePaymentWebhookInput): Promise<HandlePaymentWebhookResult> {
     const route = routeInvoiceExternalId(input.externalId);
-    if (route.kind === "user") {
-      return this.settleUserSubscription(route.transactionId, input);
-    }
-    if (route.kind === "unknown") {
+    if (route.kind !== "user") {
+      // NOT a fallback, and never `else { settle… }`. An `external_id` that is not
+      // in our namespace is somebody else's invoice or a probe: it is ignored,
+      // never assumed to be the one kind we still sell. Answered 2xx rather than
+      // 404 because no fix of ours could ever make it resolvable, so there is
+      // nothing for the provider to retry — and nothing is looked up, recorded or
+      // logged beyond this line.
       console.warn(
-        `[payments] webhook IGNORED, external id matches neither namespace: provider=xendit ` +
+        `[payments] webhook IGNORED, external id is not in our namespace: provider=xendit ` +
           `external_id=${safeLabel(input.externalId)} event=${safeLabel(input.eventType)}`
       );
       return { activated: false, duplicate: false };
     }
-    return this.settleCommunitySubscription(input);
+    return this.settleUserSubscription(route.transactionId, input);
   }
 
   /**
-   * Phase 5a's half: a paid invoice becomes an ACTIVE membership between two
-   * people (spec §7), over `user_subscription`/`user_transaction`.
+   * A paid invoice becomes an ACTIVE membership between two people (spec §7),
+   * over `user_subscription`/`user_transaction`.
    *
-   * The community handler below is the thing this is modelled on, deliberately
-   * and step for step — its order is what several real findings shaped, and none
-   * of them may be re-learned here:
-   *
-   *  1. Find OUR transaction, by the uuid behind the namespace. Unknown → 404,
-   *     recording nothing, so the retry after a fix is not swallowed as a replay.
-   *  2. Verify `body.id` against the reference checkout stored
-   *     (`attachGatewayReference`), then the amount against OUR OWN
-   *     `user_transaction.amount`. Both before anything is written — a forger
-   *     must not be able to burn the event id a genuine delivery needs.
-   *  3. `recordIfNew`, inside the unit of work. Already seen → return, touching
-   *     nothing. This is the entire replay defence.
-   *  4. Only for `PAID`: settle the transaction and activate the subscription.
-   *
-   * WHAT THIS PATH DOES NOT DO, and it is not an omission: no `activity_log`
-   * entry and no outbox row. Those are community concepts — a `member`, a
-   * `community_id`, a Telegram invite — and a user subscription grants access by
-   * being ACTIVE, which is the single index hit Phase 6's paywall asks for
-   * (spec §8). There is nothing to send.
+   * Its step order was modelled on the community handler retire-telegram Task 5
+   * deleted, because that order is what several real findings shaped — and none
+   * of them may be re-learned here. The class docstring above lists the four
+   * steps; the comments below say what each one cost to get right.
    */
   private async settleUserSubscription(
     transactionId: string,
@@ -194,18 +171,24 @@ export class HandlePaymentWebhook {
   ): Promise<HandlePaymentWebhookResult> {
     const transaction = await this.userSubscriptions.findTransactionById(transactionId);
     if (!transaction) {
-      // English at every `NotFoundError` call site, and the SAME message the
-      // community path uses: this reaches an HTTP response on a public endpoint,
-      // and telling a caller WHICH namespace it missed in is telling them which
-      // ids are worth guessing.
+      // English at every `NotFoundError` call site, and deliberately vague: this
+      // reaches an HTTP response on a public endpoint, and telling a caller
+      // anything more about WHY an id missed is telling them which ids are worth
+      // guessing.
       throw new NotFoundError("unknown transaction");
     }
 
     if (transaction.gatewayReferenceId === null) {
       // `StartUserSubscription` writes this immediately after the provider call
-      // returns, so an absent reference means that write failed. Fail CLOSED, for
-      // the reason the community path records: trusting `body.id` when we have
-      // nothing of our own to compare it against is exactly the hole this closes.
+      // returns, so an absent reference means that write failed. Fail CLOSED:
+      // trusting `body.id` when we have nothing of our own to compare it against
+      // is exactly the hole this closes. Checked BEFORE the amount, because this
+      // is the anchor the replay guard itself hangs from — `provider_event_id` is
+      // derived from `body.id`, so until `body.id` is verified an attacker can
+      // mint a fresh event id at will and walk past the UNIQUE constraint.
+      // Measured on the deleted community path before this check existed: 12
+      // concurrent PAID deliveries with 12 distinct `body.id`s all returned 200
+      // and all activated.
       console.warn(
         `[security] user webhook for a transaction with no gateway reference: provider=xendit ` +
           `user_transaction=${transaction.id} event=${safeLabel(input.eventType)} — checkout ` +
@@ -260,9 +243,13 @@ export class HandlePaymentWebhook {
 
       if (input.status !== PAID) {
         // Recorded, so a replay of THIS event is a no-op, and acted on in no other
-        // way. Said out loud for the reason the community path learned: an
-        // unrecognised status was previously indistinguishable from success on the
-        // wire, and `XenditPaymentAdapter` is unverified against the live API.
+        // way. Said out loud for a reason measured once already: an unrecognised
+        // status is otherwise indistinguishable from success on the wire — a
+        // `SETTLED` delivery returned 200, left the subscription pending, and
+        // printed nothing — and `XenditPaymentAdapter` is unverified against the
+        // live API, so "a real status we do not recognise" is the most likely
+        // production failure. Ids and enum values only, sanitised: never the raw
+        // payload.
         console.warn(
           `[payments] webhook recorded but NOT actioned: provider=xendit ` +
             `user_transaction=${transaction.id} ` +
@@ -296,8 +283,8 @@ export class HandlePaymentWebhook {
           );
           return { activated: false, duplicate: true };
         }
-        // Nothing in 5a writes any other status, so this is a row somebody
-        // reconciled by hand. A real payment has arrived for it, and answering 200
+        // Nothing writes any other status, so this is a row somebody reconciled
+        // by hand. A real payment has arrived for it, and answering 200
         // is how that payment disappears — Xendit does not retry a 2xx, and once
         // the event id is recorded the delivery cannot be replayed by hand either.
         // So this THROWS, which rolls `recordIfNew` back with it.
@@ -349,8 +336,7 @@ export class HandlePaymentWebhook {
       // redelivery against THAT row working; without it, the second delivery of a
       // subscription's own activation would refuse itself.
       //
-      // THIS PREDICATE IS THE GRACEFUL PATH, NOT THE GUARANTEE — the same division
-      // of labour `markPaid` records for the community flow. Under READ COMMITTED
+      // THIS PREDICATE IS THE GRACEFUL PATH, NOT THE GUARANTEE. Under READ COMMITTED
       // two concurrent activations cannot see each other's uncommitted row, so both
       // would pass this read; the index is what actually arbitrates, and the loser's
       // unit of work rolls back with the event id unspent, so the provider's retry
@@ -361,10 +347,10 @@ export class HandlePaymentWebhook {
       );
       if (active !== null && active.id !== subscription.id) {
         // The money ARRIVED, so the transaction settles: hiding that would hide a
-        // refund that is owed, and 5a has no refund path of its own.
+        // refund that is owed, and there is no refund path anywhere in this system.
         await repositories.userSubscriptions.markTransactionPaid(current.id, paidAt);
-        // And the pending claim is RELEASED. Nothing in 5a expires a pending
-        // `user_subscription`, and `user_subscription_one_pending` means one left
+        // And the pending claim is RELEASED. Only the worker's stale-checkout sweep
+        // expires a pending `user_subscription`, and `user_subscription_one_pending` means one left
         // behind blocks every later checkout for this pair — a buyer wedged out of
         // a creator by a purchase they already overpaid for.
         await repositories.userSubscriptions.cancel(subscription.id);
@@ -392,271 +378,6 @@ export class HandlePaymentWebhook {
           `HandlePaymentWebhook: could not activate user subscription ${subscription.id}`
         );
       }
-
-      return { activated: true, duplicate: false };
-    });
-  }
-
-  private async settleCommunitySubscription(
-    input: HandlePaymentWebhookInput
-  ): Promise<HandlePaymentWebhookResult> {
-    const transaction = await this.subscriptions.findTransactionByExternalId(input.externalId);
-    if (!transaction) {
-      throw new NotFoundError("unknown transaction");
-    }
-
-    // Checked BEFORE the amount, because this is the anchor the replay guard
-    // itself hangs from: `provider_event_id` is derived from `body.id`, so until
-    // `body.id` is verified against a reference WE stored at checkout, an
-    // attacker (or a confused provider) can mint a fresh event id at will and
-    // walk straight past the UNIQUE constraint. Probed before this check: 12
-    // concurrent PAID deliveries with 12 distinct `body.id`s all returned 200 and
-    // wrote 12 `activity_log` "joined" rows.
-    if (transaction.gatewayReferenceId === null) {
-      // StartCheckout writes this two statements after creating the row, so an
-      // absent reference means that write failed. Fail CLOSED and say so: the
-      // alternative — trusting `body.id` when we have nothing to compare it
-      // against — is exactly the hole this check exists to close.
-      console.warn(
-        `[security] webhook for a transaction with no gateway reference: provider=xendit ` +
-          `transaction=${transaction.id} event=${safeLabel(input.eventType)} — checkout ` +
-          "never recorded the provider invoice id, so this delivery cannot be verified"
-      );
-      throw new ValidationError("this transaction cannot be verified against the provider");
-    }
-
-    if (input.invoiceId !== transaction.gatewayReferenceId) {
-      // Ids only. Both sides are provider/our own identifiers, and the claimed
-      // one is attacker-chosen, so it is sanitised.
-      console.warn(
-        `[security] webhook invoice id mismatch: provider=xendit ` +
-          `transaction=${transaction.id} expected=${safeLabel(transaction.gatewayReferenceId)} ` +
-          `claimed=${safeLabel(input.invoiceId)} event=${safeLabel(input.eventType)}`
-      );
-      throw new ValidationError("webhook invoice id does not match our record");
-    }
-
-    if (input.amount !== transaction.amount) {
-      // A forged body claiming amount 1 for a 50,000 tier is the whole reason
-      // this comparison exists, so it is worth knowing about. Ids and integers
-      // only — the payload carries the payer's name and email, and this line
-      // goes to stderr.
-      console.warn(
-        `[security] webhook amount mismatch: provider=xendit ` +
-          `transaction=${transaction.id} expected=${transaction.amount} ` +
-          `claimed=${input.amount} event=${safeLabel(input.eventType)}`
-      );
-      throw new ValidationError("webhook amount does not match our record");
-    }
-
-    return this.unitOfWork.run(async (repositories) => {
-      const isNew = await repositories.webhookEvents.recordIfNew({
-        provider: "xendit",
-        providerEventId: input.providerEventId,
-        eventType: input.eventType,
-        payload: input.payload,
-      });
-      if (!isNew) {
-        return { activated: false, duplicate: true };
-      }
-
-      if (input.status !== PAID) {
-        // Recorded (so a replay of THIS event is a no-op) but not acted on.
-        // Phase 3 stops at the first successful payment; expiry/failure handling
-        // is a later phase's job.
-        //
-        // Probed before this line existed: a `SETTLED` delivery returned HTTP
-        // 200, left the subscription `pending`, wrote the webhook_event row, and
-        // printed NOTHING. `EXPIRED`, `SETTLED`, a typo, and a status Xendit adds
-        // next year were all indistinguishable from success on the wire. Given
-        // that XenditPaymentAdapter is explicitly unverified against the live
-        // API, "a real payment status we do not recognise" is the most likely
-        // production failure — and it was the one this system could not report.
-        //
-        // Ids and enum values only, sanitised: never the raw payload.
-        console.warn(
-          `[payments] webhook recorded but NOT actioned: provider=xendit ` +
-            `transaction=${transaction.id} subscription=${transaction.subscriptionId} ` +
-            `status=${safeLabel(input.status)} event=${safeLabel(input.eventType)} ` +
-            `activated=false (only ${PAID} activates)`
-        );
-        return { activated: false, duplicate: false };
-      }
-
-      const paid = await repositories.subscriptions.markPaid({
-        transactionId: transaction.id,
-        gatewayReferenceId: input.invoiceId,
-        paidAt: this.clock.now(),
-        paymentMethod: input.paymentMethod,
-      });
-
-      if (paid.outcome === "already_settled") {
-        // A genuine duplicate: the transaction is `success`, so this delivery is a
-        // second activation attempt that got past the event-id guard — which is
-        // possible whenever two deliveries differ in `body.id` or `status`. The
-        // UPDATE's own predicate absorbed it, and nothing else in here may run:
-        // `activity_log` "joined" is what Phase 4 turns into an invite, and a
-        // duplicate row is a duplicate invite. A 2xx is correct — there is nothing
-        // for the provider to retry.
-        console.warn(
-          `[payments] webhook for an already-settled transaction: provider=xendit ` +
-            `transaction=${transaction.id} status=${safeLabel(paid.status)} ` +
-            `event=${safeLabel(input.eventType)} — no second activation was performed`
-        );
-        return { activated: false, duplicate: true };
-      }
-
-      if (paid.outcome === "conflicting_status") {
-        // NOT a duplicate, and the reason this branch exists (Task 7 item 2). The
-        // transaction is in a status that neither activates nor counts as settled —
-        // today only `failed` — and a real payment has arrived for it. Reporting a
-        // 200 here is how that payment used to disappear: Xendit does not retry a
-        // 2xx, and once the event id is recorded the delivery cannot be replayed
-        // by hand either.
-        //
-        // So this THROWS, which rolls the whole unit of work back — including
-        // `recordIfNew` — leaving the event id unspent so the same delivery can be
-        // re-sent once an operator has reconciled the row. Ids and enum values
-        // only: the payload carries the payer's name, email and phone number.
-        console.warn(
-          `[payments] ALERT: a payment arrived for a transaction that is not settleable: ` +
-            `provider=xendit transaction=${transaction.id} ` +
-            `subscription=${transaction.subscriptionId} status=${safeLabel(paid.status)} ` +
-            `event=${safeLabel(input.eventType)} amount=${transaction.amount} — the member ` +
-            "has PAID and has NOT been activated. Nothing was recorded, so this delivery " +
-            "can be replayed after the transaction row is reconciled by hand."
-        );
-        throw new ConflictError(
-          "this transaction is not in a state that can be settled; it needs manual review"
-        );
-      }
-
-      if (paid.outcome === "subscription_churned") {
-        // The member's grace ran out between their invoice being created and this
-        // callback arriving, so the subscription they were paying for is CHURNED —
-        // terminal, by the state machine's own rule. `markPaid` wrote nothing.
-        //
-        // The same treatment as `conflicting_status`, and for the same reason: a real
-        // payment has arrived that we cannot apply, and answering 200 is how it would
-        // disappear (Xendit does not retry a 2xx, and the delivery cannot be replayed by
-        // hand once the event id is spent). So this THROWS, which rolls the unit of work
-        // back including `recordIfNew`, leaving the event id unspent.
-        //
-        // What the member is OWED is a fresh subscription — a new row, a new grant with
-        // the unban a churned member needs, and a new invite link — which is what
-        // checkout gives them, and which is why resurrecting this row was not the
-        // answer. That decision belongs to a person, and this line is how they find out.
-        // Ids and enum values only: the payload carries the payer's name and phone.
-        console.warn(
-          `[payments] ALERT: a payment arrived for a CHURNED subscription: provider=xendit ` +
-            `transaction=${transaction.id} subscription=${transaction.subscriptionId} ` +
-            `subscription_status=${safeLabel(paid.subscriptionStatus)} ` +
-            `event=${safeLabel(input.eventType)} amount=${transaction.amount} — the member ` +
-            "has PAID and has NOT been activated, and their old subscription was NOT " +
-            "resurrected (churned is terminal). Nothing was recorded, so this delivery can " +
-            "be replayed once somebody has decided whether to refund or to sell them a new " +
-            "subscription."
-        );
-        throw new ConflictError(
-          "this subscription has already been churned, so this payment needs manual review"
-        );
-      }
-
-      if (paid.outcome === "superseded") {
-        // A double-submit at checkout produced two pending subscriptions for one
-        // (member, tier), and the member already holds an active one. The payment
-        // settled — the money arrived — but this subscription was `cancelled`
-        // rather than activated, so NOTHING BELOW RUNS: the outbox enqueue is what
-        // Phase 4 turns into an invite link, and a second link for the same member
-        // is a second bearer credential they could forward to someone who never
-        // paid. That omission is the point of this branch.
-        //
-        // Still audited, so a creator can see the duplicate and refund it. A 2xx,
-        // because there is nothing for the provider to retry.
-        console.warn(
-          `[payments] payment superseded by an existing active subscription: provider=xendit ` +
-            `transaction=${transaction.id} subscription=${paid.subscription.id} ` +
-            `member=${paid.subscription.memberId} tier=${paid.subscription.tierId} ` +
-            `amount=${transaction.amount} event=${safeLabel(input.eventType)} — the ` +
-            "subscription was cancelled, no access was granted, and a refund is likely owed"
-        );
-        await repositories.activityLog.record({
-          memberId: paid.subscription.memberId,
-          communityId: paid.communityId,
-          // The same event type GrantChannelAccess uses for "we did not grant, and
-          // here is why", so a dashboard needs no new vocabulary.
-          eventType: "access_not_granted",
-          metadata: {
-            reason: "duplicate_active_subscription",
-            source: "xendit_webhook",
-            subscriptionId: paid.subscription.id,
-            transactionId: transaction.id,
-            amount: transaction.amount,
-          },
-        });
-        return { activated: false, duplicate: false };
-      }
-
-      const { subscription, communityId } = paid;
-
-      await repositories.activityLog.record({
-        memberId: subscription.memberId,
-        communityId,
-        // A RENEWAL IS NOT A JOIN. Phase 6's analytics count `joined` rows as new
-        // members, and a renewal is the same member paying again — recording it as a
-        // join would inflate acquisition for ever and hide retention completely. The
-        // distinction comes from `markPaid`, which is the only thing that saw the
-        // status the row was in before it was activated.
-        eventType: paid.renewed ? RENEWED : "joined",
-        // Ids and integers only: `webhook_event.payload` is where the raw body
-        // lives, and this table is read by creator-facing dashboards.
-        metadata: {
-          source: "xendit_webhook",
-          transactionId: transaction.id,
-          subscriptionId: subscription.id,
-          amount: transaction.amount,
-          // The period the member just bought, so a dashboard can show "paid until"
-          // without recomputing it from a billing cycle it would have to look up.
-          ...(subscription.nextBillingDate === null
-            ? {}
-            : { nextBillingDate: subscription.nextBillingDate }),
-        },
-      });
-
-      // The intent to invite, written INSIDE the unit of work — which is the only
-      // place it can go. Queued afterwards, in its own transaction, a crash
-      // between the two commits would leave a paid, activated subscription with
-      // no invite and no way to recover one: the event id is spent, so every
-      // provider retry is swallowed as a replay. Queued BEFORE the activation, a
-      // failed activation would leave the worker inviting someone whose payment
-      // we never recorded.
-      //
-      // What must never move in here is the SEND. That is an external HTTP call,
-      // and a Telegram outage inside this transaction would roll back a payment
-      // we have already taken (plan, Global Constraints).
-      //
-      // Reached only on the activated path, so the counts a replay produces are
-      // one webhook_event row, one activity_log row, and one outbox row.
-      await repositories.outbox.enqueue({
-        eventType: OUTBOX_GRANT_ACCESS,
-        // Ids only, for the same reason as the activity_log metadata above: the
-        // worker reads this outside any request context and logs around it, and a
-        // Xendit callback carries the payer's name, email and phone number. The
-        // worker resolves the member and the channels from `subscriptionId`.
-        payload: {
-          subscriptionId: subscription.id,
-          memberId: subscription.memberId,
-          communityId,
-          transactionId: transaction.id,
-          // WHAT THE MEMBER IS TOLD depends on this, and only `markPaid` can know it —
-          // it is the only thing that saw the status the row was in before activation.
-          // A renewal's grant takes the already-granted path and must confirm the
-          // membership WITHOUT naming an invite link: the member never left the group,
-          // and the link on their row is the one they already spent. See
-          // `GrantChannelAccessInput.renewal`.
-          renewal: paid.renewed,
-        },
-      });
 
       return { activated: true, duplicate: false };
     });

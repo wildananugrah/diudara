@@ -33,9 +33,8 @@ export interface SubscriptionRecord {
  * The community's STATUS travels with it because the pass has to decide whether the
  * community still wants renewals at all (an archived one gets no reminders and no
  * revocation, spec §8) — and there is no unscoped community-by-id port method to look
- * it up with, for exactly the same reason `MarkPaidResult` carries `communityId`:
- * `CommunityRepositoryPort` is deliberately creator-scoped, and the renewal pass has no
- * creator.
+ * it up with: `CommunityRepositoryPort` is deliberately creator-scoped, and the renewal
+ * pass has no creator.
  */
 export interface DueRenewalRecord {
   subscription: SubscriptionRecord;
@@ -74,101 +73,6 @@ export interface TransactionRecord {
   updatedAt: Date;
 }
 
-export interface MarkPaidResult {
-  transaction: TransactionRecord;
-  subscription: SubscriptionRecord;
-  /**
-   * The community the activated subscription belongs to, resolved through
-   * `subscription → membership_tier → community` while activating.
-   *
-   * Returned rather than looked up again by the caller because the audit entry
-   * (`activity_log.community_id` is NOT NULL) needs it, and there is no
-   * unscoped tier-by-id port method to reach it with —
-   * `MembershipTierRepositoryPort` is deliberately community-scoped throughout.
-   */
-  communityId: string;
-}
-
-/**
- * What `markPaid` did, or why it did nothing.
- *
- * This used to be `MarkPaidResult | null`, and the `null` conflated two states
- * that must be handled differently. The UPDATE is predicated on
- * `status = 'pending'`, so it affects zero rows for `success` AND for `failed` —
- * and the caller reported both as "already settled, no second activation", HTTP
- * 200. For `success` that is exactly right: it is a replay, and a 2xx is what
- * stops the provider retrying.
- *
- * For `failed` it silently threw a real payment away. Xendit does not retry a
- * 200, and the delivery cannot be replayed afterwards either, because the event id
- * is spent — so money was taken, access was never granted, and the only trace was
- * a log line that called it a duplicate. `failed` is not a status a payment
- * *arrives* into by accident; it means our record and the provider's disagree,
- * which is a person's problem rather than a no-op.
- *
- * The status is already in hand — the implementation reads it to tell "no such
- * transaction" from "not pending any more" — so carrying it out costs nothing.
- */
-export type MarkPaidOutcome =
-  /**
-   * The transaction is now `success` and the subscription is `active`.
-   *
-   * `renewed` distinguishes a first activation from a RENEWAL, which is a distinction
-   * only this method can make: `StartCheckout` reuses the subscription row when a member
-   * renews, so the caller cannot tell afterwards what status the row was in before. The
-   * two are audited differently — Phase 6 counts new members, and a renewal recorded as
-   * a join would inflate that for ever.
-   */
-  | ({ outcome: "activated"; renewed: boolean } & MarkPaidResult)
-  /** Already `success`. An idempotent no-op, and the caller must answer 2xx. */
-  | { outcome: "already_settled"; status: string }
-  /**
-   * Some other non-`pending` status — today only `failed`. A genuine payment for
-   * one of these must be surfaced, never absorbed.
-   */
-  | { outcome: "conflicting_status"; status: string }
-  /**
-   * The transaction was `pending` and settleable, but its SUBSCRIPTION has already
-   * been CHURNED. Nothing was written: the whole statement is rolled back, including
-   * the transaction's own settlement, so the delivery can be replayed.
-   *
-   * `churned` is terminal (see `CHURNED_SUBSCRIPTION` in the implementation) and this
-   * outcome is what makes that true rather than merely stated. The window is real: a
-   * member goes `past_due`, opens the checkout link in their own reminder, and the
-   * churn pass reaches their deadline between the invoice being created and the
-   * callback arriving. Left unguarded, the UPDATE — predicated only on the id —
-   * flipped `churned` back to `active`, and three things followed: the member's
-   * pending `revoke_subscription_access` row then evicted a paid-up member; the
-   * "renewal" reactivated a revoked membership and minted a SECOND invite link, which
-   * spec §7 forbids; and the state machine's terminal state was no longer terminal,
-   * which every later reader (Phase 6 included) would have been misled by.
-   *
-   * IT MUST NOT SILENTLY DROP THE MONEY, which is why it is a rollback and not a
-   * shrug. The caller gets the same loud `ALERT` + refusal treatment as
-   * `conflicting_status`: nothing is recorded, the webhook event id stays unspent, and
-   * the payment is visible and replayable once a person has decided what the member
-   * should get — which is a fresh subscription, not a resurrected one.
-   */
-  | { outcome: "subscription_churned"; subscriptionStatus: string }
-  /**
-   * The transaction settled, but the member ALREADY holds an active subscription
-   * to this tier, so this one was `cancelled` instead of activated.
-   *
-   * A double-submit at checkout creates two pending subscriptions for one
-   * (member, tier), and Phase 4 is the first phase to act on one — each
-   * activation enqueues a `grant_access` row, so two activations mean two
-   * single-use invite links for the same member, one of which can be forwarded to
-   * somebody who never paid. The rule is first-to-activate wins; the second is
-   * superseded.
-   *
-   * The transaction is still `success`, because the money really did arrive.
-   * Recording it as anything else would hide a refund that is owed, and would let
-   * a later delivery activate it. The caller must audit this and must NOT enqueue
-   * a grant. `subscription` is the cancelled row, so the audit entry has the
-   * member and the id.
-   */
-  | ({ outcome: "superseded" } & MarkPaidResult);
-
 /**
  * `subscription` and `transaction` both have an `updated_at` column with no
  * `BEFORE UPDATE` trigger (drizzle-kit does not generate triggers, and the
@@ -176,33 +80,41 @@ export type MarkPaidOutcome =
  * updates either table MUST set `updatedAt: new Date()` explicitly, or the
  * column silently freezes at creation time.
  *
- * **THIRTEEN OF THE SIXTEEN METHODS BELOW HAVE NO PRODUCTION CALLER**, since
- * retire-telegram Task 4 deleted `StartCheckout`, `GetSubscriptionStatus`,
- * `ProcessRenewals`, `ProcessChurn` and `SendRenewalReminder`. Exactly three
- * are still called, and both callers are seams another task owns:
+ * **FIFTEEN OF THE SIXTEEN METHODS THIS PORT ONCE DECLARED ARE GONE OR DEAD.**
+ * Retire-telegram Task 4 deleted `StartCheckout`, `GetSubscriptionStatus`,
+ * `ProcessRenewals`, `ProcessChurn` and `SendRenewalReminder`; Task 5 deleted the
+ * community branch of `HandlePaymentWebhook`, and with it the last two methods
+ * that still had a caller here — `findTransactionByExternalId` and `markPaid`,
+ * both of which are DELETED rather than kept, along with `MarkPaidOutcome` and
+ * `MarkPaidResult`.
  *
- *   `findTransactionByExternalId`  handle-payment-webhook.ts:403  (Task 5)
- *   `markPaid`                     handle-payment-webhook.ts:486  (Task 5)
- *   `findByIdWithCommunity`        authorise-stream.ts:613        (Task 6)
+ * `markPaid` is deleted rather than left dead deliberately. Four of its
+ * behaviours — the churn refusal, the `superseded` cancellation, the renewal's
+ * reminder-row clearing, and the early-renewal anchor — had shipped UNGUARDED
+ * since Task 2 took `renewal-payment.test.ts` with it: mutation proved that
+ * breaking all four at once left the api suite fully green. Code that nothing
+ * calls and nothing checks is worse than no code, and its caller is now gone.
+ *
+ * EXACTLY ONE METHOD IS STILL CALLED:
+ *
+ *   `findByIdWithCommunity`  authorise-stream.ts  (Task 6)
  *
  * The other thirteen — `createPending`, `createActiveWithoutBilling`,
  * `findCurrentSubscriptionForTier`, `findById`, `createTransaction`,
  * `attachGatewayReference`, `findDueForRenewal`, `markPastDue`,
  * `findPastGraceDeadline`, `markChurned`, `hasLiveSubscriptionInCommunity`,
- * `findRenewalContext`, `listActiveForCommunity` — are dead and are KEPT AS A
- * SET, deliberately. Task 4 could not delete this port or
- * `DrizzleSubscriptionRepository` without editing those two seams (removing the
- * implementation file yields exactly two production typecheck errors,
- * `bootstrap.ts` and `drizzle-payment-activation.unit-of-work.ts`), so the whole
- * file dies at Task 5 instead. Trimming an arbitrary subset first would delete
+ * `findRenewalContext`, `listActiveForCommunity` — have no caller and are KEPT
+ * AS A SET until Task 6, deliberately. This port and
+ * `DrizzleSubscriptionRepository` cannot die before then: `AuthoriseStream`'s
+ * constructor takes a `SubscriptionRepositoryPort`, so `bootstrap.ts` has
+ * nothing else to hand it, and editing `authorise-stream.ts` is Task 6's seam
+ * rather than Task 5's. Trimming an arbitrary further subset would delete
  * working, repository-tested code one task before the rest of it goes, and would
  * imply by omission that whatever survived the trim still had a caller. Nothing
- * here does except the three named above.
+ * here does except the one named above.
  *
  * DO NOT read "no caller" as "safe to change": every one of these is still
- * covered by `drizzle-subscription.repository.test.ts` against a real database,
- * and `markPaid` in particular has four behaviours whose only integration
- * coverage Task 2 deleted with `renewal-payment.test.ts`.
+ * covered by `drizzle-subscription.repository.test.ts` against a real database.
  */
 export interface SubscriptionRepositoryPort {
   createPending(input: { memberId: string; tierId: string }): Promise<SubscriptionRecord>;
@@ -226,10 +138,10 @@ export interface SubscriptionRepositoryPort {
    *   - `past_due`, or `active` inside the reminder window → a RENEWAL. The row is
    *     reused; see `isInsideRenewalWindow` for the predicate and why it is that one.
    *   - `active` and nowhere near renewal → 409, which is Phase 3's rule unchanged.
-   *     Without it the member was charged, `markPaid` returned `superseded`, the
-   *     subscription was `cancelled`, no outbox row was enqueued so no WhatsApp message
-   *     was sent at all, and the status page read `cancelled`. Money in, nothing out,
-   *     member never told.
+   *     Without it the member was charged, the duplicate subscription was `cancelled`
+   *     instead of activated, no invite was queued so no WhatsApp message was sent at
+   *     all, and the status page read `cancelled`. Money in, nothing out, member never
+   *     told.
    *
    * This REPLACED a `hasActiveSubscriptionForTier(): boolean`, which could not express
    * the middle case and therefore refused every renewal by an `active` member — including
@@ -259,18 +171,21 @@ export interface SubscriptionRepositoryPort {
    * redirect URL after checkout and may sit in browser history, so a value
    * that cannot possibly be an id must be reported as a MISS (`null`), never
    * raised as a driver error that would become a 500 instead of the 404 an
-   * unknown/malformed id deserves. Same shape as
-   * `findTransactionByExternalId` below, for the same reason.
+   * unknown/malformed id deserves — the same MISS-not-error rule every read on
+   * this port that takes an untrusted id follows.
    */
   findById(id: string): Promise<SubscriptionRecord | null>;
   /**
    * The subscription plus the community it belongs to, resolved through
    * `subscription → membership_tier → community`.
    *
-   * Exists because the outbox worker starts from a subscription id and needs the
-   * community to find the channels to grant — and there is no unscoped
-   * tier-by-id port method to reach it with, for the same reason `MarkPaidResult`
-   * carries `communityId`. Same MISS-not-error rule as `findById`.
+   * THE ONE METHOD ON THIS PORT WITH A CALLER LEFT: `AuthoriseStream`'s `live/`
+   * branch, which is Task 6's seam to delete. It was written for the outbox
+   * worker, which started from a subscription id and needed the community to find
+   * the channels to grant — and there is no unscoped tier-by-id port method to
+   * reach a community with, because `MembershipTierRepositoryPort` was
+   * deliberately community-scoped throughout. Same MISS-not-error rule as
+   * `findById`.
    */
   findByIdWithCommunity(
     id: string
@@ -281,14 +196,6 @@ export interface SubscriptionRepositoryPort {
     paymentMethod: string;
   }): Promise<TransactionRecord>;
   /**
-   * Used by the webhook handler: Xendit echoes our transaction id back as
-   * `external_id`. The argument therefore comes from an untrusted body, and a
-   * value that cannot possibly be an id must be reported as a MISS (`null`) —
-   * never raised as an error, which on this path would become a 500 instead of
-   * the 404 an unknown external id deserves.
-   */
-  findTransactionByExternalId(id: string): Promise<TransactionRecord | null>;
-  /**
    * Records the provider's own invoice id against a transaction we just created,
    * so the webhook has something of OURS to check `body.id` against.
    *
@@ -298,49 +205,6 @@ export interface SubscriptionRepositoryPort {
    * same reason as `CreatorRepositoryPort.beginXenditAccountProvisioning`.
    */
   attachGatewayReference(transactionId: string, gatewayReferenceId: string): Promise<boolean>;
-  /**
-   * Marks a transaction `success` and activates its subscription: `active`,
-   * `started_at` (first activation only), and `next_billing_date` derived from
-   * the tier's `billing_cycle`.
-   *
-   * IT IS ALSO THE RENEWAL PATH, because `StartCheckout` reuses the subscription row
-   * when a member renews (see `findCurrentSubscriptionForTier`). Three things therefore
-   * happen here that only matter for a renewal, and all three are in the SAME
-   * transaction as the status change:
-   *
-   *  1. `grace_ends_at` is CLEARED. A renewed subscription has no deadline.
-   *  2. The subscription's `renewal_reminder` rows are DELETED. That table's unique
-   *     `(subscription_id, stage)` is total, not partial, so a row that survives a
-   *     renewal makes the next period's reminder for that stage read as already
-   *     claimed — the member is never reminded again, invisibly, for a whole cycle.
-   *     Same transaction, so a failure cannot leave them half-cleared.
-   *  3. `next_billing_date` advances from the LATER of `paidAt` and the due date being
-   *     paid for, so renewing early does not shorten the membership. See
-   *     `renewalAnchor` in the implementation.
-   *
-   * Both rows are updates, so both must carry `updatedAt: new Date()`. The two
-   * writes must be atomic with each other — a transaction recorded as collected
-   * against a subscription that never activated is unrecoverable money.
-   *
-   * Reports what happened as a `MarkPaidOutcome` — see that type for why a bare
-   * `null` was not enough. The implementation MUST decide "was it pending?" with
-   * the status IN the UPDATE predicate, not with a preceding read:
-   * `webhook_event.provider_event_id` is the first line of replay defence and
-   * this is the second, so it has to hold even when two deliveries with different
-   * event ids reach the same transaction. Throws only when the transaction does
-   * not exist at all.
-   */
-  markPaid(input: {
-    transactionId: string;
-    gatewayReferenceId: string;
-    paidAt: Date;
-    /**
-     * What the callback reported the payer actually used. Left alone when
-     * `undefined`, so a callback that omits it does not overwrite the value
-     * `createTransaction` recorded with the placeholder it is being replaced by.
-     */
-    paymentMethod?: string | undefined;
-  }): Promise<MarkPaidOutcome>;
   /**
    * Subscriptions the renewal pass has to look at: those due on or before
    * `dueOnOrBefore`, longest-overdue first.

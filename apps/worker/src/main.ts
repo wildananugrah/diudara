@@ -2,25 +2,27 @@
  * The worker: the process that acts because time has passed, and the process that
  * drains the outbox.
  *
- * The outbox's shape is unchanged and still load-bearing: a writer enqueues a row
- * inside its own transaction and returns, and this process claims those rows and
- * performs the effects OUTSIDE any transaction, because an effect is an external HTTP
- * call and a provider outage must delay it, never roll back the payment that caused it
- * (plan, Global Constraints). Retire-telegram removed every HANDLER that used to sit
- * at the far end of that queue — the Telegram invite Phase 4 built it for, and Task
- * 4's renewal reminder last of all — but NOT every writer:
- * `handle-payment-webhook.ts:640` still enqueues `grant_access` on an activated
- * community payment, and removing that writer is Task 5's. See `bootstrapWorker`.
+ * The outbox's shape is unchanged: a writer enqueues a row inside its own transaction
+ * and returns, and this process claims those rows and performs the effects OUTSIDE any
+ * transaction, because an effect is an external HTTP call and a provider outage must
+ * delay it, never roll back the payment that caused it (plan, Global Constraints).
+ *
+ * IT HAS NO WRITER AND NO HANDLER LEFT. Retire-telegram removed every handler at the
+ * far end of that queue — the Telegram invite Phase 4 built it for, and Task 4's
+ * renewal reminder last of all — and Task 5 removed the last WRITER with the payment
+ * webhook's community branch. The queue is now empty in both directions, and the loop
+ * below is kept for one time-limited reason: a database that ran the earlier code can
+ * still hold `grant_access` rows, and draining them into a loud permanent failure
+ * beats leaving them `pending` and unread. See `bootstrapWorker`, which records the
+ * recommendation that this pass and the `outbox` table be retired together.
  *
  * It runs SIX loops, on two cadences:
  *
- *   - the OUTBOX, every 5 seconds, because that interval is the delay a paying member
- *     sees between their payment settling and whatever the row promised them arriving.
- *     Retire-telegram Task 4 removed the last registered handler, so the map this loop
- *     dispatches through is EMPTY today — while a live writer remains (see
- *     `bootstrapWorker`). The loop stays BECAUSE of that writer, not despite the empty
- *     map: it is what makes an unhandleable row fail loudly instead of sitting
- *     `pending` and unread;
+ *   - the OUTBOX, every 5 seconds, because that interval WAS the delay a paying member
+ *     saw between their payment settling and whatever the row promised them arriving.
+ *     Both the handler map and the set of writers are empty today (see
+ *     `bootstrapWorker`), so nothing new can arrive on it; the cadence is left alone
+ *     rather than tuned, because a pass with nothing to claim costs one query;
  *   - the orphan MEDIA SWEEP, the MEMBERSHIP SWEEP, the MEMBERSHIP REMINDER pass, the
  *     PENDING-CHECKOUT CLEANUP and the USER-STREAM SWEEP, hourly. None is
  *     latency-sensitive the way the outbox is, and in every case the pass's OWN window
@@ -183,8 +185,9 @@ const outboxLoop = new PollLoop({
   poll: async () => {
     const result = await processOutbox.execute();
     // Silent when there is nothing to say, so the interesting lines are not
-    // buried under one "claimed 0" per interval. Counts and nothing else: the
-    // rows carry invite links.
+    // buried under one "claimed 0" per interval — which, with no writer left, is
+    // every interval. Counts and nothing else: a row's payload is not ours to
+    // print.
     if (result.claimed > 0 || result.reclaimed > 0) {
       console.log(
         `[worker] reclaimed=${result.reclaimed} claimed=${result.claimed} ` +

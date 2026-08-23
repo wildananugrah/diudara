@@ -70,18 +70,25 @@ cd apps/worker && bun run src/main.ts  # NOT `bun run --filter @diudara/worker s
 cd apps/web    && bun run dev          # http://localhost:5173
 ```
 
-### The worker must be running, or a payment appears to do nothing
+### A payment no longer needs the worker
 
-This is the single most common local surprise. The API **never** issues a Telegram invite
-and **never** sends a WhatsApp message on the checkout path. A settled payment writes a
-`grant_access` row to the `outbox` table inside its own transaction and returns; the
-**worker** is what claims that row and performs the send. Same for renewal reminders and
-for the removal of a churned member.
+It used to. A settled payment wrote a `grant_access` row to the `outbox` table inside its
+own transaction and returned, and the **worker** was what claimed that row and issued the
+Telegram invite — so with no worker running the invoice was paid, the subscription went
+`active`, and nothing ever arrived, with no error anywhere because nothing had failed yet.
+That was the single most common local surprise.
 
-So with no worker running: the invoice is paid, the subscription goes `active`, the
-confirmation page says so — and nothing ever arrives. There is no error anywhere, because
-nothing has failed yet. Check `select status, event_type, attempts, last_error from outbox`
-if you are unsure; `pending` rows with `attempts = 0` mean nobody is polling.
+**Retire-telegram removed it.** A membership grants access by BEING `active`, which is a
+single index hit at read time; there is nothing to send and nothing to queue. The payment
+webhook writes `user_transaction`, `user_subscription` and `webhook_event`, in one
+transaction, and that is the whole of it. `outbox` now has no writer and no registered
+handler: the worker still drains it, so a row left behind by an older deploy fails loudly
+rather than sitting `pending` and unread, and `bootstrapWorker` records the recommendation
+that the pass and the table be retired together.
+
+The worker is still required for the things that happen because TIME has passed — the
+membership-expiry reminder above all, since nothing in this system recurs and that pass is
+the only thing that tells a member their access is about to end.
 
 The worker also runs Phase 5's two clock-driven passes:
 

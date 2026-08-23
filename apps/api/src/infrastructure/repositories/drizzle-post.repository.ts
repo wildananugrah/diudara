@@ -111,9 +111,10 @@ export class DrizzlePostRepository implements PostRepositoryPort {
    * `visibility` and the post's current media for a resulting-state check: a
    * second caller locking the SAME id blocks here until this transaction
    * ends. `of posts` names the table explicitly even though this query has
-   * no join, matching `DrizzleSubscriptionRepository.markPaid`'s own
-   * `for("update", { of: subscriptions })` — naming the target is what keeps
-   * a later join added to this method from silently widening the lock.
+   * no join — naming the target is what keeps a later join added to this
+   * method from silently widening the lock. (The pattern came from
+   * `DrizzleSubscriptionRepository.markPaid`, which retire-telegram Task 5
+   * deleted; the reason for it is independent of that method.)
    */
   async lockForEdit(id: string): Promise<PostOwnership | null> {
     const [row] = await this.db

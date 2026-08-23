@@ -1577,30 +1577,21 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
-  // The community `subscription`/`transaction` repository. Retire-telegram Task 4
-  // deleted every use case built for it — `StartCheckout`, `GetSubscriptionStatus`,
-  // `ProcessRenewals`, `ProcessChurn`, `SendRenewalReminder` — and the plan made
-  // deleting the repository itself BINDING on that task, because
-  // `renewal-payment.test.ts` (deleted in Task 2) held the only coverage of four
-  // `markPaid` behaviours. IT COULD NOT BE DONE HERE, and the reason is structural
-  // rather than a matter of effort:
+  // The community `subscription`/`transaction` repository, and it is down to ONE
+  // consumer. Retire-telegram Task 4 deleted every use case built for it, and
+  // Task 5 removed the last `markPaid`/`findTransactionByExternalId` caller with
+  // the webhook's community branch — deleting both methods, `MarkPaidOutcome` and
+  // `MarkPaidResult` outright, which closes the four `markPaid` behaviours that
+  // had shipped unguarded since Task 2 took `renewal-payment.test.ts`.
   //
-  //   - `markPaid` has exactly ONE caller left, `handle-payment-webhook.ts:486`,
-  //     inside the community branch — and that file is TASK 5's seam.
-  //   - `HandlePaymentWebhook`'s constructor takes a `SubscriptionRepositoryPort`
-  //     (for `findTransactionByExternalId`) and `AuthoriseStream`'s takes one too
-  //     (for `findByIdWithCommunity`, in the `live/` branch that is TASK 6's seam),
-  //     so this line has nothing to hand either of them without editing both.
-  //   - `DrizzlePaymentActivationUnitOfWork` constructs a second instance to satisfy
-  //     `PaymentActivationRepositories.subscriptions`, which exists only for that
-  //     one `markPaid` call.
-  //
-  // Measured, not assumed: deleting the file leaves exactly two production
-  // typecheck errors, `bootstrap.ts:44` and the unit of work's import. THE FOUR
-  // UNGUARDED `markPaid` BEHAVIOURS THEREFORE STILL SHIP UNTIL TASK 5 — the branch
-  // does not merge before the gates, but this is the one item Task 4 could not
-  // close. It closes when Task 5 removes the community branch and Task 6 removes
-  // `authoriseReadByEventId`; the port and both repositories die with them.
+  // IT STILL CANNOT DIE HERE, and the reason is structural rather than a matter
+  // of effort: `AuthoriseStream`'s constructor takes a `SubscriptionRepositoryPort`
+  // (for `findByIdWithCommunity`, in the `live/` branch that is TASK 6's seam), so
+  // this line has nothing else to hand it. Measured after Task 5: deleting the
+  // implementation file leaves exactly ONE production typecheck error, this
+  // file's import — down from two, because `DrizzlePaymentActivationUnitOfWork`
+  // no longer constructs one. The port and this repository die at Task 6, with
+  // `authoriseReadByEventId`.
   const subscriptionRepository = new DrizzleSubscriptionRepository(db);
   // The community `event` repository. Retire-telegram Task 3 deleted every use
   // case it was built for, and removed `getSubscriptionStatus`'s `watchUrl`
@@ -1650,15 +1641,17 @@ export function bootstrap(): Dependencies {
   // value here is ever handed to a caller in that case.
   const streamTokenSecret = presentOrUndefined(process.env.STREAM_TOKEN_SECRET);
 
-  // The webhook's three writes commit together or not at all — see
-  // PaymentActivationUnitOfWorkPort. The read that precedes them uses the
+  // The webhook's writes commit together or not at all — see
+  // PaymentActivationUnitOfWorkPort. The reads that precede them use the
   // pooled repository directly.
   const paymentActivationUnitOfWork = new DrizzlePaymentActivationUnitOfWork(db);
   const handlePaymentWebhook = new HandlePaymentWebhook(
-    subscriptionRepository,
-    // Phase 5a's parallel flow. Xendit delivers ONE webhook stream, so the same
-    // use case resolves both kinds of invoice — routed on the `external_id`
-    // namespace, never guessed (see `domain/user-payment.ts`).
+    // The ONLY kind of invoice this codebase mints. Xendit still delivers one
+    // shared webhook stream to one public endpoint, so `external_id` is still
+    // routed on the `usub_` namespace and never guessed — an id that is not in
+    // it is ignored rather than resolved here (see `domain/user-payment.ts`).
+    // Retire-telegram Task 5 removed the community half and, with it, this
+    // constructor's `SubscriptionRepositoryPort` argument.
     userSubscriptionRepository,
     paymentActivationUnitOfWork,
     clock
