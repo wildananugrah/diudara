@@ -235,6 +235,17 @@ git add -A && git commit -m "chore(api,worker): delete the community-scoped API 
 - Consumes: `USER_SUBSCRIPTION_EXTERNAL_ID_PREFIX = "usub_"`.
 - Produces: a webhook serving one kind of subscription, and still ignoring everything else.
 
+**This task also deletes `DrizzleSubscriptionRepository` and its `markPaid` — my second binding error.**
+I bound them to Task 4, but Task 4 measured the truth: removing the file yields exactly two production
+typecheck errors, and `markPaid`'s one remaining caller is **`handle-payment-webhook.ts:486`, in this
+file**. `HandlePaymentWebhook:131` and `AuthoriseStream:283` both take `SubscriptionRepositoryPort`, so
+`bootstrap()` has nothing else to hand them.
+
+**Four `markPaid` behaviours have shipped unguarded since Task 2** — proven by mutation there: breaking
+all four at once left the api suite fully green, because their only coverage went with
+`renewal-payment.test.ts`. Removing the community branch here is what finally removes them. **Confirm
+in your report that `markPaid` and its repository are gone**, or that only the port remains for Task 6.
+
 **This is the money path, and the rule survives its own second world.** With one kind left, the temptation is to treat "unrecognised prefix" as "must be the surviving kind". **That would activate a membership against a payment for something else.** The outcomes stay: **user**, and **ignored**.
 
 Amount verification and replay idempotency must not move. `webhook_event` **stays** — it is shared and it is what makes a replay safe.
