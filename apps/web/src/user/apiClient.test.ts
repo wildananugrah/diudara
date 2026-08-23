@@ -47,7 +47,6 @@ import {
   USER_TOKEN_STORAGE_KEY,
   type OwnUserProfile,
 } from "./apiClient";
-import { SESSION_EXPIRED_MESSAGE as DASHBOARD_SESSION_EXPIRED_MESSAGE } from "../dashboard/apiClient";
 
 /**
  * Type-level pin (review round 2, Important 2). `OwnUserProfile`'s own
@@ -494,17 +493,15 @@ describe("apiFetch (authenticated)", () => {
   });
 
   /**
-   * F5 (review): `SESSION_EXPIRED_MESSAGE` was never asserted at all, let
-   * alone pinned against the dashboard's own copy of it — so the two could
-   * drift apart silently (a creator's session expiring would say one thing,
-   * a member's another, with nothing here to notice). Both are hardcoded
-   * independently in their own module rather than shared (see this file's
-   * copy of `parseFieldErrors` for the same "stay independent" reasoning),
-   * so equality between them is a fact worth pinning, not a given.
+   * F5 (review), narrowed by Phase 8's Task 1: this used to also pin
+   * `SESSION_EXPIRED_MESSAGE` against the creator dashboard's own copy of
+   * it (`dashboard/apiClient.ts`), which was deleted along with the rest of
+   * the dashboard. The literal-value pin below is what remains worth
+   * keeping — `SESSION_EXPIRED_MESSAGE` was never directly asserted before
+   * F5 either way.
    */
-  it("uses the exact same session-expired copy as the creator dashboard's own apiClient", () => {
+  it("has the exact Indonesian session-expired copy", () => {
     expect(SESSION_EXPIRED_MESSAGE).toBe("Sesi Anda sudah berakhir. Silakan masuk kembali.");
-    expect(SESSION_EXPIRED_MESSAGE).toBe(DASHBOARD_SESSION_EXPIRED_MESSAGE);
   });
 
   it("throws a 404 without clearing the token", async () => {

@@ -46,10 +46,12 @@ function sourceFiles(dir: string): string[] {
 
 /**
  * `fetch(`, `apiFetch(`/`apiFetch<T>(`, `apiRequest(`, `publicPost(`,
- * `publicGet(` — the FIVE call sites this app ever reaches the network
- * through (see `user/apiClient.ts` and `dashboard/apiClient.ts`, which both
- * define `apiFetch`/`apiRequest` in terms of a bare `fetch`, and `api.ts`'s
- * own direct `fetch` calls for the public checkout surface).
+ * `publicGet(` — the network call sites this app reaches through (see
+ * `user/apiClient.ts`, which defines `apiFetch`/`apiRequest` in terms of a
+ * bare `fetch`). Retire-telegram Task 1 deleted `dashboard/apiClient.ts` and
+ * `api.ts`'s own direct-`fetch` public-checkout functions along with the
+ * rest of the old creator dashboard — `user/apiClient.ts` is the only
+ * definer of `apiFetch`/`apiRequest` left in the tree.
  * `publicGet` (Task 5, review round 2 — Important 4) backs every public GET
  * `apiClient.ts` makes for following/Jelajah (`listFollowers`,
  * `listFollowing`, `exploreUsers`) — omitting it here left this guard blind
@@ -57,9 +59,7 @@ function sourceFiles(dir: string): string[] {
  * still reported every check green, exactly the failure mode this file
  * exists to catch. Captures the literal path argument — a plain string or a
  * template literal — and deliberately does NOT match a bare identifier
- * (`fetch(url, init)` in `user/whip-publisher.ts` — moved there from
- * `dashboard/whip-publisher.ts` by Task 8 of the streaming-siaran phase,
- * since Phase 8 deletes the directory it used to live in — is exactly that: an
+ * (`fetch(url, init)` in `user/whip-publisher.ts` is exactly that: an
  * absolute URL handed in from elsewhere, not a same-origin app path, and
  * has nothing here to proxy).
  */
@@ -145,8 +145,18 @@ describe("vite proxy coverage", () => {
     // nothing, the test above would pass vacuously. Pinning that `/users`
     // specifically is found keeps this tied to the incident that motivated
     // it (Task 6's missing `^/users/` entry).
+    //
+    // Retire-telegram Task 1: this threshold used to be `> 3` — it counted
+    // every prefix `api.ts` and `dashboard/apiClient.ts` reached (`/c`,
+    // `/auth`, `/communities`, `/payment-account`, …) before Phase 8 deleted
+    // both files along with every screen that called them. `/users` and
+    // `/streams` are the only two fetch families left in the surviving
+    // `apps/web/src` tree, so `> 1` is what "finds more than one real
+    // prefix, not just a coincidental single match" now means — still a
+    // guard against the extraction matching nothing or matching only one
+    // degenerate case.
     const prefixes = fetchedPrefixes();
-    expect(prefixes.size).toBeGreaterThan(3);
+    expect(prefixes.size).toBeGreaterThan(1);
     expect(prefixes.has("/users")).toBe(true);
   });
 

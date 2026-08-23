@@ -2,9 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { AppRoutes } from "../App";
-import { setSession } from "../dashboard/auth";
-import { resetPaymentAccountCacheForTesting } from "../dashboard/paymentAccount";
-import { stubFetch, TEST_CREATOR } from "../dashboard/testing";
 
 function renderAt(path: string) {
   return render(
@@ -19,7 +16,6 @@ let originalFetch: typeof fetch;
 beforeEach(() => {
   originalFetch = global.fetch;
   localStorage.clear();
-  resetPaymentAccountCacheForTesting();
 });
 
 afterEach(() => {
@@ -53,25 +49,11 @@ describe("an unknown path", () => {
     expect(home.getAttribute("href")).toBe("/");
   });
 
-  // The dashboard keeps its OWN catch-all, which sends an unknown
-  // /dashboard/... path to the dashboard home (CommunitiesPage) rather than
-  // to this page. A signed-out render would redirect to /dashboard/login
-  // before ever reaching that nested catch-all, so this test signs in first
-  // and then confirms the dashboard's own home actually rendered — not just
-  // that this page's own heading is absent, which a login redirect would
-  // also satisfy.
-  it("leaves the dashboard's own catch-all alone", async () => {
-    setSession("jwt-test", TEST_CREATOR);
-    stubFetch([
-      { path: "/payment-account", body: { connected: true, provisioning: false } },
-      { path: "/ai/status", body: { enabled: false } },
-      { path: "/communities", body: [] },
-    ]);
-
+  // Phase 8's Task 1 deleted the creator dashboard entirely, so an unknown
+  // /dashboard/... path now falls through to this page like any other
+  // unknown path — see App.test.tsx's own routing test for that.
+  it("renders this same page for an unknown path under the old /dashboard prefix", () => {
     renderAt("/dashboard/tidak-ada");
-
-    expect(await screen.findByText("Komunitas Anda")).toBeTruthy();
-    const text = document.body.textContent ?? "";
-    expect(text).not.toContain("Halaman tidak ditemukan");
+    expect(screen.getAllByText(/halaman tidak ditemukan/i).length).toBe(1);
   });
 });

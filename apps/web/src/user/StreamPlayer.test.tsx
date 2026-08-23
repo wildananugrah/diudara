@@ -14,8 +14,7 @@ afterEach(() => cleanup());
  * `StreamPlayer` owns the re-mint loop — the task brief's own words: "a
  * player that mints once and never again works for ten minutes and then
  * fails SILENTLY." Every test here injects `attachHls` and `mintToken`
- * rather than touching real `hls.js` or a real network call, the identical
- * shape `WatchPage.test.tsx` uses for `attachPlayer` — happy-dom has no
+ * rather than touching real `hls.js` or a real network call — happy-dom has no
  * `MediaSource`, so a real `hls.js` attach is not exercisable in this
  * environment at all, and none of this suite's own guarantees (mint order,
  * re-mint timing, cleanup) depend on `hls.js` internals.
@@ -142,9 +141,7 @@ function recordingNativeAttach(): {
  * always answers `""` from `canPlayType(...)` (confirmed empirically; there
  * is no native HLS engine in this test environment at all), so a test that
  * needs `defaultAttachHls` to actually TAKE the native branch has to hand it
- * an object that reports canPlayType truthily, the same idea
- * `WatchPage.test.tsx`'s own `safariLikeVideo()` helper uses for
- * `choosePlaybackStrategy`. `Hls.isSupported()` itself is `false` in this
+ * an object that reports canPlayType truthily. `Hls.isSupported()` itself is `false` in this
  * environment regardless (no `MediaSource`), so `defaultAttachHls` reaches
  * this branch's `canPlayType` check for ANY video object passed to it here.
  */
@@ -670,11 +667,10 @@ describe("defaultAttachHls — the native branch re-reads the token (fix round 1
 
     expect(handle).not.toBeNull();
     expect(srcHistory.length).toBe(1);
-    // `withToken` resolves a relative URL against the current origin (see
-    // its own docstring in `pages/WatchPage.tsx`) — matched with `toContain`
-    // for the same reason `WatchPage.test.tsx`'s own equivalent test does:
-    // the origin string itself is an environment detail, not what this test
-    // is pinning.
+    // `withToken` (defined locally in StreamPlayer.tsx — see its own
+    // docstring) resolves a relative URL against the current origin —
+    // matched with `toContain` because the origin string itself is an
+    // environment detail, not what this test is pinning.
     expect(srcHistory[0]).toContain("/u/stream-1/index.m3u8?token=tok-1");
     expect(new URL(srcHistory[0]!, "http://localhost").searchParams.get("token")).toBe("tok-1");
     expect(loadCount()).toBe(1);
