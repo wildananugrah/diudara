@@ -276,6 +276,24 @@ git add -A && git commit -m "refactor(api): the webhook serves one world, and st
 - Consumes: `parseStreamPath(path) -> { world, key } | null`.
 - Produces: an authoriser with one namespace.
 
+**This task also deletes three files Task 3 could not, and that was my planning error.** I listed
+`domain/watch-token.ts`, `event-repository.port.ts` and `drizzle-event.repository.ts` under Task 3 —
+but `authorise-stream.ts` uses `verifyWatchToken` (around line 605) and takes `EventRepositoryPort` as
+a constructor parameter, and that file was explicitly off-limits to Task 3. **No edit order deletes
+them, keeps `tsc` green, and leaves this file untouched.** They die here, at the seam that owns their
+last consumer:
+
+- `apps/api/src/domain/watch-token.ts`
+- `apps/api/src/application/ports/event-repository.port.ts`
+- `apps/api/src/infrastructure/repositories/drizzle-event.repository.ts`
+
+Task 3 narrowed their consumer set to this file, its test, and `mediamtx-webhooks.test.ts`'s community
+`/auth` tests, and left a note in `bootstrap.ts` recording it.
+
+**When you delete `watch-token.ts`, repair rather than delete `user-watch-token.test.ts`'s cross-world
+token test.** It proves a community token cannot open a user stream — a property that still matters
+with one world left, because the signing domain separator is what enforces it.
+
 **This file authorises every publish and every read.** Remove `live/` and `authoriseReadByEventId`, leaving `u/` alone in the allow-list.
 
 **The allow-list stays an allow-list.** Phase 7 built it so an unrecognised prefix *refuses* rather than falling through, and its docstring records a real defect where a looser parser authorised a publish to a path the adapter never constructs. Collapsing to "anything that parses is a user stream" reopens exactly that.
@@ -316,6 +334,7 @@ git add -A && git commit -m "refactor(api): one namespace, still an allow-list"
 - Modify: `apps/api/src/application/use-cases/handle-payment-webhook.ts` (its `activity_log` writes)
 - Rename: `PostEditUnitOfWorkPort` → `PostWriteUnitOfWorkPort`, its adapter, its tests and both call sites
 - Modify: `apps/api/src/domain/user-watch-token.ts` (drop the duplication note now `watch-token.ts` is gone)
+- Modify: `CONTRIBUTING.md` — its "Live streaming" section describes the community flow, which is gone by Task 6. Task 3 flagged it and correctly did not touch prose it did not own; **this task owns it.**
 
 **`activity_log` itself is untouched** — the table stays this phase, so only its old-world writers go. Whether the new world should keep writing it belongs to the follow-up that drops the tables.
 
