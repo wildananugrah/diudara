@@ -606,6 +606,49 @@ describe("POST /streams/:id/watch-token", () => {
     });
   });
 
+  /**
+   * **M8 (re-review). THE ORDERING ITSELF, which nothing pinned.**
+   *
+   * I3's two tests above both use an ENTITLED viewer — a current paying member
+   * and the owner — so neither can observe WHERE the status check sits.
+   * Moving it below `if (!entitled) throw new ForbiddenError(...)` left the
+   * suite at 62 pass / 0 fail: a refusal still happened, with a different
+   * status and a different sentence, and nobody was looking.
+   *
+   * It matters because the two answers say different things to the person
+   * holding the phone. A stranger asking about a broadcast that is over should
+   * be told it is over — 409, "siaran ini sudah berakhir" — not handed a
+   * membership pitch (403, "siaran ini khusus anggota") for a stream nobody
+   * can watch any more, which is the same "sell a membership that buys
+   * nothing" defect fix wave 2 removed from `StreamPlayer`'s own copy.
+   *
+   * BUDI IS DELIBERATELY NOT A MEMBER. That is the whole test: he is exactly
+   * the viewer the 403 branch exists for, so if the status check ran second he
+   * would get a 403 and this reddens.
+   *
+   * The read gate's equivalent ordering IS pinned — `authorise-stream.test.ts`'s
+   * "by KEY / by ID: a PUBLIC stream that ENDED refuses" reaches the status
+   * check with no token at all, which nothing else there can refuse — and that
+   * asymmetry is what made this gap visible.
+   */
+  it("a NON-member minting against an ENDED stream gets the ENDED refusal, not the membership one", async () => {
+    await withStreamingConfigured(async () => {
+      const a = app();
+      const { rina, budi, stream } = await gated(a);
+      // The control: while live, this very viewer gets the MEMBERSHIP refusal.
+      const whileLive = await mintToken(a, stream.id, budi.token);
+      expect(whileLive.status).toBe(403);
+      expect((await whileLive.json()).error).toBe("siaran ini khusus anggota");
+
+      await a.request(`/streams/${stream.id}`, { method: "DELETE", headers: authed(rina.token) });
+
+      const res = await mintToken(a, stream.id, budi.token);
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe("siaran ini sudah berakhir");
+    });
+  });
+
   /** The OWNER is not a special case here — they ended it themselves. */
   it("not even the owner can mint once their own stream has ENDED", async () => {
     await withStreamingConfigured(async () => {
