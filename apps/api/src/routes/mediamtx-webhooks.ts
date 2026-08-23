@@ -176,28 +176,25 @@ export function mediamtxWebhookRoutes(
   });
 
   /**
-   * `GET /webhooks/mediamtx/auth-request` — Task 9. NOT called by MediaMTX.
-   * Called by nginx's `auth_request` directive, once per HTTP request nginx
-   * proxies to MediaMTX's HLS port, closing the gap the rest of this
-   * docstring explains.
+   * `GET /webhooks/mediamtx/auth-request` — NOT called by MediaMTX. Called by
+   * nginx's `auth_request` directive, once per HTTP request nginx proxies to
+   * MediaMTX's HLS port, closing the gap the rest of this docstring explains.
    *
    * THE PROBLEM THIS EXISTS TO FIX: MediaMTX's own `authHTTPAddress`
    * mechanism (the `/auth` route above) authorises a READ only ONCE per
-   * viewer — confirmed empirically for Task 9 (see task-9-report.md): the
-   * FIRST request for a stream mints an internal, MediaMTX-issued session
-   * identifier (returned as `hlsSession`/`cookieCheck` cookies for
+   * viewer — confirmed empirically (see task-9-report.md of the live-streaming
+   * phase): the FIRST request for a stream mints an internal, MediaMTX-issued
+   * session identifier (returned as `hlsSession`/`cookieCheck` cookies for
    * cookie-capable clients, AND rewritten directly into every sub-manifest
    * URI as a `?session=` query parameter for clients that never send
    * cookies at all — which is what `hls.js`'s default, credential-less
    * cross-origin XHR loader is, confirmed with a real browser). EVERY
    * subsequent request carrying that session identifier is let through
-   * WITHOUT calling `/auth` again — `AuthoriseStream.authoriseRead`'s live
-   * entitlement re-check never re-runs for the rest of that viewer's
-   * session, which for an open tab is the rest of the broadcast. A member
-   * who churns mid-stream keeps receiving segments until they close the tab
-   * or the underlying MediaMTX session times out — directly contradicting
-   * design spec §5.2 and this file's own `AuthoriseStream` docstring
-   * ("lose access on their very next segment request").
+   * WITHOUT calling `/auth` again, so whatever `AuthoriseStream` would have
+   * refused on the second request is never asked. For an open tab that is the
+   * rest of the broadcast: a stream the creator ENDED keeps serving segments
+   * (`authoriseUserStreamRead`'s status check never re-runs) until the viewer
+   * closes the tab or MediaMTX's own session times out.
    *
    * THE FIX: put nginx in front of MediaMTX's (already non-public) HLS
    * port, with `auth_request` pointing here for every proxied request —
@@ -206,60 +203,58 @@ export function mediamtxWebhookRoutes(
    * `auth_request` has NO caching of its own: every single HTTP request
    * (master playlist, every sub-playlist reload, every init segment, every
    * media segment, every LL-HLS part) triggers a fresh subrequest here,
-   * which calls the SAME `AuthoriseStream.authoriseRead` the `/auth` route
-   * calls — the SAME live database re-check, every time, regardless of
+   * which reaches the SAME `authoriseUserStreamRead` decision the `/auth`
+   * route reaches — the same live row, re-read every time, regardless of
    * whatever MediaMTX itself would have cached. This does not change
    * `AuthoriseStream` at all; it changes how often it gets asked.
    *
    * WHY A SEPARATE ROUTE, NOT A REUSED `/auth`: nginx's `auth_request`
    * subrequest has no built-in way to construct MediaMTX's POST-JSON-body
    * contract (it mirrors the original request, normally a bodyless GET) —
-   * so this route accepts the inputs `AuthoriseStream.authoriseReadByEventId`
-   * actually needs as HEADERS instead: `X-Mtx-Event-Id` (built by nginx from
-   * the PUBLIC request URL's captured event id — see the nginx config) and
-   * `X-Watch-Token` (the SAME watch token `hls.js`'s `xhrSetup` re-attaches
-   * to every request, per Task 8). `action` is implicitly `"read"`: nginx
-   * only ever proxies HLS reads here — RTMP publish (port 1935) is never
-   * proxied through nginx at all (see CONTRIBUTING.md's port-asymmetry note),
-   * so this route has no publish case to handle.
+   * so this route accepts the inputs
+   * `AuthoriseStream.authoriseUserReadByStreamId` actually needs as HEADERS
+   * instead: `X-Mtx-Stream-Id` (built by nginx from the PUBLIC request URL's
+   * captured stream id — see the nginx config) and `X-Watch-Token` (the SAME
+   * watch token `hls.js`'s `xhrSetup` re-attaches to every request).
+   * `action` is implicitly `"read"`: nginx only ever proxies HLS reads here —
+   * RTMP publish (port 1935) is never proxied through nginx at all (see
+   * CONTRIBUTING.md's port-asymmetry note), so this route has no publish case
+   * to handle.
    *
-   * TWO WORLDS, ONE ROUTE, TOLD APART BY WHICH ID HEADER ARRIVES — Phase 7's
-   * Task 4. `X-Mtx-Event-Id` names a community `event` and resolves through
-   * `authoriseReadByEventId`; `X-Mtx-Stream-Id` names a `user_stream` and
-   * resolves through `authoriseUserReadByStreamId`. The nginx template's
-   * `^~ /live/` and `^~ /u/` locations each send exactly one, through their
-   * own internal `auth_request` location, and a request carrying BOTH or
-   * NEITHER is refused rather than resolved by precedence — see the check in
-   * the handler. Both worlds answer with the SAME `X-Stream-Key` response
-   * header, because both need the same rewrite for the same reason: the
-   * public path names an id, MediaMTX's internal path names a key. This is
-   * one route rather than two because the CONTRACT is identical (a secret
-   * header, an id header, a token header, a status code and one response
-   * header) — only the table the id lives in differs, and that is exactly
-   * what the two header names say.
+   * ONE WORLD, ONE ID HEADER — Phase 8, Task 6. This route used to serve two,
+   * told apart by WHICH id header arrived: `X-Mtx-Event-Id` named a community
+   * `event` and resolved through `AuthoriseStream.authoriseReadByEventId`,
+   * `X-Mtx-Stream-Id` names a `user_stream` and resolves through
+   * `authoriseUserReadByStreamId`. Retiring Telegram deleted the community
+   * world and that entry point with it, so `X-Mtx-Event-Id` is no longer read
+   * here at all.
    *
-   * FINAL WHOLE-BRANCH REVIEW CRITICAL, FIXED HERE: this route used to read
-   * `X-Mtx-Path` (`live/<streamKey>`) and call `AuthoriseStream.execute`
-   * with `action: "read"` — resolving by STREAM KEY, the same identifier
-   * that authorises a publish. That was safe only because, before this fix,
-   * the PUBLIC path a member's browser requested (`/live/<streamKey>/...`)
-   * happened to equal MediaMTX's INTERNAL path — so nginx's own regex
-   * capture from the public URL already was the stream key. Once
-   * `ResolveWatchToken` stopped handing that key to members (see its own
-   * docstring), the public path became `/live/<eventId>/...` instead, and
-   * this route had to change what it resolves BY, not just what it is
-   * called: `X-Mtx-Event-Id` names the event id nginx captured, and
-   * `AuthoriseStream.authoriseReadByEventId` resolves it via `findById` (the
-   * unscoped-by-id lookup, not `findByStreamKey`). On success, the response
-   * now also carries an `X-Stream-Key` HEADER (never a body field) so nginx
-   * can rewrite the request onto MediaMTX's still-`live/<streamKey>`-shaped
-   * internal path before proxying — see the nginx config's
-   * `auth_request_set` for the other half of this. The key crosses this one
-   * response header, read only by nginx over `127.0.0.1`/loopback, and is
-   * never in a body a browser could ever see.
+   * WHAT THAT MEANS FOR A STALE `^~ /live/` LOCATION, stated rather than left
+   * to be discovered: an nginx deployment still fronting the retired
+   * community path sends an event id and no stream id, and this route
+   * REFUSES it — `presentId` finds no stream id, and there is no fallback
+   * that could read the event id instead. Fail-closed, and the same shape the
+   * `/lifecycle` route's 404 has: a namespace this API no longer serves gets
+   * an answer that differs from a healthy one, rather than silently resolving
+   * as the surviving world. Nothing here ever assumes "the only world left"
+   * from "an id of some kind arrived".
+   *
+   * WHY BY ID AND NOT BY STREAM KEY. `GET /streams` publishes
+   * `/u/<streamId>/index.m3u8`, never a URL carrying the stream key, because
+   * a stream key authorises a PUBLISH — the retired community world shipped
+   * exactly that defect (its member-facing HLS URL was built from the same
+   * `streamKey` that authorised a publish, so the URL handed to every paying
+   * member WAS the broadcast credential) and then fixed it by resolving on an
+   * opaque row id instead. So this route resolves by that id, and on success
+   * answers with an `X-Stream-Key` HEADER (never a body field) so nginx can
+   * rewrite the request onto MediaMTX's still-`u/<streamKey>`-shaped internal
+   * path before proxying — see the nginx config's `auth_request_set` for the
+   * other half of this. The key crosses this one response header, read only
+   * by nginx over `127.0.0.1`/loopback, and is never in a body a browser
+   * could ever see.
    *
    * HEADERS, NOT QUERY PARAMETERS — found running this for real, not from
-   * documentation. The obvious design reuses `?eventId=...&token=...` on
+   * documentation. The obvious design reuses `?streamId=...&token=...` on
    * this route's own URL, exactly like `/auth`'s `secret` query parameter.
    * It does not work: nginx's `auth_request` subrequest does NOT inherit
    * `$args`/`$arg_*` from the request it is authorising — confirmed with a
@@ -303,38 +298,25 @@ export function mediamtxWebhookRoutes(
       return c.json(REFUSED_BODY, 403);
     }
 
-    const eventId = presentId(c.req.header("X-Mtx-Event-Id"));
     const streamId = presentId(c.req.header("X-Mtx-Stream-Id"));
     const token = c.req.header("X-Watch-Token");
     const query = token ? `token=${encodeURIComponent(token)}` : "";
 
-    // EXACTLY ONE of the two ids, never both and never neither. Each nginx
-    // location sends its own and CLEARS the other's (`^~ /live/` sends the
-    // event id, `^~ /u/` the stream id — see the two internal locations in
-    // `infra/nginx/live-hls.conf.template`), so a request carrying both did
-    // not come from a location in this repository's template — and picking a
-    // winner by precedence would make which WORLD authorises a request depend
-    // on a rule nobody reading the nginx config can see. Refuse instead, with
-    // the same body every other refusal here uses.
-    //
-    // `presentId` above is what keeps this rule from depending on nginx —
-    // read its docstring before changing either.
-    if ((eventId === undefined) === (streamId === undefined)) {
+    // NO STREAM ID, NO RESOLUTION. `presentId` above is what keeps this rule
+    // from depending on nginx: an id header that arrived empty, or holding
+    // nothing but whitespace, counts as ABSENT — read its docstring before
+    // changing either. A request from a stale `^~ /live/` location carries an
+    // event id and lands here too; it is refused by this same line, because
+    // nothing in this route reads that header any more.
+    if (streamId === undefined) {
       return c.json(REFUSED_BODY, 403);
     }
 
-    const result =
-      streamId !== undefined
-        ? await deps.authoriseStream.authoriseUserReadByStreamId({
-            streamId,
-            query,
-            now: Date.now(),
-          })
-        : await deps.authoriseStream.authoriseReadByEventId({
-            eventId: eventId!,
-            query,
-            now: Date.now(),
-          });
+    const result = await deps.authoriseStream.authoriseUserReadByStreamId({
+      streamId,
+      query,
+      now: Date.now(),
+    });
 
     if (!result.allowed) {
       return c.json(REFUSED_BODY, 403);

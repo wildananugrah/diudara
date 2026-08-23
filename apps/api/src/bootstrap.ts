@@ -41,7 +41,6 @@ import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapt
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
 import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter";
-import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
 import { DrizzleUserPurchaseUnitOfWork } from "./infrastructure/repositories/drizzle-user-purchase.unit-of-work";
 import { SystemClock } from "./infrastructure/clock/system.clock";
@@ -49,7 +48,6 @@ import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
 import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
 import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
-import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
 import {
   StartUserStream,
   ListLiveStreams,
@@ -931,7 +929,7 @@ export function resolveMaxPostImages(value: string | undefined): number {
  * `MEDIAMTX_WEBHOOK_SECRET` is the ONLY authentication on both MediaMTX
  * webhooks (Task 4), and
  * `STREAM_TOKEN_SECRET` signs every watch token
- * (`apps/api/src/domain/watch-token.ts`) — a short one is
+ * (`apps/api/src/domain/user-watch-token.ts`) — a short one is
  * offline-brute-forceable from a single leaked token or webhook payload, and
  * either lets an attacker reach a paid stream they never paid for.
  */
@@ -1577,30 +1575,6 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
-  // The community `subscription`/`transaction` repository, and it is down to ONE
-  // consumer. Retire-telegram Task 4 deleted every use case built for it, and
-  // Task 5 removed the last `markPaid`/`findTransactionByExternalId` caller with
-  // the webhook's community branch — deleting both methods, `MarkPaidOutcome` and
-  // `MarkPaidResult` outright, which closes the four `markPaid` behaviours that
-  // had shipped unguarded since Task 2 took `renewal-payment.test.ts`.
-  //
-  // IT STILL CANNOT DIE HERE, and the reason is structural rather than a matter
-  // of effort: `AuthoriseStream`'s constructor takes a `SubscriptionRepositoryPort`
-  // (for `findByIdWithCommunity`, in the `live/` branch that is TASK 6's seam), so
-  // this line has nothing else to hand it. Measured after Task 5: deleting the
-  // implementation file leaves exactly ONE production typecheck error, this
-  // file's import — down from two, because `DrizzlePaymentActivationUnitOfWork`
-  // no longer constructs one. The port and this repository die at Task 6, with
-  // `authoriseReadByEventId`.
-  const subscriptionRepository = new DrizzleSubscriptionRepository(db);
-  // The community `event` repository. Retire-telegram Task 3 deleted every use
-  // case it was built for, and removed `getSubscriptionStatus`'s `watchUrl`
-  // (its other consumer) along with them. EXACTLY ONE consumer is left:
-  // `authoriseStream`'s `live/` branch, which is Task 6's seam to remove — and
-  // when it goes, this repository, `EventRepositoryPort` and
-  // `domain/watch-token.ts` all go with it. Task 3 could not delete them itself
-  // without editing `authorise-stream.ts`, which is Task 6's file.
-  const eventRepository = new DrizzleEventRepository(db);
   const appBaseUrl = resolveAppBaseUrl({
     appBaseUrl: process.env.APP_BASE_URL,
     nodeEnv: process.env.NODE_ENV,
@@ -1651,7 +1625,8 @@ export function bootstrap(): Dependencies {
     // routed on the `usub_` namespace and never guessed — an id that is not in
     // it is ignored rather than resolved here (see `domain/user-payment.ts`).
     // Retire-telegram Task 5 removed the community half and, with it, this
-    // constructor's `SubscriptionRepositoryPort` argument.
+    // constructor's community subscription-repository argument; Task 6 deleted
+    // that port and its implementation outright.
     userSubscriptionRepository,
     paymentActivationUnitOfWork,
     clock
@@ -1772,9 +1747,7 @@ export function bootstrap(): Dependencies {
   // selectors agreeing forever about what "configured" means.
   const mediamtxWebhookSecret = presentOrUndefined(process.env.MEDIAMTX_WEBHOOK_SECRET);
   const authoriseStream = streamTokenSecret
-    ? new AuthoriseStream(eventRepository, subscriptionRepository, userStreamRepository, {
-        streamTokenSecret,
-      })
+    ? new AuthoriseStream(userStreamRepository, { streamTokenSecret })
     : undefined;
 
   // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`

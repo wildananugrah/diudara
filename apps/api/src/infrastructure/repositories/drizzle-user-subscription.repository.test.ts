@@ -322,8 +322,8 @@ describe("DrizzleUserSubscriptionRepository", () => {
    * yields `""` and `usub_x` yields `"x"`. Task 7's webhook is a PUBLIC endpoint
    * that will feed exactly this value straight into these reads, and postgres
    * raises on a malformed uuid — a 500 anyone can trigger at will. Shape-checked
-   * here, exactly as `DrizzleSubscriptionRepository` already shape-checks the
-   * community handler's own `external_id`.
+   * here, exactly as the retired community subscription repository already
+   * shape-checked the community handler's own `external_id`.
    */
   it("answers null — never throws — for an id that cannot be a uuid at all", async () => {
     for (const junk of ["", "x", "usub_", "not-a-uuid", "00000000-0000-4000-8000-00000000000"]) {

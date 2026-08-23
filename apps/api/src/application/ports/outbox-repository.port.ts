@@ -110,7 +110,8 @@ export const OUTBOX_REVOKE_SUBSCRIPTION_ACCESS = "revoke_subscription_access";
  * notified successfully — `(eventId, subscriptionId)` would be exactly as natural an
  * idempotency key as `renewal_reminder`'s `(subscription_id, stage)` claim table, and
  * this codebase already ships that shape once. No claim table was added for this event
- * type because a watch token is a stateless HMAC (`domain/watch-token.ts`): re-minting
+ * type because a watch token is a stateless HMAC (the retired
+ * `domain/watch-token.ts`, and `domain/user-watch-token.ts` after it): re-minting
  * one for a retry creates no provider-side artifact, categorically unlike Phase 4's
  * Telegram invite link, where a re-mint produced a second live, unkillable credential.
  * A duplicate message is a nuisance; a duplicate invite link was a security bug.

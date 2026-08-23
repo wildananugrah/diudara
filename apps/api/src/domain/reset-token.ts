@@ -3,8 +3,8 @@
  * their hash — never their plaintext.
  *
  * Pure module: no imports from `application/` or `infrastructure/`, no
- * database, no clock — mirrors `domain/watch-token.ts` in that discipline,
- * though unlike that module this one is not itself signed. A reset token is
+ * database, no clock — mirrors `domain/user-watch-token.ts` in that
+ * discipline, though unlike that module this one is not itself signed. A reset token is
  * a bare random secret whose only proof of validity is "the database has a
  * row whose hash matches, unexpired and unused" — there is no payload to
  * verify offline, so there is nothing here for a `verify` function to do.

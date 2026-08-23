@@ -131,7 +131,8 @@ describe("DrizzleUserStreamRepository", () => {
    * this method. Without the guard, `GET /u/anything/index.m3u8` becomes a
    * Postgres `invalid input syntax for type uuid` — a 500 on apps/api for
    * every mistyped or probed URL, where the honest answer is "no such
-   * stream". Same rule, same wording, as `EventRepositoryPort.findById`.
+   * stream". Same rule, same wording, as `UserStreamRepositoryPort.findById`
+   * states it — and as the retired community `event` port stated it before.
    */
   it("answers a MISS, not a driver error, for an id that is not a uuid at all", async () => {
     expect(await repo.findById("../../etc/passwd")).toBe(null);

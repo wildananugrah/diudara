@@ -33,8 +33,9 @@ export interface UserStreamRepositoryPort {
    * Inserts a `live` row. THIS is the write the partial unique index
    * `user_stream_one_live` arbitrates: a bare INSERT, so nothing here can
    * see in advance whether the owner already holds a `live` row — the same
-   * shape as `DrizzleSubscriptionRepository.createActiveWithoutBilling`,
-   * and for the same reason (a read-then-write pre-check is always a TOCTOU
+   * shape the retired community subscription repository used for its own
+   * `createActiveWithoutBilling`, and for the same reason (a read-then-write
+   * pre-check is always a TOCTOU
    * race under concurrency; 5a established this three times over). Throws
    * `UniqueViolationError` when the owner already has one `live`.
    */
@@ -48,16 +49,17 @@ export interface UserStreamRepositoryPort {
   /**
    * Unscoped by owner ON PURPOSE — `AuthoriseStream` (Task 4) knows only the
    * key baked into the `u/<key>` publish/read path and has no authenticated
-   * owner to scope by. The same sanctioned exception `EventRepositoryPort.
-   * findByStreamKey` documents. `null` when no row carries this key.
+   * owner to scope by. It is the ONE sanctioned unscoped lookup on this
+   * port, and the retired community `event` port documented the identical
+   * exception for the identical reason. `null` when no row carries this key.
    */
   findByStreamKey(streamKey: string): Promise<UserStreamRow | null>;
 
   /**
    * Unscoped by owner ON PURPOSE — the lifecycle webhook and the hourly
    * sweep both resolve a specific row by id with no authenticated caller in
-   * the picture, the same shape as `EventRepositoryPort.findById`. `null`
-   * when the id does not exist.
+   * the picture — the second sanctioned unscoped lookup here, alongside
+   * `findByStreamKey` above. `null` when the id does not exist.
    */
   findById(id: string): Promise<UserStreamRow | null>;
 
@@ -81,7 +83,8 @@ export interface UserStreamRepositoryPort {
   /**
    * Transitions to `ended`, but ONLY from `live` — the status check is IN
    * the UPDATE's predicate, not a preceding read, the same atomic-predicate
-   * shape as `EventRepositoryPort.markEnded` and for the same reason: it is
+   * shape the retired community `event` port used for its own `markEnded`,
+   * and for the same reason: it is
    * what makes the transition safe under a flapping lifecycle webhook, or
    * the hourly sweep racing the webhook for the same row. Returns `null`
    * when `id` does not exist or the row is already `ended` — either way,

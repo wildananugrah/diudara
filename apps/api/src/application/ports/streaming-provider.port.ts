@@ -47,16 +47,35 @@ export interface StreamingProviderPort {
  * The top-level path segment a stream is published and read under, and the
  * ONE thing that tells the two worlds apart on the wire.
  *
- * These two literals are the SAME pair `parseStreamPath`'s `NAMESPACES` map
- * (authorise-stream.ts) recognises — `live` for the community `event` world,
- * `u` for a person's own `user_stream` (design spec §6). The two are
- * deliberately declared separately rather than derived from one another: the
- * map's job is to REFUSE a segment it does not know, which means it must own
- * its own key set, and importing a use-case's constant into a port would
- * invert this codebase's dependency direction for the sake of five
- * characters. They must be kept in step by hand, and adding a third
- * namespace means adding it in both places — see `NAMESPACES`' own docstring,
- * which says the same thing from the other side.
+ * `u` names a person's own `user_stream` (design spec §6). It is the only
+ * value any production caller passes: `StartUserStream` is the sole
+ * `createSession` call site in `src/`, and it passes `"u"`.
+ *
+ * `live` NAMED THE COMMUNITY `event` WORLD, WHICH PHASE 8 DELETED. It is kept
+ * in this union deliberately rather than removed, and the reason is scope
+ * rather than design: retire-telegram Task 6 removed the AUTHORISATION side
+ * (`parseStreamPath`'s `NAMESPACES` map now holds `u` alone, and
+ * `AuthoriseStream` refuses everything else), and the CONSTRUCTION side —
+ * this union, `whipSuffix`'s two-branch asymmetry in `mediamtx.adapter.ts`,
+ * and the adapter tests that pin it — was not that task's to unwind.
+ *
+ * SO THE TWO SIDES NO LONGER MATCH, and that is the thing to know before
+ * using this type. A caller CAN still ask an adapter to build
+ * `rtmp://host:1935/live/<key>`, and nothing will ever authorise a publish to
+ * it: `AuthoriseStream.execute` refuses the namespace outright. That fails
+ * CLOSED — a creator handed such a URL simply cannot go live — but it fails
+ * at runtime rather than at compile time, which is exactly what this union
+ * exists to prevent. **Do not add a `namespace: "live"` call site.** Narrowing
+ * this to `"u"` (and deleting `whipSuffix`'s community branch with it) is the
+ * follow-up that closes it properly.
+ *
+ * The construction and authorisation sides are deliberately declared
+ * separately rather than derived from one another: the map's job is to REFUSE
+ * a segment it does not know, which means it must own its own key set, and
+ * importing a use-case's constant into a port would invert this codebase's
+ * dependency direction for the sake of five characters. The cost of that
+ * choice is that they must be kept in step BY HAND — and the paragraph above
+ * is what it looks like when they are not.
  */
 export type StreamNamespace = "live" | "u";
 

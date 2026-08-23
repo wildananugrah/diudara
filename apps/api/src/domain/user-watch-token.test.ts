@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import { createHmac } from "node:crypto";
-import { mintWatchToken, WATCH_TOKEN_TTL_MS } from "./watch-token";
 import {
   mintUserWatchToken,
   USER_WATCH_TOKEN_TTL_MS,
@@ -82,29 +81,39 @@ describe("user watch tokens", () => {
   });
 
   /**
-   * THE TWO WORLDS SHARE ONE SECRET (`STREAM_TOKEN_SECRET`) and one encoding,
-   * so nothing about the wire format keeps a community `watch-token.ts` token
-   * out of this verifier. A community token opening a user stream would be a
-   * paywall bypass for anybody holding ANY subscription anywhere, so the
-   * refusal is pinned outright.
+   * A COMMUNITY watch token, minted with the very same `STREAM_TOKEN_SECRET`
+   * and the very same encoding, must not open a user stream. That would be a
+   * paywall bypass available to anybody holding ANY subscription anywhere, so
+   * the refusal is pinned outright.
    *
-   * FIX ROUND 1, MIN-2 — WHAT ACTUALLY REFUSES IT, measured rather than
-   * assumed: the `typeof payload?.viewerId !== "string"` shape check, NOT the
-   * domain separator. A community payload carries `subscriptionId`/`eventId`
-   * and no `viewerId`, so this test stays green with the separator deleted.
-   * That is worth knowing and the property is worth pinning — it is the
-   * outcome a member cares about — but the comment used to credit the
-   * separator for it, which was false. The separator has its own test two
-   * cases below, and it is the only one that reaches it.
+   * PHASE 8, TASK 6 — REPAIRED, NOT DELETED. This case used to call
+   * `mintWatchToken` from `./watch-token`, and retiring Telegram deleted that
+   * module. The property did not die with it: `STREAM_TOKEN_SECRET` is still
+   * the one secret, the wire format is still `<base64url payload>.<HMAC>`, and
+   * a token of the retired shape is still something a leaked secret or an old
+   * deploy can produce. So the community token is BUILT HERE instead, by
+   * writing out the deleted module's formula — a bare-payload HMAC over a
+   * `{ subscriptionId, eventId, exp }` payload, no domain separator, six-hour
+   * expiry. That duplication IS the assertion, exactly as it is in the
+   * separator case at the bottom of this file: if this verifier ever accepts
+   * what the formula produces, the two worlds' tokens are interchangeable
+   * again.
+   *
+   * WHAT ACTUALLY REFUSES IT, measured rather than assumed (fix round 1,
+   * MIN-2 of the Phase 7 branch): the `typeof payload?.viewerId !== "string"`
+   * shape check, NOT the domain separator. A community payload carries
+   * `subscriptionId`/`eventId` and no `viewerId`, so this test stays green
+   * with the separator deleted. That is worth knowing and the property is
+   * worth pinning — it is the outcome a member cares about — but the separator
+   * has its own test at the bottom of this file, and it is the only one that
+   * reaches it.
    */
   it("refuses a COMMUNITY watch token minted with the very same secret", () => {
-    const communityToken = mintWatchToken({
-      subscriptionId: VIEWER,
-      eventId: STREAM,
-      now: NOW,
-      ttlMs: WATCH_TOKEN_TTL_MS,
-      secret: SECRET,
-    });
+    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+    const encoded = Buffer.from(
+      JSON.stringify({ subscriptionId: VIEWER, eventId: STREAM, exp: NOW + SIX_HOURS_MS })
+    ).toString("base64url");
+    const communityToken = `${encoded}.${createHmac("sha256", SECRET).update(encoded).digest("base64url")}`;
 
     expect(verifyUserWatchToken({ token: communityToken, now: NOW, secret: SECRET })).toBeNull();
   });

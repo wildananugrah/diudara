@@ -186,8 +186,9 @@ export const UniqueRule = {
    * the first caller to hit this from an INSERT: an already-approved member
    * can file a fresh pending request (the partial index on `join_request`
    * only covers `pending` rows), and approving it a second time would
-   * otherwise raise a raw `23505`. See `DrizzleSubscriptionRepository.
-   * createActiveWithoutBilling`.
+   * otherwise raise a raw `23505`. The community subscription repository's
+   * `createActiveWithoutBilling` was where this surfaced; retire-telegram
+   * Task 6 deleted it, and the rule this constant names outlives it.
    */
   subscriptionMemberTierActive: "subscription_member_tier_active",
   /**
