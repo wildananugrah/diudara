@@ -1,6 +1,5 @@
 import { db } from "./db/client";
 import {
-  assertUsableStreamingSecret,
   resolveAppBaseUrl,
   selectEmailProvider,
   selectMessagingProviders,
@@ -11,7 +10,6 @@ import type { EmailProviderPort } from "./application/ports/email-provider.port"
 import { RemindExpiringMembership } from "./application/use-cases/remind-expiring-membership";
 import { SystemClock } from "./infrastructure/clock/system.clock";
 import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
-import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
 import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleMembershipReminderRepository } from "./infrastructure/repositories/drizzle-membership-reminder.repository";
 import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
@@ -25,15 +23,8 @@ import {
   SendRenewalReminder,
   sendRenewalReminderOutboxHandler,
 } from "./application/use-cases/send-renewal-reminder";
-import {
-  NotifyStreamLive,
-  notifyStreamLiveOutboxHandler,
-} from "./application/use-cases/notify-stream-live";
 import { ProcessOutbox, type OutboxHandler } from "./application/use-cases/process-outbox";
-import {
-  OUTBOX_NOTIFY_STREAM_LIVE,
-  OUTBOX_SEND_RENEWAL_REMINDER,
-} from "./application/ports/outbox-repository.port";
+import { OUTBOX_SEND_RENEWAL_REMINDER } from "./application/ports/outbox-repository.port";
 
 /**
  * What `apps/worker` needs to do its job. `messaging` is exposed so a test can
@@ -68,17 +59,6 @@ export interface WorkerDependencies {
    * unreachable for a whole phase because nothing checked that wiring.
    */
   sendRenewalReminder: SendRenewalReminder;
-  /**
-   * Task 5's `notify_stream_live` consumer — `undefined` exactly when
-   * `STREAM_TOKEN_SECRET` is unset, mirroring `Dependencies.authoriseStream`'s
-   * own undefined-ness in the API root: without it there is no secret to sign
-   * a watch token with, and a row can only exist at all if the API's own
-   * `handleStreamLifecycle` was configured to enqueue one, which needs the
-   * same secret. Exposed for the same reason as `sendRenewalReminder`: a test
-   * must be able to prove the worker can actually notify a member, not only
-   * that a handler is registered under the right string.
-   */
-  notifyStreamLive: NotifyStreamLive | undefined;
   /**
    * Task 4 of Phase 5b's SCHEDULED pass — the one that tells a member their membership
    * is about to end.
@@ -175,64 +155,24 @@ export function bootstrapWorker(): WorkerDependencies {
     clock
   );
 
-  // Task 5's `notify_stream_live` consumer. `STREAM_TOKEN_SECRET` is read directly
-  // here, exactly the way `bootstrap()` reads it for `authoriseStream`, rather than
-  // re-derived from anything else — see `WorkerDependencies.notifyStreamLive`'s own
-  // docstring for why `undefined` here can only happen alongside the API root's own
-  // `authoriseStream`/`handleStreamLifecycle` being `undefined` too.
-  //
-  // Run through `assertUsableStreamingSecret` — the SAME length floor
-  // `selectStreamingProvider` enforces on the API side, not a bare presence check.
-  // Without it, a worker box whose `STREAM_TOKEN_SECRET` diverges from (or is merely
-  // shorter/weaker than) the API's own would happily mint watch tokens the API's
-  // `AuthoriseStream` rejects at read time — every member gets a link that 403s on
-  // every segment, and nothing here would ever fail to surface it.
-  const streamTokenSecret =
-    typeof process.env.STREAM_TOKEN_SECRET === "string" && process.env.STREAM_TOKEN_SECRET.length > 0
-      ? process.env.STREAM_TOKEN_SECRET
-      : undefined;
-  if (streamTokenSecret) {
-    assertUsableStreamingSecret("STREAM_TOKEN_SECRET", streamTokenSecret);
-  }
-  const notifyStreamLive = streamTokenSecret
-    ? new NotifyStreamLive(
-        new DrizzleEventRepository(db),
-        new DrizzleSubscriptionRepository(db),
-        new DrizzleMemberRepository(db),
-        new DrizzleActivityLogRepository(db),
-        messaging.notifier,
-        // The SAME clock instance every other pass in this root shares — see
-        // `WorkerDependencies.clock`'s own docstring for why a second clock
-        // constructed here would be a bug, not a style choice.
-        clock,
-        {
-          appBaseUrl: resolveAppBaseUrl({
-            appBaseUrl: process.env.APP_BASE_URL,
-            nodeEnv: process.env.NODE_ENV,
-          }),
-          streamTokenSecret,
-        }
-      )
-    : undefined;
-
   // Retire-telegram Task 2 removed four registrations from this map:
   // `grant_access`, `revoke_access`, `revoke_subscription_access` and
   // `notify_join_request`, whose handlers went with the channel-access and
-  // join-request use cases. An unregistered type is NOT silent — see the comment
-  // on `notify_stream_live` just below — so a row of any of those types now fails
-  // with "no handler is registered", which is what `worker-bootstrap.test.ts`
-  // asserts on.
+  // join-request use cases; Task 3 removed a fifth, `notify_stream_live`, whose
+  // handler went with `NotifyStreamLive` and the community broadcast it told
+  // members about. That also removed this root's ONLY reader of
+  // `STREAM_TOKEN_SECRET` — the worker signs nothing now, so it no longer reads
+  // the variable and no longer refuses to boot over its length. The API root
+  // still enforces that floor for its own `authoriseStream`; there is simply
+  // nothing left here for a weak secret to corrupt.
+  //
+  // An unregistered type is NOT silent: `ProcessOutbox` fails the row (bounded
+  // retry, then permanent), so a row of any of those five types now fails with
+  // "no handler is registered", which is what `worker-bootstrap.test.ts` asserts
+  // on. That is the right outcome for a row nothing in this process can act on.
   const handlers = new Map<string, OutboxHandler>([
     [OUTBOX_SEND_RENEWAL_REMINDER, sendRenewalReminderOutboxHandler(sendRenewalReminder)],
   ]);
-  // Registered ONLY when configured — an unregistered event type is not silent:
-  // `ProcessOutbox` fails the row (bounded retry, then permanent), which is the
-  // right outcome for a `notify_stream_live` row that should never have been
-  // enqueued in the first place on a box with streaming disabled.
-  if (notifyStreamLive) {
-    handlers.set(OUTBOX_NOTIFY_STREAM_LIVE, notifyStreamLiveOutboxHandler(notifyStreamLive));
-  }
-
   // Task 4 of Phase 5b: reminding a member BEFORE their membership ends. Selected
   // through the SAME allowlist the API root uses, and it may legitimately be `null` —
   // a box with no `RESEND_API_KEY`/`EMAIL_FROM` outside development has no email
@@ -272,7 +212,6 @@ export function bootstrapWorker(): WorkerDependencies {
     processChurn,
     clock,
     sendRenewalReminder,
-    notifyStreamLive,
     messaging,
   };
 }

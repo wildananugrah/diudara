@@ -5,7 +5,6 @@ import { resetDatabase } from "../db/test-helpers";
 import { eq } from "drizzle-orm";
 import { db } from "../db/client";
 import { events, subscriptions, transactions } from "../db/schema";
-import { verifyWatchToken } from "../domain/watch-token";
 import { bearer, signupAndGetToken } from "./test-support";
 
 beforeEach(resetDatabase);
@@ -209,8 +208,26 @@ describe("GET /c/subscription/:subscriptionId/status", () => {
   });
 });
 
-describe("GET /c/subscription/:subscriptionId/status — the watchUrl field (Task 8)", () => {
-  it("carries no watchUrl at all while streaming is not configured on this box", async () => {
+/**
+ * Retire-telegram Task 3 removed `watchUrl` from this endpoint. See
+ * `GetSubscriptionStatus`'s own docstring for why, and
+ * `get-subscription-status.test.ts` for the use-case-level guard.
+ *
+ * SIX TESTS WENT WITH IT. One of them is the reason this deletion happened at
+ * all rather than being deferred: "adds a watchUrl once the member's community
+ * goes live, and it resolves through the read-auth path for real" drove the
+ * minted token through `GET /c/watch/:token` — a route this same task deleted —
+ * so it went red the moment the route did. A test certifying a deleted target is
+ * the exact defect this phase's earlier reviews caught twice; the honest repair
+ * was to delete what it certified, not the test alone.
+ *
+ * THE ROUTE-LEVEL REPLACEMENT, below, is the strongest of the six restated: the
+ * response is byte-compared, through the real app, in the one state that used to
+ * produce a token. Byte comparison rather than a field check is deliberate — it
+ * fails on ANY extra key, not only on `watchUrl` coming back by that name.
+ */
+describe("GET /c/subscription/:subscriptionId/status — no watchUrl, in any configuration", () => {
+  it("is byte-identical with streaming OFF and the member's community live", async () => {
     const a = app();
     const { subscriptionId, externalId, invoiceId, communityId } = await checkout(a);
     await postWebhook(a, externalId, invoiceId);
@@ -218,38 +235,22 @@ describe("GET /c/subscription/:subscriptionId/status — the watchUrl field (Tas
 
     const text = await (await a.request(`/c/subscription/${subscriptionId}/status`)).text();
 
-    // Byte-identical to the pre-Task-8 shape: streaming being off must not
-    // change this endpoint's response even when the member's community IS
-    // live, because there is nothing to mint a token WITH.
     expect(text).toBe(JSON.stringify({ status: "active" }));
   });
 
-  it("adds a watchUrl once the member's community goes live, and it resolves through the read-auth path for real", async () => {
+  /**
+   * The one that matters. Streaming FULLY configured — `STREAM_TOKEN_SECRET`
+   * present, so there IS a secret to sign with — an `active` subscription, and a
+   * `live` event in its community: byte-for-byte the state the deleted "adds a
+   * watchUrl" test set up. If a `watchUrl` branch is ever reinstated, this is
+   * where it reddens.
+   */
+  it("is byte-identical with streaming FULLY CONFIGURED and the member's community live", async () => {
     await withStreamingConfigured(async () => {
       const a = app();
       const { subscriptionId, externalId, invoiceId, communityId } = await checkout(a);
       await postWebhook(a, externalId, invoiceId);
       await seedEvent(communityId, "live");
-
-      const body = await (await a.request(`/c/subscription/${subscriptionId}/status`)).json();
-
-      expect(typeof body.watchUrl).toBe("string");
-      expect(body.watchUrl.startsWith("/watch/")).toBe(true);
-
-      // Proves the minted token is not merely well-shaped, but genuinely
-      // authorises a read: it resolves through the SAME public route
-      // WatchPage will call.
-      const token = body.watchUrl.slice("/watch/".length);
-      const resolved = await (await a.request(`/c/watch/${token}`)).json();
-      expect(typeof resolved.hlsUrl).toBe("string");
-    });
-  });
-
-  it("omits watchUrl when streaming is configured but the community has nothing live", async () => {
-    await withStreamingConfigured(async () => {
-      const a = app();
-      const { subscriptionId, externalId, invoiceId } = await checkout(a);
-      await postWebhook(a, externalId, invoiceId);
 
       const text = await (await a.request(`/c/subscription/${subscriptionId}/status`)).text();
 
@@ -257,7 +258,7 @@ describe("GET /c/subscription/:subscriptionId/status — the watchUrl field (Tas
     });
   });
 
-  it("omits watchUrl for a pending subscription, even with a live event in its community", async () => {
+  it("is byte-identical for a pending subscription with a live event in its community", async () => {
     await withStreamingConfigured(async () => {
       const a = app();
       const { subscriptionId, communityId } = await checkout(a);
@@ -269,21 +270,7 @@ describe("GET /c/subscription/:subscriptionId/status — the watchUrl field (Tas
     });
   });
 
-  it("mints a FRESH token on every visit, rather than reusing one", async () => {
-    await withStreamingConfigured(async () => {
-      const a = app();
-      const { subscriptionId, externalId, invoiceId, communityId } = await checkout(a);
-      await postWebhook(a, externalId, invoiceId);
-      await seedEvent(communityId, "live");
-
-      const first = await (await a.request(`/c/subscription/${subscriptionId}/status`)).json();
-      const second = await (await a.request(`/c/subscription/${subscriptionId}/status`)).json();
-
-      expect(first.watchUrl).not.toBe(second.watchUrl);
-    });
-  });
-
-  it("stops appearing once the subscription is cancelled, even though the community is still live", async () => {
+  it("is byte-identical for a cancelled subscription with a live event in its community", async () => {
     await withStreamingConfigured(async () => {
       const a = app();
       const { subscriptionId, externalId, invoiceId, communityId } = await checkout(a);
@@ -298,5 +285,17 @@ describe("GET /c/subscription/:subscriptionId/status — the watchUrl field (Tas
 
       expect(text).toBe(JSON.stringify({ status: "cancelled" }));
     });
+  });
+
+  /**
+   * `GET /c/watch/:token` itself is GONE — the route Task 3 deleted alongside
+   * `ResolveWatchToken`. It must 404 through the ordinary not-found path, not
+   * answer with the refusal body it used to have: `/c` is still a mounted prefix,
+   * so "no such route" here is a real claim and not a foregone conclusion.
+   */
+  it("GET /c/watch/:token is gone entirely", async () => {
+    const res = await app().request("/c/watch/anything");
+
+    expect(res.status).toBe(404);
   });
 });

@@ -4,7 +4,6 @@ import { db } from "./db/client";
 import {
   communities,
   creators,
-  events,
   members,
   membershipTiers,
   appUsers,
@@ -162,46 +161,6 @@ async function seedMemberPastGrace() {
 }
 
 /**
- * A `live` event with one `active` subscriber — the minimum `NotifyStreamLive`
- * (Task 5) needs to send exactly one WhatsApp message.
- */
-async function seedLiveEventWithActiveMember() {
-  const [creator] = await db.insert(creators).values({ name: "Rina" }).returning();
-  const [community] = await db
-    .insert(communities)
-    .values({ creatorId: creator.id, name: "Kelas Rina", slug: `kelas-live-${Date.now()}` })
-    .returning();
-  const [event] = await db
-    .insert(events)
-    .values({
-      communityId: community.id,
-      title: "Live Q&A",
-      streamKey: `worker-key-${Date.now()}`,
-      status: "live",
-      hlsPlaybackPath: "https://fake-mediamtx.local/live/worker-key/index.m3u8",
-    })
-    .returning();
-  const [tier] = await db
-    .insert(membershipTiers)
-    .values({
-      communityId: community.id,
-      name: "Basic",
-      priceAmount: 50_000,
-      billingCycle: "monthly",
-    })
-    .returning();
-  const [member] = await db
-    .insert(members)
-    .values({ whatsappNumber: `+6281394${Date.now() % 100000}`, name: "Siti" })
-    .returning();
-  const [subscription] = await db
-    .insert(subscriptions)
-    .values({ memberId: member.id, tierId: tier.id, status: "active" })
-    .returning();
-  return { event, member, subscription };
-}
-
-/**
  * The notifier this root selected, narrowed to the fake so its recorded sends can be
  * read. An `instanceof` check rather than a cast: this file forbids casts for the same
  * reason bootstrap.test.ts does, and the check itself is worth making — under
@@ -333,82 +292,31 @@ describe("bootstrapWorker", () => {
   });
 
   /**
-   * Task 5. `HandleStreamLifecycle` (in `apps/api`'s own webhook route) enqueues
-   * these; an unregistered handler here would mean a `notify_stream_live` row
-   * failing five times and then permanently, with every active member of the
-   * community never told the creator went live.
+   * Retire-telegram Task 3. `NotifyStreamLive` and the `notify_stream_live`
+   * handler registration went with the community broadcast they announced, and
+   * with them went this root's ONLY reader of `STREAM_TOKEN_SECRET`.
    *
-   * `STREAM_TOKEN_SECRET` is set for the duration of this test, exactly like the
-   * `APP_BASE_URL` test above: `notifyStreamLive` (and the handler for its event
-   * type) is `undefined` — by design, mirroring `authoriseStream` in the API root
-   * — on a box with no streaming secret configured, which is this file's default
-   * environment.
+   * That removed a boot-time refusal, so the removal gets a test of its own: the
+   * worker used to throw on a `STREAM_TOKEN_SECRET` shorter than the API's floor,
+   * because it would otherwise mint watch tokens the API then rejected. It signs
+   * nothing now, so there is nothing left for a weak secret here to corrupt, and
+   * refusing to boot over an unused variable would strand every OTHER pass in
+   * this process — the renewal reminders, the membership sweeps, the outbox — for
+   * a reason that no longer exists.
+   *
+   * The value is deliberately the same "too-short" one the deleted test asserted
+   * `bootstrapWorker` threw on, so this fails if that check is ever reinstated
+   * without a reader to justify it.
    */
-  it("dispatches a real notify_stream_live row to NotifyStreamLive, not to nothing", async () => {
-    const { event, member, subscription } = await seedLiveEventWithActiveMember();
-    const { id } = await new DrizzleOutboxRepository(db).enqueue({
-      eventType: OUTBOX_NOTIFY_STREAM_LIVE,
-      payload: { eventId: event.id, subscriptionId: subscription.id },
-    });
-
-    const original = process.env.STREAM_TOKEN_SECRET;
-    process.env.STREAM_TOKEN_SECRET = "e".repeat(32);
-    try {
-      const worker = bootstrapWorker();
-      const notifier = fakeNotifierOf(worker);
-
-      const result = await worker.processOutbox.execute();
-
-      expect(result.claimed).toBe(1);
-      expect(result.sent).toBe(1);
-      const row = await rowById(id);
-      expect(row.status).toBe("sent");
-      expect(row.lastError).toBeNull();
-      // The member was actually messaged, over WhatsApp, by THIS process.
-      expect(notifier.notifications).toHaveLength(1);
-      expect(notifier.notifications[0].toWhatsappNumber).toBe(member.whatsappNumber);
-    } finally {
-      if (original === undefined) delete process.env.STREAM_TOKEN_SECRET;
-      else process.env.STREAM_TOKEN_SECRET = original;
-    }
-  });
-
-  /**
-   * Review round 2. `selectStreamingProvider` on the API side enforces
-   * `MIN_STREAMING_SECRET_LENGTH` on `STREAM_TOKEN_SECRET` at boot — but until now
-   * this root read the SAME variable raw, with no such check. A worker box whose
-   * secret is merely present, but weak or truncated relative to the API's, would
-   * boot silently and mint watch tokens the API's `AuthoriseStream` then rejects
-   * at read time: every member gets a link that 403s on every segment, with
-   * nothing here ever failing loud enough to say why.
-   */
-  it("refuses to boot when STREAM_TOKEN_SECRET is set but too short", async () => {
+  it("boots with a too-short STREAM_TOKEN_SECRET — the worker no longer reads it", async () => {
     const original = process.env.STREAM_TOKEN_SECRET;
     process.env.STREAM_TOKEN_SECRET = "too-short";
     try {
-      expect(() => bootstrapWorker()).toThrow(/STREAM_TOKEN_SECRET is too short/);
-    } finally {
-      if (original === undefined) delete process.env.STREAM_TOKEN_SECRET;
-      else process.env.STREAM_TOKEN_SECRET = original;
-    }
-  });
-
-  it("does not register a notify_stream_live handler when STREAM_TOKEN_SECRET is unset", async () => {
-    const { event } = await seedLiveEventWithActiveMember();
-    const { id } = await new DrizzleOutboxRepository(db).enqueue({
-      eventType: OUTBOX_NOTIFY_STREAM_LIVE,
-      payload: { eventId: event.id },
-    });
-    const original = process.env.STREAM_TOKEN_SECRET;
-    delete process.env.STREAM_TOKEN_SECRET;
-
-    try {
       const worker = bootstrapWorker();
-      expect(worker.notifyStreamLive).toBeUndefined();
-
-      await worker.processOutbox.execute();
-
-      expect((await rowById(id)).lastError).toContain("no handler is registered");
+      // It booted, and the passes that have nothing to do with streaming are
+      // there — which is the whole point of not refusing.
+      expect(worker.processOutbox).toBeDefined();
+      expect(worker.processRenewals).toBeDefined();
     } finally {
       if (original === undefined) delete process.env.STREAM_TOKEN_SECRET;
       else process.env.STREAM_TOKEN_SECRET = original;
@@ -619,8 +527,9 @@ describe("bootstrapWorker", () => {
   });
 
   /**
-   * Retire-telegram Task 2. The four event types whose handlers went with the
-   * use-cases that served them.
+   * Retire-telegram Tasks 2 and 3. The FIVE event types whose handlers went with
+   * the use-cases that served them — four in Task 2 (channel access and join
+   * requests) and `notify_stream_live` in Task 3, with `NotifyStreamLive`.
    *
    * A registration left behind is INVISIBLE from the outside — the worker boots,
    * the pass runs, and the handler simply never fires — so nothing but a row
@@ -628,15 +537,23 @@ describe("bootstrapWorker", () => {
    * fails an unregistered type with `no handler is registered for outbox event
    * type "..."`, which is the literal this asserts on.
    *
-   * These four replace the "dispatches a real <type> row to <use-case>" tests
-   * that lived here: those pinned exactly the registrations this task removes,
-   * so they are the guard being deleted and this is its replacement.
+   * These replace the "dispatches a real <type> row to <use-case>" tests that
+   * lived here: those pinned exactly the registrations those tasks removed, so
+   * they are the guard being deleted and this is its replacement. Task 3 deleted
+   * two more of that shape ("dispatches a real notify_stream_live row to
+   * NotifyStreamLive" and "does not register a notify_stream_live handler when
+   * STREAM_TOKEN_SECRET is unset") and the fifth entry below replaces BOTH — the
+   * second of them asserted this exact outcome for one environment, and it is now
+   * the outcome in every environment.
+   *
+   * ONE `it.each` DECLARATION, FIVE TEST RUNS.
    */
   it.each([
     OUTBOX_GRANT_ACCESS,
     OUTBOX_REVOKE_ACCESS,
     OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
     OUTBOX_NOTIFY_JOIN_REQUEST,
+    OUTBOX_NOTIFY_STREAM_LIVE,
   ])("registers no handler for %s any more", async (eventType) => {
     const repository = new DrizzleOutboxRepository(db);
     const { id } = await repository.enqueue({

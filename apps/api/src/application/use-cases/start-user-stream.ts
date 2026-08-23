@@ -84,9 +84,8 @@ export interface StartedUserStream {
  * times. `start-user-stream.test.ts`'s thirty-contender race is what proves
  * this implementation is not that one; it is not decoration.
  *
- * `streamingProvider` is REQUIRED, mirroring `ScheduleLiveSession`'s own
- * constructor exactly: whether streaming is configured at all is a
- * composition-root decision. `bootstrap()` constructs this class only when
+ * `streamingProvider` is REQUIRED rather than `| undefined`: whether streaming is
+ * configured at all is a composition-root decision. `bootstrap()` constructs this class only when
  * `Dependencies.streamingProvider` is defined and leaves
  * `Dependencies.startUserStream` `undefined` otherwise, and `routes/streams.ts`
  * answers 503 off THAT — so nothing in here reasons about "not configured".

@@ -18,13 +18,11 @@ import {
 import { resetDatabase } from "../db/test-helpers";
 import { errorHandler } from "../http/error-handler";
 import { AuthoriseStream } from "../application/use-cases/authorise-stream";
-import { HandleStreamLifecycle } from "../application/use-cases/handle-stream-lifecycle";
 import { EndUserStream } from "../application/use-cases/end-user-stream";
 import { OUTBOX_NOTIFY_STREAM_LIVE } from "../application/ports/outbox-repository.port";
 import { SystemClock } from "../infrastructure/clock/system.clock";
 import { mintWatchToken, WATCH_TOKEN_TTL_MS } from "../domain/watch-token";
 import { DrizzleEventRepository } from "../infrastructure/repositories/drizzle-event.repository";
-import { DrizzleStreamLifecycleUnitOfWork } from "../infrastructure/repositories/drizzle-stream-lifecycle.unit-of-work";
 import { DrizzleSubscriptionRepository } from "../infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzleUserStreamRepository } from "../infrastructure/repositories/drizzle-user-stream.repository";
 import {
@@ -46,10 +44,6 @@ const authoriseStream = new AuthoriseStream(
   subscriptionRepository,
   userStreamRepository,
   { streamTokenSecret: SECRET }
-);
-const handleStreamLifecycle = new HandleStreamLifecycle(
-  eventRepository,
-  new DrizzleStreamLifecycleUnitOfWork(db)
 );
 const endUserStream = new EndUserStream(userStreamRepository, new SystemClock());
 
@@ -93,24 +87,19 @@ class ThrowingAuthoriseStream extends AuthoriseStream {
   }
 }
 
-/** Same purpose as `ThrowingAuthoriseStream`, for the `/lifecycle` route's own tests. */
-class ThrowingHandleStreamLifecycle extends HandleStreamLifecycle {
-  constructor() {
-    super(eventRepository, new DrizzleStreamLifecycleUnitOfWork(db));
-  }
-  override async execute(): Promise<void> {
-    throw new Error(
-      "HandleStreamLifecycle.execute must not run before the secret header is verified"
-    );
-  }
-}
-
 /**
- * Same purpose as `ThrowingHandleStreamLifecycle` above, and used the same way — but
- * for Task 6's `EndUserStream`, the `u/<key>` world's own lifecycle handler. Its
- * `execute` throwing PROVES the route never reaches it, whether because the secret
- * check refused first or because `parseStreamPath` sent this hook to
- * `HandleStreamLifecycle` instead.
+ * Same purpose as `ThrowingAuthoriseStream` above, and used the same way — but for
+ * `EndUserStream`, the `u/<key>` world's lifecycle handler and, since
+ * retire-telegram Task 3 deleted `HandleStreamLifecycle`, the ONLY one `/lifecycle`
+ * has left. Its `execute` throwing PROVES the route never reaches it — whether
+ * because the secret check refused first, or because `parseStreamPath` found a
+ * namespace this API no longer serves and the route 404'd before getting here.
+ *
+ * That second case is what makes this double worth more after the deletion than
+ * before it. A `live/<key>` hook used to be sent to a DIFFERENT class, so "never
+ * reaches EndUserStream" was a statement about dispatch. Now there is nowhere else
+ * to send it, and the only two possibilities are "refused" and "treated as a user
+ * stream" — so this double is what rules out the second.
  */
 class ThrowingEndUserStream extends EndUserStream {
   constructor() {
@@ -123,7 +112,6 @@ class ThrowingEndUserStream extends EndUserStream {
 
 function app(
   authorise: AuthoriseStream = authoriseStream,
-  lifecycle: HandleStreamLifecycle = handleStreamLifecycle,
   userLifecycle: EndUserStream = endUserStream
 ) {
   const a = new Hono();
@@ -133,7 +121,6 @@ function app(
     mediamtxWebhookRoutes({
       authoriseStream: authorise,
       mediamtxWebhookSecret: SECRET,
-      handleStreamLifecycle: lifecycle,
       endUserStream: userLifecycle,
     })
   );
@@ -846,7 +833,6 @@ describe("GET /webhooks/mediamtx/auth-request — read", () => {
       mediamtxWebhookRoutes({
         authoriseStream: undefined,
         mediamtxWebhookSecret: SECRET,
-        handleStreamLifecycle: undefined,
         endUserStream: undefined,
       })
     );
@@ -1133,28 +1119,43 @@ describe("GET /webhooks/mediamtx/auth-request — end-to-end wiring", () => {
 });
 
 describe("POST /webhooks/mediamtx/lifecycle — secret verification", () => {
-  it("401s a missing secret header, and never calls HandleStreamLifecycle at all", async () => {
-    const a = app(authoriseStream, new ThrowingHandleStreamLifecycle());
+  it("401s a missing secret header, and never calls EndUserStream at all", async () => {
+    const a = app(authoriseStream, new ThrowingEndUserStream());
 
-    const res = await postLifecycle(a, { hook: "online", streamKey: "live/anything" }, null);
+    const res = await postLifecycle(a, { hook: "online", streamKey: "u/anything" }, null);
 
     expect(res.status).toBe(401);
   });
 
-  it("401s a wrong secret header, and never calls HandleStreamLifecycle at all", async () => {
-    const a = app(authoriseStream, new ThrowingHandleStreamLifecycle());
+  it("401s a wrong secret header, and never calls EndUserStream at all", async () => {
+    const a = app(authoriseStream, new ThrowingEndUserStream());
 
     const res = await postLifecycle(
       a,
-      { hook: "online", streamKey: "live/anything" },
+      { hook: "online", streamKey: "u/anything" },
       "wrong-secret"
     );
 
     expect(res.status).toBe(401);
   });
 
+  /**
+   * 401 AND NOT 404, for a `live/<key>` an unauthenticated caller sent — the
+   * ordering the route's docstring promises, now that a retired namespace has a
+   * status code of its own to be confused with. The secret check must still run
+   * FIRST, so nothing an unauthenticated caller sends can tell it which
+   * namespaces this API serves.
+   */
+  it("401s a retired live/<key> hook without a secret — the secret check still comes first", async () => {
+    const a = app(authoriseStream, new ThrowingEndUserStream());
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: "live/anything" }, null);
+
+    expect(res.status).toBe(401);
+  });
+
   it("checks the secret BEFORE parsing the body — an unauthenticated garbage body is 401, not 200", async () => {
-    const a = app(authoriseStream, new ThrowingHandleStreamLifecycle());
+    const a = app(authoriseStream, new ThrowingEndUserStream());
 
     const res = await a.request("/webhooks/mediamtx/lifecycle", {
       method: "POST",
@@ -1166,8 +1167,7 @@ describe("POST /webhooks/mediamtx/lifecycle — secret verification", () => {
   });
 
   it("authorises via a `secret` query parameter too, exactly like /auth", async () => {
-    const community = await seedCommunity();
-    const { streamKey } = await seedEvent(community.id, "scheduled");
+    const stream = await seedUserStream("public");
     const a = app();
 
     const res = await a.request(
@@ -1175,151 +1175,25 @@ describe("POST /webhooks/mediamtx/lifecycle — secret verification", () => {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hook: "online", streamKey: `live/${streamKey}` }),
+        body: JSON.stringify({ hook: "offline", streamKey: `u/${stream.streamKey}` }),
       }
     );
 
     expect(res.status).toBe(200);
-  });
-});
-
-describe("POST /webhooks/mediamtx/lifecycle — online", () => {
-  it("moves a scheduled event to live, and answers 200", async () => {
-    const community = await seedCommunity();
-    const { event, streamKey } = await seedEvent(community.id, "scheduled");
-    const a = app();
-
-    const res = await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
-
-    expect(res.status).toBe(200);
-    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
-    expect(reloaded!.status).toBe("live");
-  });
-
-  it("enqueues one notify_stream_live row per active member — a second online enqueues no more", async () => {
-    const community = await seedCommunity();
-    const { event, streamKey } = await seedEvent(community.id, "scheduled");
-    await seedActiveSubscription(community.id);
-    await seedActiveSubscription(community.id);
-    const a = app();
-
-    await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
-    const second = await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
-
-    expect(second.status).toBe(200);
-    const rows = await db.select().from(outbox).where(eq(outbox.eventType, OUTBOX_NOTIFY_STREAM_LIVE));
-    const forThisEvent = rows.filter(
-      (row) => (row.payload as { eventId?: string } | null)?.eventId === event.id
-    );
-    // Two active members at go-live time, ONE row each — not one row for the
-    // whole community — and the repeated `online` enqueues nothing further.
-    expect(forThisEvent).toHaveLength(2);
-    for (const row of forThisEvent) {
-      expect(typeof (row.payload as { subscriptionId?: string }).subscriptionId).toBe("string");
-    }
-  });
-
-  it("answers 200 for an unknown stream key, and writes nothing — a hook that 500s retries forever", async () => {
-    const a = app();
-
-    const res = await postLifecycle(a, { hook: "online", streamKey: "live/no-such-key" });
-
-    expect(res.status).toBe(200);
-    const activity = await db.select().from(activityLogs);
-    expect(activity).toHaveLength(0);
-  });
-
-  it("answers 200 for a malformed hook value, and writes nothing", async () => {
-    const community = await seedCommunity();
-    const { streamKey } = await seedEvent(community.id, "scheduled");
-    const a = app();
-
-    const res = await postLifecycle(a, { hook: "publishing", streamKey: `live/${streamKey}` });
-
-    expect(res.status).toBe(200);
-    const activity = await db.select().from(activityLogs);
-    expect(activity).toHaveLength(0);
-  });
-});
-
-describe("POST /webhooks/mediamtx/lifecycle — offline", () => {
-  it("ends an event that was never live, and answers 200", async () => {
-    const community = await seedCommunity();
-    const { event, streamKey } = await seedEvent(community.id, "scheduled");
-    const a = app();
-
-    const res = await postLifecycle(a, { hook: "offline", streamKey: `live/${streamKey}` });
-
-    expect(res.status).toBe(200);
-    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
-    expect(reloaded!.status).toBe("ended");
-  });
-
-  it("offline then a late online leaves the event ended", async () => {
-    const community = await seedCommunity();
-    const { event, streamKey } = await seedEvent(community.id, "live");
-    const a = app();
-
-    await postLifecycle(a, { hook: "offline", streamKey: `live/${streamKey}` });
-    await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
-
-    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
-    expect(reloaded!.status).toBe("ended");
   });
 });
 
 describe("POST /webhooks/mediamtx/lifecycle — end-to-end wiring", () => {
   /**
-   * Same purpose as `/auth`'s own end-to-end test: proves `app.ts` mounts this
-   * route where `infra/mediamtx.yml`'s planned hooks will reach it, and that
-   * `bootstrap()` really does wire `HandleStreamLifecycle` off
-   * `MEDIAMTX_WEBHOOK_SECRET`.
-   */
-  it("marks an event live through the real bootstrap() when streaming is fully configured", async () => {
-    const community = await seedCommunity();
-    const { event, streamKey } = await seedEvent(community.id, "scheduled");
-
-    const originals = {
-      MEDIAMTX_RTMP_HOST: process.env.MEDIAMTX_RTMP_HOST,
-      MEDIAMTX_HLS_BASE_URL: process.env.MEDIAMTX_HLS_BASE_URL,
-      MEDIAMTX_WHIP_BASE_URL: process.env.MEDIAMTX_WHIP_BASE_URL,
-      MEDIAMTX_WEBHOOK_SECRET: process.env.MEDIAMTX_WEBHOOK_SECRET,
-      STREAM_TOKEN_SECRET: process.env.STREAM_TOKEN_SECRET,
-    };
-    process.env.MEDIAMTX_RTMP_HOST = "mediamtx.internal";
-    process.env.MEDIAMTX_HLS_BASE_URL = "https://hls.diudara.test";
-    process.env.MEDIAMTX_WHIP_BASE_URL = "https://whip.diudara.test";
-    process.env.MEDIAMTX_WEBHOOK_SECRET = SECRET;
-    process.env.STREAM_TOKEN_SECRET = SECRET;
-
-    let a: ReturnType<typeof createApp>;
-    try {
-      a = createApp(bootstrap());
-    } finally {
-      for (const [key, value] of Object.entries(originals)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
-
-    const res = await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
-    expect(res.status).toBe(200);
-
-    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
-    expect(reloaded!.status).toBe("live");
-
-    const wrongSecret = await postLifecycle(
-      a,
-      { hook: "online", streamKey: `live/${streamKey}` },
-      "wrong-secret"
-    );
-    expect(wrongSecret.status).toBe(401);
-  });
-
-  /**
-   * Same purpose, for the OTHER world Task 6 adds: proves `bootstrap()` really does
-   * wire `EndUserStream` off `MEDIAMTX_WEBHOOK_SECRET` too, and that the real route
-   * dispatches a `u/<key>` hook to it rather than to `HandleStreamLifecycle`.
+   * Same purpose as `/auth`'s own end-to-end test: proves `app.ts` mounts this route
+   * where `infra/mediamtx.yml`'s hooks will reach it, that `bootstrap()` really does
+   * wire `EndUserStream` off `MEDIAMTX_WEBHOOK_SECRET`, and that the REAL route —
+   * not the locally assembled one every other test in this file uses — sends a
+   * `u/<key>` hook to it.
+   *
+   * The community twin of this test went with `HandleStreamLifecycle` in
+   * retire-telegram Task 3. What replaced it is the 404 case below, driven through
+   * this same real `createApp(bootstrap())`.
    */
   it("ends a user stream through the real bootstrap() when streaming is fully configured", async () => {
     const stream = await seedUserStream("public");
@@ -1359,52 +1233,136 @@ describe("POST /webhooks/mediamtx/lifecycle — end-to-end wiring", () => {
 });
 
 /**
- * Task 6 of Phase 7: the route's own dispatch between the two lifecycle classes,
- * told apart by `parseStreamPath` — see `mediamtx-webhooks.ts`'s `/lifecycle`
- * docstring. These tests are about the ROUTE's own decision, not either class's
- * internal behaviour (that is `end-user-stream.test.ts`'s and
- * `handle-stream-lifecycle.test.ts`'s job) — so each uses the OTHER world's
- * throwing double to prove mutual isolation: a `u/<key>` hook must never reach
- * `HandleStreamLifecycle`, and a `live/<key>` (or unparseable) hook must never reach
- * `EndUserStream`.
+ * Phase 8, Task 3 — what `/lifecycle` does now that the community world's handler
+ * is gone.
+ *
+ * The route used to send BOTH `live/<key>` and an unparseable key to
+ * `HandleStreamLifecycle`, which logged an "ignoring" line and no-op'd, and the
+ * route answered 200 either way. With that class deleted there is nothing left to
+ * hand either one to — so the choice was between acknowledging a path nothing can
+ * serve and refusing it.
+ *
+ * IT REFUSES, with a 404. This route is reached by MediaMTX and by
+ * `infra/mediamtx.yml`'s `curl` hooks, never by a person, so a wrong `$MTX_PATH`
+ * or a stale `mediamtx.yml` has exactly one way to become visible: the hook has to
+ * fail. A 200 for a namespace that no longer exists is byte-for-byte the answer a
+ * healthy broadcast gets, so the deployment would look fine while every lifecycle
+ * event went nowhere.
+ *
+ * 404 AND NEVER 5xx — the reason the route's docstring gives for not failing
+ * survives intact, and it was always about RETRIES: a 5xx invites one, and no
+ * amount of retrying turns `live/abc` back into a path this API serves. A 404 is
+ * permanent and says so.
+ *
+ * THE THROWING DOUBLE IS THE OTHER HALF of each refusal test. 404 alone would
+ * still pass if the route had handed the path to `EndUserStream` first and only
+ * then failed to find a row — which would mean a `live/<key>` reaching the user
+ * world's writer. `ThrowingEndUserStream` is what rules that out.
  */
-describe("POST /webhooks/mediamtx/lifecycle — dispatch between the two worlds", () => {
-  it("a u/<key> offline hook ends the user stream, and never calls HandleStreamLifecycle", async () => {
-    const stream = await seedUserStream("public");
-    const a = app(authoriseStream, new ThrowingHandleStreamLifecycle());
+describe("POST /webhooks/mediamtx/lifecycle — the community world is gone", () => {
+  it("a community lifecycle hook is now refused, not silently handled", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "scheduled");
+    const a = app(authoriseStream, new ThrowingEndUserStream());
 
-    const res = await postLifecycle(a, {
-      hook: "offline",
-      streamKey: `u/${stream.streamKey}`,
-    });
+    const res = await postLifecycle(a, { hook: "offline", streamKey: `live/${streamKey}` });
+
+    expect(res.status).toBe(404);
+    // And the community event is exactly as it was — nothing was handled.
+    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
+    expect(reloaded!.status).toBe("scheduled");
+  });
+
+  it("an unparseable streamKey is refused too, not acknowledged", async () => {
+    const a = app(authoriseStream, new ThrowingEndUserStream());
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: "not-a-namespaced-path" });
+
+    expect(res.status).toBe(404);
+  });
+
+  /**
+   * The literal sentence, not the constant that holds it. It reaches a `curl`
+   * command's stderr and an operator's logs, and it is the only thing telling
+   * them what `$MTX_PATH` should have looked like — so it is worth pinning that
+   * it says so, and that it is ENGLISH (`NotFoundError` messages are, throughout).
+   */
+  it("says what shape it wanted, in English", async () => {
+    const a = app(authoriseStream, new ThrowingEndUserStream());
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: "live/abc" });
+    const body = (await res.json()) as { error: string };
+
+    expect(body.error).toBe(
+      "lifecycle streamKey does not name a stream this server handles: expected a u/<key> path"
+    );
+  });
+
+  it("a user lifecycle hook still ends the stream", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await postLifecycle(a, { hook: "offline", streamKey: `u/${stream.streamKey}` });
 
     expect(res.status).toBe(200);
     const reloaded = await userStreamRepository.findById(stream.id);
     expect(reloaded!.status).toBe("ended");
   });
 
-  it("a live/<key> hook never calls EndUserStream", async () => {
+  /**
+   * The line the 404 must NOT cross. An `u/<key>` naming no live row is an
+   * ordinary, expected no-op — an `offline` can legitimately arrive twice, and
+   * `EndUserStream` documents exactly that — so it stays a 200. If this ever
+   * became a 404 too, every second `offline` MediaMTX sends would start looking
+   * like a misconfiguration.
+   */
+  it("an unknown u/<key> is still acknowledged with a 200, not refused", async () => {
+    const a = app();
+
+    const res = await postLifecycle(a, { hook: "offline", streamKey: "u/no-such-key" });
+
+    expect(res.status).toBe(200);
+  });
+
+  /**
+   * The other line the 404 must not cross, and the ordering that makes it hold:
+   * `isLifecycleRequestBody` runs BEFORE the namespace guard, so a body this route
+   * cannot read is acknowledged even when its `streamKey` names the retired world.
+   * A hook value outside `LIFECYCLE_HOOKS` says something about one garbled
+   * request, not about the deployment's path configuration.
+   */
+  it("a malformed hook value is still acknowledged with a 200, even on a retired live/<key>", async () => {
     const community = await seedCommunity();
-    const { event, streamKey } = await seedEvent(community.id, "scheduled");
-    const a = app(authoriseStream, handleStreamLifecycle, new ThrowingEndUserStream());
+    const { streamKey } = await seedEvent(community.id, "scheduled");
+    const a = app(authoriseStream, new ThrowingEndUserStream());
 
-    const res = await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
-
-    expect(res.status).toBe(200);
-    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
-    expect(reloaded!.status).toBe("live");
-  });
-
-  it("an unparseable streamKey falls through to HandleStreamLifecycle, unchanged, and never calls EndUserStream", async () => {
-    const a = app(authoriseStream, handleStreamLifecycle, new ThrowingEndUserStream());
-
-    const res = await postLifecycle(a, { hook: "online", streamKey: "not-a-namespaced-path" });
+    const res = await postLifecycle(a, { hook: "publishing", streamKey: `live/${streamKey}` });
 
     expect(res.status).toBe(200);
-    const activity = await db.select().from(activityLogs);
-    expect(activity).toHaveLength(0);
   });
 
+  it("a malformed body is still acknowledged with a 200", async () => {
+    const a = app(authoriseStream, new ThrowingEndUserStream());
+
+    const res = await a.request("/webhooks/mediamtx/lifecycle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", [HEADER]: SECRET },
+      body: "{not json",
+    });
+
+    expect(res.status).toBe(200);
+  });
+
+  /**
+   * Streaming not configured on this box. Unchanged: a 200, because there is
+   * nothing wrong with the PATH — this box simply has no user-stream machinery
+   * wired at all.
+   *
+   * ORDERING, pinned deliberately: the namespace guard runs BEFORE this check, so
+   * the `live/<key>` case immediately below is a 404 even here. Were it the other
+   * way round, an unconfigured box would answer 200 to a retired namespace and
+   * hide the exact misconfiguration the 404 exists to surface.
+   */
   it("a u/<key> hook acks 200 without throwing when streaming is not configured (endUserStream undefined)", async () => {
     const stream = await seedUserStream("public");
     const a = new Hono();
@@ -1414,20 +1372,73 @@ describe("POST /webhooks/mediamtx/lifecycle — dispatch between the two worlds"
       mediamtxWebhookRoutes({
         authoriseStream,
         mediamtxWebhookSecret: SECRET,
-        handleStreamLifecycle,
         endUserStream: undefined,
       })
     );
 
-    const res = await postLifecycle(a, {
-      hook: "offline",
-      streamKey: `u/${stream.streamKey}`,
-    });
+    const res = await postLifecycle(a, { hook: "offline", streamKey: `u/${stream.streamKey}` });
 
     expect(res.status).toBe(200);
-    // Nothing ran — the row is untouched, exactly as `handleStreamLifecycle undefined`
-    // leaves a community event untouched.
+    // Nothing ran — the row is untouched.
     const reloaded = await userStreamRepository.findById(stream.id);
     expect(reloaded!.status).toBe("live");
+  });
+
+  it("a live/<key> hook is 404 even when streaming is not configured — the namespace guard comes first", async () => {
+    const a = new Hono();
+    a.onError(errorHandler);
+    a.route(
+      "/webhooks/mediamtx",
+      mediamtxWebhookRoutes({
+        authoriseStream,
+        mediamtxWebhookSecret: SECRET,
+        endUserStream: undefined,
+      })
+    );
+
+    const res = await postLifecycle(a, { hook: "offline", streamKey: "live/anything" });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+/**
+ * The REAL app, through `createApp(bootstrap())` — the community twin of the
+ * end-to-end test above, replaced rather than deleted. It proves the 404 is what
+ * the actually-wired route does, not only what a locally assembled one does.
+ */
+describe("POST /webhooks/mediamtx/lifecycle — the 404 through the real bootstrap()", () => {
+  it("refuses a community lifecycle hook through the real bootstrap()", async () => {
+    const community = await seedCommunity();
+    const { event, streamKey } = await seedEvent(community.id, "scheduled");
+
+    const originals = {
+      MEDIAMTX_RTMP_HOST: process.env.MEDIAMTX_RTMP_HOST,
+      MEDIAMTX_HLS_BASE_URL: process.env.MEDIAMTX_HLS_BASE_URL,
+      MEDIAMTX_WHIP_BASE_URL: process.env.MEDIAMTX_WHIP_BASE_URL,
+      MEDIAMTX_WEBHOOK_SECRET: process.env.MEDIAMTX_WEBHOOK_SECRET,
+      STREAM_TOKEN_SECRET: process.env.STREAM_TOKEN_SECRET,
+    };
+    process.env.MEDIAMTX_RTMP_HOST = "mediamtx.internal";
+    process.env.MEDIAMTX_HLS_BASE_URL = "https://hls.diudara.test";
+    process.env.MEDIAMTX_WHIP_BASE_URL = "https://whip.diudara.test";
+    process.env.MEDIAMTX_WEBHOOK_SECRET = SECRET;
+    process.env.STREAM_TOKEN_SECRET = SECRET;
+
+    let a: ReturnType<typeof createApp>;
+    try {
+      a = createApp(bootstrap());
+    } finally {
+      for (const [key, value] of Object.entries(originals)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+
+    const res = await postLifecycle(a, { hook: "online", streamKey: `live/${streamKey}` });
+
+    expect(res.status).toBe(404);
+    const [reloaded] = await db.select().from(events).where(eq(events.id, event.id));
+    expect(reloaded!.status).toBe("scheduled");
   });
 });

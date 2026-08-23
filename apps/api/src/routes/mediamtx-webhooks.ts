@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { UnauthorizedError } from "../application/errors";
+import { NotFoundError, UnauthorizedError } from "../application/errors";
 import { verifyCallbackToken } from "../infrastructure/webhooks/webhook-token";
 import { parseStreamPath } from "../application/use-cases/authorise-stream";
 import type { Dependencies } from "../bootstrap";
@@ -52,13 +52,33 @@ const REFUSED_BODY = { ok: false } as const;
 const ALLOWED_BODY = { ok: true } as const;
 
 /**
- * The literal body `/lifecycle` always answers with, once the shared secret has
- * checked out — success OR a no-op both read as "acknowledged". Unlike `/auth`,
- * this route has nothing to refuse: it is a fire-and-forget notification from a
+ * The literal body `/lifecycle` answers with once the shared secret has checked
+ * out and the stream key named a namespace this API still serves — success OR a
+ * no-op both read as "acknowledged". It is a fire-and-forget notification from a
  * shell `curl` command, not a decision MediaMTX branches on. See the route's own
- * docstring for why an unknown key or a malformed body still answer 200.
+ * docstring for why a malformed body and an unknown `u/<key>` still answer 200
+ * while a key naming no served namespace does NOT.
  */
 const ACKNOWLEDGED_BODY = { ok: true } as const;
+
+/**
+ * What `/lifecycle` says when `body.streamKey` names no namespace this API
+ * serves — a `live/<key>` from the retired community world, or anything
+ * `parseStreamPath` cannot read at all.
+ *
+ * ENGLISH, not Indonesian, and that is the rule rather than an oversight: this
+ * message reaches a `curl` command's stderr and an operator reading logs, never
+ * a member's screen, and `NotFoundError` messages are English throughout this
+ * codebase.
+ *
+ * It names the SHAPE it wanted (`u/<key>`) and not the shape it got. There is no
+ * secrecy argument for that here the way there is for `/auth`'s `REFUSED_BODY`
+ * — this route is secret-gated and private, and a caller that reached this line
+ * already knows what it sent. It is simply the half that is actionable: whoever
+ * is reading this needs to know what `$MTX_PATH` should have looked like.
+ */
+const LIFECYCLE_UNKNOWN_PATH_MESSAGE =
+  "lifecycle streamKey does not name a stream this server handles: expected a u/<key> path";
 
 /** The two `hook` values `POST /lifecycle`'s body may legitimately carry. */
 const LIFECYCLE_HOOKS: ReadonlySet<string> = new Set(["online", "offline"]);
@@ -111,10 +131,7 @@ const LIFECYCLE_HOOKS: ReadonlySet<string> = new Set(["online", "offline"]);
  * event" from "not entitled" from "expired token".
  */
 export function mediamtxWebhookRoutes(
-  deps: Pick<
-    Dependencies,
-    "authoriseStream" | "mediamtxWebhookSecret" | "handleStreamLifecycle" | "endUserStream"
-  >
+  deps: Pick<Dependencies, "authoriseStream" | "mediamtxWebhookSecret" | "endUserStream">
 ) {
   const app = new Hono();
 
@@ -343,35 +360,56 @@ export function mediamtxWebhookRoutes(
    * before either lifecycle class is ever reached — identical ordering to
    * `/auth`, for the identical reason.
    *
-   * TWO WORLDS, ONE ROUTE, TOLD APART BY `parseStreamPath` — Task 6 of Phase 7.
-   * `HandleStreamLifecycle` (the community `live/<key>` world, unchanged by this
-   * task — its own docstring still says the user world "is not handled by this
-   * class") and `EndUserStream` (the new `u/<key>` world) each have a real job to
-   * do only for their own namespace, so THIS ROUTE parses `body.streamKey` ONCE,
-   * itself, with the SAME parser both use-cases already import
-   * (`authorise-stream.ts`'s `parseStreamPath` — "the single parser", per that
-   * function's own docstring), and dispatches to exactly one of them. The
-   * alternative — calling both classes unconditionally and letting each ignore
-   * what is not theirs — was rejected: `HandleStreamLifecycle` already logs a
-   * warning for a path it does not own, and calling it (or the new class) on
-   * EVERY lifecycle event regardless of world would turn an ordinary community
-   * broadcast's `online`/`offline` into a spurious "ignoring" log line every
-   * single time, forever. `EndUserStream` gets the BARE key (`parsed.key`), never
-   * the raw `u/<key>` path — see its own docstring for why its signature could
-   * change (this task owns that file) while `HandleStreamLifecycle.execute`'s
-   * could not (its signature is untouched, so it still takes the raw path and
-   * re-parses it itself for the community/unparseable cases below).
+   * ONE WORLD, TOLD APART BY `parseStreamPath` — Phase 8, Task 3. This route
+   * used to serve TWO: `HandleStreamLifecycle` for the community `live/<key>`
+   * namespace and `EndUserStream` for `u/<key>`, dispatched between by parsing
+   * `body.streamKey` ONCE, here, with the SAME parser `authorise-stream.ts`
+   * exports ("the single parser", per that function's own docstring). Retiring
+   * Telegram deleted the community world, so `HandleStreamLifecycle` is gone and
+   * `u/<key>` is the only namespace with anything left to handle. The parse
+   * stays exactly where it was — the dispatch became a GUARD rather than a fork,
+   * and the parser is still the one thing that decides. `EndUserStream` gets the
+   * BARE key (`parsed.key`), never the raw `u/<key>` path — see its own
+   * docstring.
    *
-   * ALWAYS 200 ONCE THE SECRET CHECKS OUT, whatever the chosen class's `execute`
-   * did or did not do: an unknown stream key, a malformed body, an out-of-order
-   * hook that turned out to be a no-op — none of these are failures MediaMTX
-   * should retry over. `runOnOnline`/`runOnOffline` are fire-and-forget; a 500
-   * here would make MediaMTX (or whatever wraps the curl call) retry forever for
-   * a condition retrying can never fix. A genuine database error is NOT caught
-   * here and is allowed to become the process's normal 500, exactly as `/auth`
-   * lets `AuthoriseStream.execute` propagate — the two failure modes are
-   * different (one is "this input teaches us nothing new", the other is "the
-   * database is unreachable") and only the first is swallowed to 200.
+   * A KEY THAT DOES NOT NAME A USER STREAM PATH IS A 404 — the one behaviour
+   * this task changed, and the reason it changed. `live/<key>` and an
+   * unparseable key BOTH used to fall through to `HandleStreamLifecycle`, which
+   * logged an "ignoring" line and no-op'd, and this route answered 200. With
+   * that class deleted there is nothing to hand either one to, and the choice
+   * was between acknowledging a path nothing can serve and refusing it.
+   *
+   * It refuses, because of WHO CALLS THIS ROUTE: MediaMTX and
+   * `infra/mediamtx.yml`'s `runOnOnline`/`runOnOffline` `curl` commands — never
+   * a person. A wrong `$MTX_PATH`, a stale `mediamtx.yml` still shaped for the
+   * community namespace, a path template nobody updated: every one of those has
+   * exactly one way to become visible, and it is the hook failing. A 200 for a
+   * namespace that no longer exists is byte-for-byte the response a healthy
+   * broadcast gets, so the deployment would look fine while every lifecycle
+   * event silently went nowhere and every user stream stayed `live` forever.
+   * That is the failure the deleted class's own log line existed to warn about;
+   * the status code now carries it instead, where something other than a human
+   * reading stderr can see it.
+   *
+   * 404 AND NEVER 5xx. The rule the previous version of this docstring gave for
+   * never failing survives intact, and it was always about RETRIES: a 5xx makes
+   * MediaMTX (or whatever wraps the curl call) retry forever for a condition
+   * retrying can never fix. A 404 is permanent and says so — it is not a request
+   * to try again, it is "this API does not serve that path". Nothing here
+   * retries it.
+   *
+   * STILL 200 FOR A MALFORMED BODY, and for a `hook` value outside
+   * `LIFECYCLE_HOOKS`, and for an `u/<key>` stream key matching no live row: all
+   * three are unchanged. Those say something about ONE garbled or late request,
+   * not about the deployment pointing at a namespace this API no longer has —
+   * and the last of them is `EndUserStream`'s documented, ordinary no-op (an
+   * `offline` can legitimately arrive twice). Only the namespace decision moved.
+   *
+   * A genuine database error is NOT caught here and is allowed to become the
+   * process's normal 500, exactly as `/auth` lets `AuthoriseStream.execute`
+   * propagate — the two failure modes are different (one is "this input teaches
+   * us nothing new", the other is "the database is unreachable") and only the
+   * first is swallowed to 200.
    */
   app.post("/lifecycle", async (c) => {
     const secret = c.req.query(MEDIAMTX_SECRET_QUERY_PARAM) ?? c.req.header(MEDIAMTX_SECRET_HEADER);
@@ -392,37 +430,32 @@ export function mediamtxWebhookRoutes(
 
     // Told apart by NAMESPACE, never by guessing — see this route's own
     // docstring. `parsed === null` (unparseable) and `parsed.world ===
-    // "community"` both fall through to `handleStreamLifecycle` below,
-    // UNCHANGED from this route's behaviour before this task: the community
-    // world's own lifecycle logic must not move (Global Constraints).
+    // "community"` used to fall through to `handleStreamLifecycle`; that class
+    // is gone, so both are now refused here instead of acknowledged. The guard
+    // is `world !== "user"` rather than `world === "community"`: it stays an
+    // ALLOW-LIST, exactly like `AuthoriseStream`'s own, so a namespace added to
+    // `parseStreamPath` later refuses here until somebody deliberately teaches
+    // this route what to do with it, instead of falling into `EndUserStream`.
     const parsed = parseStreamPath(body.streamKey);
 
-    if (parsed !== null && parsed.world === "user") {
-      // Streaming not configured on this box — nothing to react to. Unreachable
-      // in practice once the secret check above holds (same lockstep pairing as
-      // `handleStreamLifecycle`/`mediamtxWebhookSecret` — see bootstrap.ts);
-      // kept for type-safety and so this route never assumes the pairing
-      // without checking.
-      if (!deps.endUserStream) {
-        return c.json(ACKNOWLEDGED_BODY, 200);
-      }
-      await deps.endUserStream.execute({ hook: body.hook, streamKey: parsed.key });
-      return c.json(ACKNOWLEDGED_BODY, 200);
+    if (parsed === null || parsed.world !== "user") {
+      throw new NotFoundError(LIFECYCLE_UNKNOWN_PATH_MESSAGE);
     }
 
     // Streaming not configured on this box — nothing to react to. Unreachable
-    // in practice once the secret check above holds (same pairing as
+    // in practice once the secret check above holds (same lockstep pairing as
     // `authoriseStream`/`mediamtxWebhookSecret` — see bootstrap.ts); kept for
     // type-safety and so this route never assumes the pairing without checking.
-    if (!deps.handleStreamLifecycle) {
+    //
+    // Deliberately checked AFTER the namespace guard above, not before: a
+    // `live/<key>` hook is a wrong path whether or not this box has streaming
+    // configured, and answering 200 for it on an unconfigured box would hide the
+    // very misconfiguration the 404 exists to surface.
+    if (!deps.endUserStream) {
       return c.json(ACKNOWLEDGED_BODY, 200);
     }
 
-    await deps.handleStreamLifecycle.execute({
-      hook: body.hook,
-      streamKey: body.streamKey,
-    });
-
+    await deps.endUserStream.execute({ hook: body.hook, streamKey: parsed.key });
     return c.json(ACKNOWLEDGED_BODY, 200);
   });
 
@@ -494,12 +527,18 @@ function isAuthRequestBody(
 }
 
 /**
- * The minimum shape `HandleStreamLifecycle.execute` needs out of the lifecycle
- * hook's own `curl -d` body. `hook` is checked against `LIFECYCLE_HOOKS` here,
- * not merely typeof-string, so a value neither the shell templates in
- * `infra/mediamtx.yml` nor `HandleStreamLifecycle`'s own union ever produces is
- * treated the same as a malformed body — acknowledged and dropped — rather than
- * reaching the use-case with a hook value it was never typed to accept.
+ * The minimum shape `EndUserStream.execute` needs out of the lifecycle hook's
+ * own `curl -d` body. `hook` is checked against `LIFECYCLE_HOOKS` here, not
+ * merely typeof-string, so a value neither the shell templates in
+ * `infra/mediamtx.yml` nor `EndUserStream`'s own union ever produces is treated
+ * the same as a malformed body — acknowledged and dropped — rather than reaching
+ * the use-case with a hook value it was never typed to accept.
+ *
+ * NOTE THAT THIS RUNS BEFORE THE NAMESPACE GUARD, so a body that fails here is
+ * acknowledged with a 200 even when its `streamKey` is a retired `live/<key>`.
+ * That ordering is deliberate and unchanged: this function answers "is this
+ * request readable at all", and there is nothing to say about a stream key that
+ * arrived alongside a hook value this route cannot interpret.
  */
 function isLifecycleRequestBody(
   body: unknown

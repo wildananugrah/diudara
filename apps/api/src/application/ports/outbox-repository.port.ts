@@ -95,6 +95,17 @@ export const OUTBOX_REVOKE_SUBSCRIPTION_ACCESS = "revoke_subscription_access";
  * churn between go-live and delivery). Both are re-read, never trusted from the
  * enqueue-time snapshot the roster was built from.
  *
+ * RETIRE-TELEGRAM TASK 3 DELETED BOTH ENDS, exactly as Task 2 did for
+ * `OUTBOX_REVOKE_ACCESS` and `OUTBOX_NOTIFY_JOIN_REQUEST` below:
+ * `HandleStreamLifecycle` wrote these rows and `NotifyStreamLive` handled them, and
+ * both went with the community broadcast they existed to announce. Nothing writes
+ * this type any more and no handler is registered for it, so a surviving row from
+ * before the deletion fails with "no handler is registered" rather than being
+ * silently dropped. THE CONSTANT STAYS so nothing reuses the string for something
+ * else, and so a row found in a real database still has a name here to look up.
+ *
+ * Everything below describes how it worked while it existed.
+ *
  * A retry of one row can duplicate a "we're live" WhatsApp message to a member already
  * notified successfully — `(eventId, subscriptionId)` would be exactly as natural an
  * idempotency key as `renewal_reminder`'s `(subscription_id, stage)` claim table, and
@@ -162,8 +173,10 @@ export interface ClaimedOutboxRow {
 export interface OutboxRepositoryPort {
   enqueue(input: { eventType: string; payload: unknown }): Promise<{ id: string }>;
   /**
-   * The same write as `enqueue`, `inputs.length` times, as ONE round trip — review
-   * round 2 on `HandleStreamLifecycle`. A per-member `enqueue` in a loop is
+   * The same write as `enqueue`, `inputs.length` times, as ONE round trip. It was
+   * added for the community go-live fan-out (one row per member), whose enqueuer
+   * retire-telegram Task 3 deleted; the shape stays because the argument for it is
+   * about the outbox, not about that caller. A per-member `enqueue` in a loop is
    * `inputs.length` serial `await`s, each one held open inside the enqueuer's
    * transaction (which is holding a row lock and one of postgres.js's ten pool
    * connections for the whole loop) while whatever triggered the write — here,

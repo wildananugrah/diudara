@@ -158,13 +158,14 @@ paths:
     #
     # THE DAMAGE IS NOT ONLY "the creator's broadcast was cut off", bad as
     # that is. Look at the hook order: `runOnOffline` fires BEFORE the
-    # replacement's `runOnOnline`. `HandleStreamLifecycle.handleOffline`
-    # marks the event `ended`, and `handleOnline` then REFUSES to resurrect
-    # an `ended` event — deliberately, so a late `online` cannot revive a
-    # finished session (see that class's own comment). The observed end
-    # state, measured: ffmpeg still publishing eleven minutes later while the
-    # event row read `ended`, no member able to get a watch link for a stream
-    # that was demonstrably on the air, and no error anywhere.
+    # replacement's `runOnOnline`. The offline hook ends the row, and the
+    # online hook then refuses to resurrect an ended one — deliberately, so a
+    # late `online` cannot revive a finished session (`EndUserStream`'s
+    # "online" no-op is the current world's version of that rule). The
+    # observed end state, measured against the community world this was found
+    # in: ffmpeg still publishing eleven minutes later while the row read
+    # `ended`, nobody able to get a watch link for a stream that was
+    # demonstrably on the air, and no error anywhere.
     #
     # `no` makes MediaMTX refuse the second publisher instead. The first
     # publisher keeps the path — but what the NEWCOMER sees differs by
@@ -221,15 +222,19 @@ paths:
     # (`runOnOnline command exited: exec: "curl": executable file not
     # found in $PATH`, observed against a real container).
     #
-    # $MTX_PATH's runtime shape was the one assumption Task 6 existed to
-    # test against a live server rather than mediamtx.org's docs alone —
-    # apps/api/src/application/use-cases/authorise-stream.ts's
-    # `streamKeyFromPath` requires exactly "live/<key>", and
-    # handle-stream-lifecycle.ts logs a console.warn if $MTX_PATH ever
-    # disagrees. CONFIRMED against a real publish: $MTX_PATH arrives as
-    # exactly "live/<key>", matching what both use-cases assume — see
-    # CONTRIBUTING.md's "Live streaming (MediaMTX)" section for what was
-    # observed.
+    # $MTX_PATH's runtime shape was tested against a live server rather than
+    # taken from mediamtx.org's docs alone. CONFIRMED against a real publish:
+    # $MTX_PATH arrives as exactly "<namespace>/<key>", which is what
+    # `parseStreamPath` (authorise-stream.ts) requires — see CONTRIBUTING.md's
+    # "Live streaming (MediaMTX)" section for what was observed.
+    #
+    # THESE HOOKS FIRE FOR EVERY PATH (`all_others`), and send $MTX_PATH
+    # verbatim. Since retire-telegram Task 3 deleted the community world,
+    # `/webhooks/mediamtx/lifecycle` serves ONLY the `u/<key>` namespace and
+    # answers 404 for anything else — deliberately, so a stale path
+    # configuration surfaces here instead of looking like a healthy broadcast.
+    # A `u/<key>` naming no live row is still a 200; see that route's own
+    # docstring for why those two are different answers.
     runOnOnline: >
       wget -q -O- --header="X-Mediamtx-Secret: $MEDIAMTX_WEBHOOK_SECRET"
       --header="Content-Type: application/json"

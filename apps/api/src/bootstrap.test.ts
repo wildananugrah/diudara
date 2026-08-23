@@ -27,7 +27,6 @@ import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsap
 import { FAKE_AI_BEHAVIOURS, FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
 import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
 import { SendAiMessage } from "./application/use-cases/send-ai-message";
-import { ListLiveSessions } from "./application/use-cases/schedule-live-session";
 import {
   StartUserStream,
   ListLiveStreams,
@@ -111,7 +110,6 @@ import type { ActivityLogRepositoryPort } from "./application/ports/activity-log
 import type { AnalyticsRepositoryPort } from "./application/ports/analytics-repository.port";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
-import type { EventRepositoryPort } from "./application/ports/event-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
 import type { UserPurchaseUnitOfWorkPort } from "./application/ports/user-purchase-unit-of-work.port";
 import type { PostEditUnitOfWorkPort } from "./application/ports/post-edit-unit-of-work.port";
@@ -440,33 +438,6 @@ const fakeMembershipTierRepository: MembershipTierRepositoryPort = {
   },
 };
 
-const fakeEventRepository: EventRepositoryPort = {
-  async createForCreator() {
-    throw new Error("not used");
-  },
-  async findByIdForCreator() {
-    return null;
-  },
-  async listForCommunityForCreator() {
-    return [];
-  },
-  async markLive() {
-    return null;
-  },
-  async markEnded() {
-    return null;
-  },
-  async findByStreamKey() {
-    return null;
-  },
-  async findById() {
-    return null;
-  },
-  async findLiveByCommunityId() {
-    return null;
-  },
-};
-
 /**
  * Phase 7's `user_stream`. Every method answers "nothing here" — these two
  * tests are about which PROVIDERS `bootstrap()` selects, not about streams,
@@ -610,7 +581,8 @@ const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
     return false;
   },
   async listActiveForCommunity() {
-    // Read only by NotifyStreamLive, which runs in the worker.
+    // Read only by the community go-live fan-out, deleted in retire-telegram
+    // Task 3. Nothing in this root calls it.
     return [];
   },
   async markPaid() {
@@ -893,9 +865,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
-      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
-        streamTokenSecret: undefined,
-      }),
+      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
         fakeUserSubscriptionRepository,
@@ -929,16 +899,10 @@ describe("Dependencies (composition root contract)", () => {
       // needs no fake adapter to satisfy the type, and these tests are not
       // about the streaming path.
       streamingProvider: undefined,
-      // Task 3's scheduling endpoints. `scheduleLiveSession` mirrors
-      // `streamingProvider`'s undefined-ness for the same reason;
-      // `listLiveSessions` is never undefined, so it needs a fake here even
-      // though these tests are not about the streaming path either.
-      scheduleLiveSession: undefined,
-      listLiveSessions: new ListLiveSessions(fakeEventRepository),
       // Task 3 of Phase 7's Siaran. `startUserStream` mirrors
-      // `scheduleLiveSession`'s undefined-ness (both need a real
-      // `streamingProvider`, which is `undefined` here); the other two are
-      // never undefined on a real `Dependencies`, so they need fakes.
+      // `streamingProvider`'s undefined-ness (it needs a real one, and there is
+      // none here); the other two are never undefined on a real `Dependencies`,
+      // so they need fakes.
       startUserStream: undefined,
       listLiveStreams: new ListLiveStreams(
         fakeUserStreamRepository,
@@ -949,18 +913,15 @@ describe("Dependencies (composition root contract)", () => {
       // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`
       // below (both need STREAM_TOKEN_SECRET, absent here).
       mintUserWatchToken: undefined,
-      // Task 4's authorisation webhook. `authoriseStream` mirrors
-      // `scheduleLiveSession`'s undefined-ness for the same reason (needs
-      // STREAM_TOKEN_SECRET, which is absent here); these tests are not
-      // about the streaming path.
+      // Task 4's authorisation webhook. `authoriseStream` needs
+      // STREAM_TOKEN_SECRET, which is absent here; these tests are not about the
+      // streaming path.
       authoriseStream: undefined,
       mediamtxWebhookSecret: undefined,
-      // Task 5's lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
-      handleStreamLifecycle: undefined,
-      // Task 6's user-world lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
+      // The lifecycle webhook's only remaining handler, since retire-telegram
+      // Task 3 deleted `handleStreamLifecycle` and `resolveWatchToken` beside it.
+      // Same undefined-ness reasoning as `authoriseStream`.
       endUserStream: undefined,
-      // Task 8's `GET /c/watch/:token`. Same undefined-ness reasoning as `authoriseStream`.
-      resolveWatchToken: undefined,
       // Phase 4's image storage. Never undefined/null in a real Dependencies —
       // see `mediaStorage`'s own field docstring — so this needs a real fake,
       // unlike the streaming fields just above.
@@ -1133,9 +1094,7 @@ describe("Dependencies (composition root contract)", () => {
         fakeClock,
         { appBaseUrl: "https://app.diudara.test" }
       ),
-      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
-        streamTokenSecret: undefined,
-      }),
+      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
         fakeUserSubscriptionRepository,
@@ -1169,16 +1128,10 @@ describe("Dependencies (composition root contract)", () => {
       // needs no fake adapter to satisfy the type, and these tests are not
       // about the streaming path.
       streamingProvider: undefined,
-      // Task 3's scheduling endpoints. `scheduleLiveSession` mirrors
-      // `streamingProvider`'s undefined-ness for the same reason;
-      // `listLiveSessions` is never undefined, so it needs a fake here even
-      // though these tests are not about the streaming path either.
-      scheduleLiveSession: undefined,
-      listLiveSessions: new ListLiveSessions(fakeEventRepository),
       // Task 3 of Phase 7's Siaran. `startUserStream` mirrors
-      // `scheduleLiveSession`'s undefined-ness (both need a real
-      // `streamingProvider`, which is `undefined` here); the other two are
-      // never undefined on a real `Dependencies`, so they need fakes.
+      // `streamingProvider`'s undefined-ness (it needs a real one, and there is
+      // none here); the other two are never undefined on a real `Dependencies`,
+      // so they need fakes.
       startUserStream: undefined,
       listLiveStreams: new ListLiveStreams(
         fakeUserStreamRepository,
@@ -1189,18 +1142,15 @@ describe("Dependencies (composition root contract)", () => {
       // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`
       // below (both need STREAM_TOKEN_SECRET, absent here).
       mintUserWatchToken: undefined,
-      // Task 4's authorisation webhook. `authoriseStream` mirrors
-      // `scheduleLiveSession`'s undefined-ness for the same reason (needs
-      // STREAM_TOKEN_SECRET, which is absent here); these tests are not
-      // about the streaming path.
+      // Task 4's authorisation webhook. `authoriseStream` needs
+      // STREAM_TOKEN_SECRET, which is absent here; these tests are not about the
+      // streaming path.
       authoriseStream: undefined,
       mediamtxWebhookSecret: undefined,
-      // Task 5's lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
-      handleStreamLifecycle: undefined,
-      // Task 6's user-world lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
+      // The lifecycle webhook's only remaining handler, since retire-telegram
+      // Task 3 deleted `handleStreamLifecycle` and `resolveWatchToken` beside it.
+      // Same undefined-ness reasoning as `authoriseStream`.
       endUserStream: undefined,
-      // Task 8's `GET /c/watch/:token`. Same undefined-ness reasoning as `authoriseStream`.
-      resolveWatchToken: undefined,
       // Phase 4's image storage. Never undefined/null in a real Dependencies —
       // see `mediaStorage`'s own field docstring — so this needs a real fake,
       // unlike the streaming fields just above.

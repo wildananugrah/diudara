@@ -30,9 +30,9 @@ export class DrizzleOutboxRepository implements OutboxRepositoryPort {
   async enqueueMany(
     inputs: { eventType: string; payload: unknown }[]
   ): Promise<{ id: string }[]> {
-    // No round trip for an empty batch — `HandleStreamLifecycle` already guards
-    // this, but a multi-row `.values([])` is not a statement Drizzle should be
-    // asked to build in the first place.
+    // No round trip for an empty batch. Its original caller guarded this itself,
+    // but a multi-row `.values([])` is not a statement Drizzle should be asked to
+    // build in the first place.
     if (inputs.length === 0) {
       return [];
     }

@@ -66,7 +66,6 @@ import { GetCommunityMetrics } from "./application/use-cases/get-community-metri
 import { GetCommunityActivity } from "./application/use-cases/get-community-activity";
 import { ListCommunityMembers } from "./application/use-cases/list-community-members";
 import { ExportCommunityMembers } from "./application/use-cases/export-community-members";
-import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import { SystemClock } from "./infrastructure/clock/system.clock";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
@@ -78,8 +77,6 @@ import { SendAiMessage } from "./application/use-cases/send-ai-message";
 import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
 import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
 import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
-import { DrizzleStreamLifecycleUnitOfWork } from "./infrastructure/repositories/drizzle-stream-lifecycle.unit-of-work";
-import { ScheduleLiveSession, ListLiveSessions } from "./application/use-cases/schedule-live-session";
 import {
   StartUserStream,
   ListLiveStreams,
@@ -88,9 +85,7 @@ import {
 } from "./application/use-cases/start-user-stream";
 import { DrizzleUserStreamRepository } from "./infrastructure/repositories/drizzle-user-stream.repository";
 import { AuthoriseStream } from "./application/use-cases/authorise-stream";
-import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lifecycle";
 import { EndUserStream } from "./application/use-cases/end-user-stream";
-import { ResolveWatchToken } from "./application/use-cases/resolve-watch-token";
 import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-storage.adapter";
 import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage.adapter";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
@@ -358,8 +353,8 @@ export interface Dependencies {
    * this use-case's constructor requires a real `PaymentProviderPort`, so
    * there is nothing to construct it against when payments are disabled (see
    * `selectPaymentProvider`). `routes/public-community.ts` does NOT register
-   * the checkout route at all in that case (mirrors `scheduleLiveSession`'s
-   * own undefined-ness, not `listLiveSessions`'s), so the route 404s through
+   * the checkout route at all in that case (mirrors `startUserStream`'s own
+   * undefined-ness, not `listLiveStreams`'s), so the route 404s through
    * the ordinary not-found path rather than answering with a 503 from a route
    * that does exist.
    */
@@ -463,35 +458,13 @@ export interface Dependencies {
    */
   streamingProvider: StreamingProviderPort | undefined;
   /**
-   * Task 3's `POST /communities/:communityId/events` — scheduling a live
-   * session. `undefined` EXACTLY when `streamingProvider` is: this use-case
-   * requires a real `StreamingProviderPort` (see `ScheduleLiveSession`'s own
-   * docstring for why the "is streaming configured" decision is made once,
-   * here, rather than inside the use-case), so there is nothing to construct
-   * it against when streaming is disabled. `routes/events.ts` checks this
-   * exactly the way `routes/ai.ts` checks `sendAiMessage` and answers 503.
-   */
-  scheduleLiveSession: ScheduleLiveSession | undefined;
-  /**
-   * Task 3's `GET /communities/:communityId/events`. Unlike
-   * `scheduleLiveSession`, this FIELD is NEVER `undefined` — listing always
-   * works whether streaming is configured on this box or not. The
-   * `StreamingProviderPort` it is constructed with (below) MAY be
-   * `undefined` though (Task 2 review, Important #3): it is passed through
-   * as an OPTIONAL constructor param so `ListLiveSessions` can rebuild each
-   * row's `rtmpUrl`/`whipUrl` from its persisted `streamKey` when a provider
-   * is available, and return them `null` — never omit them, never throw —
-   * when it is not. See `ListLiveSessions`'s own docstring for the full
-   * reasoning.
-   */
-  listLiveSessions: ListLiveSessions;
-  /**
    * Task 3 of Phase 7's `POST /streams` — a person goes live on their own
-   * profile. `undefined` EXACTLY when `streamingProvider` is, mirroring
-   * `scheduleLiveSession` immediately above: `StartUserStream` requires a
-   * real `StreamingProviderPort` rather than accepting `| undefined` and
-   * checking internally, so there is nothing to construct it against when
-   * streaming is disabled. `routes/streams.ts` checks THIS and answers 503.
+   * profile. `undefined` EXACTLY when `streamingProvider` is: `StartUserStream`
+   * requires a real `StreamingProviderPort` rather than accepting `| undefined`
+   * and checking internally, so there is nothing to construct it against when
+   * streaming is disabled — the "is streaming configured" decision is made once,
+   * in `bootstrap()`, not inside the use-case. `routes/streams.ts` checks THIS
+   * and answers 503.
    */
   startUserStream: StartUserStream | undefined;
   /**
@@ -500,9 +473,10 @@ export interface Dependencies {
    * rows and derives each row's playback path from its own id
    * (`userStreamPlaybackPath`), so it needs no provider at all. A listing
    * that failed over a WRITER's dependency would take Siaran down for every
-   * reader on a box where nobody configured MediaMTX — the same argument
-   * `listLiveSessions` above makes, with one fewer moving part (it does not
-   * even take an optional provider).
+   * reader on a box where nobody configured MediaMTX. It does not even take an
+   * optional provider, unlike the community `ListLiveSessions` retire-telegram
+   * Task 3 deleted, which had to rebuild each row's URLs from a provider it
+   * might not have.
    */
   listLiveStreams: ListLiveStreams;
   /**
@@ -519,7 +493,7 @@ export interface Dependencies {
    * actually checked for watching.
    *
    * `undefined` EXACTLY when `streamTokenSecret` is — in LOCKSTEP with
-   * `authoriseStream` and `resolveWatchToken`, not with `startUserStream`.
+   * `authoriseStream`, not with `startUserStream`.
    * The distinction is real and is pinned by a test: a relaxed dev box
    * (`development`/`test` with no streaming vars) gets a truthy
    * `FakeStreamingAdapter`, so `startUserStream` is DEFINED while
@@ -531,8 +505,8 @@ export interface Dependencies {
   mintUserWatchToken: MintUserWatchToken | undefined;
   /**
    * Task 4's `POST /webhooks/mediamtx/auth` decision logic — `undefined`
-   * EXACTLY when `streamTokenSecret` is. Mirrors `scheduleLiveSession`'s
-   * undefined-ness rather than `listLiveSessions`'s: unlike listing,
+   * EXACTLY when `streamTokenSecret` is. Mirrors `startUserStream`'s
+   * undefined-ness rather than `listLiveStreams`'s: unlike listing,
    * authorising a read needs `STREAM_TOKEN_SECRET` to verify a watch
    * token's signature, so there is nothing to construct it against when
    * streaming is disabled.
@@ -544,12 +518,12 @@ export interface Dependencies {
    * truthy `FakeStreamingAdapter` (see that function's case 3), so
    * `streamingProvider` is defined while `MEDIAMTX_WEBHOOK_SECRET` /
    * `STREAM_TOKEN_SECRET` are genuinely absent and `authoriseStream` stays
-   * `undefined`. Concretely: a relaxed dev box has "schedule a session"
-   * enabled (`scheduleLiveSession` is set) while every call to
+   * `undefined`. Concretely: a relaxed dev box has "go live" enabled
+   * (`startUserStream` is set) while every call to
    * `POST /webhooks/mediamtx/auth` 401s (see `mediamtxWebhookSecret`
    * below) — a real, if confusing-looking, combination, and the correct
    * one: fail-closed on authorisation is the right default even when
-   * scheduling itself is happily faked. Do not "fix" the route's
+   * publishing itself is happily faked. Do not "fix" the route's
    * `!deps.authoriseStream` guard as dead code on the strength of the old
    * (wrong) claim that it can never be reached — this is exactly the case
    * that reaches it.
@@ -574,39 +548,25 @@ export interface Dependencies {
    */
   mediamtxWebhookSecret: string | undefined;
   /**
-   * Task 5's `POST /webhooks/mediamtx/lifecycle` decision logic — `undefined`
-   * in lockstep with `mediamtxWebhookSecret` (both are read off the same
-   * `MEDIAMTX_WEBHOOK_SECRET`; see that field for what "in lockstep" does and
-   * does not imply). Unlike `authoriseStream`, this class needs no secret of
-   * its own to do its job — it only reads and writes `event`, `activity_log`
-   * and `outbox` — so gating its construction on the secret is a choice made
-   * for symmetry with the route it serves (there is no reachable path to
-   * `POST /lifecycle` on a box where the secret is unset, so wiring the
-   * use-case anyway would only be dead weight) rather than a requirement of
-   * the class itself.
-   */
-  handleStreamLifecycle: HandleStreamLifecycle | undefined;
-  /**
-   * Task 6 of Phase 7's `POST /webhooks/mediamtx/lifecycle` decision logic for the
-   * `u/<key>` world — `undefined` in lockstep with `mediamtxWebhookSecret`, same
-   * reasoning as `handleStreamLifecycle` immediately above (this class needs no
-   * secret of its own either; it only reads and writes `user_stream`, unscoped by
-   * owner, same as that class). The route (`routes/mediamtx-webhooks.ts`) parses
-   * `$MTX_PATH` with `parseStreamPath` itself and dispatches to THIS field when the
-   * path names the user world, and to `handleStreamLifecycle` otherwise — see that
-   * route's own docstring for why the dispatch lives there rather than inside either
-   * class.
+   * `POST /webhooks/mediamtx/lifecycle`'s decision logic — and, since
+   * retire-telegram Task 3 deleted `HandleStreamLifecycle` and the community
+   * `live/<key>` world beside it, the ONLY one that route has left.
+   *
+   * `undefined` in lockstep with `mediamtxWebhookSecret` (both are read off the
+   * same `MEDIAMTX_WEBHOOK_SECRET`; see that field for what "in lockstep" does
+   * and does not imply). This class needs no secret of its own to do its job —
+   * it only reads and writes `user_stream`, unscoped by owner — so gating its
+   * construction on the secret is a choice made for symmetry with the route it
+   * serves (there is no reachable path to `POST /lifecycle` on a box where the
+   * secret is unset) rather than a requirement of the class itself.
+   *
+   * The route (`routes/mediamtx-webhooks.ts`) still parses `$MTX_PATH` with
+   * `parseStreamPath` itself before reaching THIS field, and now REFUSES with a
+   * 404 when the path names anything other than the user world — see that
+   * route's own docstring for why an unserved namespace must not be
+   * acknowledged.
    */
   endUserStream: EndUserStream | undefined;
-  /**
-   * Task 8's `GET /c/watch/:token` decision logic — `undefined` in lockstep
-   * with `authoriseStream` (both are read off `STREAM_TOKEN_SECRET`; see
-   * that field for what "in lockstep" does and does not imply). A member
-   * opening a `/watch/<token>` URL on a box with streaming disabled sees the
-   * SAME "link is not valid" message as an expired token — see
-   * `routes/public-subscription.ts`'s `WATCH_REFUSED_BODY`.
-   */
-  resolveWatchToken: ResolveWatchToken | undefined;
   /**
    * Phase 4's image storage (Task 2). Never `undefined` and never `null` —
    * mirrors `messaging`, not `payments`/`email`/`streamingProvider`: unlike
@@ -1922,11 +1882,13 @@ export function bootstrap(): Dependencies {
 
   const memberRepository = new DrizzleMemberRepository(db);
   const subscriptionRepository = new DrizzleSubscriptionRepository(db);
-  // Task 3's event repository, constructed here (rather than down by
-  // `scheduleLiveSession`/`listLiveSessions`, where it used to live alone)
-  // because `getSubscriptionStatus` below needs it too — one shared instance,
-  // same rule `subscriptionRepository` already follows for its own many
-  // consumers.
+  // The community `event` repository. Retire-telegram Task 3 deleted every use
+  // case it was built for, and removed `getSubscriptionStatus`'s `watchUrl`
+  // (its other consumer) along with them. EXACTLY ONE consumer is left:
+  // `authoriseStream`'s `live/` branch, which is Task 6's seam to remove — and
+  // when it goes, this repository, `EventRepositoryPort` and
+  // `domain/watch-token.ts` all go with it. Task 3 could not delete them itself
+  // without editing `authorise-stream.ts`, which is Task 6's file.
   const eventRepository = new DrizzleEventRepository(db);
   const appBaseUrl = resolveAppBaseUrl({
     appBaseUrl: process.env.APP_BASE_URL,
@@ -1971,9 +1933,9 @@ export function bootstrap(): Dependencies {
       )
     : undefined;
 
-  // Task 8's watch link. Read directly off `process.env` here (rather than
-  // derived from `streamingProvider`'s truthiness) for the exact reason
-  // `authoriseStream`/`mediamtxWebhookSecret` do this further down: by the
+  // The streaming signing secret. Read directly off `process.env` here (rather
+  // than derived from `streamingProvider`'s truthiness) for the exact reason
+  // `mediamtxWebhookSecret` does this further down: by the
   // time `selectStreamingProvider` (below) has run without throwing, either
   // all five streaming vars are set and length-valid or all five are
   // genuinely absent — so a plain `presentOrUndefined` read here is exactly
@@ -1983,9 +1945,7 @@ export function bootstrap(): Dependencies {
   // this function ever returns anything, so nothing constructed off this
   // value here is ever handed to a caller in that case.
   const streamTokenSecret = presentOrUndefined(process.env.STREAM_TOKEN_SECRET);
-  const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-    streamTokenSecret,
-  });
+  const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository);
 
   // The webhook's three writes commit together or not at all — see
   // PaymentActivationUnitOfWorkPort. The read that precedes them uses the
@@ -2132,40 +2092,18 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
-  // Task 3's scheduling endpoints. `eventRepository` is constructed earlier
-  // now (Task 8 needs it for `getSubscriptionStatus` too) and shared, not
-  // itself exposed on `Dependencies` — same rule the tier/channel
-  // repositories follow, since nothing outside this module needs to see it.
-  // `scheduleLiveSession` mirrors `sendAiMessage`'s undefined-ness exactly:
-  // constructed only when `streamingProvider` is, because its constructor
-  // requires a real `StreamingProviderPort` rather than accepting
-  // `| undefined` and checking internally — see `ScheduleLiveSession`'s
-  // docstring for why that decision belongs here and not there.
-  const scheduleLiveSession = streamingProvider
-    ? new ScheduleLiveSession(eventRepository, streamingProvider)
-    : undefined;
-  // `streamingProvider` (possibly `undefined`) passed through, NOT gated the
-  // way `scheduleLiveSession` is above: `ListLiveSessions` takes it as an
-  // OPTIONAL constructor param specifically so listing keeps working with
-  // streaming disabled (see that class's own docstring, Task 2 review
-  // Important #3) — it rebuilds rtmpUrl/whipUrl from each row's persisted
-  // streamKey when a provider is available, and returns them `null`
-  // otherwise, rather than needing a second undefined-ness story here.
-  const listLiveSessions = new ListLiveSessions(eventRepository, streamingProvider);
-
-  // Task 3 of Phase 7 — the NEW, user-scoped world beside the community
-  // `event` one above. `userStreamRepository` is constructed here and shared
-  // by all three use-cases rather than exposed on `Dependencies`, the same
-  // rule `eventRepository` and the tier/channel repositories follow.
+  // Task 3 of Phase 7 — the user-scoped streaming world, and after
+  // retire-telegram Task 3 the only one left. `userStreamRepository` is
+  // constructed here and shared by all of its use-cases rather than exposed on
+  // `Dependencies`, the same rule `eventRepository` above follows.
   const userStreamRepository = new DrizzleUserStreamRepository(db);
-  // Gated on `streamingProvider` for the identical reason
-  // `scheduleLiveSession` is: the constructor requires a real provider, and
+  // Gated on `streamingProvider`: the constructor requires a real provider, and
   // "is streaming configured" is this file's decision, not the use-case's.
   const startUserStream = streamingProvider
     ? new StartUserStream(userStreamRepository, streamingProvider)
     : undefined;
-  // NOT gated, and not even handed a `streamingProvider | undefined` the way
-  // `listLiveSessions` is — see the field docstrings above. The SAME
+  // NOT gated, and not even handed a `streamingProvider | undefined` — see the
+  // field docstrings above. The SAME
   // `userSubscriptionRepository` and the SAME `clock` `isMemberOf` and
   // `listFeed` read, so Siaran's gate and the feed's gate cannot disagree
   // about who is a paying member at a given instant.
@@ -2178,9 +2116,9 @@ export function bootstrap(): Dependencies {
 
   // Task 4's publish/read authorisation. The webhook secret is read directly
   // here rather than re-derived from `streamingProvider`'s truthiness, and
-  // `streamTokenSecret` itself was already resolved earlier (alongside
-  // `getSubscriptionStatus`) — see that declaration for why reading it before
-  // `selectStreamingProvider` runs is still safe. Both secrets rely on the
+  // `streamTokenSecret` itself was already resolved earlier — see that
+  // declaration for why reading it before `selectStreamingProvider` runs is
+  // still safe. Both secrets rely on the
   // SAME invariant `selectStreamingProvider` enforces: by the time execution
   // reaches this line, either both MEDIAMTX_WEBHOOK_SECRET and
   // STREAM_TOKEN_SECRET are set and length-valid (the five-vars-together
@@ -2205,51 +2143,17 @@ export function bootstrap(): Dependencies {
     ? new MintUserWatchToken(userStreamRepository, isMemberOf, clock, { streamTokenSecret })
     : undefined;
 
-  // Task 8's `GET /c/watch/:token`. `undefined` in lockstep with
-  // `authoriseStream` — both need nothing but `STREAM_TOKEN_SECRET`, and
-  // both refuse everything (this route's ONE generic body; that webhook's
-  // `{ allowed: false }`) when it is absent.
+  // `POST /webhooks/mediamtx/lifecycle`'s only remaining decision logic, now that
+  // retire-telegram Task 3 deleted `HandleStreamLifecycle` and the community world
+  // it served. `userStreamRepository` is the SAME pooled instance
+  // `startUserStream`/`listLiveStreams`/`endOwnUserStream` already share — this class
+  // needs no transaction of its own, because `user_stream`'s `endById` is a single
+  // atomic UPDATE with nothing else to commit alongside it (no activity_log row, no
+  // per-member notify).
   //
-  // `hlsBaseUrl` (final whole-branch review fix — see `ResolveWatchToken`'s
-  // own docstring): this class now BUILDS the member-facing HLS URL from
-  // `event.id` rather than trusting the `streamKey`-shaped
-  // `event.hlsPlaybackPath` column, so it needs the same public HLS origin
-  // `MediaMtxAdapter` was configured with. Reading `MEDIAMTX_HLS_BASE_URL`
-  // directly here, rather than threading it through from `streamingProvider`,
-  // relies on the SAME invariant `mediamtxWebhookSecret` above already does:
-  // `selectStreamingProvider` (already run, without throwing, by the time
-  // this line executes) enforces all five streaming env vars together or
-  // none at all, so `streamTokenSecret` present implies
-  // `MEDIAMTX_HLS_BASE_URL` is too.
-  const resolveWatchToken = streamTokenSecret
-    ? new ResolveWatchToken(eventRepository, subscriptionRepository, {
-        streamTokenSecret,
-        hlsBaseUrl: presentOrUndefined(process.env.MEDIAMTX_HLS_BASE_URL) as string,
-      })
-    : undefined;
-
-  // Task 5's `POST /webhooks/mediamtx/lifecycle`. Gated on `mediamtxWebhookSecret`
-  // rather than constructed unconditionally — see the `handleStreamLifecycle`
-  // field's own docstring for why that is a symmetry choice, not a real
-  // dependency of the class. Takes BOTH the pooled `eventRepository` (the
-  // stream-key lookup, kept outside any transaction — review round 2, mirroring
-  // `HandlePaymentWebhook`'s own split) AND the unit-of-work (the transition, its
-  // activity_log row, and every per-member notify_stream_live row, which must
-  // commit or roll back together — see `StreamLifecycleUnitOfWorkPort`'s own
-  // docstring for why).
-  const handleStreamLifecycle = mediamtxWebhookSecret
-    ? new HandleStreamLifecycle(eventRepository, new DrizzleStreamLifecycleUnitOfWork(db))
-    : undefined;
-
-  // Task 6 of Phase 7's `POST /webhooks/mediamtx/lifecycle` for the `u/<key>` world —
-  // see the `endUserStream` field's own docstring for why this is a separate class
-  // rather than a branch inside `HandleStreamLifecycle`, and for why the route
-  // decides which of the two to call. `userStreamRepository` is the SAME pooled
-  // instance `startUserStream`/`listLiveStreams`/`endOwnUserStream` already share —
-  // this class needs no transaction of its own, unlike `handleStreamLifecycle`,
-  // because `user_stream`'s `endById` is a single atomic UPDATE with nothing else to
-  // commit alongside it (no activity_log row, no per-member notify — see the class's
-  // own docstring for why the two worlds' `online` hooks differ this much).
+  // Gated on `mediamtxWebhookSecret` rather than constructed unconditionally — see
+  // the `endUserStream` field's own docstring for why that is a symmetry choice with
+  // the route it serves, not a real dependency of the class.
   const endUserStream = mediamtxWebhookSecret
     ? new EndUserStream(userStreamRepository, clock)
     : undefined;
@@ -2310,16 +2214,12 @@ export function bootstrap(): Dependencies {
     aiProvider,
     sendAiMessage,
     streamingProvider,
-    scheduleLiveSession,
-    listLiveSessions,
     startUserStream,
     listLiveStreams,
     endOwnUserStream,
     mintUserWatchToken,
     authoriseStream,
-    resolveWatchToken,
     mediamtxWebhookSecret,
-    handleStreamLifecycle,
     endUserStream,
     mediaStorage,
     uploadMedia,

@@ -802,7 +802,7 @@ export function formatStalePendingSweepLine(result: StalePendingSweepResult): st
 
 /**
  * Phase 7's backstop against a LOST `user_stream` lifecycle webhook (design spec
- * §7). The failure mode: `HandleStreamLifecycle`'s sibling for the `u/<key>` world —
+ * §7). The failure mode: the `u/<key>` world's lifecycle handler —
  * `apps/api/src/application/use-cases/end-user-stream.ts`'s `EndUserStream` — ends a
  * stream the moment MediaMTX's `offline` hook arrives, but that hook is a
  * fire-and-forget shell command (`runOnOffline`), and a crash, a restart, or a

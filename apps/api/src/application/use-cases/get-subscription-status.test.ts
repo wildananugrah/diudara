@@ -2,18 +2,14 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { db } from "../../db/client";
 import { communities, creators, events, members, membershipTiers, subscriptions } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
-import { DrizzleEventRepository } from "../../infrastructure/repositories/drizzle-event.repository";
 import { DrizzleSubscriptionRepository } from "../../infrastructure/repositories/drizzle-subscription.repository";
-import { verifyWatchToken } from "../../domain/watch-token";
 import { NotFoundError } from "../errors";
 import { GetSubscriptionStatus } from "./get-subscription-status";
 
 beforeEach(resetDatabase);
 
-const SECRET = "a".repeat(32);
 const NOW = Date.parse("2026-08-11T10:00:00.000Z");
 
-const eventRepository = new DrizzleEventRepository(db);
 const subscriptionRepository = new DrizzleSubscriptionRepository(db);
 
 let seedCounter = 0;
@@ -66,131 +62,67 @@ async function seedSubscription(communityId: string, status: string) {
 }
 
 describe("GetSubscriptionStatus — the base contract", () => {
-  it("returns just the status when streaming is not configured on this box", async () => {
-    const useCase = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-      streamTokenSecret: undefined,
-    });
+  it("returns just the status", async () => {
     const community = await seedCommunity();
-    await seedEvent(community.id, "live");
     const subscription = await seedSubscription(community.id, "active");
 
-    const result = await useCase.execute(subscription.id, NOW);
+    const result = await new GetSubscriptionStatus(subscriptionRepository).execute(
+      subscription.id,
+      NOW
+    );
 
     expect(result).toEqual({ status: "active" });
   });
 
   it("throws NotFoundError for an unknown subscription id", async () => {
-    const useCase = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-      streamTokenSecret: SECRET,
-    });
-
     await expect(
-      useCase.execute("00000000-0000-4000-8000-000000000000", NOW)
+      new GetSubscriptionStatus(subscriptionRepository).execute(
+        "00000000-0000-4000-8000-000000000000",
+        NOW
+      )
     ).rejects.toBeInstanceOf(NotFoundError);
   });
 
   it("throws NotFoundError rather than 500ing for a value that cannot be a uuid", async () => {
-    const useCase = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-      streamTokenSecret: SECRET,
-    });
-
-    await expect(useCase.execute("not-a-uuid", NOW)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(
+      new GetSubscriptionStatus(subscriptionRepository).execute("not-a-uuid", NOW)
+    ).rejects.toBeInstanceOf(NotFoundError);
   });
 });
 
-describe("GetSubscriptionStatus — watchUrl", () => {
-  it("mints a watchUrl when the subscription is active and its community is live", async () => {
-    const useCase = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-      streamTokenSecret: SECRET,
-    });
-    const community = await seedCommunity();
-    const event = await seedEvent(community.id, "live");
-    const subscription = await seedSubscription(community.id, "active");
-
-    const result = await useCase.execute(subscription.id, NOW);
-
-    expect(result.status).toBe("active");
-    expect(typeof result.watchUrl).toBe("string");
-    const token = result.watchUrl!.replace(/^\/watch\//, "");
-    const claims = verifyWatchToken({ token, now: NOW, secret: SECRET });
-    expect(claims).toEqual({ subscriptionId: subscription.id, eventId: event.id });
-  });
-
-  it("omits watchUrl when the community has no event at all", async () => {
-    const useCase = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-      streamTokenSecret: SECRET,
-    });
-    const community = await seedCommunity();
-    const subscription = await seedSubscription(community.id, "active");
-
-    const result = await useCase.execute(subscription.id, NOW);
-
-    expect(result).toEqual({ status: "active" });
-  });
-
-  it("omits watchUrl when the community's event is only scheduled, not live", async () => {
-    const useCase = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-      streamTokenSecret: SECRET,
-    });
-    const community = await seedCommunity();
-    await seedEvent(community.id, "scheduled");
-    const subscription = await seedSubscription(community.id, "active");
-
-    const result = await useCase.execute(subscription.id, NOW);
-
-    expect(result).toEqual({ status: "active" });
-  });
-
-  it("omits watchUrl once the event has ended", async () => {
-    const useCase = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-      streamTokenSecret: SECRET,
-    });
-    const community = await seedCommunity();
-    await seedEvent(community.id, "ended");
-    const subscription = await seedSubscription(community.id, "active");
-
-    const result = await useCase.execute(subscription.id, NOW);
-
-    expect(result).toEqual({ status: "active" });
-  });
-
-  it("omits watchUrl for a pending subscription, even with a live event — never hand out an unusable link", async () => {
-    const useCase = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-      streamTokenSecret: SECRET,
-    });
+/**
+ * Retire-telegram Task 3 removed `watchUrl` from this endpoint entirely — the
+ * screen that rendered it went in Task 1 and the route that redeemed it
+ * (`GET /c/watch/:token`) went in Task 3, so it had become a signed credential
+ * minted on a public endpoint that nothing could spend. See the class's own
+ * docstring.
+ *
+ * SEVEN TESTS WENT WITH IT, and they were the seven cases that decided WHEN the
+ * field appeared (live/scheduled/ended event, active/pending/cancelled
+ * subscription, another community's event). None of those questions exists any
+ * more. What replaces them is the single stronger claim below: there is no
+ * condition under which this endpoint returns anything but `status`.
+ *
+ * THE SEEDING IS THE POINT. This reproduces the exact state the deleted
+ * "mints a watchUrl" test used — an `active` subscription whose community has a
+ * `live` event, the one combination that used to produce a token — so a
+ * reinstated `watchUrl` branch reddens here rather than passing unnoticed. A test
+ * that seeded nothing would pass against a class that still minted links.
+ */
+describe("GetSubscriptionStatus — there is no watchUrl any more", () => {
+  it("returns status ALONE for an active subscription whose community is live", async () => {
     const community = await seedCommunity();
     await seedEvent(community.id, "live");
-    const subscription = await seedSubscription(community.id, "pending");
+    const subscription = await seedSubscription(community.id, "active");
 
-    const result = await useCase.execute(subscription.id, NOW);
+    const result = await new GetSubscriptionStatus(subscriptionRepository).execute(
+      subscription.id,
+      NOW
+    );
 
-    expect(result).toEqual({ status: "pending" });
-  });
-
-  it("omits watchUrl for a cancelled subscription, even with a live event", async () => {
-    const useCase = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-      streamTokenSecret: SECRET,
-    });
-    const community = await seedCommunity();
-    await seedEvent(community.id, "live");
-    const subscription = await seedSubscription(community.id, "cancelled");
-
-    const result = await useCase.execute(subscription.id, NOW);
-
-    expect(result).toEqual({ status: "cancelled" });
-  });
-
-  it("never leaks another community's live event into this subscription's watchUrl", async () => {
-    const useCase = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-      streamTokenSecret: SECRET,
-    });
-    const streamerCommunity = await seedCommunity("Rina");
-    const otherCommunity = await seedCommunity("Budi");
-    await seedEvent(streamerCommunity.id, "live");
-    const subscription = await seedSubscription(otherCommunity.id, "active");
-
-    const result = await useCase.execute(subscription.id, NOW);
-
+    // `toEqual` on the WHOLE object, not a `watchUrl === undefined` check: this
+    // must fail if the body ever grows any field at all, not only that one.
     expect(result).toEqual({ status: "active" });
+    expect(Object.keys(result)).toEqual(["status"]);
   });
 });

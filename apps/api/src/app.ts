@@ -13,8 +13,6 @@ import { publicSubscriptionRoutes } from "./routes/public-subscription";
 import { webhookRoutes } from "./routes/webhooks";
 import { mediamtxWebhookRoutes } from "./routes/mediamtx-webhooks";
 import { aiRoutes } from "./routes/ai";
-import { eventRoutes } from "./routes/events";
-import { streamingRoutes } from "./routes/streaming";
 import { streamRoutes } from "./routes/streams";
 import { errorHandler } from "./http/error-handler";
 import type { AuthVariables } from "./http/auth.middleware";
@@ -92,10 +90,6 @@ export function createApp(deps: Dependencies) {
   // mounts that used to sit here; the ordering rule they shared is unchanged for
   // the ones that remain.
   app.route("/communities/:communityId/tiers", tierRoutes(deps));
-  // Task 3's scheduling endpoint. Same reason as tiers above: it must
-  // be registered before the catch-all /communities mount so this more
-  // specific path matches first.
-  app.route("/communities/:communityId/events", eventRoutes(deps));
   // Phase 6's dashboard reads: /communities/:communityId/metrics, /activity,
   // /members and /members.csv. Mounted at /communities rather than at
   // /communities/:communityId because `members.csv` is a SIBLING path segment of
@@ -109,17 +103,11 @@ export function createApp(deps: Dependencies) {
   // Phase 7's AI co-builder chat. A distinct top-level path, so mount order
   // relative to /communities does not matter.
   app.route("/ai", aiRoutes(deps));
-  // Task 7's "is live streaming configured" flag — GET /streaming/status,
-  // the same shape as /ai/status above. A distinct top-level path (the flag
-  // is not community-scoped), so mount order does not matter here either.
-  app.route("/streaming", streamingRoutes(deps));
   // Phase 7's Siaran (Task 3): GET /streams (public), POST /streams and
-  // DELETE /streams/:id (a person's own broadcast). A distinct top-level path
-  // — /streams, plural — from /streaming above, whose single route is the
-  // dashboard's "is live streaming configured" flag for the OLD, community
-  // world. Neither is a prefix of the other, so mount order does not matter
-  // here; the near-identical names are worth reading twice before adding a
-  // route to either.
+  // DELETE /streams/:id (a person's own broadcast). A distinct top-level path,
+  // and since retire-telegram Task 3 deleted /streaming (the dashboard's "is
+  // live streaming configured" flag for the OLD, community world) it is no
+  // longer one careless read away from a near-identical sibling.
   app.route("/streams", streamRoutes(deps));
   return app;
 }

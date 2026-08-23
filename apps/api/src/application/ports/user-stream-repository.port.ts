@@ -9,10 +9,9 @@
  *
  * `streamKey` IS present — this is the repository layer, not the wire, and
  * `AuthoriseStream` (Task 4) resolves a publish/read entirely off it. It is
- * a SECRET exactly as `EventRepositoryPort.streamKey` is: never logged
- * (`HandleStreamLifecycle`'s docstring states the rule this table inherits
- * unchanged), and a caller building a wire response must pick fields
- * explicitly rather than spread this type.
+ * a SECRET: never logged — a rule this table inherits unchanged from the old
+ * community world's own stream keys — and a caller building a wire response must
+ * pick fields explicitly rather than spread this type.
  */
 export interface UserStreamRow {
   id: string;

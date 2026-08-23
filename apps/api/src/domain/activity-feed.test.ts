@@ -1,13 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import { RENEWED } from "../application/use-cases/handle-payment-webhook";
-import {
-  STREAM_ENDED_EVENT,
-  STREAM_LIVE_EVENT,
-} from "../application/use-cases/handle-stream-lifecycle";
-import {
-  STREAM_LIVE_NOTIFIED_EVENT,
-  STREAM_LIVE_NOTIFY_SKIPPED_EVENT,
-} from "../application/use-cases/notify-stream-live";
 import { CHURNED, CHURN_REVOKE_SKIPPED } from "../application/use-cases/process-churn";
 import {
   RENEWAL_REMINDER_QUEUED,
@@ -18,6 +10,23 @@ import {
   RENEWAL_REMINDER_SENT,
 } from "../application/use-cases/send-renewal-reminder";
 import { CREATOR_VISIBLE_EVENTS, describeActivityEvent } from "./activity-feed";
+
+/**
+ * FOUR MORE, whose writers retire-telegram TASK 3 deleted: `HandleStreamLifecycle`
+ * wrote `stream_live`/`stream_ended`, and `NotifyStreamLive` wrote
+ * `stream_live_notified`/`stream_live_notify_skipped`. Same downgrade, same
+ * reasoning, as the Task 2 group below — the literals are what `activity_log`
+ * already holds for rows written before the deletion, and `activity-feed.ts` (Task
+ * 4's) must keep rendering them rather than showing a creator a blank line.
+ *
+ * These four WERE imported from their writers until Task 3, which is exactly the
+ * rule the rest of this list still follows; there is simply no module left to
+ * import them from.
+ */
+const STREAM_LIVE_EVENT = "stream_live";
+const STREAM_ENDED_EVENT = "stream_ended";
+const STREAM_LIVE_NOTIFIED_EVENT = "stream_live_notified";
+const STREAM_LIVE_NOTIFY_SKIPPED_EVENT = "stream_live_notify_skipped";
 
 /**
  * Four event types whose WRITERS retire-telegram Task 2 deleted — the two
