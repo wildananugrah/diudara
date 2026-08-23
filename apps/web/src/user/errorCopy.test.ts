@@ -366,3 +366,35 @@ describe("describeStreamStartFailure", () => {
     expect(describeStreamStartFailure(new UserApiError("ignored", 401))).toBe(SESSION_EXPIRED_MESSAGE);
   });
 });
+
+/**
+ * **I2 (final whole-branch review), the 409 branch.** `POST /streams`
+ * answers 409 from `user_stream_one_live` whenever the caller already holds a
+ * `live` row — the state a failed browser publish leaves behind and the state
+ * a creator who reloaded is already in. The generic 4xx sentence tells them
+ * to retry, and retrying 409s again for up to twelve hours.
+ */
+describe("describeStreamStartFailure — the 409 a second Mulai siaran gets", () => {
+  it("says a stream is already running and points at ending it, never 'coba lagi'", () => {
+    const copy = describeStreamStartFailure(
+      new UserApiError("sudah ada siaran yang sedang berlangsung", 409)
+    );
+    expect(copy).toBe(
+      "Anda masih punya siaran yang sedang berlangsung. Akhiri siaran itu dulu, lalu mulai lagi."
+    );
+    expect(copy).not.toBe("Permintaan tidak dapat diproses. Coba lagi.");
+  });
+
+  it("never repeats the wire's own sentence, Bahasa though it is", () => {
+    const copy = describeStreamStartFailure(
+      new UserApiError("sudah ada siaran yang sedang berlangsung", 409)
+    );
+    expect(copy.includes("sudah ada siaran yang sedang berlangsung")).toBe(false);
+  });
+
+  it("leaves every OTHER 4xx on the general sentence — a 400 from an over-long title", () => {
+    expect(describeStreamStartFailure(new UserApiError("invalid body: title too long", 400))).toBe(
+      "Permintaan tidak dapat diproses. Coba lagi."
+    );
+  });
+});

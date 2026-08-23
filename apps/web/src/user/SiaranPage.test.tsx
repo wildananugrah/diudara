@@ -513,3 +513,162 @@ describe("SiaranPage — going live actually publishes over WHIP", () => {
     expect(whipCalls[0]?.init?.method).toBe("POST");
   });
 });
+
+/**
+ * **I2 (final whole-branch review). A creator who reloads mid-broadcast must
+ * still be able to end their own stream.**
+ *
+ * `liveStream` used to be local `useState` initialised to `null` and nothing
+ * rehydrated it, so after a reload — or after a browser publish that never
+ * started, which leaves the row `live` with no publisher and therefore no
+ * `offline` webhook — there was NO *Akhiri siaran* control anywhere in the
+ * app. `DELETE /streams/:id` was built, tested, and deliberately made to work
+ * on a box with no provider "specifically so a creator can never be left
+ * unable to end their own stream" (`apiClient.ts`'s own words), and no UI
+ * reached it. The next *Mulai siaran* then 409s against
+ * `user_stream_one_live` for up to twelve hours, until `SweepStaleUserStreams`
+ * catches the row.
+ *
+ * The creator's own live row is already in `GET /streams` — the same payload
+ * this page already fetches — so rehydrating from it needs no new endpoint.
+ * `isOwnHandle` is the ONE handle comparison this app makes (`apiClient.ts`),
+ * reused rather than re-implemented here.
+ */
+describe("SiaranPage — Akhiri siaran survives a reload (I2)", () => {
+  /** The creator's OWN live row, exactly as `GET /streams` renders it — no key, no whip/rtmp URL. */
+  const OWN_LIVE_STREAM: StreamView = {
+    id: "stream-mine",
+    title: "Tanya jawab",
+    visibility: "public",
+    owner: { handle: "wildan", displayName: "Wildan" },
+    locked: false,
+    hlsPlaybackPath: "/u/stream-mine/index.m3u8",
+  };
+
+  /** Somebody else's live row — the same shape, a different owner. */
+  const OTHER_LIVE_STREAM: StreamView = {
+    id: "stream-theirs",
+    title: "Bedah karya",
+    visibility: "public",
+    owner: { handle: "sari", displayName: "Sari" },
+    locked: false,
+    hlsPlaybackPath: "/u/stream-theirs/index.m3u8",
+  };
+
+  /** `GET /streams` answering `streams`, `DELETE /streams/:id` answering `{ ended: true }`. */
+  function mockReload(streams: StreamView[]): Call[] {
+    return mockApi((url, method) => {
+      if (url === "/streams" && method === "GET") return jsonResponse({ streams });
+      if (url.startsWith("/streams/") && method === "DELETE") return jsonResponse({ ended: true });
+      return jsonResponse({ error: "unrouted in this test" }, 500);
+    });
+  }
+
+  async function renderReloaded(streams: StreamView[]) {
+    setUserSession("jwt-abc", SESSION_USER);
+    render(
+      <MemoryRouter>
+        <SiaranPage attachHls={(_input: AttachHlsInput) => fakeAttach()} />
+      </MemoryRouter>
+    );
+    await screen.findByTestId("stream-composer");
+    return streams;
+  }
+
+  it("puts Akhiri siaran on screen for the creator's OWN live row, with no Mulai siaran in this session", async () => {
+    mockReload([OWN_LIVE_STREAM]);
+    await renderReloaded([OWN_LIVE_STREAM]);
+
+    await waitFor(() =>
+      expect(screen.queryAllByRole("button", { name: "Akhiri siaran" }).length).toBe(1)
+    );
+    expect(screen.queryAllByRole("button", { name: "Mulai siaran" }).length).toBe(0);
+  });
+
+  it("DELETEs the rehydrated row's OWN id, not some id this session invented", async () => {
+    const calls = mockReload([OWN_LIVE_STREAM]);
+    await renderReloaded([OWN_LIVE_STREAM]);
+
+    const end = await screen.findByRole("button", { name: "Akhiri siaran" });
+    fireEvent.click(end);
+
+    await waitFor(() =>
+      expect(
+        calls.some((c) => c.url === "/streams/stream-mine" && c.init?.method === "DELETE")
+      ).toBe(true)
+    );
+  });
+
+  it("never shows Akhiri siaran for somebody ELSE's live row", async () => {
+    mockReload([OTHER_LIVE_STREAM]);
+    await renderReloaded([OTHER_LIVE_STREAM]);
+
+    await waitFor(() =>
+      expect(screen.queryAllByRole("button", { name: "Mulai siaran" }).length).toBe(1)
+    );
+    expect(screen.queryAllByRole("button", { name: "Akhiri siaran" }).length).toBe(0);
+  });
+
+  it("shows NO OBS block for a rehydrated row — GET /streams never carries the stream key", async () => {
+    mockReload([OWN_LIVE_STREAM]);
+    await renderReloaded([OWN_LIVE_STREAM]);
+
+    await screen.findByRole("button", { name: "Akhiri siaran" });
+    expect(screen.queryAllByTestId("stream-obs-details").length).toBe(0);
+  });
+
+  /**
+   * The listing is NOT refetched after *Akhiri siaran*, so the row this
+   * component rehydrated from is still sitting in `streams` when the panel
+   * closes. Without a memory of what was ended, the rehydration would fire
+   * again on the very next render and pin the creator in a panel they just
+   * dismissed.
+   */
+  it("stays ended after Akhiri siaran, even though the stale listing still lists the row", async () => {
+    mockReload([OWN_LIVE_STREAM]);
+    await renderReloaded([OWN_LIVE_STREAM]);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Akhiri siaran" }));
+
+    await waitFor(() =>
+      expect(screen.queryAllByRole("button", { name: "Mulai siaran" }).length).toBe(1)
+    );
+    await waitFor(() =>
+      expect(screen.queryAllByRole("button", { name: "Akhiri siaran" }).length).toBe(0)
+    );
+  });
+});
+
+/**
+ * **I2's other half. The 409 must not say "coba lagi".**
+ *
+ * `POST /streams` answers 409 (`user_stream_one_live`) whenever the caller
+ * already holds a `live` row — the exact state a failed browser publish
+ * leaves behind. `describeStreamStartFailure` used to delegate every non-503
+ * shape to `describeRequestFailure`, whose 4xx branch says "Permintaan tidak
+ * dapat diproses. Coba lagi." — advice that cannot terminate, since retrying
+ * *Mulai siaran* 409s again every single time. Same class as
+ * `describeUploadFailure`'s HEIC branch and `describeSubscribeFailure`'s: a
+ * refusal a retry cannot fix must never be answered "try again".
+ */
+describe("SiaranPage — POST /streams 409s when a stream is already running", () => {
+  it("names the running stream and points at ending it, never the generic retry sentence", async () => {
+    mockApi((url, method) => {
+      if (url === "/streams" && method === "GET") return jsonResponse({ streams: [] });
+      if (url === "/streams" && method === "POST") {
+        return jsonResponse({ error: "sudah ada siaran yang sedang berlangsung" }, 409);
+      }
+      return jsonResponse({ error: "unrouted in this test" }, 500);
+    });
+    await renderSignedIn();
+
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mulai siaran" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe(
+      "Anda masih punya siaran yang sedang berlangsung. Akhiri siaran itu dulu, lalu mulai lagi."
+    );
+    expect(alert.textContent).not.toContain("sudah ada siaran yang sedang berlangsung");
+  });
+});

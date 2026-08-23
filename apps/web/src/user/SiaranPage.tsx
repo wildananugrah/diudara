@@ -4,11 +4,11 @@ import StreamPlayer, { type AttachHls } from "./StreamPlayer";
 import { describeRequestFailure, describeStreamStartFailure } from "./errorCopy";
 import {
   endOwnStream,
+  isOwnHandle,
   isUserSignedIn,
   listStreams,
   startOwnStream,
   subscribeToUserAuth,
-  type StartedStream,
   type StreamView,
   type WatchTokenResult,
 } from "./apiClient";
@@ -76,6 +76,23 @@ export default function SiaranPage({
     };
   }, []);
 
+  /**
+   * **The signed-in creator's OWN live row, out of the listing this page
+   * already fetched — I2's fix, and the whole of its data half.**
+   *
+   * `GET /streams` returns every `live` row, and `user_stream_one_live`
+   * guarantees a person holds at most one of them, so this `find` cannot be
+   * ambiguous. `isOwnHandle` is the ONE handle comparison this app makes
+   * (`apiClient.ts`: case-insensitive, both sides normalised, read from the
+   * "who am I?" cache rather than from `isUserSignedIn()`) — reused, never
+   * re-implemented, exactly as `ProfilePage` and `PostCard` reuse it.
+   *
+   * `null` for a signed-out visitor (no session handle to compare against),
+   * for a creator who is not live, and while the first fetch is still in
+   * flight.
+   */
+  const ownLiveStream = streams.find((stream) => isOwnHandle(stream.owner.handle)) ?? null;
+
   return (
     <main className="user-page siaran-page" data-testid="siaran">
       <h1>Siaran</h1>
@@ -123,10 +140,40 @@ export default function SiaranPage({
       ))}
 
       {/* Below the list, per design spec §8's own words. Signed-in only —
-          see this component's own docstring. */}
-      {signedIn ? <StreamComposer /> : null}
+          see this component's own docstring. `ownLiveStream` is I2's fix:
+          the listing this page already fetched is where a creator's own
+          live row lives, so it is also what makes *Akhiri siaran* reachable
+          after a reload. See `StreamComposer`'s own docstring. */}
+      {signedIn ? <StreamComposer ownLiveStream={ownLiveStream} /> : null}
     </main>
   );
+}
+
+/**
+ * **What the live panel actually needs to exist — deliberately NOT
+ * `StartedStream`.**
+ *
+ * I2. `StartedStream` is `POST /streams`'s response, and three of its fields
+ * (`streamKey`, `rtmpUrl`, `whipUrl`) exist ONLY there: `GET /streams` never
+ * carries a publish credential, so a panel typed as `StartedStream` can only
+ * ever be built by the one browser session that pressed *Mulai siaran*. That
+ * is precisely how *Akhiri siaran* came to be unreachable after a reload.
+ *
+ * So the panel is typed by what it RENDERS instead — an id to `DELETE`, a
+ * title to show, and OBS details when, and only when, this session happens
+ * to hold them.
+ */
+interface LiveBroadcast {
+  /** The row id `DELETE /streams/:id` names. Never the stream key — see `authoriseUserReadByStreamId` on the API side for why the two are not interchangeable. */
+  id: string;
+  title: string;
+  /**
+   * `null` for a broadcast REHYDRATED from `GET /streams`, which has no
+   * publish credential in it at all. Non-null only in the session that
+   * started the stream, and cleared with the rest of `liveStream` the
+   * instant *Akhiri siaran* runs — see the stream key's lifetime, above.
+   */
+  obs: { rtmpUrl: string; streamKey: string } | null;
 }
 
 /**
@@ -177,15 +224,60 @@ export default function SiaranPage({
  * call is reported with this component's OWN Bahasa sentence, never the
  * browser's or `WhipNegotiationError`'s own text.
  * =======================================================================
+ *
+ * ==================== AKHIRI SIARAN SURVIVES A RELOAD (I2) ====================
+ * `liveStream` used to be local state and nothing rehydrated it, which made
+ * `DELETE /streams/:id` — a route built and tested "specifically so a
+ * creator can never be left unable to end their own stream" — UNREACHABLE in
+ * exactly the case it was written for. The route the review walked: a
+ * browser publish that never starts (no `mediaDevices`, a denied camera, a
+ * WHIP negotiation that fails) leaves the row `live` server-side with NO
+ * publisher ever connected, so MediaMTX never fires `offline`, so nothing
+ * ends the row until `SweepStaleUserStreams` at twelve hours. Reload, and
+ * there was no *Akhiri siaran* anywhere in the app; the next *Mulai siaran*
+ * 409'd against `user_stream_one_live` for the rest of those twelve hours.
+ *
+ * `ownLiveStream` closes it with the data the page ALREADY HAS: the
+ * creator's own `live` row is in `GET /streams` like everybody else's, and
+ * `SiaranPage` picks it out with `isOwnHandle`. Whenever this component
+ * holds no live broadcast of its own and that row is present, it adopts it —
+ * so the control appears however the creator got here, not only in the
+ * browser session that pressed *Mulai siaran*.
+ *
+ * **A REHYDRATED BROADCAST HAS NO OBS BLOCK, and that is not a gap to fill
+ * later.** `streamKey`/`rtmpUrl` come back from `POST /streams` and from
+ * nowhere else — `GET /streams` deliberately never carries a publish
+ * credential (`StreamView`'s own docstring) — so `obs` is `null` on every
+ * rehydrated row and the `<details>` simply does not render. Widening the
+ * listing to carry the key so this panel could look the same would hand a
+ * publish credential to every viewer of every stream, which is the one thing
+ * this whole phase is arranged to prevent.
+ *
+ * **`endedIdsRef` is what stops the adoption looping.** The listing is not
+ * refetched after *Akhiri siaran*, so the row this component rehydrated from
+ * is still in `streams` when the panel closes; without a memory of what was
+ * ended, the effect would re-adopt it on the very next render and pin the
+ * creator in a panel they just dismissed. Ids are recorded rather than a
+ * single boolean because a creator may legitimately end one stream and start
+ * another in the same session, and the new one carries a different id.
+ * =======================================================================
  */
-function StreamComposer() {
+function StreamComposer({ ownLiveStream }: { ownLiveStream: StreamView | null }) {
   const [title, setTitle] = useState("");
   const [membersOnly, setMembersOnly] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [startFailure, setStartFailure] = useState<string | null>(null);
-  const [liveStream, setLiveStream] = useState<StartedStream | null>(null);
+  const [liveStream, setLiveStream] = useState<LiveBroadcast | null>(null);
   const [ending, setEnding] = useState(false);
   const [browserPublishNotice, setBrowserPublishNotice] = useState<string | null>(null);
+
+  /**
+   * Every stream id *Akhiri siaran* has already been pressed for in this
+   * session — see this component's own docstring on why a stale listing
+   * makes this necessary. A ref, not state: nothing renders from it, and a
+   * write to it must not schedule a render of its own.
+   */
+  const endedIdsRef = useRef<Set<string>>(new Set());
 
   /** The live WHIP publish, if the browser managed to start one. `null` whenever there is none to close. */
   const handleRef = useRef<PublishHandle | null>(null);
@@ -210,6 +302,25 @@ function StreamComposer() {
       handleRef.current = null;
     };
   }, []);
+
+  /**
+   * **THE REHYDRATION — I2's fix in four lines.** Adopts the creator's own
+   * `live` row from the listing whenever this component is not already
+   * holding one, so *Akhiri siaran* is on screen for anybody who holds a
+   * live row, however they got here. See this component's own docstring for
+   * the failure this closes and for why `endedIdsRef` is consulted.
+   *
+   * No fetch of its own: `SiaranPage` already asked `GET /streams` and this
+   * reads the answer it got. Nothing here can start a stream, and nothing
+   * here can end one — adopting a row only makes the control that ends it
+   * reachable.
+   */
+  useEffect(() => {
+    if (ownLiveStream === null) return;
+    if (liveStream !== null) return;
+    if (endedIdsRef.current.has(ownLiveStream.id)) return;
+    setLiveStream({ id: ownLiveStream.id, title: ownLiveStream.title, obs: null });
+  }, [ownLiveStream, liveStream]);
 
   const canSubmit = title.trim().length > 0 && !submitting;
 
@@ -273,7 +384,11 @@ function StreamComposer() {
         // docstring on why this never sends a literal `"public"`.
         visibility: membersOnly ? "members" : undefined,
       });
-      setLiveStream(started);
+      setLiveStream({
+        id: started.id,
+        title: started.title,
+        obs: { rtmpUrl: started.rtmpUrl, streamKey: started.streamKey },
+      });
       setTitle("");
       setMembersOnly(false);
       void goLiveOverWhip(started.whipUrl);
@@ -305,6 +420,10 @@ function StreamComposer() {
       // sending. See this component's own docstring on the stream key's
       // lifetime for why `liveStream` is cleared below regardless.
     } finally {
+      // Recorded BEFORE the panel closes, so the rehydration effect above
+      // cannot re-adopt this same row out of a listing that has not been
+      // refetched — see this component's own docstring.
+      endedIdsRef.current.add(liveStream.id);
       setLiveStream(null);
       setBrowserPublishNotice(null);
       setEnding(false);
@@ -325,16 +444,20 @@ function StreamComposer() {
         ) : null}
 
         {/* Collapsed by default — design spec §7: "a collapsed block for a
-            creator on a desktop with OBS." */}
-        <details className="stream-obs-details" data-testid="stream-obs-details">
-          <summary>Pakai OBS</summary>
-          <p>
-            URL RTMP: <code>{liveStream.rtmpUrl}</code>
-          </p>
-          <p>
-            Stream key: <code>{liveStream.streamKey}</code>
-          </p>
-        </details>
+            creator on a desktop with OBS." Absent entirely on a REHYDRATED
+            broadcast: `GET /streams` never carries a publish credential, so
+            there is nothing to put here. See `LiveBroadcast.obs`. */}
+        {liveStream.obs !== null ? (
+          <details className="stream-obs-details" data-testid="stream-obs-details">
+            <summary>Pakai OBS</summary>
+            <p>
+              URL RTMP: <code>{liveStream.obs.rtmpUrl}</code>
+            </p>
+            <p>
+              Stream key: <code>{liveStream.obs.streamKey}</code>
+            </p>
+          </details>
+        ) : null}
 
         <button type="button" className="button-danger" onClick={() => void endStream()} disabled={ending}>
           {ending ? "Mengakhiri..." : "Akhiri siaran"}
