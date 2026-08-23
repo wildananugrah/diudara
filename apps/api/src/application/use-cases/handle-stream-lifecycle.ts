@@ -35,9 +35,16 @@ export type StreamLifecycleHook = "online" | "offline";
  * stray or malicious path this codebase's own adapter never constructs from marking an
  * event live whose members would then be sent an HLS URL that points nowhere. THIS
  * CLASS ONLY EVER ACTS ON THE `community` WORLD — a `u/<key>` path parses cleanly (it is
- * a real namespace now) but is treated exactly like an unparseable path below, because
- * `user_stream` lifecycle handling does not exist yet; wiring it up is later work, not
- * this one.
+ * a real namespace now) but is treated exactly like an unparseable path below, because the
+ * user world has its own use case. **M7 (final whole-branch review): this used to say
+ * "`user_stream` lifecycle handling does not exist yet; wiring it up is later work", which
+ * is false at HEAD** — `EndUserStream` exists, and `routes/mediamtx-webhooks.ts`'s
+ * `/lifecycle` dispatches a `u/<key>` hook to it BEFORE this class is ever reached.
+ *
+ * That makes the `parsed.world !== "community"` guard below unreachable FROM THE ROUTE,
+ * and it stays anyway as defence in depth for any future second caller: neutralising it
+ * reddens "a `u/<key>` hook is ignored even when a community event happens to share that
+ * exact key". Fix the sentence; do not delete the branch.
  *
  * ==========================================================================
  * OUT-OF-ORDER AND REPEATED HOOKS ARE THE NORMAL CASE, NOT AN EDGE CASE

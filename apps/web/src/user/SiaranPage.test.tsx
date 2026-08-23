@@ -261,6 +261,47 @@ async function renderSignedIn() {
   return result;
 }
 
+/**
+ * **M3 (final whole-branch review, a carried finding confirmed empirically):
+ * the sign-in gate was pinned by NOTHING.** Rendering `StreamComposer`
+ * unconditionally — deleting the `signedIn ? … : null` in `SiaranPage` — left
+ * the entire web suite green, 911 pass / 0 fail. Nothing in this file or in
+ * `App.test.tsx` asserted the composer was absent for a signed-out visitor.
+ *
+ * The consequence today is mild (a signed-out visitor types a title, presses
+ * *Mulai siaran*, and collects `SESSION_EXPIRED_MESSAGE` from `apiFetch`),
+ * which is exactly why it went unnoticed — but the behaviour the component's
+ * own docstring claims was unowned, and *Akhiri siaran*'s rehydration now
+ * hangs off the same gate.
+ *
+ * `localStorage` is cleared in this file's own `beforeEach`, so "signed out"
+ * here is the real thing rather than a stub: `isUserSignedIn()` reads the
+ * absent token, and `useSyncExternalStore` reports false.
+ */
+describe("SiaranPage — the composer is signed-in only", () => {
+  it("renders NO composer at all for a signed-out visitor", async () => {
+    mockStreams([]);
+
+    renderSiaran();
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("Belum ada siaran langsung.").length).toBe(1)
+    );
+    expect(screen.queryAllByTestId("stream-composer").length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: "Mulai siaran" }).length).toBe(0);
+  });
+
+  /** The other half: the same page, the same listing, with a session. */
+  it("renders the composer once there IS a session", async () => {
+    mockStreams([]);
+    setUserSession("jwt-abc", SESSION_USER);
+
+    renderSiaran();
+
+    await waitFor(() => expect(screen.queryAllByTestId("stream-composer").length).toBe(1));
+  });
+});
+
 describe("SiaranPage — Mulai siaran is disabled until a title is typed", () => {
   it("starts disabled, and enables once a title is typed", async () => {
     mockGoLive();

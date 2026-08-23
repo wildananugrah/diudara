@@ -1044,9 +1044,21 @@ describe("AuthoriseStream — user world read by stream id (nginx auth_request)"
    * is open), which is safe there only because the write path is the
    * authority on what may be stored. It is NOT safe here: this method is the
    * paywall itself, and an allow-by-default paywall is one typo from open.
+   *
+   * **M1 (final whole-branch review): this test used to pass for the wrong
+   * reason.** It called `authoriseUserReadByStreamId` with `query: ""`, so
+   * the refusal came from the `watchTokenFromQuery` → `!token` guard and
+   * never reached the visibility allow-list this test is named for —
+   * deleting `if (stream.visibility !== MEMBERS_ONLY) return { allowed:
+   * false }` left it GREEN, and only its by-key sibling (whose own docstring
+   * says "the token is present and valid on purpose") reddened. The by-id
+   * copy had lost that property. It now sends a VALID, unexpired token minted
+   * for this very row, so the ONLY thing left that can refuse is the
+   * allow-list.
    */
   it("DENIES a visibility it does not recognise, rather than treating it as public", async () => {
     const stream = await seedUserStream("members");
+    const token = userTokenFor("55555555-5555-4555-8555-555555555555", stream.id);
     await db
       .update(userStreams)
       .set({ visibility: "publik" })
@@ -1054,7 +1066,7 @@ describe("AuthoriseStream — user world read by stream id (nginx auth_request)"
 
     const result = await useCase.authoriseUserReadByStreamId({
       streamId: stream.id,
-      query: "",
+      query: `token=${token}`,
       now: NOW,
     });
 

@@ -172,7 +172,9 @@ export interface StreamPlayerHandle {
    * The NATIVE branch (`video.src`) is the one that needed this: a bare
    * `<video src>` has no hook that fires per-request, so a refreshed token
    * sitting in `getToken()` was previously invisible to it for the rest of
-   * the token's five-minute life — every re-mint minted a token, and the
+   * the applied token's life (M7: this used to say "five-minute life" —
+   * `DEFAULT_REMINT_INTERVAL_MS` is one minute since fix round 3, and the
+   * token's own TTL is ten) — every re-mint minted a token, and the
    * native path threw it away. `StreamPlayer`'s own re-mint success handler
    * calls `handle.onTokenRefreshed?.()` right after writing the new token,
    * so the native implementation below can reload with it.
@@ -209,7 +211,9 @@ export type AttachHls = (input: AttachHlsInput) => StreamPlayerHandle | null;
  * DELIBERATELY SIMPLER THAN `WatchPage`'s `defaultAttachPlayer`: no bounded
  * network/media-error recovery loop. That loop exists there to keep a
  * six-hour forwarded link alive through a mobile network's normal blips;
- * this player already re-mints every five minutes regardless; and the one
+ * this player already re-mints every `remintIntervalMs` regardless (one
+ * minute by default since fix round 3 — M7: this sentence used to say "five
+ * minutes", the pre-round-3 value); and the one
  * behaviour that actually matters here — a fatal error ending the session
  * cleanly rather than leaving a broken `<video>` — needs nothing more than
  * calling `onFatalError` on the first fatal error hls.js reports. Recovery

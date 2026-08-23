@@ -62,7 +62,21 @@ export interface UserStreamRepositoryPort {
    */
   findById(id: string): Promise<UserStreamRow | null>;
 
-  /** Every `live` row, newest first — Siaran's own listing (spec §8). Visible to everyone, signed in or not. */
+  /**
+   * Every `live` row, newest first — Siaran's own listing (spec §8). Visible
+   * to everyone, signed in or not.
+   *
+   * **UNBOUNDED, AND THAT IS THE DECISION, NOT AN OVERSIGHT** (M6, final
+   * whole-branch review). There is no limit and no cursor because
+   * `user_stream_one_live` — the partial unique index this whole table is
+   * arranged around — caps the result at one row per person, so the ceiling
+   * is "people broadcasting simultaneously", not "streams ever created". At
+   * this platform's scale that is a page, and a paginated listing would need
+   * a cursor, a wire shape to carry it, and a Siaran page that knows how to
+   * ask for more — real surface area bought against a bound the database
+   * already enforces. Revisit when simultaneous broadcasters are counted in
+   * hundreds; the query is already `status`-indexed for it.
+   */
   listLive(): Promise<UserStreamRow[]>;
 
   /**

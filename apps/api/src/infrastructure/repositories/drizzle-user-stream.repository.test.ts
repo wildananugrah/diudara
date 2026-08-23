@@ -263,4 +263,56 @@ describe("DrizzleUserStreamRepository", () => {
     expect(rows.map((r) => r.id)).toEqual([stale.id]);
     expect(rows.map((r) => r.id)).not.toContain(fresh.id);
   });
+
+  /**
+   * **M2 (final whole-branch review): "at or before" never exercised "at".**
+   * The test above backdates its stale row to 2026-08-01 against a 2026-08-15
+   * cutoff — two weeks clear of the boundary — so `lte(startedAt, olderThan)`
+   * could be weakened to `lt(...)` and nothing in this file reddened. The
+   * *pass-level* boundary IS pinned in both directions against the fake
+   * (`scheduled-passes.test.ts`'s "ends a stream started EXACTLY AT the
+   * cutoff" and "leaves a stream ONE MINUTE inside the cap alone"), which is
+   * what met spec §9 — but the real SQL predicate's inclusivity was not, and
+   * the pass and the predicate are two different pieces of code.
+   *
+   * Inclusivity is the direction that matters: a row landing exactly on the
+   * cutoff and being SKIPPED is a row `user_stream_one_live` then pins its
+   * owner to for another whole sweep interval.
+   */
+  it("includes a stream started EXACTLY AT the cutoff — the boundary is inclusive", async () => {
+    const rina = await createUser("rina");
+    const started = await repo.startLive({
+      ownerId: rina.id,
+      title: "Tepat di batas",
+      visibility: "public",
+      streamKey: "aaa",
+    });
+    const cutoff = new Date("2026-08-15T00:00:00.000Z");
+    await db
+      .update(userStreams)
+      .set({ startedAt: cutoff })
+      .where(eq(userStreams.id, started.id));
+
+    const rows = await repo.listStaleLive(cutoff);
+
+    expect(rows.map((r) => r.id)).toEqual([started.id]);
+  });
+
+  /** The other side of the same boundary — one millisecond INSIDE the cap is left alone. */
+  it("leaves a stream started ONE MILLISECOND after the cutoff alone", async () => {
+    const rina = await createUser("rina");
+    const started = await repo.startLive({
+      ownerId: rina.id,
+      title: "Baru saja lewat",
+      visibility: "public",
+      streamKey: "aaa",
+    });
+    const cutoff = new Date("2026-08-15T00:00:00.000Z");
+    await db
+      .update(userStreams)
+      .set({ startedAt: new Date(cutoff.getTime() + 1) })
+      .where(eq(userStreams.id, started.id));
+
+    expect(await repo.listStaleLive(cutoff)).toEqual([]);
+  });
 });

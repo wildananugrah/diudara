@@ -113,6 +113,16 @@ export default defineConfig({
       // navigation to protect with `bypass`, matching `/auth`,
       // `/communities` and `/ai` above rather than the two regex entries.
       "/streams": "http://localhost:3000",
+      // NOT PROXIED, DELIBERATELY: `/u/` (M5, final whole-branch review).
+      // `/u/<streamId>/index.m3u8` is HLS playback, and in production nginx
+      // serves it from MediaMTX after an `auth_request` — apps/api on :3000
+      // has no bytes to give it, so a proxy entry here would forward every
+      // segment request to a 404 instead of the SPA fallback it hits today.
+      // There is nothing to point it AT on a dev box, which is why the
+      // community world's `/live/` has never been proxied either. Live
+      // playback under `vite dev` needs a real MediaMTX and a real nginx;
+      // that is what `gate-checklist.md` is for. Recorded here so nobody
+      // spends an afternoon "fixing" it.
     },
   },
 });
