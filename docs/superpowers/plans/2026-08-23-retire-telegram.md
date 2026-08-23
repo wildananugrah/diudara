@@ -358,6 +358,19 @@ already deleted, and none had an owner:
 - `apps/web/src/user/SiaranPage.test.tsx:12` names the deleted `GET /c/watch/:token`.
 - `get-subscription-status.ts:45` carries the repo's **only** `eslint-disable` comment, and this
   project has no ESLint at all.
+- **The `processOutbox` / `outbox` retirement — decide it here or defer it once, explicitly.** Task 5
+  removed the queue's last writer, so the dispatcher now drains nothing. Both its own reviewer and
+  Task 5's agreed it should **stay for now and retire together with the `outbox` table in one commit**,
+  because deleting the drainer while the table remains is strictly worse — rows would sit `pending` and
+  unread rather than failing loudly. The residual reason (draining `grant_access` rows an older deploy
+  may have left) is real but thin. **What matters is that this is tracked rather than deferred onward
+  by comment**: either retire `processOutbox`, `enqueueMany` and the `outbox` table together here, or
+  record the decision in the ledger naming exactly what goes together and when.
+- **Stale comments naming deleted things**, found by Task 5's review and not yet owned:
+  `.env.example`'s `WORKER_POLL_INTERVAL_MS` still calls the interval "the delay before their invite
+  arrives"; `outbox-repository.port.ts:4` names `HandlePaymentWebhook` as "the writer";
+  `billing-cycle.ts:60` points at the deleted `renewalAnchor`. **`schema.ts` stays untouched** — its
+  four stale references (`:295`, `:297`, `:463`, `:471`) belong to the table-drop follow-up.
 - `DrizzleOutboxRepository.enqueueMany` is now uncalled **and** untested — its only real-database
   coverage went with `drizzle-stream-lifecycle.unit-of-work.test.ts`. Decide: delete it, or restore
   coverage and say why it stays.
