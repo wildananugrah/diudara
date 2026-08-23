@@ -11,17 +11,18 @@ export default function LandingPage() {
           berbayar yang sudah Anda kelola. Anggota diberi tahu lewat WhatsApp, dan Anda tetap fokus
           ke konten.
         </p>
-        <Link className="button-primary landing-cta" to="/dashboard/login">
+        {/*
+          Retire-telegram Task 1, fix round 1 (review Critical 1). Both
+          `landing-cta` links used to point at `/dashboard/login`, the
+          creator dashboard's own login screen — deleted by this same
+          commit. Phase 8 is the resolution this comment (removed) used to
+          say was still pending: with the dashboard gone, the new world's
+          own signup is this page's only real entry point, so both CTAs
+          point at the exact same place the `Daftar` link below does.
+        */}
+        <Link className="button-primary landing-cta" to="/signup">
           Mulai sekarang
         </Link>
-        {/*
-          Task 5: the personal-account entry points (Task 2's own spec §10 —
-          "nothing links to the six account pages today, and phase 2 is
-          where that gets fixed"). Added ALONGSIDE the existing dashboard
-          CTAs above/below, not in place of them — the creator pitch stays
-          untouched; Phase 8 resolves which of the two audiences this page
-          is actually for.
-        */}
         <p className="landing-entry-points">
           <Link to="/signup">Daftar</Link> · <Link to="/masuk">Masuk</Link>
         </p>
@@ -91,7 +92,7 @@ export default function LandingPage() {
 
       <section className="landing-closing">
         <h2>Siap mencoba?</h2>
-        <Link className="button-primary landing-cta" to="/dashboard/login">
+        <Link className="button-primary landing-cta" to="/signup">
           Mulai sekarang
         </Link>
       </section>

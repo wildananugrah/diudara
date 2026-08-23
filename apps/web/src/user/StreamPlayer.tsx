@@ -7,9 +7,21 @@ import { mintStreamWatchToken, UserApiError, type StreamView, type WatchTokenRes
  * `pages/WatchPage.tsx` (see that file's own history for the MediaMTX
  * query-propagation reasoning behind it — Phase 8 deleted `WatchPage.tsx`
  * along with the rest of the old checkout/status/watch surface, so the
- * function is reproduced here verbatim rather than left dangling. It is
- * still pure — no DOM, no hls.js — and still not exported: nothing outside
- * this file needs it now that `WatchPage.tsx` is gone.
+ * function is reproduced here verbatim rather than left dangling. Still
+ * pure — no DOM, no hls.js.
+ *
+ * Fix round 1 (review Major 2): EXPORTED, where it was not before. The
+ * body is byte-identical to `WatchPage.tsx`'s own — `searchParams.set`
+ * still preserves any pre-existing query string like MediaMTX's own
+ * `?session=` — but `WatchPage.test.tsx`'s four-test
+ * `describe("withToken — ...")` block, the only thing that pinned that
+ * property directly, was deleted along with the file and never ported.
+ * The branch where this actually matters (`xhrSetup` below, on segment
+ * requests) is unreachable under happy-dom (`Hls.isSupported()` is false
+ * with no `MediaSource`), so those pure-function tests are the only way
+ * this behaviour is tested at all — hence exporting it, purely for
+ * `StreamPlayer.test.tsx` to import and pin directly. See that file's own
+ * copy of the WatchPage.test.tsx block.
  *
  * Re-attaches `?token=<token>` to `url`, overwriting any query string
  * already there. MediaMTX re-authenticates EVERY playlist request AND every
@@ -19,7 +31,7 @@ import { mintStreamWatchToken, UserApiError, type StreamView, type WatchTokenRes
  * native-HLS branch (which sets `video.src` directly, with no `xhrSetup`
  * hook) both still need this re-attachment done explicitly.
  */
-function withToken(url: string, token: string): string {
+export function withToken(url: string, token: string): string {
   const parsed = resolveUrl(url);
   parsed.searchParams.set("token", token);
   return parsed.toString();

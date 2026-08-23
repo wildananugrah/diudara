@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import StreamPlayer, {
   defaultAttachHls,
+  withToken,
   type AttachHls,
   type AttachHlsInput,
   type StreamPlayerHandle,
@@ -9,6 +10,48 @@ import StreamPlayer, {
 import { UserApiError, type StreamView, type WatchTokenResult } from "./apiClient";
 
 afterEach(() => cleanup());
+
+/**
+ * Retire-telegram Task 1, fix round 1 (review Major 2). Ported verbatim
+ * from `pages/WatchPage.test.tsx`'s own
+ * `describe("withToken — the exact re-attachment logic MediaMTX's
+ * per-request auth depends on")`, deleted along with that file. The
+ * function body that moved into `StreamPlayer.tsx` is byte-identical to
+ * the original, but its only direct test coverage was not — and the
+ * branch that actually depends on this behaviour (`xhrSetup` in
+ * `defaultAttachHls` below, on every segment request) is unreachable
+ * under happy-dom, so these pure-function tests are the only guard this
+ * behaviour has at all. In particular, "preserves the path and any OTHER
+ * query parameters already on the URL" is the one that would have caught
+ * a naive `url.split("?")[0] + "?token=" + token` rewrite — which
+ * destroys a pre-existing `?session=` the same way it destroys `?m=1234`
+ * here — while leaving the rest of this file's suite green.
+ */
+describe("withToken — the exact re-attachment logic MediaMTX's per-request auth depends on", () => {
+  it("appends the token as a query parameter to a bare URL", () => {
+    const result = withToken("https://hls.diudara.test/live/key/index.m3u8", "tok-1");
+    expect(result).toBe("https://hls.diudara.test/live/key/index.m3u8?token=tok-1");
+  });
+
+  it("OVERWRITES an existing token rather than duplicating the parameter", () => {
+    const result = withToken("https://hls.diudara.test/live/key/index.m3u8?token=stale", "tok-2");
+    const url = new URL(result);
+    expect(url.searchParams.getAll("token")).toEqual(["tok-2"]);
+  });
+
+  it("preserves the path and any OTHER query parameters already on the URL", () => {
+    const result = withToken("https://hls.diudara.test/live/key/seg-0.ts?m=1234", "tok-3");
+    const url = new URL(result);
+    expect(url.pathname).toBe("/live/key/seg-0.ts");
+    expect(url.searchParams.get("m")).toBe("1234");
+    expect(url.searchParams.get("token")).toBe("tok-3");
+  });
+
+  it("resolves a relative URL against the current origin — the shape a segment URL inside a playlist can take", () => {
+    const result = withToken("/live/key/seg-1.ts", "tok-4");
+    expect(result).toContain("/live/key/seg-1.ts?token=tok-4");
+  });
+});
 
 /**
  * `StreamPlayer` owns the re-mint loop — the task brief's own words: "a

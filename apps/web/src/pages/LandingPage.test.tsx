@@ -24,7 +24,18 @@ describe("LandingPage", () => {
     expect(screen.getAllByRole("heading", { level: 1 }).length).toBe(1);
   });
 
-  it("points every call to action at the dashboard login", () => {
+  /**
+   * Retire-telegram Task 1, fix round 1 (review Critical 1). Both
+   * "Mulai sekarang" buttons used to point at `/dashboard/login`, which
+   * Task 1 itself deleted — leaving the app's two most prominent controls
+   * 404ing while a since-removed version of THIS test certified the dead
+   * target. They now point at `/signup`, the same place the small `Daftar`
+   * link below goes: with the dashboard gone, that is the new world's only
+   * real entry point. Named and literal so a regression back to
+   * `/dashboard/login` (or any other dead route) fails here, not silently
+   * in production.
+   */
+  it("points every call to action at /signup, not the deleted dashboard login", () => {
     render(
       <MemoryRouter>
         <LandingPage />
@@ -33,13 +44,15 @@ describe("LandingPage", () => {
     const ctas = screen.getAllByRole("link", { name: /mulai/i });
     expect(ctas.length).toBeGreaterThan(0);
     for (const cta of ctas) {
-      expect(cta.getAttribute("href")).toBe("/dashboard/login");
+      expect(cta.getAttribute("href")).toBe("/signup");
     }
   });
 
-  // Task 5: the personal-account entry points, added alongside the existing
-  // dashboard CTAs above — nothing about the creator pitch changes.
-  it("also links to /signup and /masuk, alongside the dashboard CTAs", () => {
+  // Task 5: the personal-account entry points. Fix round 1: the big
+  // "Mulai sekarang" CTAs above now point at the same /signup destination
+  // as this small `Daftar` link, so this test only pins the small entry
+  // points' own hrefs — the CTA target itself is pinned by the test above.
+  it("also links to /signup and /masuk via the small entry-point links", () => {
     render(
       <MemoryRouter>
         <LandingPage />
@@ -49,8 +62,6 @@ describe("LandingPage", () => {
     expect(signup.getAttribute("href")).toBe("/signup");
     const login = screen.getByRole("link", { name: "Masuk" });
     expect(login.getAttribute("href")).toBe("/masuk");
-    // Still there, untouched.
-    expect(screen.getAllByRole("link", { name: /mulai/i }).length).toBeGreaterThan(0);
   });
 
   // THE REGRESSION THIS CHANGE EXISTS TO PREVENT. Before it, "/" matched no
