@@ -74,7 +74,7 @@ function literalPath(raw: string): string | null {
   return path.startsWith("/") ? path : null;
 }
 
-/** The first path segment — `/communities` from `/communities/${id}/members.csv`. */
+/** The first path segment — `/users` from `/users/${handle}/posts`. */
 function firstSegment(path: string): string {
   const match = /^\/[^/]+/.exec(path);
   return match ? match[0] : path;
@@ -102,7 +102,7 @@ function fetchedPrefixes(): Set<string> {
  * which a plain grep finds reliably. Restricted to lines whose VALUE starts
  * an object or an `"http` string, so this cannot accidentally match a
  * quoted path mentioned only in a comment (this file has several, e.g.
- * `` `/c/some-slug` `` — backtick-quoted, not double-quoted, so it never
+ * `` `/users/...` `` — backtick-quoted, not double-quoted, so it never
  * matches this pattern regardless).
  */
 const PROXY_ENTRY = /^\s*"(\^?\/[^"]+)"\s*:\s*(?:\{|"http)/gm;
@@ -114,13 +114,14 @@ function proxyKeys(): string[] {
 
 /**
  * Whether some proxy key would forward a request for `prefix`. A `^`-led
- * key is the regex form `vite.config.ts` uses for the three segment-precise
- * entries (`^/c/`, `^/users/`); tested against `prefix + "/"` so `^/c/`
- * matches the derived prefix `/c` the same way it matches a real request to
- * `/c/some-slug`. A plain key is the string form every other entry uses,
- * matched by exact equality — every derived prefix here is already reduced
- * to a single leading path segment, which is exactly the shape those keys
- * are written in (`/auth`, `/communities`, `/ai`, …).
+ * key is the regex form `vite.config.ts` uses for its segment-precise entry
+ * (`^/users/`, the only one left after retire-telegram Task 4 removed
+ * `^/c/`); tested against `prefix + "/"` so `^/users/` matches the derived
+ * prefix `/users` the same way it matches a real request to
+ * `/users/by-handle/wildan`. A plain key is the string form every other entry
+ * uses, matched by exact equality — every derived prefix here is already
+ * reduced to a single leading path segment, which is exactly the shape those
+ * keys are written in (`/auth`, `/payment-account`, `/streams`, …).
  */
 function isCovered(prefix: string, keys: string[]): boolean {
   return keys.some((key) =>

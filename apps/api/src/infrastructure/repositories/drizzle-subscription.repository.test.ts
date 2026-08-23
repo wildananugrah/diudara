@@ -15,12 +15,7 @@ import {
 import { resetDatabase } from "../../db/test-helpers";
 import { UniqueRule, UniqueViolationError } from "../../application/errors";
 import type { MarkPaidResult } from "../../application/ports/subscription-repository.port";
-import { ProcessRenewals } from "../../application/use-cases/process-renewals";
-import { FixedClock } from "../clock/fixed.clock";
 import { ArrivalLatch } from "../../test-support/arrival-latch";
-import { DrizzleActivityLogRepository } from "./drizzle-activity-log.repository";
-import { DrizzleOutboxRepository } from "./drizzle-outbox.repository";
-import { DrizzleRenewalReminderRepository } from "./drizzle-renewal-reminder.repository";
 import { DrizzleSubscriptionRepository } from "./drizzle-subscription.repository";
 
 beforeEach(resetDatabase);
@@ -1300,31 +1295,22 @@ describe("DrizzleSubscriptionRepository.createActiveWithoutBilling", () => {
     });
     expect(due.some((r) => r.subscription.id === free.id)).toBe(false);
 
-    // THE SECOND LINK, PROVEN TRANSITIVELY RATHER THAN ASSERTED DIRECTLY.
-    // `markPastDue` — the only thing that can write `past_due` — has exactly one
-    // production caller, and that caller is fed only from `findDueForRenewal`'s
-    // result (see `ProcessRenewals.execute`). So asserting `findPastGraceDeadline`
-    // excludes this row would be structurally unfailable for anything
-    // `createActiveWithoutBilling` can produce: that method never writes `past_due`
-    // in the first place, so there is nothing `findPastGraceDeadline`'s
-    // `status = 'past_due'` predicate could ever have matched here — the assertion
-    // would pass even with an arbitrary `graceEndsAt` sitting on the row.
+    // THE SECOND LINK IS NO LONGER OBSERVABLE FROM HERE, and saying so is more
+    // useful than replacing it with an assertion that cannot fail.
     //
-    // What actually has to hold is that running the REAL renewal pass over this row
-    // leaves it alone, since that pass is the only path that could ever reach
-    // `markPastDue` for it. This is the link nobody would think to re-check after
-    // changing `ProcessRenewals` or `findDueForRenewal`.
-    const pass = new ProcessRenewals(
-      repo,
-      new DrizzleRenewalReminderRepository(db),
-      new DrizzleOutboxRepository(db),
-      new DrizzleActivityLogRepository(db),
-      new FixedClock(new Date("2099-01-01T00:00:00Z"))
-    );
-    await pass.execute();
-
-    const reloaded = await repo.findById(free.id);
-    expect(reloaded?.status).toBe("active");
-    expect(reloaded?.graceEndsAt).toBeNull();
+    // This test used to run the REAL `ProcessRenewals` over the row and assert it
+    // was left alone — the transitive proof that `markPastDue`, whose only
+    // production caller was that pass, could never reach a free membership.
+    // Retire-telegram Task 4 deleted `ProcessRenewals` with the community
+    // subscriptions it dunned, so `markPastDue` now has NO production caller at
+    // all and there is no pass to run.
+    //
+    // Asserting `findPastGraceDeadline` excludes this row instead would be
+    // structurally unfailable: `createActiveWithoutBilling` never writes
+    // `past_due` in the first place, so that query's own `status = 'past_due'`
+    // predicate has nothing to match here and the assertion would pass even with
+    // an arbitrary `graceEndsAt` on the row. What remains provable — that the row
+    // is invisible to `findDueForRenewal`, the only feed the deleted pass ever
+    // had — is asserted above.
   });
 });

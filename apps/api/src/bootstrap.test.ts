@@ -4,14 +4,10 @@ import { join } from "node:path";
 import {
   bootstrap,
   DEFAULT_APP_BASE_URL,
-  DEFAULT_AI_DAILY_MESSAGE_LIMIT,
   RELAXED_NODE_ENVS,
-  resolveAiDailyMessageLimit,
-  resolveAiFakeBehaviour,
   resolveAppBaseUrl,
   resolveCallbackToken,
   resolveMaxPostImages,
-  selectAiProvider,
   selectEmailProvider,
   selectMediaStorage,
   selectMessagingProviders,
@@ -24,9 +20,6 @@ import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-sto
 import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage.adapter";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
-import { FAKE_AI_BEHAVIOURS, FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
-import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
-import { SendAiMessage } from "./application/use-cases/send-ai-message";
 import {
   StartUserStream,
   ListLiveStreams,
@@ -59,30 +52,13 @@ import type {
   PasswordResetUnitOfWorkPort,
 } from "./application/ports/password-reset-unit-of-work.port";
 import type { SignupNoticeRepositoryPort } from "./application/ports/signup-notice-repository.port";
-import { CreateCommunity } from "./application/use-cases/create-community";
-import { ListCommunities } from "./application/use-cases/list-communities";
-import { UpdateCommunity } from "./application/use-cases/update-community";
-import { GetCommunity } from "./application/use-cases/get-community";
-import {
-  DefineMembershipTier,
-  ListTiers,
-  UpdateTier,
-} from "./application/use-cases/manage-tiers";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
 import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
 import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
 import { StartUserSubscription } from "./application/use-cases/start-user-subscription";
-import { GetPublicCommunity } from "./application/use-cases/get-public-community";
-import { StartCheckout } from "./application/use-cases/start-checkout";
-import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
-import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
-import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
-import { GetCommunityActivity } from "./application/use-cases/get-community-activity";
-import { ListCommunityMembers } from "./application/use-cases/list-community-members";
-import { ExportCommunityMembers } from "./application/use-cases/export-community-members";
 import { XENDIT_ACCOUNT_PROVISIONING } from "./domain/payment-account";
 import type {
   CreatorRecord,
@@ -101,13 +77,9 @@ import { MediaEntitlement } from "./application/use-cases/media-entitlement";
 import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
-import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
-import type { MembershipTierRepositoryPort } from "./application/ports/membership-tier-repository.port";
-import type { MemberRepositoryPort } from "./application/ports/member-repository.port";
 import type { SubscriptionRepositoryPort } from "./application/ports/subscription-repository.port";
 import type { WebhookEventRepositoryPort } from "./application/ports/webhook-event-repository.port";
 import type { ActivityLogRepositoryPort } from "./application/ports/activity-log-repository.port";
-import type { AnalyticsRepositoryPort } from "./application/ports/analytics-repository.port";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
@@ -124,10 +96,7 @@ import type { PaymentProviderPort } from "./application/ports/payment-provider.p
  * and `bun run typecheck` fails. No `as` casts are allowed in this file — a cast
  * would hide exactly the regression this test exists to catch.
  *
- * `registerCreator`/`authenticateCreator`/`createCommunity`/`listCommunities`/
- * `updateCommunity`/`defineTier`/`listTiers`/`updateTier`/
- * `createPaymentAccount`/`getPublicCommunity`/`startCheckout`/
- * `getSubscriptionStatus` are typed as the
+ * `registerCreator`/`authenticateCreator`/`createPaymentAccount` are typed as the
  * concrete use-case classes (there's only one implementation of each, so no
  * port exists for them) — a class with private members can't be satisfied by
  * a plain object literal without a cast, so the fakes below construct real
@@ -405,39 +374,6 @@ const fakePostEditUnitOfWork: PostEditUnitOfWorkPort = {
   },
 };
 
-const fakeCommunityRepository: CommunityRepositoryPort = {
-  async create() {
-    throw new Error("not used");
-  },
-  async findByIdForCreator() {
-    return null;
-  },
-  async listByCreator() {
-    return [];
-  },
-  async slugExists() {
-    return false;
-  },
-  async update() {
-    return null;
-  },
-  async findBySlug() {
-    return null;
-  },
-};
-
-const fakeMembershipTierRepository: MembershipTierRepositoryPort = {
-  async create() {
-    throw new Error("not used");
-  },
-  async listByCommunity() {
-    return [];
-  },
-  async updateForCommunity() {
-    return null;
-  },
-};
-
 /**
  * Phase 7's `user_stream`. Every method answers "nothing here" — these two
  * tests are about which PROVIDERS `bootstrap()` selects, not about streams,
@@ -463,15 +399,6 @@ const fakeUserStreamRepository: UserStreamRepositoryPort = {
   },
   async listStaleLive() {
     return [];
-  },
-};
-
-const fakeMemberRepository: MemberRepositoryPort = {
-  async findOrCreateByWhatsappNumber() {
-    throw new Error("not used");
-  },
-  async findById() {
-    return null;
   },
 };
 
@@ -599,23 +526,6 @@ const fakeWebhookEventRepository: WebhookEventRepositoryPort = {
 const fakeActivityLogRepository: ActivityLogRepositoryPort = {
   async record() {
     // not used
-  },
-};
-
-/**
- * Phase 6's dashboard reads. Every method is creator-scoped by the port itself
- * (there is no unscoped variant to fake), so this fake answers `null` — the
- * "not yours / does not exist" answer — for everything.
- */
-const fakeAnalyticsRepository: AnalyticsRepositoryPort = {
-  async getMetricsForCreator() {
-    return null;
-  },
-  async listActivityForCreator() {
-    return null;
-  },
-  async listMembersForCreator() {
-    return null;
   },
 };
 
@@ -828,13 +738,6 @@ describe("Dependencies (composition root contract)", () => {
         new FakePasswordResetUnitOfWork(),
         fakeClock
       ),
-      createCommunity: new CreateCommunity(fakeCommunityRepository),
-      listCommunities: new ListCommunities(fakeCommunityRepository),
-      updateCommunity: new UpdateCommunity(fakeCommunityRepository),
-      getCommunity: new GetCommunity(fakeCommunityRepository),
-      defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
-      listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
-      updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
       getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
       connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
@@ -851,50 +754,16 @@ describe("Dependencies (composition root contract)", () => {
         { appBaseUrl: "https://app.diudara.test" }
       ),
       listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
-      getPublicCommunity: new GetPublicCommunity(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository
-      ),
-      startCheckout: new StartCheckout(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeMemberRepository,
-        fakeSubscriptionRepository,
-        fakeCreatorRepository,
-        fakePaymentProvider,
-        fakeClock,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
-      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
         fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
         fakeClock
       ),
-      getCommunityMetrics: new GetCommunityMetrics(fakeAnalyticsRepository),
-      getCommunityActivity: new GetCommunityActivity(fakeAnalyticsRepository),
-      listCommunityMembers: new ListCommunityMembers(fakeAnalyticsRepository),
-      exportCommunityMembers: new ExportCommunityMembers(
-        fakeCommunityRepository,
-        fakeAnalyticsRepository
-      ),
-      sendRenewalReminder: new SendRenewalReminder(
-        fakeSubscriptionRepository,
-        fakeMemberRepository,
-        fakeActivityLogRepository,
-        fakeMessagingProvider,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
       messaging: { notifier: fakeMessagingProvider },
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
-      // Phase 7's AI co-builder. `undefined` is a valid value of both fields
-      // (the feature disabled) and needs no fake use-case to satisfy the
-      // type — these two tests are not about the AI path.
-      aiProvider: undefined,
-      sendAiMessage: undefined,
       // Task 2's streaming provider. Same reasoning: `undefined` (disabled)
       // needs no fake adapter to satisfy the type, and these tests are not
       // about the streaming path.
@@ -1057,13 +926,6 @@ describe("Dependencies (composition root contract)", () => {
         new FakePasswordResetUnitOfWork(),
         fakeClock
       ),
-      createCommunity: new CreateCommunity(fakeCommunityRepository),
-      listCommunities: new ListCommunities(fakeCommunityRepository),
-      updateCommunity: new UpdateCommunity(fakeCommunityRepository),
-      getCommunity: new GetCommunity(fakeCommunityRepository),
-      defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
-      listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
-      updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
       createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
       getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
       connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
@@ -1080,50 +942,16 @@ describe("Dependencies (composition root contract)", () => {
         { appBaseUrl: "https://app.diudara.test" }
       ),
       listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
-      getPublicCommunity: new GetPublicCommunity(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository
-      ),
-      startCheckout: new StartCheckout(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeMemberRepository,
-        fakeSubscriptionRepository,
-        fakeCreatorRepository,
-        fakePaymentProvider,
-        fakeClock,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
-      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeSubscriptionRepository,
         fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
         fakeClock
       ),
-      getCommunityMetrics: new GetCommunityMetrics(fakeAnalyticsRepository),
-      getCommunityActivity: new GetCommunityActivity(fakeAnalyticsRepository),
-      listCommunityMembers: new ListCommunityMembers(fakeAnalyticsRepository),
-      exportCommunityMembers: new ExportCommunityMembers(
-        fakeCommunityRepository,
-        fakeAnalyticsRepository
-      ),
-      sendRenewalReminder: new SendRenewalReminder(
-        fakeSubscriptionRepository,
-        fakeMemberRepository,
-        fakeActivityLogRepository,
-        fakeMessagingProvider,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
       messaging: { notifier: fakeMessagingProvider },
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
-      // Phase 7's AI co-builder. `undefined` is a valid value of both fields
-      // (the feature disabled) and needs no fake use-case to satisfy the
-      // type — these two tests are not about the AI path.
-      aiProvider: undefined,
-      sendAiMessage: undefined,
       // Task 2's streaming provider. Same reasoning: `undefined` (disabled)
       // needs no fake adapter to satisfy the type, and these tests are not
       // about the streaming path.
@@ -1359,27 +1187,6 @@ describe("bootstrap() APP_BASE_URL", () => {
     });
   });
 
-  /**
-   * Phase 5's reminder delivery is DISPATCHED by the worker, but it is built here too,
-   * from the same resolved `appBaseUrl` `StartCheckout` gets — so the link in a reminder
-   * and the `success_redirect_url` in an invoice cannot disagree about which deployment
-   * a member is sent to. Constructing it is the assertion: it is the only thing that
-   * fails if the field is dropped from the root while the type still has it.
-   *
-   * The FUNCTIONAL proof that the origin reaches a sent message lives in
-   * worker-bootstrap.test.ts, because the worker is the process that sends.
-   */
-  it("also builds the renewal reminder sender, so the two roots cannot drift", async () => {
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ APP_BASE_URL: "https://wired.example/" }, () => {
-        const deps = bootstrap();
-        expect(deps.sendRenewalReminder).toBeInstanceOf(SendRenewalReminder);
-        // The notifier it was handed is the WhatsApp one, not a gating provider:
-        // TelegramBotAdapter.notify throws.
-        expect(deps.messaging.notifier.capabilities().canGateAccess).toBe(false);
-      });
-    });
-  });
 });
 
 describe(".env.example", () => {
@@ -1795,7 +1602,12 @@ describe("bootstrap() payment provider selection", () => {
             }).not.toThrow();
             expect(deps!.payments).toBeNull();
             expect(deps!.payments).not.toBeInstanceOf(FakePaymentAdapter);
-            expect(deps!.startCheckout).toBeUndefined();
+            // The two money use cases this root still builds. `startCheckout` used
+            // to be a third; retire-telegram Task 4 deleted the community checkout
+            // it opened. Both must be UNCONSTRUCTED, not merely unreachable — see
+            // each field's own docstring on `Dependencies`.
+            expect(deps!.startUserSubscription).toBeUndefined();
+            expect(deps!.connectUserPayout).toBeUndefined();
             expect(deps!.createPaymentAccount).toBeUndefined();
             expect(deps!.xenditCallbackToken).toBeUndefined();
           });
@@ -2531,275 +2343,6 @@ function captureConsoleLogValue<T>(fn: () => T): T {
  * secret this process still has.
  */
 
-describe("selectAiProvider", () => {
-  it("selects OpenRouterAiAdapter when both env vars are set", () => {
-    captureConsoleLog(() => {
-      const provider = selectAiProvider({
-        apiKey: "sk-or-x",
-        model: "openai/gpt-4o-mini",
-        nodeEnv: "test",
-      });
-      expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
-    });
-  });
-
-  it("selects the real adapter in production when fully configured", () => {
-    const logs = captureConsoleLog(() => {
-      const provider = selectAiProvider({
-        apiKey: "sk-or-x",
-        model: "openai/gpt-4o-mini",
-        nodeEnv: "production",
-      });
-      expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
-    });
-    expect(logs.some((line) => /OpenRouterAiAdapter/.test(line))).toBe(true);
-  });
-
-  it("selects FakeAiAdapter when both env vars are unset in development or test", () => {
-    captureConsoleLog(() => {
-      for (const nodeEnv of ["test", "development"]) {
-        expect(
-          selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv })
-        ).toBeInstanceOf(FakeAiAdapter);
-      }
-    });
-  });
-
-  // THE DELIBERATE DIVERGENCE from selectPaymentProvider/selectMessagingProviders:
-  // absent configuration outside the allowlist returns undefined — the feature is
-  // disabled, not the boot (design spec §11).
-  it("returns undefined — does NOT throw — outside the allowlist with no configuration", () => {
-    captureConsoleLog(() => {
-      for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "production"]) {
-        expect(selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv })).toBeUndefined();
-      }
-    });
-  });
-
-  it("says out loud that the feature is disabled, outside the allowlist with no configuration", () => {
-    const logs = captureConsoleLog(() => {
-      selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv: "production" });
-    });
-    expect(logs.some((line) => /AI co-builder is DISABLED/.test(line))).toBe(true);
-  });
-
-  // Gate-review finding: every OTHER fakeBehaviour test below passes
-  // nodeEnv: "development" (or ambient "test") — none of them establishes
-  // that the switch is INERT outside RELAXED_NODE_ENVS, which is the
-  // combination that actually matters. `resolveAiFakeBehaviour` is only
-  // ever called from inside the `isRelaxedNodeEnv` branch — it does not
-  // even take a `nodeEnv` parameter to gate on — so this is really pinning
-  // THAT CALL SITE, not a second guard inside the resolver. A refactor that
-  // hoisted the resolve above the allowlist check would make a production
-  // box with a stray AI_FAKE_BEHAVIOUR throw (on a typo) or, worse, serve
-  // fake AI behaviour from an env var — and every other test in this file
-  // would keep passing while it happened.
-  it("does NOT throw and does NOT consult fakeBehaviour outside the allowlist with no configuration", () => {
-    captureConsoleLog(() => {
-      for (const nodeEnv of ["production", "Development", undefined]) {
-        // A VALID value must still be ignored...
-        expect(
-          selectAiProvider({
-            apiKey: undefined,
-            model: undefined,
-            nodeEnv,
-            fakeBehaviour: "timeout",
-          })
-        ).toBeUndefined();
-        // ...and so must a GARBAGE one: if resolveAiFakeBehaviour were ever
-        // reached here, this would throw instead of returning undefined.
-        expect(
-          selectAiProvider({
-            apiKey: undefined,
-            model: undefined,
-            nodeEnv,
-            fakeBehaviour: "not-a-real-behaviour",
-          })
-        ).toBeUndefined();
-      }
-    });
-  });
-
-  it("still starts on the allowlist when OpenRouter IS configured, whatever nodeEnv says", () => {
-    captureConsoleLog(() => {
-      for (const nodeEnv of [undefined, "staging", "prod", "production"]) {
-        expect(
-          selectAiProvider({ apiKey: "sk-or-x", model: "openai/gpt-4o-mini", nodeEnv })
-        ).toBeInstanceOf(OpenRouterAiAdapter);
-      }
-    });
-  });
-
-  it("refuses to start on PARTIAL configuration in EVERY environment", () => {
-    for (const nodeEnv of ["test", "development", "production", undefined]) {
-      expect(() =>
-        selectAiProvider({ apiKey: "sk-or-x", model: undefined, nodeEnv })
-      ).toThrow(/half-configured/);
-      expect(() =>
-        selectAiProvider({ apiKey: undefined, model: "openai/gpt-4o-mini", nodeEnv })
-      ).toThrow(/half-configured/);
-    }
-  });
-
-  it("names the missing variable, not the one that is set", () => {
-    expect(() =>
-      selectAiProvider({ apiKey: "sk-or-x", model: undefined, nodeEnv: "test" })
-    ).toThrow(/OPENROUTER_API_KEY is set but OPENROUTER_MODEL is not/);
-  });
-
-  it("treats empty and whitespace-only configuration as unset", () => {
-    captureConsoleLog(() => {
-      for (const blank of ["", "   "]) {
-        expect(
-          selectAiProvider({ apiKey: blank, model: blank, nodeEnv: "test" })
-        ).toBeInstanceOf(FakeAiAdapter);
-      }
-    });
-  });
-
-  it("stays silent under NODE_ENV=test and speaks up everywhere else", () => {
-    const quiet = captureConsoleLog(() => {
-      selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv: "test" });
-    });
-    expect(quiet).toEqual([]);
-
-    const loud = captureConsoleLog(() => {
-      selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv: "development" });
-    });
-    expect(loud.length).toBeGreaterThan(0);
-  });
-
-  // Task 8's gate: before this, FakeAiAdapter.nextBehaviour could only be
-  // set by a test holding the instance directly, so every hostile-payload
-  // path (refusal, injection, malformed-JSON-> 502, timeout -> 503) was
-  // unreachable from a real browser — the fake always answered "draft".
-  it("sets the returned FakeAiAdapter's nextBehaviour from fakeBehaviour", () => {
-    captureConsoleLog(() => {
-      const provider = selectAiProvider({
-        apiKey: undefined,
-        model: undefined,
-        nodeEnv: "development",
-        fakeBehaviour: "timeout",
-      }) as FakeAiAdapter;
-      expect(provider).toBeInstanceOf(FakeAiAdapter);
-      expect(provider.nextBehaviour).toBe("timeout");
-    });
-  });
-
-  it("leaves nextBehaviour at its default when fakeBehaviour is unset", () => {
-    captureConsoleLog(() => {
-      const provider = selectAiProvider({
-        apiKey: undefined,
-        model: undefined,
-        nodeEnv: "development",
-      }) as FakeAiAdapter;
-      expect(provider.nextBehaviour).toBe("draft");
-    });
-  });
-
-  it("mentions the configured AI_FAKE_BEHAVIOUR in the startup log", () => {
-    const logs = captureConsoleLog(() => {
-      selectAiProvider({
-        apiKey: undefined,
-        model: undefined,
-        nodeEnv: "development",
-        fakeBehaviour: "injection",
-      });
-    });
-    expect(logs.some((line) => /AI_FAKE_BEHAVIOUR=injection/.test(line))).toBe(true);
-  });
-
-  it("propagates resolveAiFakeBehaviour's own failure-closed guard", () => {
-    expect(() =>
-      selectAiProvider({
-        apiKey: undefined,
-        model: undefined,
-        nodeEnv: "development",
-        fakeBehaviour: "not-a-real-behaviour",
-      })
-    ).toThrow(/AI_FAKE_BEHAVIOUR must be one of/);
-  });
-
-  // Strengthened per gate review: the original version passed a VALID
-  // fakeBehaviour and asserted only `instanceof OpenRouterAiAdapter`, which
-  // would keep passing even if resolveAiFakeBehaviour were (wrongly) called
-  // in this branch with a value that happened to validate. A GARBAGE value
-  // is the assertion that actually proves the resolver is never reached
-  // here at all — if it were, this would throw instead of returning the
-  // real adapter.
-  it("never consults fakeBehaviour in the real-adapter branch, not even to validate it", () => {
-    captureConsoleLog(() => {
-      const provider = selectAiProvider({
-        apiKey: "sk-or-x",
-        model: "openai/gpt-4o-mini",
-        nodeEnv: "test",
-        fakeBehaviour: "not-a-real-behaviour",
-      });
-      expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
-    });
-  });
-});
-
-describe("resolveAiFakeBehaviour", () => {
-  it("returns undefined when unset", () => {
-    expect(resolveAiFakeBehaviour({ value: undefined })).toBeUndefined();
-  });
-
-  it("treats empty and whitespace-only as unset", () => {
-    expect(resolveAiFakeBehaviour({ value: "" })).toBeUndefined();
-    expect(resolveAiFakeBehaviour({ value: "   " })).toBeUndefined();
-  });
-
-  it("accepts every behaviour FakeAiAdapter itself supports", () => {
-    for (const behaviour of FAKE_AI_BEHAVIOURS) {
-      expect(resolveAiFakeBehaviour({ value: behaviour })).toBe(behaviour);
-    }
-  });
-
-  it("fails closed on an unrecognised value rather than silently keeping the default", () => {
-    expect(() => resolveAiFakeBehaviour({ value: "garbage" })).toThrow(
-      /AI_FAKE_BEHAVIOUR must be one of/
-    );
-  });
-
-  it("is case-sensitive — the fake's own union is lowercase-hyphenated", () => {
-    expect(() => resolveAiFakeBehaviour({ value: "Draft" })).toThrow(
-      /AI_FAKE_BEHAVIOUR must be one of/
-    );
-  });
-});
-
-describe("resolveAiDailyMessageLimit", () => {
-  it("defaults to DEFAULT_AI_DAILY_MESSAGE_LIMIT when unset", () => {
-    expect(resolveAiDailyMessageLimit({ value: undefined })).toBe(
-      DEFAULT_AI_DAILY_MESSAGE_LIMIT
-    );
-  });
-
-  it("uses a configured positive whole number", () => {
-    expect(resolveAiDailyMessageLimit({ value: "10" })).toBe(10);
-  });
-
-  it("treats an empty or whitespace-only value as unset", () => {
-    expect(resolveAiDailyMessageLimit({ value: "" })).toBe(DEFAULT_AI_DAILY_MESSAGE_LIMIT);
-    expect(resolveAiDailyMessageLimit({ value: "   " })).toBe(DEFAULT_AI_DAILY_MESSAGE_LIMIT);
-  });
-
-  it("fails closed on a non-numeric value rather than silently allowing nothing", () => {
-    expect(() => resolveAiDailyMessageLimit({ value: "abc" })).toThrow(
-      /must be a positive whole number/
-    );
-  });
-
-  it("fails closed on zero, a negative number, or a fraction", () => {
-    for (const bad of ["0", "-5", "1.5"]) {
-      expect(() => resolveAiDailyMessageLimit({ value: bad })).toThrow(
-        /must be a positive whole number/
-      );
-    }
-  });
-});
-
 describe("resolveMaxPostImages", () => {
   it("defaults to 5 when MAX_POST_IMAGES is unset", () => {
     expect(resolveMaxPostImages(undefined)).toBe(5);
@@ -2845,107 +2388,6 @@ describe("bootstrap() MAX_POST_IMAGES wiring", () => {
       withEnv({ MAX_POST_IMAGES: "not-a-number" }, () => {
         expect(() => bootstrap()).toThrow(/MAX_POST_IMAGES must be a whole number/);
       });
-    });
-  });
-});
-
-describe("bootstrap() AI provider wiring", () => {
-  it("wires a SendAiMessage and a FakeAiAdapter under NODE_ENV=test with no OpenRouter config", () => {
-    withJwtSecret("x".repeat(32), () => {
-      const deps = bootstrap();
-      expect(deps.aiProvider).toBeInstanceOf(FakeAiAdapter);
-      expect(deps.sendAiMessage).toBeInstanceOf(SendAiMessage);
-    });
-  });
-
-  it("wires OpenRouterAiAdapter and a SendAiMessage when both env vars are configured", () => {
-    withJwtSecret("x".repeat(32), () => {
-      withEnv(
-        { OPENROUTER_API_KEY: "sk-or-x", OPENROUTER_MODEL: "openai/gpt-4o-mini" },
-        () => {
-          const deps = bootstrap();
-          expect(deps.aiProvider).toBeInstanceOf(OpenRouterAiAdapter);
-          expect(deps.sendAiMessage).toBeInstanceOf(SendAiMessage);
-        }
-      );
-    });
-  });
-
-  it("wires AI_FAKE_BEHAVIOUR through to the constructed FakeAiAdapter", () => {
-    // End-to-end through the composition root: the env var has to reach the
-    // ACTUAL instance bootstrap() hands to SendAiMessage, not just
-    // selectAiProvider in isolation — otherwise a browser-driven turn would
-    // still hit the untouched default.
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ AI_FAKE_BEHAVIOUR: "refusal" }, () => {
-        const deps = bootstrap();
-        expect(deps.aiProvider).toBeInstanceOf(FakeAiAdapter);
-        expect((deps.aiProvider as FakeAiAdapter).nextBehaviour).toBe("refusal");
-      });
-    });
-  });
-
-  it("fails closed on an invalid AI_FAKE_BEHAVIOUR rather than silently keeping the default", () => {
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ AI_FAKE_BEHAVIOUR: "not-a-real-behaviour" }, () => {
-        expect(() => bootstrap()).toThrow(/AI_FAKE_BEHAVIOUR must be one of/);
-      });
-    });
-  });
-
-  it("fails closed on an invalid AI_DAILY_MESSAGE_LIMIT rather than silently keeping the default", () => {
-    // This only proves resolveAiDailyMessageLimit's own guard fires from
-    // inside bootstrap() — it does NOT prove a configured valid value
-    // reaches SendAiMessage's constructor (hardcoding 50 there would still
-    // pass this). That wiring is covered by routes/ai.test.ts's
-    // AI_DAILY_MESSAGE_LIMIT=1 test, which observes the cap actually bind at
-    // 1 through a real HTTP call.
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ AI_DAILY_MESSAGE_LIMIT: "not-a-number" }, () => {
-        expect(() => bootstrap()).toThrow(/must be a positive whole number/);
-      });
-    });
-  });
-
-  it("boots with the co-builder disabled even when AI_DAILY_MESSAGE_LIMIT is garbage — absent/irrelevant AI config must never block boot", () => {
-    // `NODE_ENV=production` with no OPENROUTER_API_KEY/OPENROUTER_MODEL is
-    // exactly `selectAiProvider`'s disabled path — see "THE DELIBERATE
-    // DIVERGENCE" above. Every OTHER provider is fully configured (mirrors
-    // the "refuses to boot a production process with no callback token" test
-    // above) so the only thing under test is the AI wiring: a fat-fingered
-    // AI_DAILY_MESSAGE_LIMIT must not even be READ, let alone thrown on,
-    // once the feature it belongs to is off.
-    //
-    // APP_BASE_URL is set explicitly, not inherited, same as every other
-    // fully-configured production block in this file: resolveAppBaseUrl sits
-    // between resolveCallbackToken and selectMessagingProviders in bootstrap()'s
-    // guard order, so without it bootstrap() throws before it ever reaches the
-    // AI wiring this test is actually about.
-    withJwtSecret("x".repeat(32), () => {
-      withEnv(
-        {
-          NODE_ENV: "production",
-          APP_BASE_URL: "http://localhost:5173",
-          XENDIT_SECRET_KEY: "sk_live_x",
-          XENDIT_SPLIT_RULE_ID: "splitrule_1",
-          XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          FONNTE_API_TOKEN: "real-fonnte-token",
-          OPENROUTER_API_KEY: undefined,
-          OPENROUTER_MODEL: undefined,
-          AI_DAILY_MESSAGE_LIMIT: "fifty",
-          ...REAL_S3_CONFIG,
-        },
-        () => {
-          captureConsoleLog(() => {
-            let deps: Dependencies;
-            expect(() => {
-              deps = bootstrap();
-            }).not.toThrow();
-            expect(deps!.aiProvider).toBeUndefined();
-            expect(deps!.sendAiMessage).toBeUndefined();
-          });
-        }
-      );
     });
   });
 });

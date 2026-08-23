@@ -2,15 +2,9 @@ import { describe, expect, it, beforeEach } from "bun:test";
 import { eq } from "drizzle-orm";
 import { db } from "./db/client";
 import {
-  communities,
-  creators,
-  members,
-  membershipTiers,
   appUsers,
   membershipReminders,
   outbox,
-  renewalReminders,
-  subscriptions,
   userSubscriptions,
   userTiers,
 } from "./db/schema";
@@ -27,137 +21,14 @@ import {
   OUTBOX_SEND_RENEWAL_REMINDER,
 } from "./application/ports/outbox-repository.port";
 import { resolveAppBaseUrl } from "./bootstrap";
-import { jakartaDayNumber } from "./domain/renewal-schedule";
 import { SystemClock } from "./infrastructure/clock/system.clock";
 import { bootstrapWorker } from "./worker-bootstrap";
 
 beforeEach(resetDatabase);
 
-/**
- * A `YYYY-MM-DD` string `days` after TODAY as Asia/Jakarta reckons it — i.e. derived
- * from the real clock, on purpose.
- *
- * These dates are what make the two pass tests below prove the composition root wired a
- * `SystemClock`: a root that had injected a fixed instant, or a clock stuck at some
- * literal date, would compute a different stage for the same row (or none at all) and
- * the assertions would fail. A hardcoded 2026-03-10 could not tell the difference.
- */
-function jakartaDateStringOffsetFromToday(days: number): string {
-  return new Date((jakartaDayNumber(new Date()) + days) * 86_400_000).toISOString().slice(0, 10);
-}
-
 async function rowById(id: string) {
   const [row] = await db.select().from(outbox).where(eq(outbox.id, id));
   return row;
-}
-
-/**
- * A past-due member of a real community, i.e. exactly what `ProcessRenewals` enqueues a
- * `send_renewal_reminder` row for.
- */
-async function seedPastDueMember(slug: string) {
-  const [creator] = await db.insert(creators).values({ name: "Rina" }).returning();
-  const [community] = await db
-    .insert(communities)
-    .values({ creatorId: creator.id, name: "Kelas Bimbel Rina", slug })
-    .returning();
-  const [tier] = await db
-    .insert(membershipTiers)
-    .values({
-      communityId: community.id,
-      name: "Paket Lengkap",
-      priceAmount: 50_000,
-      billingCycle: "monthly",
-    })
-    .returning();
-  const [member] = await db
-    .insert(members)
-    .values({ whatsappNumber: `+6281390${Date.now() % 100000}`, name: "Siti" })
-    .returning();
-  const [subscription] = await db
-    .insert(subscriptions)
-    .values({
-      memberId: member.id,
-      tierId: tier.id,
-      status: "past_due",
-      nextBillingDate: "2026-03-10",
-    })
-    .returning();
-  await db.insert(renewalReminders).values({ subscriptionId: subscription.id, stage: "due" });
-  return { community, member, subscription };
-}
-
-/**
- * A member whose next billing date is `daysOverdue` WIB days in the past and whose
- * subscription is still `active` — i.e. exactly what `ProcessRenewals` is supposed to
- * find, remind and move to `past_due`.
- */
-async function seedMemberDueDaysAgo(daysOverdue: number) {
-  const [creator] = await db.insert(creators).values({ name: "Rina" }).returning();
-  const [community] = await db
-    .insert(communities)
-    .values({ creatorId: creator.id, name: "Kelas Rina", slug: `kelas-due-${Date.now()}` })
-    .returning();
-  const [tier] = await db
-    .insert(membershipTiers)
-    .values({
-      communityId: community.id,
-      name: "Basic",
-      priceAmount: 50_000,
-      billingCycle: "monthly",
-    })
-    .returning();
-  const [member] = await db
-    .insert(members)
-    .values({ whatsappNumber: `+6281392${Date.now() % 100000}`, name: "Siti" })
-    .returning();
-  const [subscription] = await db
-    .insert(subscriptions)
-    .values({
-      memberId: member.id,
-      tierId: tier.id,
-      status: "active",
-      nextBillingDate: jakartaDateStringOffsetFromToday(-daysOverdue),
-    })
-    .returning();
-  return { community, member, tier, subscription };
-}
-
-/**
- * A `past_due` member whose stored grace deadline has already passed relative to the
- * REAL clock — i.e. exactly what `ProcessChurn` is supposed to find and end.
- */
-async function seedMemberPastGrace() {
-  const [creator] = await db.insert(creators).values({ name: "Rina" }).returning();
-  const [community] = await db
-    .insert(communities)
-    .values({ creatorId: creator.id, name: "Kelas Rina", slug: `kelas-grace-${Date.now()}` })
-    .returning();
-  const [tier] = await db
-    .insert(membershipTiers)
-    .values({
-      communityId: community.id,
-      name: "Basic",
-      priceAmount: 50_000,
-      billingCycle: "monthly",
-    })
-    .returning();
-  const [member] = await db
-    .insert(members)
-    .values({ whatsappNumber: `+6281393${Date.now() % 100000}`, name: "Siti" })
-    .returning();
-  const [subscription] = await db
-    .insert(subscriptions)
-    .values({
-      memberId: member.id,
-      tierId: tier.id,
-      status: "past_due",
-      nextBillingDate: jakartaDateStringOffsetFromToday(-8),
-      // A minute ago, by the real clock.
-      graceEndsAt: new Date(Date.now() - 60_000),
-    })
-    .returning();
-  return { community, member, subscription };
 }
 
 /**
@@ -231,64 +102,23 @@ async function seedMembershipEndingInDays(days: number) {
 
 describe("bootstrapWorker", () => {
   /**
-   * Phase 5. `ProcessRenewals` runs in this same process and enqueues these rows, so an
-   * unregistered handler here would mean every reminder failing five times and then
-   * permanently — a member who is about to lose access is never warned, and the only
-   * trace is `outbox.last_error`. Phase 4 found a guard that existed in the API and had
-   * never crossed the workspace seam; this is the same seam.
+   * What this root hands the worker, pinned as an EXACT SET.
+   *
+   * Retire-telegram Task 4 deleted `ProcessRenewals`, `ProcessChurn` and
+   * `SendRenewalReminder` — the community world's dunning cycle — so three fields
+   * left this container. Set equality rather than three `toBeUndefined()` checks:
+   * an absence check passes just as happily while a fourth, unexpected field
+   * survives, and this container is the only place the worker's shape is stated
+   * once.
    */
-  it("dispatches a real send_renewal_reminder row to SendRenewalReminder, not to nothing", async () => {
-    const { member } = await seedPastDueMember("kelas-bimbel-rina");
-    const [subscription] = await db.select().from(subscriptions);
-    const { id } = await new DrizzleOutboxRepository(db).enqueue({
-      eventType: OUTBOX_SEND_RENEWAL_REMINDER,
-      payload: { subscriptionId: subscription.id, stage: "due" },
-    });
-    const worker = bootstrapWorker();
-    const notifier = fakeNotifierOf(worker);
-
-    const result = await worker.processOutbox.execute();
-
-    expect(result.claimed).toBe(1);
-    expect(result.sent).toBe(1);
-    const row = await rowById(id);
-    expect(row.status).toBe("sent");
-    expect(row.lastError).toBeNull();
-    // The member was actually messaged, over WhatsApp, by THIS process.
-    expect(notifier.notifications).toHaveLength(1);
-    expect(notifier.notifications[0].toWhatsappNumber).toBe(member.whatsappNumber);
-  });
-
-  it("builds the reminder's checkout link from APP_BASE_URL, in THIS root", async () => {
-    // Phase 3 shipped a confirmation page nothing could reach for a whole phase because
-    // no test checked that an environment variable arrived at the composition root. The
-    // worker's root did not resolve APP_BASE_URL at all before Phase 5 — its docstring
-    // said it had "no confirmation page to link to" — so this is the assertion that
-    // stops the reminder link pointing at localhost on every member's phone.
-    await seedPastDueMember("kelas-bimbel-rina");
-    const [subscription] = await db.select().from(subscriptions);
-    await new DrizzleOutboxRepository(db).enqueue({
-      eventType: OUTBOX_SEND_RENEWAL_REMINDER,
-      payload: { subscriptionId: subscription.id, stage: "overdue_3d" },
-    });
-
-    const original = process.env.APP_BASE_URL;
-    process.env.APP_BASE_URL = "https://worker-wired.example/";
-    try {
-      const worker = bootstrapWorker();
-      const notifier = fakeNotifierOf(worker);
-      await worker.processOutbox.execute();
-      const { message } = notifier.notifications[0];
-      // The SAME resolver the API uses, trailing slash stripped and all.
-      expect(message).toContain(
-        `${resolveAppBaseUrl({ appBaseUrl: "https://worker-wired.example/", nodeEnv: "test" })}` +
-          "/c/kelas-bimbel-rina"
-      );
-      expect(message).not.toContain("localhost");
-    } finally {
-      if (original === undefined) delete process.env.APP_BASE_URL;
-      else process.env.APP_BASE_URL = original;
-    }
+  it("exposes exactly the surviving dependencies", () => {
+    expect(Object.keys(bootstrapWorker()).sort()).toEqual([
+      "clock",
+      "email",
+      "messaging",
+      "processOutbox",
+      "remindExpiringMemberships",
+    ]);
   });
 
   /**
@@ -316,7 +146,7 @@ describe("bootstrapWorker", () => {
       // It booted, and the passes that have nothing to do with streaming are
       // there — which is the whole point of not refusing.
       expect(worker.processOutbox).toBeDefined();
-      expect(worker.processRenewals).toBeDefined();
+      expect(worker.remindExpiringMemberships).toBeDefined();
     } finally {
       if (original === undefined) delete process.env.STREAM_TOKEN_SECRET;
       else process.env.STREAM_TOKEN_SECRET = original;
@@ -330,64 +160,6 @@ describe("bootstrapWorker", () => {
     await bootstrapWorker().processOutbox.execute();
 
     expect((await rowById(id)).lastError).toContain("no handler is registered");
-  });
-
-  /**
-   * Phase 5, Task 7. Until this task nothing constructed `ProcessRenewals` at all: its
-   * outbox handler was registered, its use-case was tested, and no process would ever
-   * have called it — the whole phase was dead code reachable only from a test. These
-   * two tests are what make "the pass exists" mean "the pass runs".
-   */
-  it("constructs a renewal pass that actually reminds a real due subscription", async () => {
-    const { member, subscription } = await seedMemberDueDaysAgo(1);
-
-    const result = await bootstrapWorker().processRenewals.execute();
-
-    expect(result.considered).toBe(1);
-    expect(result.reminded).toBe(1);
-    expect(result.transitionedToPastDue).toBe(1);
-    // The stage is derived from the REAL clock against a date seeded one WIB day ago,
-    // so this also proves the root injected a `SystemClock` and not a fixed instant.
-    const reminders = await db.select().from(renewalReminders);
-    expect(reminders).toHaveLength(1);
-    expect(reminders[0].stage).toBe("overdue_1d");
-    expect(reminders[0].subscriptionId).toBe(subscription.id);
-    // And a row for the OTHER half of the wiring to pick up.
-    const [row] = await db.select().from(outbox);
-    expect(row.eventType).toBe(OUTBOX_SEND_RENEWAL_REMINDER);
-    const [updated] = await db.select().from(subscriptions).where(eq(subscriptions.id, subscription.id));
-    expect(updated.status).toBe("past_due");
-    expect(updated.graceEndsAt).not.toBeNull();
-    expect(member.whatsappNumber).toBeTruthy();
-  });
-
-  it("runs the renewal pass and the outbox in ONE process, so the member is really messaged", async () => {
-    // The end-to-end seam this task closes: clock → pass → outbox row → WhatsApp. Every
-    // link is a different module and none of them was connected before.
-    const { member } = await seedMemberDueDaysAgo(3);
-    const worker = bootstrapWorker();
-    const notifier = fakeNotifierOf(worker);
-
-    await worker.processRenewals.execute();
-    const delivered = await worker.processOutbox.execute();
-
-    expect(delivered.sent).toBe(1);
-    expect(notifier.notifications).toHaveLength(1);
-    expect(notifier.notifications[0].toWhatsappNumber).toBe(member.whatsappNumber);
-  });
-
-  it("constructs a churn pass that actually ends a subscription past its grace deadline", async () => {
-    const { subscription } = await seedMemberPastGrace();
-
-    const result = await bootstrapWorker().processChurn.execute();
-
-    expect(result.considered).toBe(1);
-    expect(result.churned).toBe(1);
-    expect(result.revocationsQueued).toBe(1);
-    const [updated] = await db.select().from(subscriptions).where(eq(subscriptions.id, subscription.id));
-    expect(updated.status).toBe("churned");
-    const [row] = await db.select().from(outbox);
-    expect(row.eventType).toBe(OUTBOX_REVOKE_SUBSCRIPTION_ACCESS);
   });
 
   /**
@@ -527,9 +299,21 @@ describe("bootstrapWorker", () => {
   });
 
   /**
-   * Retire-telegram Tasks 2 and 3. The FIVE event types whose handlers went with
+   * Retire-telegram Tasks 2, 3 and 4. The SIX event types whose handlers went with
    * the use-cases that served them — four in Task 2 (channel access and join
-   * requests) and `notify_stream_live` in Task 3, with `NotifyStreamLive`.
+   * requests), `notify_stream_live` in Task 3 with `NotifyStreamLive`, and
+   * `send_renewal_reminder` in Task 4 with `SendRenewalReminder` and the
+   * `ProcessRenewals` pass that was its only writer.
+   *
+   * That sixth entry means the handler map is now EMPTY, so this block is the whole
+   * of what `ProcessOutbox` can be asked to dispatch. It replaces two tests Task 4
+   * deleted — "dispatches a real send_renewal_reminder row to SendRenewalReminder,
+   * not to nothing" and "builds the reminder's checkout link from APP_BASE_URL, in
+   * THIS root". The first pinned exactly the registration that has now gone. The
+   * second pinned that this root resolves `APP_BASE_URL` at all, and that property
+   * did NOT go with it: `RemindExpiringMembership` builds its own link from the same
+   * value, and "builds the reminder's link from APP_BASE_URL, in THIS root" above
+   * asserts it against the surviving pass.
    *
    * A registration left behind is INVISIBLE from the outside — the worker boots,
    * the pass runs, and the handler simply never fires — so nothing but a row
@@ -546,7 +330,7 @@ describe("bootstrapWorker", () => {
    * second of them asserted this exact outcome for one environment, and it is now
    * the outcome in every environment.
    *
-   * ONE `it.each` DECLARATION, FIVE TEST RUNS.
+   * ONE `it.each` DECLARATION, SIX TEST RUNS.
    */
   it.each([
     OUTBOX_GRANT_ACCESS,
@@ -554,6 +338,7 @@ describe("bootstrapWorker", () => {
     OUTBOX_REVOKE_SUBSCRIPTION_ACCESS,
     OUTBOX_NOTIFY_JOIN_REQUEST,
     OUTBOX_NOTIFY_STREAM_LIVE,
+    OUTBOX_SEND_RENEWAL_REMINDER,
   ])("registers no handler for %s any more", async (eventType) => {
     const repository = new DrizzleOutboxRepository(db);
     const { id } = await repository.enqueue({

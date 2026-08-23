@@ -19,7 +19,8 @@ import type { EmailProviderPort, SendEmailInput } from "../../application/ports/
  * not be exercised end to end in local development — the one environment this
  * class exists to serve. `echo: true` prints the message so it can be, which is
  * the same remedy the PREVIOUS phase's gate applied to `FakeAiAdapter`'s
- * unreachable behaviours (`AI_FAKE_BEHAVIOUR`, see `resolveAiFakeBehaviour`).
+ * unreachable behaviours (both that adapter and its `AI_FAKE_BEHAVIOUR` switch
+ * went with the AI co-builder in retire-telegram Task 4).
  *
  * IT PRINTS THE WHOLE BODY, RESET LINK INCLUDED, AND THAT IS THE POINT. Every
  * other component in this feature refuses to log the token (see

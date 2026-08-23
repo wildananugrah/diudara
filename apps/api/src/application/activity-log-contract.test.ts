@@ -2,15 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { RENEWED } from "./use-cases/handle-payment-webhook";
-import { CHURNED, CHURN_REVOKE_SKIPPED } from "./use-cases/process-churn";
-import {
-  RENEWAL_REMINDER_QUEUED,
-  RENEWAL_REMINDER_SKIPPED,
-} from "./use-cases/process-renewals";
-import {
-  RENEWAL_REMINDER_NOT_SENT,
-  RENEWAL_REMINDER_SENT,
-} from "./use-cases/send-renewal-reminder";
 
 /**
  * I4, final whole-branch review. `activity_log` is Phase 6's declared source, and this
@@ -29,10 +20,22 @@ import {
  * event type in code fails here until the spec is updated with it.
  *
  * Retire-telegram Task 2 removed one of the eight, `ACCESS_NOT_REVOKED`, when
- * `RevokeChannelAccess` was deleted. The spec still documents it — that is the
- * correct direction of this check, which fails on a type the code writes and the
- * spec does not mention, never the reverse: a spec paragraph describing a phase
- * that has been retired is history, not a broken contract.
+ * `RevokeChannelAccess` was deleted. Task 4 removed six more — `CHURNED` and
+ * `CHURN_REVOKE_SKIPPED` with `ProcessChurn`, `RENEWAL_REMINDER_QUEUED` and
+ * `RENEWAL_REMINDER_SKIPPED` with `ProcessRenewals`, and
+ * `RENEWAL_REMINDER_NOT_SENT` and `RENEWAL_REMINDER_SENT` with
+ * `SendRenewalReminder`. `RENEWED` is the one writer left, in
+ * `handle-payment-webhook.ts`, which is Task 5's seam.
+ *
+ * The spec still documents all seven — that is the correct direction of this
+ * check, which fails on a type the code writes and the spec does not mention,
+ * never the reverse: a spec paragraph describing a phase that has been retired
+ * is history, not a broken contract. That direction is also why the two tests
+ * that asserted only against the SPEC's prose (the two-rows-per-reminder rule
+ * and the "`renewal_reminder` rows are deleted on renewal" rule) went with the
+ * code: with no writer and no reader left, they pinned a document against
+ * itself, and Phase 6's analytics — the reader they protected — is deleted by
+ * this same task.
  */
 
 // src/application/ -> apps/api/ -> apps/ -> repo root
@@ -46,12 +49,6 @@ const spec = readFileSync(SPEC_PATH, "utf8");
 
 /** Every `activity_log.event_type` this phase writes, from the code that writes it. */
 const PHASE_5_EVENT_TYPES: Record<string, string> = {
-  RENEWAL_REMINDER_QUEUED,
-  RENEWAL_REMINDER_SENT,
-  RENEWAL_REMINDER_SKIPPED,
-  RENEWAL_REMINDER_NOT_SENT,
-  CHURNED,
-  CHURN_REVOKE_SKIPPED,
   RENEWED,
 };
 
@@ -62,20 +59,6 @@ describe("the activity_log contract this phase hands to Phase 6", () => {
       .map(([name, eventType]) => `${name} (${eventType})`);
 
     expect(undocumented).toEqual([]);
-  });
-
-  it("says that ONE reminder produces TWO rows, and which one means delivered", () => {
-    // The single most likely way for Phase 6 to double every reminder figure.
-    expect(spec).toMatch(/one reminder produces two rows/i);
-    expect(spec).toContain(`\`${RENEWAL_REMINDER_SENT}\``);
-    expect(spec).toMatch(/means "delivered"/i);
-  });
-
-  it("says that renewal_reminder rows are DELETED on renewal, so they are not a history", () => {
-    // Reminder volume has to come from activity_log. A count over `renewal_reminder`
-    // silently loses every period that was renewed.
-    expect(spec).toMatch(/`renewal_reminder` rows are DELETED on renewal/i);
-    expect(spec).toMatch(/must\s+therefore\s+come from `activity_log`/i);
   });
 
   it("distinguishes `renewed` from `joined`", () => {

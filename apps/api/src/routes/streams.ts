@@ -59,8 +59,10 @@ const streamIdParams = z.object({ id: uuidParam });
  * **`deps.startUserStream` is `undefined` exactly when
  * `Dependencies.streamingProvider` is** (see `selectStreamingProvider` in
  * bootstrap.ts): live streaming is not configured on this box. That is a 503
- * here, the same shape `POST /ai/messages` and
- * `POST /communities/:communityId/events` already use.
+ * here, the same shape `POST /users/me/payout` and
+ * `POST /users/:handle/subscribe` already use (retire-telegram Task 4 deleted
+ * `POST /ai/messages` and `POST /communities/:communityId/events`, which this
+ * sentence used to name).
  * `deps.mintUserWatchToken` is `undefined` on a slightly DIFFERENT condition
  * — exactly when `STREAM_TOKEN_SECRET` is absent, mirroring
  * `Dependencies.authoriseStream` rather than `startUserStream` — because

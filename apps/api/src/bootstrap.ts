@@ -2,7 +2,6 @@ import { db, sql } from "./db/client";
 import { DrizzleCreatorRepository } from "./infrastructure/repositories/drizzle-creator.repository";
 import { DrizzleUserRepository } from "./infrastructure/repositories/drizzle-user.repository";
 import { DrizzleUserPayoutRepository } from "./infrastructure/repositories/drizzle-user-payout.repository";
-import { DrizzleCommunityRepository } from "./infrastructure/repositories/drizzle-community.repository";
 import { BunPasswordHasher } from "./infrastructure/auth/bun-password.hasher";
 import { HonoJwtTokenIssuer } from "./infrastructure/auth/hono-jwt.token-issuer";
 import { HonoJwtUserTokenIssuer } from "./infrastructure/auth/hono-jwt.user-token-issuer";
@@ -28,16 +27,6 @@ import { CompletePasswordReset } from "./application/use-cases/complete-password
 import { DrizzlePasswordResetRepository } from "./infrastructure/repositories/drizzle-password-reset.repository";
 import { DrizzlePasswordResetUnitOfWork } from "./infrastructure/repositories/drizzle-password-reset-unit-of-work";
 import { DrizzleSignupNoticeRepository } from "./infrastructure/repositories/drizzle-signup-notice.repository";
-import { CreateCommunity } from "./application/use-cases/create-community";
-import { ListCommunities } from "./application/use-cases/list-communities";
-import { UpdateCommunity } from "./application/use-cases/update-community";
-import { GetCommunity } from "./application/use-cases/get-community";
-import { DrizzleMembershipTierRepository } from "./infrastructure/repositories/drizzle-membership-tier.repository";
-import {
-  DefineMembershipTier,
-  ListTiers,
-  UpdateTier,
-} from "./application/use-cases/manage-tiers";
 import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
 import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
@@ -46,34 +35,18 @@ import { DrizzleUserTierRepository } from "./infrastructure/repositories/drizzle
 import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
 import { DrizzleUserSubscriptionRepository } from "./infrastructure/repositories/drizzle-user-subscription.repository";
 import { StartUserSubscription } from "./application/use-cases/start-user-subscription";
-import { GetPublicCommunity } from "./application/use-cases/get-public-community";
-import { StartCheckout } from "./application/use-cases/start-checkout";
 import { DrizzlePostEditUnitOfWork } from "./infrastructure/repositories/drizzle-post-edit-unit-of-work";
-import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
-import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
 import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter";
-import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
 import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
 import { DrizzleUserPurchaseUnitOfWork } from "./infrastructure/repositories/drizzle-user-purchase.unit-of-work";
-import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
-import { DrizzleAnalyticsRepository } from "./infrastructure/repositories/drizzle-analytics.repository";
-import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
-import { GetCommunityActivity } from "./application/use-cases/get-community-activity";
-import { ListCommunityMembers } from "./application/use-cases/list-community-members";
-import { ExportCommunityMembers } from "./application/use-cases/export-community-members";
 import { SystemClock } from "./infrastructure/clock/system.clock";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
-import { FAKE_AI_BEHAVIOURS, FakeAiAdapter, type FakeAiBehaviour } from "./infrastructure/ai/fake-ai.adapter";
-import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
-import { DrizzleAiConversationRepository } from "./infrastructure/repositories/drizzle-ai-conversation.repository";
-import { DrizzleAiUsageRepository } from "./infrastructure/repositories/drizzle-ai-usage.repository";
-import { SendAiMessage } from "./application/use-cases/send-ai-message";
 import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
 import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
 import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
@@ -99,7 +72,6 @@ import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 import type { EmailProviderPort } from "./application/ports/email-provider.port";
-import type { AiProviderPort } from "./application/ports/ai-provider.port";
 import type { StreamingProviderPort } from "./application/ports/streaming-provider.port";
 
 /** Values that may be interpolated into a `DatabasePing` tagged template. */
@@ -266,19 +238,6 @@ export interface Dependencies {
    * for all three — see the use-case's own docstring.
    */
   completePasswordReset: CompletePasswordReset;
-  createCommunity: CreateCommunity;
-  listCommunities: ListCommunities;
-  updateCommunity: UpdateCommunity;
-  /**
-   * `GET /communities/:id` (Phase 7 carry-forward from Phase 6). Creator-scoped
-   * through `CommunityRepositoryPort.findByIdForCreator` — the same method
-   * `UpdateCommunity` uses — so a stranger's id 404s rather than 403ing and
-   * confirming the resource exists.
-   */
-  getCommunity: GetCommunity;
-  defineTier: DefineMembershipTier;
-  listTiers: ListTiers;
-  updateTier: UpdateTier;
   /**
    * `POST /payment-account`. `undefined` EXACTLY when `payments` is `null` —
    * mirrors `sendAiMessage`'s undefined-ness: there is no `PaymentProviderPort`
@@ -293,14 +252,14 @@ export interface Dependencies {
    * AUTHENTICATED creator has connected payments, read from
    * `creator.xendit_account_id` through the same `isConnectedPaymentAccount` /
    * `isProvisioningPlaceholder` predicates `CreatePaymentAccount` uses. Read-only
-   * and safe to call on every dashboard load — unlike the POST route above, it
-   * provisions nothing at Xendit. Replaces the dashboard's per-browser
-   * `localStorage` guess (see apps/web's `paymentAccount.ts`) with the server's
-   * own truth. NOT read by the AI co-builder's model path — `SendAiMessage`
-   * has no dependency on this and the system prompt never mentions it; only
-   * the SCREEN reads it, via `PaymentAccountNotice` rendered above the
-   * co-builder chat (`CoBuilderPage.tsx`), so a creator sees the warning
-   * without the model itself being aware payments are connected or not.
+   * and safe to call on every page load — unlike the POST route above, it
+   * provisions nothing at Xendit. It answers off `creator`, the OLD world's
+   * identity: retire-telegram deleted every screen that called it (the
+   * dashboard in Task 1, the AI co-builder that displayed it in Task 4), so
+   * `GET /payment-account` currently has no caller in this repository. The
+   * route survives because `POST /payment-account` — creator payment
+   * onboarding — does, and a write endpoint whose matching read had been
+   * deleted would be worse than an unused read.
    */
   getPaymentAccountStatus: GetPaymentAccountStatus;
   /**
@@ -347,52 +306,7 @@ export interface Dependencies {
    * unconditionally regardless of whether this box takes payments.
    */
   listSubscribers: ListSubscribers;
-  getPublicCommunity: GetPublicCommunity;
-  /**
-   * `POST /c/:slug/checkout`. `undefined` EXACTLY when `payments` is `null` —
-   * this use-case's constructor requires a real `PaymentProviderPort`, so
-   * there is nothing to construct it against when payments are disabled (see
-   * `selectPaymentProvider`). `routes/public-community.ts` does NOT register
-   * the checkout route at all in that case (mirrors `startUserStream`'s own
-   * undefined-ness, not `listLiveStreams`'s), so the route 404s through
-   * the ordinary not-found path rather than answering with a 503 from a route
-   * that does exist.
-   */
-  startCheckout: StartCheckout | undefined;
-  getSubscriptionStatus: GetSubscriptionStatus;
   handlePaymentWebhook: HandlePaymentWebhook;
-  /**
-   * Phase 6's creator dashboard reads. All three go through
-   * `AnalyticsRepositoryPort`, whose every method is creator-scoped and which has
-   * no unscoped variant — see the port for why that absence is the protection.
-   */
-  getCommunityMetrics: GetCommunityMetrics;
-  getCommunityActivity: GetCommunityActivity;
-  listCommunityMembers: ListCommunityMembers;
-  /**
-   * The roster as a downloadable CSV. It STREAMS — see the use-case for why one
-   * unbounded select would put twice a successful creator's roster in memory per
-   * concurrent download — and it carries members' WhatsApp numbers, so it is
-   * authenticated like everything else and never logged.
-   */
-  exportCommunityMembers: ExportCommunityMembers;
-  /**
-   * Phase 5's renewal reminder delivery.
-   *
-   * The DISPATCHER lives in the worker — `bootstrapWorker` registers it against the
-   * `send_renewal_reminder` outbox event type, and this process claims no outbox rows.
-   * It is constructed here anyway, and exposed, for the reason `messaging` and
-   * `payments` are: so a test can prove what THIS process wired. Specifically that the
-   * reminder's checkout link is built from the same resolved `appBaseUrl` this root
-   * hands `StartCheckout` for `success_redirect_url` — the two must never disagree
-   * about which deployment a member is sent to, and the only way to check that is to
-   * be able to see both from one place.
-   *
-   * Phase 4's lesson, restated: a guard that exists in the API and has never crossed
-   * the workspace seam is not a guard. Both roots build this use-case, and both are
-   * tested.
-   */
-  sendRenewalReminder: SendRenewalReminder;
   /**
    * The messaging adapters THIS process selected. Exposed for the same reason
    * `payments` and `WorkerDependencies.messaging` are: a test must be able to prove
@@ -418,33 +332,13 @@ export interface Dependencies {
   xenditCallbackToken: string | undefined;
   /**
    * The resolved public origin of `apps/web` — see `resolveAppBaseUrl`. Exposed
-   * here rather than kept private inside `StartCheckout` so a test can prove the
+   * here rather than kept private inside the use cases that build links from it
+   * (`StartUserSubscription`, `RequestPasswordReset`) so a test can prove the
    * environment variable actually reaches the composition root: the confirmation
    * page was unreachable for an entire phase because nothing checked the wiring.
    */
   appBaseUrl: string;
   sql: DatabasePing;
-  /**
-   * The AI co-builder's provider adapter (Phase 7), `undefined` when the
-   * feature is disabled — see `selectAiProvider`. Exposed for the same
-   * reason `payments` and `messaging` are: a test must be able to prove what
-   * THIS process actually wired (e.g. drive `FakeAiAdapter.nextBehaviour`
-   * directly against a route test built on `bootstrap()`), and reading it
-   * off a fake constructed by the test instead would prove only that the
-   * test can call the fake.
-   */
-  aiProvider: AiProviderPort | undefined;
-  /**
-   * `undefined` EXACTLY when `aiProvider` is `undefined`. This is the ONE
-   * signal `GET /ai/status` (routes/ai.ts) surfaces to the dashboard so it
-   * can hide the chat screen instead of linking to one that always 503s —
-   * see `selectAiProvider` for when that happens: a NODE_ENV outside
-   * `RELAXED_NODE_ENVS` with no `OPENROUTER_API_KEY`/`OPENROUTER_MODEL`
-   * configured. Unlike every other feature in this codebase, this is NOT a
-   * reason to refuse to boot (design spec §11): the product works fine
-   * without a co-builder.
-   */
-  sendAiMessage: SendAiMessage | undefined;
   /**
    * Task 2's live-streaming provider — the SECOND feature in this codebase
    * (after `aiProvider`) that boots DISABLED rather than refusing to start
@@ -652,9 +546,9 @@ export function assertUsableJwtSecret(secret: string | undefined): string {
  * The ONLY `NODE_ENV` values allowed to reach a relaxed configuration branch:
  * the fake payment adapter, and an absent `XENDIT_CALLBACK_TOKEN`.
  *
- * An ALLOWLIST, deliberately — this is the same shape as `VISIBLE_STATUSES` in
- * get-public-community.ts, for the same reason: an unanticipated value must fail
- * CLOSED. The denylist this replaced (`if (nodeEnv === "production") throw`)
+ * An ALLOWLIST, deliberately — the same shape as `NAMESPACES` in
+ * `routes/mediamtx-webhooks.ts`, for the same reason: an unanticipated value
+ * must fail CLOSED. The denylist this replaced (`if (nodeEnv === "production") throw`)
  * looked equivalent and was not, because nothing in this repository ever sets
  * `NODE_ENV`:
  *
@@ -751,10 +645,13 @@ function presentOrUndefined(value: string | undefined): string | undefined {
  *     would ship exactly the disaster the original throw existed to prevent
  *     — a box that LOOKS like it takes payments and only takes fake ones.
  *   - `null` is genuinely absent instead: `bootstrap()` does not construct
- *     `StartCheckout` when this returns `null`, and `POST /c/:slug/checkout`
- *     is never registered, so it 404s through the ordinary not-found path.
- *     There is nothing left in the process for a caller to reach that would
- *     pretend to take a payment.
+ *     `StartUserSubscription`, `ConnectUserPayout` or `CreatePaymentAccount`
+ *     when this returns `null`, and each of their routes answers 503 off its
+ *     own `undefined` dependency. There is nothing left in the process for a
+ *     caller to reach that would pretend to take a payment. (Before
+ *     retire-telegram Task 4 there was a fourth, `StartCheckout`, whose
+ *     `POST /c/:slug/checkout` route was not even registered in that case —
+ *     the community checkout and that asymmetry went together.)
  *
  * Mirrors `assertUsableJwtSecret` above in shape and error wording for the
  * two cases that still throw.
@@ -981,177 +878,6 @@ export function selectEmailProvider(env: {
         : "")
   );
   return new FakeEmailAdapter({ echo });
-}
-
-/**
- * Resolves `AI_FAKE_BEHAVIOUR`, the switch that makes `FakeAiAdapter`'s
- * hostile-payload behaviours reachable from OUTSIDE the API process.
- *
- * Before this, `FakeAiAdapter.nextBehaviour` could only be set by a test
- * holding a reference to the adapter instance bootstrap() constructed — so a
- * creator driving the co-builder chat screen in a real browser could only
- * ever see `"draft"` (the fake's hardcoded default), and the 502 ("prose"/
- * "truncated-json"), 503 ("timeout"), and any non-draft-happy-path response
- * were unreachable from the UI in every environment, including local dev
- * with no OpenRouter key. Task 8's gate found that gap and it is now closed:
- * an operator restarts the API with this set to drive any behaviour the
- * fake supports.
- *
- * Fails CLOSED on an unrecognised value, same rule as
- * `resolveAiDailyMessageLimit` and every other env parser in this file: a
- * typo'd behaviour name silently falling back to `"draft"` would look like
- * "it works" while testing nothing the operator intended to test.
- *
- * Deliberately NOT itself gated on `RELAXED_NODE_ENVS` — `selectAiProvider`
- * only ever calls this from inside the branch that is already behind that
- * allowlist (a `FakeAiAdapter` is never constructed outside it), so a second
- * check here would be dead code, not a second layer of safety. This
- * function has no effect at all in production: `OPENROUTER_API_KEY`/
- * `OPENROUTER_MODEL` set there selects `OpenRouterAiAdapter`, which has no
- * `nextBehaviour` to set, and unset selects `undefined` (the feature
- * disabled) — a `FakeAiAdapter` never exists for this value to reach.
- */
-export function resolveAiFakeBehaviour(env: {
-  value: string | undefined;
-}): FakeAiBehaviour | undefined {
-  const raw = presentOrUndefined(env.value);
-  if (raw === undefined) {
-    return undefined;
-  }
-
-  if (!(FAKE_AI_BEHAVIOURS as readonly string[]).includes(raw)) {
-    throw new Error(
-      `AI_FAKE_BEHAVIOUR must be one of ${FAKE_AI_BEHAVIOURS.join(", ")} (got "${raw}"). ` +
-        "Unset it to keep the fake's default, draft."
-    );
-  }
-  return raw as FakeAiBehaviour;
-}
-
-/**
- * Chooses the AI co-builder's provider adapter (Phase 7) — the ONE selector
- * in this file that does NOT refuse to boot when configuration is absent.
- * Unlike payments and messaging, nothing is on the line if the co-builder is
- * unavailable: no money moves and no invite is issued through this path
- * (design spec §11, plan Global Constraints) — the AI never writes to the
- * database beyond its own conversation transcript and usage counter.
- *
- *   1. Both `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` set -> the real
- *      adapter, in every environment.
- *   2. PARTIAL configuration throws in EVERY environment — same reasoning as
- *      `selectPaymentProvider`/`selectMessagingProviders`: a key with no
- *      model id (or vice versa) is a typo, never intentional.
- *   3. ABSENT configuration selects `FakeAiAdapter` ONLY inside
- *      `RELAXED_NODE_ENVS` (development/test) — the SAME allowlist reused
- *      from `isRelaxedNodeEnv`, not a second gate. `AI_FAKE_BEHAVIOUR` (see
- *      `resolveAiFakeBehaviour`) sets that instance's `nextBehaviour` so the
- *      fake's hostile-payload paths are reachable from a real browser, not
- *      only from a test holding the instance directly.
- *   4. ABSENT configuration OUTSIDE the allowlist returns `undefined` RATHER
- *      THAN THROWING: this is the one deliberate divergence from every other
- *      selector in this file. The feature is disabled, not the boot.
- *      `Dependencies.sendAiMessage` becomes `undefined` too, and
- *      `GET /ai/status` (routes/ai.ts) reports `enabled: false` so the
- *      dashboard hides the chat screen rather than linking to one that
- *      always 503s (plan Task 7).
- */
-export function selectAiProvider(env: {
-  apiKey: string | undefined;
-  model: string | undefined;
-  nodeEnv: string | undefined;
-  fakeBehaviour?: string | undefined;
-}): AiProviderPort | undefined {
-  const apiKey = presentOrUndefined(env.apiKey);
-  const model = presentOrUndefined(env.model);
-
-  if (apiKey && model) {
-    logProviderChoice(
-      env.nodeEnv,
-      "[bootstrap] AI provider: OpenRouterAiAdapter " +
-        "(OPENROUTER_API_KEY and OPENROUTER_MODEL are set)"
-    );
-    return new OpenRouterAiAdapter({ apiKey, model });
-  }
-
-  if (apiKey || model) {
-    const missing = apiKey ? "OPENROUTER_MODEL" : "OPENROUTER_API_KEY";
-    const present = apiKey ? "OPENROUTER_API_KEY" : "OPENROUTER_MODEL";
-    throw new Error(
-      `AI co-builder is half-configured: ${present} is set but ${missing} is not. ` +
-        "Set both or neither — see apps/api/.env.example. Refusing to start rather " +
-        "than booting the fake AI adapter while looking configured."
-    );
-  }
-
-  if (isRelaxedNodeEnv(env.nodeEnv)) {
-    // Resolved BEFORE the fake is constructed: an invalid AI_FAKE_BEHAVIOUR
-    // must throw with nothing left half-built, not discard an already-built
-    // instance. The adapter's own constructor has no side effects, so this
-    // reordering is cosmetic today — but it is the right shape to keep, not
-    // the one to have to notice later.
-    const behaviour = resolveAiFakeBehaviour({ value: env.fakeBehaviour });
-    const fake = new FakeAiAdapter();
-    if (behaviour !== undefined) {
-      fake.nextBehaviour = behaviour;
-    }
-    logProviderChoice(
-      env.nodeEnv,
-      "[bootstrap] AI provider: FakeAiAdapter " +
-        "(OPENROUTER_API_KEY/OPENROUTER_MODEL not set — no real model will be called; " +
-        "set both to switch to OpenRouterAiAdapter)" +
-        (behaviour !== undefined
-          ? ` — AI_FAKE_BEHAVIOUR=${behaviour}, so every turn from here on gets that ` +
-            "response rather than the fake's default draft"
-          : "")
-    );
-    return fake;
-  }
-
-  logProviderChoice(
-    env.nodeEnv,
-    "[bootstrap] AI provider: none — the AI co-builder is DISABLED " +
-      "(OPENROUTER_API_KEY/OPENROUTER_MODEL not set, and NODE_ENV is " +
-      `${describeNodeEnv(env.nodeEnv)}, outside ${RELAXED_NODE_ENVS_LIST}). Unlike ` +
-      "payments/messaging this does NOT block boot: GET /ai/status reports " +
-      "enabled: false and POST /ai/messages returns 503. Set both env vars to enable it."
-  );
-  return undefined;
-}
-
-/**
- * The per-creator daily message cap `SendAiMessage` enforces through
- * `AiUsageRepositoryPort.consumeOne` — the only thing standing between a
- * creator (or a bug, or a stolen session) and an unbounded bill once a real
- * key is configured (see `ai-usage-repository.port.ts`). 50 is a judgement
- * call, not a mirrored value from anywhere else: generous enough that a
- * real onboarding conversation (a dozen or so turns) never gets cut off
- * mid-conversation, tight enough that a runaway loop cannot run up a
- * meaningful bill in one day.
- */
-export const DEFAULT_AI_DAILY_MESSAGE_LIMIT = 50;
-
-/**
- * Parses `AI_DAILY_MESSAGE_LIMIT`, failing closed on anything that is not a
- * positive whole number — the same rule `WORKER_POLL_INTERVAL_MS` follows in
- * `apps/worker`, for the same reason: `Number("abc")` is `NaN`, and a cap
- * that silently became `NaN` would make every `message_count < NaN`
- * comparison false, which is "allow nothing" rather than "no cap", the
- * opposite of what an operator fat-fingering this value would expect.
- */
-export function resolveAiDailyMessageLimit(env: { value: string | undefined }): number {
-  const raw = presentOrUndefined(env.value);
-  if (raw === undefined) {
-    return DEFAULT_AI_DAILY_MESSAGE_LIMIT;
-  }
-
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(
-      `AI_DAILY_MESSAGE_LIMIT must be a positive whole number (got "${raw}"). Unset it to ` +
-        `use the default of ${DEFAULT_AI_DAILY_MESSAGE_LIMIT}.`
-    );
-  }
-  return parsed;
 }
 
 /**
@@ -1792,15 +1518,6 @@ export function bootstrap(): Dependencies {
     clock
   );
 
-  const communityRepository = new DrizzleCommunityRepository(db);
-  const listCommunities = new ListCommunities(communityRepository);
-  const getCommunity = new GetCommunity(communityRepository);
-
-  const tierRepository = new DrizzleMembershipTierRepository(db);
-  const defineTier = new DefineMembershipTier(communityRepository, tierRepository);
-  const listTiers = new ListTiers(communityRepository, tierRepository);
-  const updateTier = new UpdateTier(communityRepository, tierRepository);
-
   const payments: PaymentProviderPort | null = selectPaymentProvider({
     secretKey: process.env.XENDIT_SECRET_KEY,
     splitRuleId: process.env.XENDIT_SPLIT_RULE_ID,
@@ -1809,27 +1526,13 @@ export function bootstrap(): Dependencies {
 
   // Task 4. Resolved here rather than down with `messaging` below: nothing in
   // THIS task's `Dependencies` depends on it (Task 5's `RequestPasswordReset`
-  // is the first consumer), so its position is not load-bearing the way
-  // `payments`'s is for `createCommunity`/`updateCommunity` above.
+  // is the first consumer), so its position is not load-bearing.
   const email: EmailProviderPort | null = selectEmailProvider({
     apiKey: process.env.RESEND_API_KEY,
     from: process.env.EMAIL_FROM,
     nodeEnv: process.env.NODE_ENV,
   });
 
-  // `createCommunity`/`updateCommunity` are constructed here, after `payments`
-  // is known, rather than up with `communityRepository` above: both need to
-  // know whether this box has a payment provider at all, to refuse
-  // `accessMode: "paid"` — see CreateCommunity/UpdateCommunity's own
-  // docstrings — while `payments` itself has to be resolved here anyway
-  // (see the `xenditCallbackToken` comment below for why THIS position is
-  // fixed).
-  const createCommunity = new CreateCommunity(communityRepository, {
-    paymentsEnabled: payments !== null,
-  });
-  const updateCommunity = new UpdateCommunity(communityRepository, {
-    paymentsEnabled: payments !== null,
-  });
   // `undefined` EXACTLY when `payments` is `null` — see `createPaymentAccount`'s
   // own field docstring on `Dependencies`.
   const createPaymentAccount = payments
@@ -1850,9 +1553,10 @@ export function bootstrap(): Dependencies {
   const manageUserTiers = new ManageUserTiers(userTierRepository, userPayoutRepository);
   // After selectPaymentProvider on purpose — two reasons, one of them dated.
   //
-  // STILL TRUE: `createCommunity`/`updateCommunity`/`createPaymentAccount` above
-  // all need `payments` already resolved, so this call has to happen no later
-  // than it does regardless of anything below it.
+  // STILL TRUE: `createPaymentAccount` above needs `payments` already resolved,
+  // so this call has to happen no later than it does regardless of anything
+  // below it. (Retire-telegram Task 4 deleted `createCommunity`/
+  // `updateCommunity`, which shared that constraint.)
   //
   // NO LONGER TRUE (fix round 1 correction): this comment used to say the order
   // matters because "you are about to take fake money" is the more urgent of two
@@ -1871,16 +1575,30 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
-  // `paymentsEnabled` for the same reason `createCommunity`/`updateCommunity`
-  // take it, and it MUST be the same `payments !== null` they read: that is what
-  // decides whether `POST /c/:slug/checkout` is registered, so it is also what
-  // decides whether a `paid` community has any join path on this box. Without
-  // it, such a community advertised a price and a buy button whose route 404s.
-  const getPublicCommunity = new GetPublicCommunity(communityRepository, tierRepository, {
-    paymentsEnabled: payments !== null,
-  });
-
-  const memberRepository = new DrizzleMemberRepository(db);
+  // The community `subscription`/`transaction` repository. Retire-telegram Task 4
+  // deleted every use case built for it — `StartCheckout`, `GetSubscriptionStatus`,
+  // `ProcessRenewals`, `ProcessChurn`, `SendRenewalReminder` — and the plan made
+  // deleting the repository itself BINDING on that task, because
+  // `renewal-payment.test.ts` (deleted in Task 2) held the only coverage of four
+  // `markPaid` behaviours. IT COULD NOT BE DONE HERE, and the reason is structural
+  // rather than a matter of effort:
+  //
+  //   - `markPaid` has exactly ONE caller left, `handle-payment-webhook.ts:486`,
+  //     inside the community branch — and that file is TASK 5's seam.
+  //   - `HandlePaymentWebhook`'s constructor takes a `SubscriptionRepositoryPort`
+  //     (for `findTransactionByExternalId`) and `AuthoriseStream`'s takes one too
+  //     (for `findByIdWithCommunity`, in the `live/` branch that is TASK 6's seam),
+  //     so this line has nothing to hand either of them without editing both.
+  //   - `DrizzlePaymentActivationUnitOfWork` constructs a second instance to satisfy
+  //     `PaymentActivationRepositories.subscriptions`, which exists only for that
+  //     one `markPaid` call.
+  //
+  // Measured, not assumed: deleting the file leaves exactly two production
+  // typecheck errors, `bootstrap.ts:44` and the unit of work's import. THE FOUR
+  // UNGUARDED `markPaid` BEHAVIOURS THEREFORE STILL SHIP UNTIL TASK 5 — the branch
+  // does not merge before the gates, but this is the one item Task 4 could not
+  // close. It closes when Task 5 removes the community branch and Task 6 removes
+  // `authoriseReadByEventId`; the port and both repositories die with them.
   const subscriptionRepository = new DrizzleSubscriptionRepository(db);
   // The community `event` repository. Retire-telegram Task 3 deleted every use
   // case it was built for, and removed `getSubscriptionStatus`'s `watchUrl`
@@ -1894,26 +1612,10 @@ export function bootstrap(): Dependencies {
     appBaseUrl: process.env.APP_BASE_URL,
     nodeEnv: process.env.NODE_ENV,
   });
-  // `undefined` EXACTLY when `payments` is `null` — see this field's own
-  // docstring on `Dependencies`. `routes/public-community.ts` does not
-  // register `POST /c/:slug/checkout` at all when this is `undefined`, so a
-  // request to it 404s through the ordinary not-found path.
-  const startCheckout = payments
-    ? new StartCheckout(
-        communityRepository,
-        tierRepository,
-        memberRepository,
-        subscriptionRepository,
-        creatorRepository,
-        payments,
-        clock,
-        { appBaseUrl }
-      )
-    : undefined;
-
-  // Task 6 of Phase 5a. `undefined` on the same condition `startCheckout` above
-  // is, and for the same reason — but the ROUTE stays registered and answers
-  // 503, see this field's own docstring on `Dependencies`.
+  // Task 6 of Phase 5a. `undefined` EXACTLY when `payments` is `null` — the
+  // constructor requires a real `PaymentProviderPort` — but the ROUTE stays
+  // registered and answers 503, see this field's own docstring on
+  // `Dependencies`.
   const startUserSubscription = payments
     ? new StartUserSubscription(
         userRepository,
@@ -1945,7 +1647,6 @@ export function bootstrap(): Dependencies {
   // this function ever returns anything, so nothing constructed off this
   // value here is ever handed to a caller in that case.
   const streamTokenSecret = presentOrUndefined(process.env.STREAM_TOKEN_SECRET);
-  const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository);
 
   // The webhook's three writes commit together or not at all — see
   // PaymentActivationUnitOfWorkPort. The read that precedes them uses the
@@ -1959,20 +1660,6 @@ export function bootstrap(): Dependencies {
     userSubscriptionRepository,
     paymentActivationUnitOfWork,
     clock
-  );
-
-  // Phase 6's dashboard reads. One repository, three use-cases, every method
-  // creator-scoped at the port.
-  const analyticsRepository = new DrizzleAnalyticsRepository(db);
-  const getCommunityMetrics = new GetCommunityMetrics(analyticsRepository);
-  const getCommunityActivity = new GetCommunityActivity(analyticsRepository);
-  const listCommunityMembers = new ListCommunityMembers(analyticsRepository);
-  // Takes the COMMUNITY repository too, for the slug the download's filename needs
-  // — and its `findByIdForCreator` is the ownership check, which has to happen
-  // before a single roster row is read because a stream cannot be un-sent.
-  const exportCommunityMembers = new ExportCommunityMembers(
-    communityRepository,
-    analyticsRepository
   );
 
   // What this process still messages people about: Task 5's password reset and
@@ -2041,44 +1728,6 @@ export function bootstrap(): Dependencies {
     passwordResetUnitOfWork,
     clock
   );
-
-  // Phase 5. Built with the SAME `appBaseUrl` StartCheckout received above. See
-  // the `sendRenewalReminder` field on `Dependencies` for why the API root builds
-  // a use-case the worker dispatches.
-  const sendRenewalReminder = new SendRenewalReminder(
-    subscriptionRepository,
-    memberRepository,
-    new DrizzleActivityLogRepository(db),
-    messaging.notifier,
-    { appBaseUrl }
-  );
-  // Phase 7's AI co-builder. The ONE feature in this codebase that boots
-  // disabled rather than refusing to start — see selectAiProvider.
-  // `sendAiMessage` mirrors `aiProvider`'s undefined-ness exactly, which is
-  // what `GET /ai/status` reports and what `POST /ai/messages` checks.
-  const aiProvider = selectAiProvider({
-    apiKey: process.env.OPENROUTER_API_KEY,
-    model: process.env.OPENROUTER_MODEL,
-    nodeEnv: process.env.NODE_ENV,
-    fakeBehaviour: process.env.AI_FAKE_BEHAVIOUR,
-  });
-  // `resolveAiDailyMessageLimit` is called ONLY inside this branch, not
-  // unconditionally above it — it throws on a malformed
-  // `AI_DAILY_MESSAGE_LIMIT`, and that throw must never be reachable when
-  // `aiProvider` is `undefined`. The co-builder disabled (no OpenRouter key)
-  // plus a fat-fingered limit is exactly the box that must still boot: the
-  // env var is irrelevant to a disabled feature, so it must not be read at
-  // all in that case, matching `selectAiProvider`'s own "boots disabled
-  // rather than refusing to start" rule.
-  const sendAiMessage = aiProvider
-    ? new SendAiMessage(
-        new DrizzleAiConversationRepository(db),
-        new DrizzleAiUsageRepository(db),
-        aiProvider,
-        clock,
-        { dailyLimit: resolveAiDailyMessageLimit({ value: process.env.AI_DAILY_MESSAGE_LIMIT }) }
-      )
-    : undefined;
 
   // Task 2's live-streaming provider. The SECOND feature in this codebase
   // that boots disabled rather than refusing to start — see
@@ -2184,13 +1833,6 @@ export function bootstrap(): Dependencies {
     listUserPosts,
     requestPasswordReset,
     completePasswordReset,
-    createCommunity,
-    listCommunities,
-    updateCommunity,
-    getCommunity,
-    defineTier,
-    listTiers,
-    updateTier,
     createPaymentAccount,
     getPaymentAccountStatus,
     connectUserPayout,
@@ -2198,21 +1840,11 @@ export function bootstrap(): Dependencies {
     manageUserTiers,
     startUserSubscription,
     listSubscribers,
-    getPublicCommunity,
-    startCheckout,
-    getSubscriptionStatus,
     handlePaymentWebhook,
-    getCommunityMetrics,
-    getCommunityActivity,
-    listCommunityMembers,
-    exportCommunityMembers,
-    sendRenewalReminder,
     messaging,
     xenditCallbackToken,
     appBaseUrl,
     sql,
-    aiProvider,
-    sendAiMessage,
     streamingProvider,
     startUserStream,
     listLiveStreams,

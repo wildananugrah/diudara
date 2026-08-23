@@ -55,9 +55,10 @@ export interface MembershipReminderRow {
  * ask would ask, and "read, decide, send, insert" is a TOCTOU under READ COMMITTED —
  * two overlapping passes both read "not yet" and both message the same member about
  * the same membership. Phase 4 measured the identical shape as two live invite links
- * for one paying member; `RenewalReminderRepositoryPort` records it for the old
- * world's reminders, and Phase 5b has now landed on "the database must arbitrate" in
- * four separate tasks.
+ * for one paying member; the old world's `RenewalReminderRepositoryPort` recorded it
+ * again (retire-telegram Task 4 deleted that port with the community reminders it
+ * claimed), and Phase 5b has now landed on "the database must arbitrate" in four
+ * separate tasks.
  *
  * So the only way to find out whether a membership has already been claimed is to
  * CLAIM IT, and the database is what answers. Implementations MUST arbitrate with the

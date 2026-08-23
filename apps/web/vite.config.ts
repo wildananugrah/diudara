@@ -1,85 +1,49 @@
-import { defineConfig, type ProxyOptions } from "vite";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 // The API runs on :3000 (see apps/api). Proxying its paths means every
-// `fetch("/communities/...")` in this app works unmodified against the same
+// `fetch("/users/...")` in this app works unmodified against the same
 // origin in dev, matching how they'll be served together in production.
 //
-// The React app's own client route is ALSO "/c/:slug" (see App.tsx), which
-// collides with this exact proxy path: without `bypass`, a browser
-// navigating to /c/some-slug never reaches the SPA at all — Vite forwards
-// the top-level HTML request straight to the API and the address bar shows
-// raw JSON. `bypass` tells Vite to serve index.html itself instead for
-// requests that look like a page navigation (Accept: text/html), and only
-// hand fetch()/XHR calls (which don't send that header) to the API.
-const bypassPageNavigation: ProxyOptions["bypass"] = (req) => {
-  if (req.headers.accept?.includes("text/html")) {
-    return "/index.html";
-  }
-};
+// Retire-telegram Task 4 removed the `^/c/` entry and, with it, the
+// `bypassPageNavigation` helper this file used to open with. That helper
+// existed for ONE collision: the SPA's own `/c/:slug` route and the API's
+// public community path shared a prefix, so a browser NAVIGATION to
+// `/c/some-slug` was forwarded to the API and the address bar showed raw
+// JSON. Task 1 deleted the SPA route and Task 4 deleted the API path, so
+// there is no collision left to resolve.
 
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
     proxy: {
-      // `^/c/`, A REGEX, NOT the string `/c` it used to be — and the difference is
-      // a real bug found by running this, not a tidy-up.
-      //
-      // Vite matches a STRING proxy context with `url.startsWith(context)`, with no
-      // notion of path segments, and takes the FIRST entry that matches. So `/c`
-      // also matched `/communities`, `/communities/:id/members.csv` and anything
-      // else beginning with those two characters — including every dashboard API
-      // path added below, which never reached their own entries at all. They still
-      // worked, because the `/c` entry happens to point at the same target, but
-      // they inherited `bypass`: measured here, `GET /communities` with
-      // `Accept: text/html` answered 200 index.html instead of the API's 401 JSON.
-      //
-      // Harmless for fetch() (which sends `Accept: * /*`), and NOT harmless for
-      // anything a browser NAVIGATES to — open `…/members.csv` in a new tab and the
-      // download silently becomes the SPA's HTML. `^/c/` matches only real public
-      // checkout paths (`/c/:slug`, `/c/:slug/checkout`,
-      // `/c/subscription/:id/status`) and leaves the dashboard's paths to their own
-      // entries, unbypassed.
-      "^/c/": { target: "http://localhost:3000", bypass: bypassPageNavigation },
       "/webhooks": "http://localhost:3000",
       // ---------------------------------------------------------------
-      // The dashboard's API paths (Phase 6, plus later additions). Every one
-      // of these is reached only by fetch() from /dashboard/* screens, never
-      // by a browser navigation.
+      // Retire-telegram Task 4 removed the entries that used to head this
+      // block — `/communities`, `/ai` and `^/c/` — with the API routes they
+      // forwarded to, and `/streaming`, which retire-telegram Task 3 had
+      // already orphaned. Every key left is one the API still serves.
       //
-      // NO `bypass` ON ANY OF THESE, and the asymmetry with /c above is the
-      // point rather than an oversight. `bypass` exists solely because a SPA
-      // ROUTE and an API PATH share a prefix; the dashboard lives at
-      // /dashboard/*, which no API route uses, so there is no collision to
-      // resolve. Adding `bypass` anyway would be actively harmful: it would
-      // make any request that happens to send `Accept: text/html` — a link
-      // opened in a new tab, a curl typed with -H "Accept: text/html" while
-      // debugging — silently answer with index.html instead of the API's JSON
-      // or 401, which is exactly the confusing failure /c's comment describes,
-      // just pointed the other way.
+      // The lesson those entries were written to record survives them, and
+      // is why this comment does: a MISSING entry does not fail loudly.
+      // Vite's SPA history fallback answers `200 text/html` with
+      // `index.html`'s body, so `res.json()` throws on a call that looks like
+      // it reached the API — that is how `GET /streaming/status`, and then the
+      // whole of Task 6's `/users/*` surface, were dead under `vite dev` while
+      // every test passed. `vite-proxy-coverage.test.ts` is the guard against
+      // it happening a fourth time. Production is unaffected either way:
+      // nginx there proxies every API path to apps/api regardless of this list.
       //
-      // Verified in real Chrome rather than inferred from this config: see
-      // .superpowers/sdd/2026-08-10-phase6-dashboard/tasks-5-7-report.md.
-      // Vite's SPA fallback serves index.html for /dashboard/* because no proxy
-      // entry matches it, so a deep dashboard URL renders the app.
+      // NO ENTRY HERE CARRIES A `bypass`, and that is deliberate rather than
+      // an oversight. `bypass` existed solely to resolve the `/c` collision
+      // described at the top of this file; adding it anywhere else would make
+      // a request that happens to send `Accept: text/html` — a link opened in
+      // a new tab, a curl typed with -H "Accept: text/html" while debugging —
+      // silently answer with index.html instead of the API's JSON or 401.
       // ---------------------------------------------------------------
       "/auth": "http://localhost:3000",
-      "/communities": "http://localhost:3000",
       "/payment-account": "http://localhost:3000",
-      "/ai": "http://localhost:3000",
-      // Missing here left `GET /streaming/status` unproxied — the dev server
-      // fell through to its SPA history fallback and answered 200 with
-      // index.html instead of the API's JSON. `LiveStreamingNavLink` and
-      // `EventsPage` (Task 7, then Task 3's browser-publishing UI) both call
-      // this on mount; unproxied, `res.json()` throws on the HTML body and
-      // both fail toward HIDING (see those components' own docstrings on why
-      // that direction is deliberate for this one flag), so "Siaran
-      // langsung" simply never appeared while running `vite dev` — found
-      // while driving Task 3's UI in a real browser, not from reading this
-      // file. Production is unaffected: nginx there proxies every API path
-      // to apps/api regardless of this list.
-      "/streaming": "http://localhost:3000",
       // THE THIRD INSTANCE OF THE SAME BUG CLASS (Task 6). Every `/users/...`
       // call (signup, login, by-handle, /users/me, both password-reset
       // endpoints — apps/web/src/user/apiClient.ts) had no entry here at
@@ -89,10 +53,10 @@ export default defineConfig({
       // `POST /users/signup` answered a bodiless 404 from Vite itself, never
       // reaching apps/api. All six Task 6 pages were dead under `vite dev`
       // until this was added — found by actually starting the dev server
-      // and loading `/@wildan`, `/signup` and `/masuk`, exactly as `/c/`'s
-      // and `/streaming`'s own history above says to. `^/users/` (a regex,
+      // and loading `/@wildan`, `/signup` and `/masuk`, exactly as the
+      // `/c/` and `/streaming` history above says to. `^/users/` (a regex,
       // segment-precise with the trailing slash) rather than the string
-      // `/users`, for the same reason `/c` was rewritten to `^/c/` above:
+      // `/users`, for the same reason `/c` was once rewritten to `^/c/`:
       // this app's own SPA routes are single path segments
       // (`/signup`, `/masuk`, `/pengaturan`, `/:handleParam`, …), none of
       // which begin with `users`, so there is no real collision to guard
@@ -108,10 +72,10 @@ export default defineConfig({
       "^/users/": "http://localhost:3000",
       // Task 7 (Phase 7's Siaran): `GET /streams` and
       // `POST /streams/:id/watch-token` (`apps/web/src/user/apiClient.ts`).
-      // A plain string, not a regex like `^/c/`/`^/users/` above — no SPA
-      // route in this app begins with "streams", so there is no page
-      // navigation to protect with `bypass`, matching `/auth`,
-      // `/communities` and `/ai` above rather than the two regex entries.
+      // A plain string, not a regex like `^/users/` above — no SPA route in
+      // this app begins with "streams", so there is no page navigation to
+      // protect with `bypass`, matching `/auth` and `/payment-account` above
+      // rather than the regex entry.
       "/streams": "http://localhost:3000",
       // NOT PROXIED, DELIBERATELY: `/u/` (M5, final whole-branch review).
       // `/u/<streamId>/index.m3u8` is HLS playback, and in production nginx

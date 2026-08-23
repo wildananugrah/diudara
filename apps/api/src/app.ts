@@ -4,15 +4,9 @@ import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
 import { postRoutes } from "./routes/posts";
 import { mediaRoutes } from "./routes/media";
-import { communityRoutes } from "./routes/communities";
-import { tierRoutes } from "./routes/tiers";
-import { analyticsRoutes } from "./routes/analytics";
 import { paymentAccountRoutes } from "./routes/payment-account";
-import { publicCommunityRoutes } from "./routes/public-community";
-import { publicSubscriptionRoutes } from "./routes/public-subscription";
 import { webhookRoutes } from "./routes/webhooks";
 import { mediamtxWebhookRoutes } from "./routes/mediamtx-webhooks";
-import { aiRoutes } from "./routes/ai";
 import { streamRoutes } from "./routes/streams";
 import { errorHandler } from "./http/error-handler";
 import type { AuthVariables } from "./http/auth.middleware";
@@ -62,15 +56,6 @@ export function createApp(deps: Dependencies) {
   // router declares a literal segment the other one does.
   app.route("/users", mediaRoutes(deps));
   app.route("/payment-account", paymentAccountRoutes(deps));
-  // Mounted before publicCommunityRoutes: /c/:slug is a single path segment,
-  // while this route's literal "subscription"/"watch" prefixes and their
-  // multi-segment shapes never collide with it — but ordering it first makes
-  // that reasoning visible instead of relying on segment-count math staying
-  // true forever. A community whose slug is literally "watch" or
-  // "subscription" would be shadowed by this route; slug allocation has no
-  // reserved-word list today, and this is one more reason it should.
-  app.route("/c", publicSubscriptionRoutes(deps));
-  app.route("/c", publicCommunityRoutes(deps));
   // Public by design and authenticated by X-CALLBACK-TOKEN instead of a bearer
   // token — see routes/webhooks.ts. Never put this behind requireAuth.
   app.route("/webhooks", webhookRoutes(deps));
@@ -81,33 +66,22 @@ export function createApp(deps: Dependencies) {
   // either behind requireAuth. A distinct path prefix from /webhooks/xendit,
   // so mount order relative to webhookRoutes above does not matter.
   app.route("/webhooks/mediamtx", mediamtxWebhookRoutes(deps));
-  // Nested routes for tiers (Task 10) mount at
-  // /communities/:communityId/tiers. They must be registered BEFORE the
-  // catch-all /communities mount below so the more specific path matches first
-  // — keep that route the last one mounted under /communities.
-  //
-  // Retire-telegram Task 2 removed the /channels, /members and /join-requests
-  // mounts that used to sit here; the ordering rule they shared is unchanged for
-  // the ones that remain.
-  app.route("/communities/:communityId/tiers", tierRoutes(deps));
-  // Phase 6's dashboard reads: /communities/:communityId/metrics, /activity,
-  // /members and /members.csv. Mounted at /communities rather than at
-  // /communities/:communityId because `members.csv` is a SIBLING path segment of
-  // `members`, so it falls outside the membershipRoutes mount above.
-  //
-  // Its middleware is per-route, never `use("*")` — a `*` under /communities also
-  // matches /communities itself, so a communityId check there would 400 the
-  // community list and create endpoints. See routes/analytics.ts.
-  app.route("/communities", analyticsRoutes(deps));
-  app.route("/communities", communityRoutes(deps));
-  // Phase 7's AI co-builder chat. A distinct top-level path, so mount order
-  // relative to /communities does not matter.
-  app.route("/ai", aiRoutes(deps));
   // Phase 7's Siaran (Task 3): GET /streams (public), POST /streams and
   // DELETE /streams/:id (a person's own broadcast). A distinct top-level path,
   // and since retire-telegram Task 3 deleted /streaming (the dashboard's "is
   // live streaming configured" flag for the OLD, community world) it is no
   // longer one careless read away from a near-identical sibling.
+  //
+  // Retire-telegram Task 4 removed every remaining mount that used to sit
+  // between this one and /webhooks/mediamtx above — /c (twice, for the public
+  // community page and the public checkout/status pair), /communities,
+  // /communities/:communityId/tiers and /ai — along with the ordering rules
+  // that governed them: the /c pair's slug-shadowing note, and the rule that
+  // kept the nested tier mount ahead of the catch-all /communities one. Every
+  // prefix left in this file is distinct at its first segment except /users,
+  // whose three routers keep the ordering rule documented above them, so no
+  // mount order below /users is load-bearing any more. `app.test.ts` pins the
+  // whole set.
   app.route("/streams", streamRoutes(deps));
   return app;
 }

@@ -144,7 +144,8 @@ for (const key of [
   //
   // Measured before the fix, on such a box: 13 failures across
   // `worker-bootstrap.test.ts`, `routes/communities.test.ts` and the channel-access
-  // lifecycle, every one of them a test asserting the fake was selected. The
+  // lifecycle (the last two have since been deleted, by retire-telegram Tasks 4
+  // and 2 — the measurement is history, and the guard it justified is not). The
   // failures are the harmless half — the same configuration lets a bare
   // `bootstrap()` in any test file hold a live messaging token.
   //
