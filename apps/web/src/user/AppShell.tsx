@@ -66,12 +66,20 @@ function Destinations({ destinations }: { destinations: ReturnType<typeof useDes
 
 /**
  * The chrome every member-facing page sits inside — see the design spec's
- * §3. Mounted as a path-less layout route wrapping `/beranda`, `/jelajah`,
- * `/siaran` and `/pengaturan` in `App.tsx`; `/signup`, `/masuk`,
- * `/lupa-sandi`, `/reset/:token` and `/:handleParam` (the public profile)
- * are registered OUTSIDE it and never render this nav at all. Those four
- * child routes stay reachable signed out too — this shell does not gate
- * them itself, only `/pengaturan`'s own `SettingsPage` guard does.
+ * §3. Mounted as a path-less layout route in `App.tsx` wrapping `/beranda`,
+ * `/jelajah`, `/siaran`, `/pengaturan`, and — since 2026-08-25 — the public
+ * profile `/:handleParam` and its two follow lists.
+ *
+ * What stays OUTSIDE, and never renders this nav: `/signup`, `/masuk`,
+ * `/lupa-sandi`, `/reset/:token` (a nav on an auth page is noise, and its
+ * fourth item would point at the page you are already on), plus `/` and the
+ * catch-all 404, which carry their own layouts.
+ *
+ * Every child route stays reachable signed out — this shell does not gate
+ * them itself, only `/pengaturan`'s own `SettingsPage` guard does. That is
+ * precisely why the profile could move in: `useDestinations` below reads
+ * "Masuk" rather than "Profil" with no session, so the nav on a public page
+ * cannot offer a door that is not there.
  */
 export default function AppShell() {
   const destinations = useDestinations();
@@ -80,9 +88,17 @@ export default function AppShell() {
       <nav className="side-rail" aria-label="Navigasi utama">
         <Destinations destinations={destinations} />
       </nav>
-      <main className="app-shell-main">
+      {/*
+        A <div>, NOT a <main>: every page this shell renders brings its own
+        <main className="user-page">, so a <main> here nested one inside the
+        other — invalid HTML, and two "main" landmarks for assistive
+        technology to choose between. The class stays, so the CSS keyed on it
+        (the 220px left margin above 768px, the 72px bottom padding that
+        clears the fixed bottom bar below it) is unaffected.
+      */}
+      <div className="app-shell-main">
         <Outlet />
-      </main>
+      </div>
       <nav className="bottom-nav" aria-label="Navigasi utama">
         <Destinations destinations={destinations} />
       </nav>

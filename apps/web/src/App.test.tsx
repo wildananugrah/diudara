@@ -215,6 +215,30 @@ describe("routing — the app shell", () => {
   });
 
   /**
+   * The shell used to wrap each page's own `<main className="user-page">` in a
+   * SECOND `<main className="app-shell-main">` — visible as `main > main` in
+   * any inspector. Nested `<main>` is invalid HTML and hands assistive
+   * technology two "main" landmarks to choose between. The wrapper is a
+   * `<div>`; it keeps the same class, so every CSS rule keyed on
+   * `.app-shell-main` (the 768px `margin-left: 220px`, the 72px bottom
+   * padding that clears the fixed bottom bar) is untouched.
+   *
+   * Asserted on the TAG rather than the ARIA role: the role is what breaks
+   * for a screen reader, but the tag is what makes the document invalid, and
+   * a `role="main"` added by hand somewhere should not be able to satisfy it.
+   */
+  it("renders exactly one main landmark inside the shell, not a nested pair", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ posts: [], nextCursor: null })
+    ) as unknown as typeof fetch;
+
+    renderAt("/beranda");
+
+    await screen.findByText("Belum ada kiriman untuk ditampilkan.");
+    expect(document.querySelectorAll("main").length).toBe(1);
+  });
+
+  /**
    * The one a future refactor breaks silently, per the brief: a signed-out
    * visitor on the signup page must see no navigation at all — every
    * destination behind the shell requires a session.
@@ -253,7 +277,32 @@ describe("routing — the app shell", () => {
     expect(screen.queryAllByRole("navigation").length).toBe(0);
   });
 
-  it("renders no navigation shell on a public profile page", async () => {
+  /**
+   * REVERSED DELIBERATELY on 2026-08-25 — this test asserted the exact
+   * opposite, and the reasoning it rested on had expired.
+   *
+   * Spec §3's rule is "no navigation when there is no session", and the
+   * public profile was placed outside the shell under it. That rule predates
+   * `useDestinations`, which now computes the fourth destination FROM whether
+   * a session exists: signed out it reads "Masuk" -> /masuk. A nav on a
+   * public page therefore no longer promises something tapping it cannot
+   * deliver, which was the rule's whole purpose. Note §3 itself names only
+   * signup, login and the two reset pages — `/@handle` was added to that list
+   * by a later ruling that generalised the rule past what it said.
+   *
+   * The auth pages stay outside for a DIFFERENT reason that has not expired:
+   * a nav there is noise, and its fourth item would point at the page you are
+   * already standing on.
+   *
+   * What forced the reversal: `/@handle` is where a member buys a membership,
+   * and with no navigation of any kind it is a dead end — on a phone the only
+   * way out is the browser's own Back button.
+   *
+   * Two, not one: `AppShell` renders one destinations array as both a bottom
+   * bar and a side rail, and happy-dom does not evaluate the media query that
+   * hides one of them — so the count also pins "one source, two shapes".
+   */
+  it("renders the navigation shell on a public profile page", async () => {
     global.fetch = mock(async () =>
       jsonResponse({ handle: "wildan", displayName: "Wildan", bio: null, createdAt: "2026-01-01T00:00:00.000Z" })
     ) as unknown as typeof fetch;
@@ -261,23 +310,23 @@ describe("routing — the app shell", () => {
     renderAt("/@wildan");
 
     await screen.findByText("Wildan");
-    expect(screen.queryAllByRole("navigation").length).toBe(0);
+    expect(screen.getAllByRole("navigation", { name: "Navigasi utama" }).length).toBe(2);
   });
 
   /**
-   * Final-review I1: Task 4's own I1, REINTRODUCED. Task 4 found
-   * `/lupa-sandi` and `/reset/:token` movable inside the `AppShell` block with
-   * the suite green and added the two assertions above; Task 5 then added two
-   * MORE outside-shell routes and covered only their route RESOLUTION, not
-   * their shell absence. Measured at HEAD `11b8848`: moving either route below
-   * inside the `AppShell` block left all 448 web tests green, while the same
-   * mutation on each of the five older outside-shell routes went red.
+   * These two follow the profile across the boundary, for the reason they
+   * exist: both are reached ONLY by tapping a follower/following count on a
+   * profile, so leaving them outside while the profile moved inside would
+   * make the navigation appear, vanish on tap, and reappear on Back.
    *
-   * These two are the same form as the five above. The class — "a new
-   * outside-shell route arrives with nothing holding it there" — is closed
-   * separately, by the route-table partition test at the bottom of this file.
+   * Their previous "no navigation" assertions were added by a final review
+   * that measured a real hole — moving either route inside the shell left all
+   * 448 web tests green at HEAD `11b8848`. That hole is now closed by the
+   * route-table partition test at the bottom of this file, which asserts the
+   * whole boundary rather than sampling it, and which is what forced this
+   * change to be deliberate rather than quiet.
    */
-  it("renders no navigation shell on /@handle/pengikut", async () => {
+  it("renders the navigation shell on /@handle/pengikut", async () => {
     global.fetch = mock(async () =>
       jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null, viewerFollows: null }])
     ) as unknown as typeof fetch;
@@ -285,10 +334,10 @@ describe("routing — the app shell", () => {
     renderAt("/@wildan/pengikut");
 
     expect(await screen.findByText("Budi Santoso")).toBeTruthy();
-    expect(screen.queryAllByRole("navigation").length).toBe(0);
+    expect(screen.getAllByRole("navigation", { name: "Navigasi utama" }).length).toBe(2);
   });
 
-  it("renders no navigation shell on /@handle/mengikuti", async () => {
+  it("renders the navigation shell on /@handle/mengikuti", async () => {
     global.fetch = mock(async () =>
       jsonResponse([{ handle: "budi", displayName: "Budi Santoso", bio: null, viewerFollows: null }])
     ) as unknown as typeof fetch;
@@ -296,7 +345,7 @@ describe("routing — the app shell", () => {
     renderAt("/@wildan/mengikuti");
 
     expect(await screen.findByText("Budi Santoso")).toBeTruthy();
-    expect(screen.queryAllByRole("navigation").length).toBe(0);
+    expect(screen.getAllByRole("navigation", { name: "Navigasi utama" }).length).toBe(2);
   });
 });
 
@@ -541,22 +590,37 @@ function flattenRouteTable(): FlatRoute[] {
  * IT IS MEANT TO FAIL when the route table changes. That is not brittleness,
  * it is the point: adding a route, or moving one across the shell boundary,
  * must be a deliberate edit to the expected list below and a deliberate
- * decision about whether the new page renders navigation. The design spec
- * (`2026-08-17-member-ui-design.md` §3) and the ledger's binding ruling name
- * signup, login, the two reset pages and `/@handle` as outside; the final
- * review ruled the two follow-list pages outside too.
+ * decision about whether the new page renders navigation.
+ *
+ * It did its job on 2026-08-25: moving the profile and the two follow lists
+ * INSIDE the shell could not be done quietly — it failed here and forced this
+ * list to be rewritten by hand. The boundary now falls where spec §3 actually
+ * draws it, around the four pages you reach without a session: signup, login,
+ * and the two reset pages. `/` has the landing's own header and `*` is the
+ * 404. Everything else — including the public profile, which is where a
+ * membership is bought — carries navigation, because `useDestinations`
+ * renders "Masuk" rather than "Profil" when there is no session and so cannot
+ * offer a signed-out visitor a door that is not there.
  */
 describe("routing — the shell partition of the real route table", () => {
-  it("renders EXACTLY these four paths inside the AppShell layout route", () => {
+  it("renders EXACTLY these seven paths inside the AppShell layout route", () => {
     const inside = flattenRouteTable()
       .filter((route) => route.insideShell)
       .map((route) => route.path)
       .sort();
 
-    expect(inside).toEqual(["/beranda", "/jelajah", "/pengaturan", "/siaran"]);
+    expect(inside).toEqual([
+      "/:handleParam",
+      "/:handleParam/mengikuti",
+      "/:handleParam/pengikut",
+      "/beranda",
+      "/jelajah",
+      "/pengaturan",
+      "/siaran",
+    ]);
   });
 
-  it("renders EXACTLY these paths OUTSIDE the shell — the two follow lists among them", () => {
+  it("renders EXACTLY these paths OUTSIDE the shell — the four auth pages among them", () => {
     const outside = flattenRouteTable()
       .filter((route) => !route.insideShell)
       .map((route) => route.path)
@@ -565,9 +629,6 @@ describe("routing — the shell partition of the real route table", () => {
     expect(outside).toEqual([
       "*",
       "/",
-      "/:handleParam",
-      "/:handleParam/mengikuti",
-      "/:handleParam/pengikut",
       "/lupa-sandi",
       "/masuk",
       "/reset/:token",

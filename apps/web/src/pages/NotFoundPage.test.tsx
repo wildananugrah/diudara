@@ -43,9 +43,18 @@ describe("an unknown path", () => {
     expect(text).not.toContain("Memuat...");
   });
 
+  /**
+   * Matched by EXACT name, not /beranda/i. A single-segment unknown path is
+   * matched by `/:handleParam` (ProfilePage renders this page for any param
+   * that does not start with "@"), and that route moved inside the AppShell
+   * on 2026-08-25 — so the nav's own "Beranda" links are on screen too and a
+   * loose pattern now matches three links, not one. The exact name is also
+   * the stronger assertion: it pins THIS page's link, and its href of "/"
+   * distinguishes it from the nav's "/beranda".
+   */
   it("offers a link home", () => {
     renderAt("/tidak-ada-halaman-ini");
-    const home = screen.getByRole("link", { name: /beranda/i });
+    const home = screen.getByRole("link", { name: "Kembali ke beranda" });
     expect(home.getAttribute("href")).toBe("/");
   });
 
