@@ -49,16 +49,22 @@ export interface CreateInvoiceResult {
 
 export interface CreatePaymentAccountInput {
   /**
-   * THE OWNER'S ID — `creator.id` OR `app_user.id`. The name is historical, from
-   * when creators were the only owner that could be paid, and it is now wrong:
-   * Phase 5a's `ConnectUserPayout` passes an `app_user.id` through this field for
-   * a user selling a membership on their own profile.
+   * THE OWNER'S ID — an `app_user.id`, from `ConnectUserPayout`, the only caller.
    *
-   * Not renamed on purpose. `creator.xendit_account_id` and everything
-   * /dashboard/* reads are frozen, and a rename would edit
-   * `create-payment-account.ts` to no functional end. Naming the two owners here
-   * is the honest alternative — the field's name was previously its only
-   * documentation, and that documentation was false.
+   * CALLED `creatorId` UNTIL RETIRE-TELEGRAM TASK 7'S FIX ROUND 2, and the
+   * rename is the point of this paragraph. The name was historical, from when
+   * creators were the only owner that could be paid, and it had been wrong
+   * since Phase 5a started passing an `app_user.id` through it. It was kept
+   * anyway, on a stated reason: renaming would have edited
+   * `create-payment-account.ts`, part of the frozen creator flow, to no
+   * functional end. FIX ROUND 1 DELETED THAT FLOW — the use case, its route,
+   * its repository and its port — so the reason evaporated, and the review
+   * caught the justification still standing over it. There is one owner table
+   * now and one caller, so the field says what it holds.
+   *
+   * NOTHING STORED CHANGED. This is a TypeScript field name; the VALUE was
+   * already the owner's id, and `creator.xendit_account_id` (untouched, and the
+   * table-drop follow-up's) holds whatever it always held.
    *
    * INERT AT THE PROVIDER, but not unused. `XenditPaymentAdapter` never sends it
    * — only `email` and `public_profile.business_name` cross the wire — while
@@ -66,11 +72,12 @@ export interface CreatePaymentAccountInput {
    * every development box and every test then stores in a real column. So it
    * does reach the database, just never Xendit.
    *
-   * NEVER JOIN THIS TO `creator`. A lookup keyed on it will silently return
-   * nothing for half the owners that pass through here, and "no rows" is exactly
-   * the shape a missing creator has.
+   * NEVER JOIN THIS TO `creator`. Every id that passes through here names an
+   * `app_user`, so such a lookup returns nothing — and "no rows" is exactly
+   * the shape a missing row has, which is why this is worth saying rather than
+   * leaving to be discovered.
    */
-  creatorId: string;
+  ownerId: string;
   /** Becomes the provider account's own email. `app_user.email` is NOT NULL; `creator.email` is not. */
   email: string;
   /** Sent as the sub-account's `public_profile.business_name`. */

@@ -836,9 +836,10 @@ needs four manual steps on the box that nothing in the automated deploy performs
 **Siaran (`/siaran`, a person going live from their own profile) is the only streaming
 world left** — retire-telegram deleted the community event world and, with it, three of the
 seven nginx `location` blocks. **Step 3 therefore now REMOVES blocks as well as installing
-them**, and a box still carrying the old seven keeps a `^~ /live/` location that forwards
-client-supplied headers into an `auth_request`; see the template's own header for why that
-matters. Do them in this order — the `.env` variables first, because a missing one restart-loops the
+them**: a box still carrying the old seven keeps three dead blocks whose only remaining
+safety is one `proxy_set_header` line with an out-of-date comment (step 3 spells this out,
+including why "dead" is not the same as "exploitable"). Do them in this order — the
+`.env` variables first, because a missing one restart-loops the
 API the moment `git pull` lands the code that requires it; the reload and the firewall
 changes are independent of each other but both have to be done before a creator can
 actually go live from a browser:
@@ -873,15 +874,37 @@ actually go live from a browser:
    | `^~ /u/` | **Siaran playback** — every viewer's player 404s on the manifest |
    | `= /_internal/mediamtx-user-auth-request` | `^~ /u/`'s `auth_request` has no upstream; Siaran playback fails closed |
 
-   **GONE, and they must be removed from the box, not merely absent from the template:**
-   `^~ /live/`, `^~ /whip/` and `= /_internal/mediamtx-auth-request`. Left in place they are
-   not inert. `^~ /live/` still issues an `auth_request`, and an `auth_request` subrequest
-   INHERITS the client's own headers — so a client that attaches its own `X-Mtx-Stream-Id`
-   to a `/live/...` URL gets to choose which stream apps/api resolves, with a real
-   `user_stream`'s PUBLISH KEY landing in nginx's upstream URL and error log. It fails to
-   deliver bytes (nothing publishes to `live/<key>` any more), which is exactly why it is
-   easy to leave behind. `^~ /whip/` is a public proxy into MediaMTX's WHIP port for
-   arbitrary keys. Remove both, and the internal upstream only `/live/` ever called.
+   **GONE, and they should be removed from the box, not merely absent from the template:**
+   `^~ /live/`, `^~ /whip/` and `= /_internal/mediamtx-auth-request`.
+
+   **These three are DEAD, not exploitable, and the distinction matters because someone
+   will reason from this paragraph.** A box still carrying all three is not currently
+   vulnerable: `^~ /live/` refuses every read (its `auth_request` upstream sends apps/api no
+   stream id, and apps/api resolves reads by stream id alone since Task 6), and `^~ /whip/`
+   refuses every publish (MediaMTX's own `authHTTPAddress` hook asks apps/api, whose
+   `parseStreamPath` no longer recognises the `live` namespace). Nothing gets through
+   either one.
+
+   The reason to remove them is that they are **unreachable, confusing, and one careless
+   edit from mattering** — not that they are a live hole. `^~ /live/` is the only location
+   in the old set that forwards a request into an `auth_request`, and an `auth_request`
+   subrequest INHERITS the client's own headers. What stops a client-supplied
+   `X-Mtx-Stream-Id` from reaching apps/api on a `/live/...` URL is exactly one line inside
+   `= /_internal/mediamtx-auth-request`:
+
+   ```nginx
+   proxy_set_header X-Mtx-Stream-Id "";
+   ```
+
+   That line does its job today. The hazard is its COMMENT, which justified it by a
+   both-or-neither rule apps/api stopped enforcing in Task 6 — so a future editor
+   tidying dead config has a written, wrong reason to delete it as obsolete, and deleting
+   it is what would let a client choose which stream apps/api resolves, putting a real
+   `user_stream`'s PUBLISH KEY into nginx's upstream URL and error log. Removing the whole
+   `/live/` location removes the reachable path instead of relying on a guard nobody
+   maintains. (`infra/nginx/live-hls.conf.template`'s own header makes the same argument;
+   if these two ever disagree, the template is the one that has been checked against the
+   config.)
 
    Render the template with `envsubst` (it carries `${MEDIAMTX_WEBHOOK_SECRET}`) into a
    snippet, `include` that snippet from the real server block rather than re-pasting the

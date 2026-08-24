@@ -2,19 +2,27 @@ import { ApiError } from "../api";
 import { MAX_UPLOAD_BYTES } from "@diudara/shared";
 
 /**
- * The personal-account session, plus every call to `/users/...`.
+ * The session, plus every call to `/users/...`. THE ONLY SESSION THIS APP HAS.
  *
- * THIS IS A SEPARATE SESSION FROM THE CREATOR DASHBOARD'S — see
- * `apps/web/src/dashboard/auth.ts` and `apiClient.ts`, which this file
- * mirrors deliberately rather than importing from. The codebase already has
- * two account systems (creator, personal user) with their own token types
- * (`UserTokenPayload` carries a different `typ` than the creator's — see
- * Task 2's `hono-jwt.user-token-issuer.ts`) and their own auth middleware
- * (`requireUserAuth` vs `requireAuth`), each rejecting the other's token. A
- * shared storage key or a shared listener set would let one session's
- * expiry silently affect the other's UI, so this stays a full parallel
- * implementation of the SAME DESIGN — localStorage, a Bearer header, and a
- * 401 clearing the token — not a new scheme.
+ * IT WAS BUILT AS A SEPARATE, PARALLEL ONE, and that is worth knowing before
+ * reading the storage keys below. This app once carried two account systems
+ * side by side: the creator dashboard's (`apps/web/src/dashboard/auth.ts` and
+ * its own `apiClient.ts`, which this file mirrored deliberately rather than
+ * imported from) and the personal-account one here. They had different token
+ * types — `UserTokenPayload` carried a `typ` the creator's did not — and
+ * different auth middleware, each rejecting the other's token. Sharing a
+ * storage key or a listener set would have let one session's expiry silently
+ * affect the other's UI, so this was written as a full parallel implementation
+ * of the SAME DESIGN — localStorage, a Bearer header, and a 401 clearing the
+ * token — never a new scheme.
+ *
+ * Retire-telegram deleted the other side of that pair: Task 1 removed the
+ * dashboard and its `auth.ts`, and Task 7's fix round removed the creator API,
+ * its token issuer and its middleware. NOTHING HERE CHANGED as a result, and
+ * nothing needed to — the parallel implementation was already
+ * self-contained, which was the point of building it that way. The `typ`
+ * claim on the surviving token stays too; see
+ * `hono-jwt.user-token-issuer.ts` for what it means with one audience left.
  */
 
 /** The ONE key the personal-account token lives under. Exported so tests assert on it rather than guess. */

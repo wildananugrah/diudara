@@ -332,7 +332,7 @@ describe("XenditPaymentAdapter.createInvoice", () => {
 });
 
 describe("XenditPaymentAdapter.createPaymentAccount", () => {
-  const ACCOUNT_INPUT = { creatorId: "c1", email: "a@b.co", name: "Budi" };
+  const ACCOUNT_INPUT = { ownerId: "c1", email: "a@b.co", name: "Budi" };
 
   it("returns the sub-account id", async () => {
     const { fetchFn } = captureFetch({ id: "acct_1" });

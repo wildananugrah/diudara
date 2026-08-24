@@ -84,7 +84,7 @@ function user(overrides: Partial<UserPayoutAccount> = {}): UserPayoutAccount {
 
 /** Captures what the provider was actually asked for, which the shared fake does not record. */
 function recordAccountCalls(payments: FakePaymentAdapter) {
-  const calls: { creatorId: string; email: string; name: string }[] = [];
+  const calls: { ownerId: string; email: string; name: string }[] = [];
   const original = payments.createPaymentAccount.bind(payments);
   payments.createPaymentAccount = async (input) => {
     calls.push(input);
@@ -114,12 +114,13 @@ describe("ConnectUserPayout", () => {
 
     await new ConnectUserPayout(repository, payments).execute("user-1");
 
-    // `creatorId` is `PaymentProviderPort`'s field name, carried over from the
-    // creator flow and deliberately NOT renamed: renaming it would edit
-    // `create-payment-account.ts`, which serves the untouchable /dashboard/*.
-    // The value is this app_user's id — a different owner table, same provider.
+    // `ownerId` is `PaymentProviderPort`'s field name. It was `creatorId`,
+    // carried over from the creator flow and kept because renaming it would
+    // have edited `create-payment-account.ts`; retire-telegram Task 7's fix
+    // round 1 deleted that file, and fix round 2 did the rename. The value is
+    // unchanged and always was this app_user's id.
     expect(calls).toEqual([
-      { creatorId: "user-1", email: "rina@example.com", name: "Rina Kusuma" },
+      { ownerId: "user-1", email: "rina@example.com", name: "Rina Kusuma" },
     ]);
   });
 
@@ -164,7 +165,7 @@ describe("ConnectUserPayout", () => {
     const original = payments.createPaymentAccount.bind(payments);
     payments.createPaymentAccount = async (input) => {
       seenAtProviderCall.push(
-        (await repository.findPayoutAccount(input.creatorId))?.xenditAccountId ?? null
+        (await repository.findPayoutAccount(input.ownerId))?.xenditAccountId ?? null
       );
       return original(input);
     };

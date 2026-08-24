@@ -126,18 +126,53 @@ export function bootstrapWorker(): WorkerDependencies {
   // `worker-bootstrap.test.ts` asserts on) instead of leaving them `pending` and
   // unread for ever.
   //
-  // TASK 7 TOOK THE DECISION RATHER THAN DEFERRING IT ONWARD, and this is the
-  // whole of it, so that nothing later has to guess what "together" meant. ONE
-  // COMMIT, in the follow-up that drops the retired tables, retires exactly:
-  // `ProcessOutbox` and its test, `OutboxRepositoryPort` (including every
-  // surviving `OUTBOX_*` constant), `DrizzleOutboxRepository` and its test, the
-  // `OutboxHandler` type, this map and the poll loop below that reads it,
-  // `WORKER_POLL_INTERVAL_MS` and its `.env.example` entry, and the `outbox`
-  // table itself. NOT BEFORE the table drops, for the reason above: a drainer
-  // deleted while the table survives turns a loud failure into silence.
-  // `enqueueMany` was the one piece that did NOT wait — Task 7 deleted it,
-  // because the argument above is about draining and cannot be made for a
-  // writer.
+  // TASK 7 TOOK THE DECISION RATHER THAN DEFERRING IT ONWARD, and the list below
+  // is meant to be EXECUTED, not read: whoever runs the follow-up should be able
+  // to work from it without re-deriving the surface. Fix round 2 completed it
+  // — the first version named only the apps/api half, which is a trap for
+  // exactly the person the list exists for.
+  //
+  // ONE COMMIT, in the follow-up that drops the retired tables, retires:
+  //
+  //   apps/api
+  //     - `ProcessOutbox` (application/use-cases/process-outbox.ts) + its test
+  //     - `OutboxRepositoryPort` (application/ports/outbox-repository.port.ts),
+  //       including every surviving `OUTBOX_*` constant and `ClaimedOutboxRow`
+  //     - `DrizzleOutboxRepository` + its test
+  //     - `OutboxHandler`, THIS map, and `WorkerDependencies.processOutbox`
+  //     - `worker-bootstrap.test.ts`'s outbox coverage, including the `it.each`
+  //       that pins "no handler is registered" (ONE declaration, SIX runs —
+  //       the test count drops by six, not one)
+  //     - `db/test-helpers.ts`'s `outbox` import and its `db.delete(outbox)`
+  //     - `db/schema-phase4.test.ts`'s outbox import and its
+  //       "defaults an outbox row to pending with no attempts" case
+  //     - `.env.example`'s `WORKER_POLL_INTERVAL_MS` entry
+  //     - the `outbox` table in `db/schema.ts`
+  //
+  //   apps/worker
+  //     - `main.ts`: the `processOutbox` destructure from `bootstrapWorker()`,
+  //       the whole `outboxLoop` block, the `resolvePollIntervalMs` call and its
+  //       `intervalMs`, `outboxLoop` in the shutdown list, `outboxLoop.run()`,
+  //       and the "polling the outbox every Nms" clause of the startup log
+  //     - `poll-loop.ts`: `DEFAULT_POLL_INTERVAL_MS` and
+  //       `resolvePollIntervalMs` ONLY — **`PollLoop` itself and
+  //       `resolveIntervalMs` STAY**, because the five scheduled passes in
+  //       `scheduled-passes.ts` are built on them. Deleting that file wholesale
+  //       takes the whole worker down; this is the one line of this list that
+  //       is a subtraction rather than a deletion.
+  //     - `poll-loop.test.ts`'s `resolvePollIntervalMs` cases
+  //     - `scheduled-passes.ts`: the `"outbox"` member of `formatPassFailure`'s
+  //       `pass` union (and the matching case in `scheduled-passes.test.ts`)
+  //
+  // Prose that merely MENTIONS the outbox as a comparison — `poll-loop.ts`'s
+  // interval reasoning, `scheduled-passes.ts`'s "why not 5 seconds",
+  // `error-handler.ts`'s "symmetrical with `ProcessOutbox`" — needs rewording,
+  // not deleting, and is not on this list because it is not load-bearing.
+  //
+  // NOT BEFORE the table drops, for the reason above: a drainer deleted while
+  // the table survives turns a loud failure into silence. `enqueueMany` was the
+  // one piece that did NOT wait — Task 7 deleted it, because the argument
+  // above is about draining and cannot be made for a writer.
   //
   // Anything added later that must happen AFTER a payment commits reinstates the
   // real reason to keep all of it: see `PaymentActivationUnitOfWorkPort`.

@@ -12,7 +12,7 @@ import type {
  */
 export class FakePaymentAdapter implements PaymentProviderPort {
   readonly invoices: CreateInvoiceInput[] = [];
-  readonly accounts: { creatorId: string; accountId: string }[] = [];
+  readonly accounts: { ownerId: string; accountId: string }[] = [];
   failNextInvoice = false;
   /**
    * Makes the next `createPaymentAccount` throw. Exists so a test can exercise
@@ -39,7 +39,7 @@ export class FakePaymentAdapter implements PaymentProviderPort {
   failNextInvoiceExpiry = false;
 
   async createPaymentAccount(input: {
-    creatorId: string;
+    ownerId: string;
     email: string;
     name: string;
   }): Promise<{ accountId: string }> {
@@ -47,8 +47,8 @@ export class FakePaymentAdapter implements PaymentProviderPort {
       this.failNextPaymentAccount = false;
       throw new Error("fake payment provider: createPaymentAccount failed");
     }
-    const accountId = `fake-acct-${this.accounts.length + 1}-${input.creatorId}`;
-    this.accounts.push({ creatorId: input.creatorId, accountId });
+    const accountId = `fake-acct-${this.accounts.length + 1}-${input.ownerId}`;
+    this.accounts.push({ ownerId: input.ownerId, accountId });
     return { accountId };
   }
 

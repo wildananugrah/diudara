@@ -225,8 +225,8 @@ describe("vite proxy coverage", () => {
     // Run against the same `isJustified` the test above uses, so this pins the
     // real logic rather than a restatement of it.
     expect(isJustified("/streaming", fetchedPrefixes())).toBe(false);
-    // And the exception list is what makes the three real ones pass — not a
-    // loophole in the matching. Deleting `/webhooks` from
+    // And the exception list — one entry, `/webhooks` — is what makes that key
+    // pass, not a loophole in the matching. Deleting it from
     // `NOT_FETCHED_BY_THIS_APP` must turn the check above red; this asserts the
     // half of that which a test can assert without editing itself.
     expect("/webhooks" in NOT_FETCHED_BY_THIS_APP).toBe(true);
