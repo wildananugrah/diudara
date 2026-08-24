@@ -82,11 +82,6 @@ function feedTabRules(css: string): { selector: string; body: string }[] {
   return rules(css).filter((rule) => rule.selector.includes(".feed-tabs"));
 }
 
-/** Selectors as one readable string, so a failure names the offender instead of printing a count. */
-function selectors(matched: { selector: string }[]): string {
-  return matched.map((rule) => rule.selector).join(" | ");
-}
-
 /** Gives any effect a queued request would sit in a chance to fire before an absence is asserted. */
 function settle(): Promise<void> {
   return act(async () => {
