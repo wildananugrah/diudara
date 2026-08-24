@@ -13,14 +13,29 @@ import { Link } from "react-router-dom";
  * gone. No test pinned any of it, so the suite stayed green the whole way down.
  *
  * The rewrite below describes only what ships, and `LandingPage.test.tsx` now
- * pins it three ways so the next deletion phase cannot leave it stale the same
+ * pins it four ways so the next deletion phase cannot leave it stale the same
  * way:
  *
  *   1. every `<a href>` on this page is rendered through the real `AppRoutes`
  *      and must not land on the 404 page (with a positive control proving the
  *      check can fail);
  *   2. the vocabulary of the deleted world is a denylist;
- *   3. the page may not promise automatic renewal, because nothing renews.
+ *   3. the page may not promise automatic renewal, because nothing renews;
+ *   4. the page must say that the TEXT of a members-only post stays readable.
+ *
+ * THE FOURTH ONE IS THERE BECAUSE THE FIRST REWRITE GOT IT WRONG. Removing a
+ * false claim about a deleted feature and replacing it with a false claim about
+ * a surviving one is the same defect wearing new clothes, and the re-review
+ * caught exactly that: this page said "hanya anggota berbayar Anda yang bisa
+ * membukanya" of a members-only post, and applied "Tandai yang khusus anggota"
+ * to *tulisan*. Both are false, and false in the direction that matters — a
+ * seller would design their posts around a paywall the product does not have.
+ * Only the PHOTOS lock; the caption is deliberately public, because it is the
+ * teaser that makes the lock convert (Phase 6), and a text-only post cannot be
+ * members-only at all. Note that none of tests 1-3 could see this: no banned
+ * word, no renewal promise, no link. A denylist catches the last product's
+ * vocabulary; only a positive assertion catches THIS product being described
+ * backwards.
  *
  * What each claim below rests on, so a future editor can re-check it rather than
  * trust this comment:
@@ -37,9 +52,17 @@ import { Link } from "react-router-dom";
  *   - money to your own sub-account   `XenditPaymentAdapter` sends `for-user-id`
  *                                     (the seller's sub-account) with a split rule
  *                                     that routes only DIUDARA's fee elsewhere
- *   - members-only posts and photos   `post.visibility` (`public` | `members`),
- *                                     `PostComposer`'s *Khusus anggota*,
- *                                     `POST /users/media`
+ *   - photos lock, TEXT DOES NOT       `toPostView` (`post-views.ts`) returns
+ *                                     `body` UNCONDITIONALLY and empties only
+ *                                     `media`; `PostCard` renders the body
+ *                                     outside its `locked ?` branch and shows
+ *                                     "<n> foto terkunci" instead of the images
+ *   - a locked post must have a photo  `requireImageWhenLocked` (`write-post.ts`)
+ *                                     throws NO_IMAGE_FOR_MEMBERS_MESSAGE, and
+ *                                     `PostComposer` disables *Khusus anggota*
+ *                                     until an image is attached, saying so:
+ *                                     "Tambahkan foto dulu — teks selalu bisa
+ *                                     dibaca semua orang"
  *   - live streams, browser or OBS    `POST /streams` with the same two
  *                                     visibilities, `SiaranPage`'s WHIP publisher
  *                                     and its *Pakai OBS* block
@@ -61,8 +84,9 @@ export default function LandingPage() {
         <p className="landing-eyebrow">DIUDARA</p>
         <h1>Jual keanggotaan langsung dari profil Anda</h1>
         <p className="landing-lede">
-          Satu profil untuk tulisan, foto, dan siaran langsung Anda. Tandai yang khusus
-          anggota, dan DIUDARA mengurus pembayarannya.
+          Satu profil untuk tulisan, foto, dan siaran langsung Anda. Tulisannya terbuka
+          untuk semua orang; fotonya bisa Anda kunci untuk anggota berbayar, begitu juga
+          siaran langsung Anda — dan DIUDARA mengurus pembayarannya.
         </p>
         {/*
           Retire-telegram Task 1, fix round 1 (review Critical 1). Both
@@ -103,8 +127,8 @@ export default function LandingPage() {
           </li>
           <li>
             <strong>Bagikan tautan profil Anda.</strong> Pengunjung menekan tombol
-            &ldquo;Jadi anggota&rdquo; di profil itu, membayar, lalu bisa membuka yang
-            khusus anggota.
+            &ldquo;Jadi anggota&rdquo; di profil itu, membayar, lalu bisa membuka foto
+            dan siaran yang khusus anggota.
           </li>
         </ol>
       </section>
@@ -117,10 +141,13 @@ export default function LandingPage() {
             <p>Dana anggota masuk ke sub-akun Xendit Anda sendiri, bukan ke rekening bersama.</p>
           </article>
           <article className="card landing-feature">
-            <h3>Postingan khusus anggota</h3>
+            <h3>Foto untuk anggota, teks untuk semua</h3>
             <p>
-              Tulis dan unggah foto. Tandai sebuah postingan sebagai khusus anggota, dan
-              hanya anggota berbayar Anda yang bisa membukanya.
+              Tandai satu kiriman sebagai khusus anggota dan yang terkunci adalah fotonya:
+              orang lain hanya melihat berapa foto yang tersembunyi, dengan tautan untuk
+              jadi anggota. Teksnya sengaja tetap bisa dibaca siapa saja — itulah yang
+              membuat orang ingin membukanya, dan karena itu kiriman khusus anggota harus
+              punya sedikitnya satu foto.
             </p>
           </article>
           <article className="card landing-feature">
@@ -147,7 +174,7 @@ export default function LandingPage() {
           <article className="card landing-feature">
             <h3>Pengikut tanpa bayar</h3>
             <p>
-              Siapa pun boleh mengikuti Anda tanpa membeli apa pun, membaca postingan
+              Siapa pun boleh mengikuti Anda tanpa membeli apa pun, membaca kiriman
               terbuka Anda di berandanya, dan menemukan Anda lewat halaman Jelajah.
             </p>
           </article>

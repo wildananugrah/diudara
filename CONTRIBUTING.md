@@ -1055,9 +1055,15 @@ the state `0003` needs.
 - **Ports and adapters.** Use-cases depend on interfaces in
   `apps/api/src/application/ports`; Drizzle and HTTP live in `infrastructure/` and
   `routes/`.
-- **Time is injected**, never `Date.now()` inside a use-case — `ClockPort`. Billing dates
-  are interpreted in **Asia/Jakarta**, in one place (`domain/billing-cycle.ts` —
-  `domain/renewal-schedule.ts` went with the renewal pass in retire-telegram Task 4).
+- **Time is injected**, never `Date.now()` inside a use-case — `ClockPort`. Billing dates are
+  computed in **UTC**, in one place (`computeNextBillingDate` in `domain/billing-cycle.ts`, whose
+  TIMEZONE ASSUMPTION note says so and records the accepted consequence: a payment at 06:00 WIB is
+  23:00 UTC the previous day, so a stored date can read one day earlier than the member would
+  count). **There is no Asia/Jakarta boundary logic left in live code.** The WIB calendar-day
+  comparison that used to decide it lived in `domain/renewal-schedule.ts`, which went with the
+  renewal pass in retire-telegram Task 4; the only WIB handling that survives is
+  *presentational* — `formatWibDate` in `remind-expiring-membership.ts`, which shifts by a fixed
+  `WIB_OFFSET_MS` purely to print a date a member can read.
 - **Owner-scoped reads return 404, not 403**, so a stranger cannot confirm that a
   row exists.
 - `NODE_ENV` is an **allowlist**: only exactly `development` or `test` may relax a guard.

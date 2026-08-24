@@ -191,6 +191,11 @@ describe("LandingPage", () => {
     );
     const text = document.body.textContent ?? "";
     cleanup();
+    // PROOF OF LIFE. A denylist over `textContent` passes vacuously if the page
+    // renders nothing, and five sibling tests reddening first is luck, not a
+    // guarantee. "DIUDARA" is the eyebrow above the H1 and the one word on this
+    // page that is not a product claim, so it is the stable thing to require.
+    expect(text).toContain("DIUDARA");
     const banned: Array<[string, RegExp]> = [
       ["telegram", /telegram/i],
       ["komunitas", /komunitas/i],
@@ -276,6 +281,91 @@ describe("LandingPage", () => {
     const text = document.body.textContent ?? "";
     cleanup();
     expect(promisesRenewal(text).join(", ")).toBe("");
+  });
+
+  /**
+   * THE PHOTOS LOCK. THE WORDS DO NOT. And the first rewrite said otherwise.
+   *
+   * Phase 8's re-review found this page claiming *"Tandai sebuah postingan
+   * sebagai khusus anggota, dan hanya anggota berbayar Anda yang bisa
+   * membukanya"*, and applying *"Tandai yang khusus anggota"* to **tulisan**.
+   * Both false, and false about a SURVIVING feature rather than a deleted one —
+   * which is why the three guards above all stayed green through it. There is no
+   * banned word in a wrong description of a live product, no renewal promise and
+   * no link to 404.
+   *
+   * What the code actually does:
+   *
+   *   - `toPostView` (`post-views.ts`) returns `body: row.body` UNCONDITIONALLY
+   *     and empties only `media`; `PostCard` renders the body OUTSIDE its
+   *     `locked ?` branch, and the locked branch shows a count of hidden photos
+   *     plus a link to the author's profile.
+   *   - `requireImageWhenLocked` (`write-post.ts`) throws
+   *     "kiriman khusus anggota harus punya minimal satu foto", so a text-only
+   *     post cannot be members-only at all. `PostComposer` disables the checkbox
+   *     until an image is attached and says why: *"Tambahkan foto dulu — teks
+   *     selalu bisa dibaca semua orang."*
+   *
+   * That is a deliberate Phase 6 decision — the caption is the teaser that makes
+   * the lock convert — so this test pins it as a RULE in two directions rather
+   * than as a spelling:
+   *
+   *   POSITIVE: the page must SAY somewhere that the text stays readable. A page
+   *   that simply drops the clause is back to implying a full paywall.
+   *
+   *   NEGATIVE: any sentence that talks about locking must name what actually
+   *   locks — a photo or a stream. A sentence claiming the words lock fails
+   *   here even if it uses wording nobody has thought of yet.
+   */
+  it("says the photos lock and the words stay readable", () => {
+    const sentencesOf = (root: ParentNode): string[] =>
+      Array.from(root.querySelectorAll("p, li, h1, h2, h3")).flatMap((block) =>
+        (block.textContent ?? "").split(/(?<=[.!?])\s+/)
+      );
+    // A sentence may only talk about locking if it names something that locks.
+    // TWO WAYS TO SAY IT, and the second is the one that actually shipped: the
+    // false card carried no lock word at all, it claimed EXCLUSIVITY ("hanya
+    // anggota berbayar Anda yang bisa membukanya"). A rule that only knew
+    // "terkunci" would have passed it, so both spellings of the claim count.
+    const LOCK = /terkunci|dikunci|\bkunci\b|tersembunyi|hanya anggota|khusus anggota saja/i;
+    const LOCKABLE = /foto|siaran/i;
+    const misdescribesLock = (sentences: string[]): string[] =>
+      sentences.filter((s) => LOCK.test(s) && !LOCKABLE.test(s));
+
+    // POSITIVE CONTROLS on the negative rule. The first is the exact sentence
+    // the re-review caught; the other two are the plainest ways to get it wrong
+    // in Indonesian. All three must be flagged, or the sweep over the real page
+    // below proves nothing.
+    expect(
+      misdescribesLock([
+        "Tandai sebuah postingan sebagai khusus anggota, dan hanya anggota berbayar Anda yang bisa membukanya.",
+      ]).length
+    ).toBe(1);
+    expect(misdescribesLock(["Tandai tulisan Anda dan teksnya terkunci."]).length).toBe(1);
+    expect(misdescribesLock(["Kiriman khusus anggota dikunci seluruhnya."]).length).toBe(1);
+    // NEGATIVE CONTROL: the true sentence must NOT be flagged.
+    expect(
+      misdescribesLock(["Yang terkunci adalah fotonya, bukan teksnya."]).join(" | ")
+    ).toBe("");
+
+    render(
+      <MemoryRouter>
+        <LandingPage />
+      </MemoryRouter>
+    );
+    const sentences = sentencesOf(document);
+    const text = document.body.textContent ?? "";
+    cleanup();
+
+    expect(sentences.length).toBeGreaterThan(0);
+    expect(misdescribesLock(sentences).join(" | ")).toBe("");
+
+    // The positive half: the page must state that the words stay open. Written
+    // as alternatives rather than one literal so the copy can be reworded, but
+    // not so loosely that deleting the promise passes.
+    const saysTextIsOpen =
+      /(teks|tulisan)[^.;]{0,60}(terbuka untuk semua|bisa dibaca siapa saja|dibaca semua orang|bisa dibaca semua)/i;
+    expect(saysTextIsOpen.test(text)).toBe(true);
   });
 
   it("quotes no price, because the platform fee has never been decided", () => {
