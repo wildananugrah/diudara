@@ -53,6 +53,19 @@ project has already paid for the same rule being enforced in two places.
 **Signup, login and the reset pages render outside the shell.** No navigation when there is no
 session — every destination behind it requires one.
 
+> **Amended 2026-08-25.** The clause above was later read as a general rule and applied to the
+> public profile `/@handle` and its two follow lists, which rendered no navigation on any viewport.
+> The rule had already expired by then: `useDestinations` computes the fourth destination *from*
+> the session, so a signed-out visitor sees "Masuk" → `/masuk` rather than "Profil", and the nav
+> cannot offer a door that is not there. Meanwhile `/@handle` is where a membership is bought — and
+> without navigation it was a dead end whose only exit on a phone was the browser's Back button.
+>
+> The boundary is now **the four pages you reach without a session** — signup, login, and the two
+> reset pages — where a nav is noise whose fourth item points at the page you are already on. Plus
+> `/`, which has the landing's own header, and the catch-all 404. Everything else renders inside
+> the shell. `App.test.tsx`'s route-table partition test asserts this boundary as a whole, so
+> crossing it again cannot be done quietly.
+
 Phase 2 owns the shell.
 
 ## 4. Jelajah is people, not posts

@@ -40,46 +40,68 @@ export function AppRoutes() {
         SettingsPage.tsx), so a signed-out visit to any of these four still
         lands on /masuk — just via a route now nested one level deeper.
 
-        Static, single-segment paths — registered here, BEFORE /:handleParam
-        below, for the same reason /signup and /masuk are: see that route's
-        own comment on why this ordering is defensive rather than load-bearing.
+        The public profile and the two follow lists moved in here on
+        2026-08-25 — see their own comment below for why the rule that kept
+        them out had expired.
       */}
       <Route element={<AppShell />}>
         <Route path="/beranda" element={<BerandaPage />} />
         <Route path="/jelajah" element={<JelajahPage />} />
         <Route path="/siaran" element={<SiaranPage />} />
         <Route path="/pengaturan" element={<SettingsPage />} />
+
+        {/*
+          MOVED INSIDE THE SHELL on 2026-08-25, reversing an earlier ruling.
+
+          Spec §3's rule is "no navigation when there is no session", and it
+          names exactly four pages: signup, login, and the two reset pages. A
+          later ruling generalised it to the public profile as well — but that
+          rule was written before `useDestinations` (AppShell.tsx) computed the
+          fourth destination FROM the session: signed out it reads "Masuk" ->
+          /masuk rather than "Profil". A public page can therefore carry the
+          nav without offering a signed-out visitor a door that is not there,
+          which was the only thing the rule was protecting against. The four
+          auth pages stay outside for a reason that has NOT expired: a nav
+          there is noise whose fourth item points at the page you are on.
+
+          What forced it: `/@handle` is where a membership is bought, and
+          outside the shell it renders no navigation on any viewport — no side
+          rail above 768px, no bottom bar below it. On a phone that leaves the
+          browser's Back button as the only way out of the page the whole
+          paid-membership flow ends on.
+
+          The two follow lists come along because they are reachable ONLY by
+          tapping a count on a profile; leaving them behind would make the
+          navigation vanish on tap and reappear on Back.
+
+          Ordering below is unchanged and still deliberate — two-segment paths
+          ahead of the bare "/:handleParam", which stays last. Nesting does not
+          affect matching (React Router ranks the flattened tree, so the static
+          paths above still outrank this dynamic one regardless of where they
+          are declared), and `App.test.tsx` pins both the ranking and the
+          shell boundary itself.
+        */}
+        <Route path="/:handleParam/pengikut" element={<FollowListPage direction="followers" />} />
+        <Route path="/:handleParam/mengikuti" element={<FollowListPage direction="following" />} />
+
+        {/*
+          THE PROFILE ROUTE — path="/:handleParam", NOT path="/@:handle".
+          React Router cannot match a literal glued to a parameter inside one
+          path segment, so "/@:handle" would never match "/@wildan" at all.
+          ProfilePage itself renders the 404 page unless the param starts
+          with "@", and strips it before calling the API.
+
+          Registered LAST among the shell's children, immediately before the
+          catch-all below: a single-segment dynamic route would otherwise be
+          free to shadow /signup, /masuk, and every other one-segment path
+          above. React Router actually ranks static segments above dynamic
+          ones regardless of declaration order, so this ordering is defensive
+          rather than load-bearing — but it is exactly the ordering whose
+          absence would silently break /masuk, so it is kept here anyway and
+          covered by its own routing test.
+        */}
+        <Route path="/:handleParam" element={<ProfilePage />} />
       </Route>
-
-      {/*
-        Task 5: reachable by tapping either count on ProfilePage. Both are
-        TWO-segment paths ("/:handleParam/pengikut",
-        "/:handleParam/mengikuti"), strictly more specific than the bare
-        one-segment "/:handleParam" below — React Router ranks a route with
-        more matched segments above a shorter one regardless of declaration
-        order, so neither can ever be shadowed by the profile route.
-        Registered before it anyway, for the same "defensive, not
-        load-bearing" reason /:handleParam's own comment gives.
-      */}
-      <Route path="/:handleParam/pengikut" element={<FollowListPage direction="followers" />} />
-      <Route path="/:handleParam/mengikuti" element={<FollowListPage direction="following" />} />
-
-      {/*
-        THE PROFILE ROUTE — path="/:handleParam", NOT path="/@:handle".
-        React Router cannot match a literal glued to a parameter inside one
-        path segment, so "/@:handle" would never match "/@wildan" at all.
-        ProfilePage itself renders the 404 page unless the param starts
-        with "@", and strips it before calling the API.
-
-        Registered LAST, immediately before the catch-all: a single-segment
-        dynamic route would otherwise be free to shadow /signup, /masuk, and
-        every other one-segment path above. React Router actually ranks
-        static segments above dynamic ones regardless of declaration order,
-        so this ordering is defensive rather than load-bearing — but it is
-        exactly the ordering whose absence would silently break /masuk, so
-        it is kept here anyway and covered by its own routing test.
-      */}
-      <Route path="/:handleParam" element={<ProfilePage />} />
 
       {/* Rendered IN PLACE, never redirected: the URL the visitor typed has to
           stay in the address bar or the message cannot be acted on. */}
