@@ -12,13 +12,20 @@ const DEFAULT_BASE_URL = "https://api.resend.com";
 const REQUEST_TIMEOUT_MS = 30_000;
 
 /**
- * !!! UNVERIFIED AGAINST THE LIVE RESEND API !!!
+ * VERIFIED against the live Resend API on 2026-08-25: a message sent through
+ * THIS adapter — constructed as `bootstrap.ts` constructs it, not a mock —
+ * arrived in a real inbox, from a verified sending domain. Until then the
+ * file had been written from Resend's published documentation without an
+ * account, and its request shape and error handling were assumptions.
  *
- * Written from Resend's published documentation without an account, so the
- * request shape and error handling are ASSUMPTIONS. The tests beside this
- * file prove the port contract and the secret-handling rule below — they do
- * NOT prove this reaches a real inbox. Exercise it against a real Resend
- * account before a password reset depends on it, then delete this warning.
+ * `apps/api/scripts/verify-resend.ts` is that check, kept rather than thrown
+ * away so it can be re-run whenever the request shape, the sending domain, or
+ * Resend's API changes. Run it after any edit to `send` below.
+ *
+ * The tests beside this file still prove ONLY the port contract and the
+ * secret-handling rule below. They never touch the network, so they cannot
+ * notice Resend changing its API, and a green suite here is not evidence that
+ * mail is being delivered.
  *
  * PLAIN TEXT ONLY, deliberately: HTML mail is a rendering and deliverability
  * project of its own (see `SendEmailInput.body`), and every message this
