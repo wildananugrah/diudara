@@ -28,9 +28,18 @@ export default function LoginPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
-  // Already signed in: nothing here to do.
+  /**
+   * Already signed in: nothing here to do.
+   *
+   * `/beranda`, NOT `/`. This sent people to the marketing landing page — a
+   * signed-in user who opened /masuk (from a bookmark, a stale tab, or the
+   * browser's own autocomplete) was dropped somewhere with no route into the
+   * app, and had to type /beranda by hand. The feed is where a session
+   * belongs, and it is the same answer `destination` defaults to below, so
+   * there is ONE rule here rather than two.
+   */
   if (getUserToken() !== null) {
-    return <Navigate to="/" replace />;
+    return <Navigate to="/beranda" replace />;
   }
 
   // Carried by SignupPage after a successful signup ("Akun dibuat. Silakan
@@ -39,7 +48,13 @@ export default function LoginPage() {
   // once they are signed in.
   const state = (location.state as { message?: unknown; from?: unknown } | null) ?? null;
   const noticeFromState = typeof state?.message === "string" ? state.message : null;
-  const destination = typeof state?.from === "string" ? state.from : "/";
+  /**
+   * Where a successful login lands. A guard that bounced the visitor here
+   * (SettingsPage) names the page it took them from, and that always wins —
+   * being returned to what you were doing beats any default. With no such
+   * state, the feed.
+   */
+  const destination = typeof state?.from === "string" ? state.from : "/beranda";
 
   function describe(err: unknown): { message: string; fieldErrors: Record<string, string> } {
     if (err instanceof UserApiError) {
@@ -74,8 +89,12 @@ export default function LoginPage() {
     setFieldErrors({});
     setSubmitting(true);
     try {
-      const result = await login({ email, password });
-      navigate(destination === "/" ? `/@${result.user.handle}` : destination, { replace: true });
+      await login({ email, password });
+      // No `=== "/"` special case any more: that branch existed to turn the
+      // old "/" default into the caller's own profile, and `destination` now
+      // carries the right answer in both cases. It also means this no longer
+      // needs the handle out of the login response.
+      navigate(destination, { replace: true });
     } catch (err) {
       const described = describe(err);
       setMessage(described.message);
