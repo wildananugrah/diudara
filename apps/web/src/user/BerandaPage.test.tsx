@@ -1,6 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   MemoryRouter,
@@ -11,6 +9,7 @@ import {
   useLocation,
 } from "react-router-dom";
 import BerandaPage from "./BerandaPage";
+import { rules, selectors, stylesheet } from "../test/stylesheet";
 import { getUserToken, setUserSession, type PostView } from "./apiClient";
 
 const USER = { id: "user-1", handle: "wildan", displayName: "Wildan", email: "wildan@example.com" };
@@ -78,40 +77,9 @@ function tabButton(name: "Untuk Anda" | "Mengikuti"): HTMLButtonElement {
   return screen.getByRole("button", { name }) as HTMLButtonElement;
 }
 
-/**
- * `src/styles.css`, normalised: comments stripped first (so a selector NAMED in
- * prose is never mistaken for a rule), then quotes removed and whitespace
- * collapsed — `[aria-current="true"]` and `[aria-current=true]` are the same
- * selector and must not read differently here.
- */
-function stylesheet(): string {
-  return readFileSync(join(import.meta.dir, "../styles.css"), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/["']/g, "")
-    .replace(/\s+/g, " ");
-}
-
-/**
- * Every rule in the sheet as `{ selector, body }`. The pattern matches INNERMOST
- * braces, so a rule nested in an `@media` block is returned on its own and the
- * at-rule's prelude is skipped — which also means the media condition is lost.
- * See the docstring below for what that costs.
- */
-function rules(css: string): { selector: string; body: string }[] {
-  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({
-    selector: match[1]!.trim(),
-    body: match[2]!.trim(),
-  }));
-}
-
 /** Every rule that can apply to the feed tabs, in source order. */
 function feedTabRules(css: string): { selector: string; body: string }[] {
   return rules(css).filter((rule) => rule.selector.includes(".feed-tabs"));
-}
-
-/** Selectors as one readable string, so a failure names the offender instead of printing a count. */
-function selectors(matched: { selector: string }[]): string {
-  return matched.map((rule) => rule.selector).join(" | ");
 }
 
 /** Gives any effect a queued request would sit in a chance to fire before an absence is asserted. */

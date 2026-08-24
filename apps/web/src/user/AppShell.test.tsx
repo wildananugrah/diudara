@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { setUserSession } from "./apiClient";
 import AppShell from "./AppShell";
+import { rules, selectors, stylesheet } from "../test/stylesheet";
 
 /**
  * `AppShell` produces its four destinations from ONE place
@@ -132,5 +133,68 @@ describe("AppShell", () => {
     // other, never both.
     expect(screen.getAllByRole("link", { name: "Masuk" }).length).toBe(2);
     expect(screen.queryAllByRole("link", { name: "Profil" }).length).toBe(0);
+  });
+});
+/**
+ * Every `z-index` the sheet declares, split into the navigation's and
+ * everything else's. A rule with no `z-index` contributes nothing.
+ */
+function zIndexes(): { nav: { selector: string; value: number }[]; other: { selector: string; value: number }[] } {
+  const nav: { selector: string; value: number }[] = [];
+  const other: { selector: string; value: number }[] = [];
+  for (const rule of rules(stylesheet())) {
+    const match = /(?:^|;)\s*z-index:\s*(-?\d+)/.exec(rule.body);
+    if (match === null) continue;
+    const entry = { selector: rule.selector, value: Number(match[1]) };
+    const isNav = rule.selector.includes(".bottom-nav") || rule.selector.includes(".side-rail");
+    (isNav ? nav : other).push(entry);
+  }
+  return { nav, other };
+}
+
+/**
+ * The navigation is chrome: it must paint above page content, always.
+ *
+ * Both shapes are `position: fixed`, and both used to declare no `z-index` at
+ * all — which leaves them at `z-index: auto` in the ROOT stacking context,
+ * level with (and therefore merely source-ordered against) every positioned
+ * element on the page. `.badge-members` is `position: absolute; z-index: 1`
+ * inside `.stream-card` / `.stream-lock`, which are `position: relative` with
+ * `z-index: auto` and so create NO stacking context to contain it. On Siaran
+ * those badges painted straight over the bottom bar.
+ *
+ * Asserted as an INVARIANT, not a literal value: whatever the navigation
+ * declares must beat every other `z-index` in the sheet. A future
+ * `z-index: 99` somewhere else fails here instead of quietly covering the
+ * only way to leave the page.
+ *
+ * WHAT THIS CANNOT DO — see `../test/stylesheet.ts`: it reads rule text, so it
+ * cannot weigh specificity, see `!important`, know a rule's `@media` context,
+ * or account for inline styles. It catches a missing declaration and a rival
+ * one, which is the failure that actually happened here.
+ */
+describe("AppShell — the navigation paints above the page", () => {
+  it("declares a z-index on both nav shapes", () => {
+    const declaring = zIndexes().nav;
+
+    // Named, not counted: a failure should say WHICH shape lost its z-index.
+    expect(selectors(declaring)).toContain(".bottom-nav");
+    expect(selectors(declaring)).toContain(".side-rail");
+  });
+
+  it("gives the navigation a higher z-index than anything else in the sheet", () => {
+    const { nav, other } = zIndexes();
+    // Not decoration: with `nav` empty, `Math.min()` is Infinity and every
+    // assertion below passes vacuously. This test would then go green on
+    // exactly the bug the test above exists to catch.
+    expect(nav.length).toBeGreaterThanOrEqual(2);
+    const lowestNav = Math.min(...nav.map((rule) => rule.value));
+    const highestOther = other.length === 0 ? Number.NEGATIVE_INFINITY : Math.max(...other.map((rule) => rule.value));
+
+    // Reported as strings so a failure prints the offending selector and both
+    // numbers, rather than a bare `false`.
+    const offenders = other.filter((rule) => rule.value >= lowestNav);
+    expect(selectors(offenders)).toBe("");
+    expect(lowestNav > highestOther).toBe(true);
   });
 });
