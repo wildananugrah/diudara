@@ -721,6 +721,16 @@ button:disabled {
   left: 0;
   right: 0;
   bottom: 0;
+  /* Chrome paints above content. Without this the bar sits at `z-index: auto`
+     in the ROOT stacking context — level with every positioned element on the
+     page, decided by source order alone. `.badge-members` (absolute,
+     `z-index: 1`) lives inside `.stream-card` / `.stream-lock`, which are
+     `position: relative` with `z-index: auto` and so create no stacking
+     context to hold it in: on Siaran those badges painted over the only way
+     off the page. 10 leaves room below it; `AppShell.test.tsx` asserts the
+     navigation outranks every other z-index in this sheet, so a new one
+     elsewhere fails loudly instead of covering the bar. */
+  z-index: 10;
   display: flex;
   justify-content: space-around;
   background: var(--surface);
@@ -1118,6 +1128,9 @@ button:disabled {
     flex-direction: column;
     gap: 4px;
     position: fixed;
+    /* Same reasoning as `.bottom-nav` above — the rail is the same chrome in
+       the other shape, and shares its stacking guarantee. */
+    z-index: 10;
     top: 0;
     bottom: 0;
     left: 0;
