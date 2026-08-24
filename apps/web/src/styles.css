@@ -45,7 +45,6 @@
   --green-wash: oklch(0.93 0.02 145);
   --red: oklch(0.5 0.15 25);
   --red-bg: oklch(0.96 0.02 25);
-  --live: oklch(0.55 0.16 25);
   --amber: #92400e;
   --amber-bg: #fffbeb;
   --amber-border: #fcd34d;
@@ -73,6 +72,11 @@
      than a control. Was 6px and unused; it is now the single definition of
      the 5px those four frames had hardcoded. */
   --radius-panel: 5px;
+  /* The inside margin of a panel — both composers, and the negative margin the
+     composer's full-bleed hairline row uses to reach their edges. It was the
+     same 1.125rem written out in four places, and the hairline is only correct
+     while all four agree. */
+  --panel-pad: 1.125rem;
   --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
   /* The diagonal hatch that stands in for content a viewer may not see. One
@@ -1240,30 +1244,30 @@ button:disabled {
   cursor: pointer;
 }
 
-/* --- Composer: a bordered card whose actions sit on their own hairline row. - */
+/* --- Composer: a bordered card whose actions sit on their own hairline row.
+       All four sides are padded and NOTHING depends on which child is last:
+       `.post-composer-actions` is followed by `.post-composer-error` on every
+       failed submit (PostComposer.tsx:540), so a card that let the actions row
+       close its bottom edge put that alert flush against the border — the same
+       defect as the padding this replaces, one element further down.
+       `overflow: hidden` because the row below reaches past the padding box and
+       the card has a radius to clip it against. -------------------------- */
 .post-composer,
 .stream-composer {
+  padding: var(--panel-pad);
   border: 1px solid var(--line);
   border-radius: var(--radius-panel);
   background: var(--surface);
+  overflow: hidden;
 }
 
-/* Sides and top only: the actions row below is full-bleed and closes the
-   bottom edge itself. */
-.post-composer {
-  padding: 1.125rem 1.125rem 0;
-}
-
-/* The live block ends in a plain button, so this one pads all four sides. */
-.stream-composer {
-  padding: 1.125rem;
-}
-
-/* Negative margins pull the hairline out to the card's edges; the padding puts
-   the row's own content back in line with the rest. */
+/* The negative margin pulls the hairline out to the card's edges and the
+   padding puts the row's own content back in line with the rest. No bottom
+   padding: the card's own closes the row, and does so equally whether this row
+   or the error alert is the last thing in it. */
 .post-composer-actions {
-  margin: 0.875rem -1.125rem 0;
-  padding: 0.75rem 1.125rem;
+  margin: 0.875rem calc(var(--panel-pad) * -1) 0;
+  padding: 0.75rem var(--panel-pad) 0;
   border-top: 1px solid var(--line-soft);
 }
 
@@ -1433,6 +1437,21 @@ button:disabled {
   object-fit: contain;
 }
 
+/* The frame is dark, and these two are the only things in it when there is no
+   video: `--ink` on `oklch(0.28 ...)` is 1.19:1, which is not "hard to read",
+   it is invisible. `--surface` on the same frame is 14.12:1. Both messages are
+   the ones a viewer sees when a broadcast is gated or their browser cannot play
+   it — the moments the screen most has to be able to speak. */
+.stream-player-blocked,
+.stream-player-unsupported {
+  margin: 0;
+  padding: var(--panel-pad);
+  color: var(--surface);
+  font-size: 0.875rem;
+  text-align: center;
+  text-wrap: pretty;
+}
+
 /* The publish credentials are monospace because they are copied, not read —
    which is exactly why they WRAP rather than being clipped to an ellipsis.
    A truncated stream key cannot be dragged past the clip edge, and there is no
@@ -1536,29 +1555,35 @@ button:disabled {
   font-weight: 600;
 }
 
-/* An `<ol>`, so `margin`, `padding-left` and the markers all have to be dealt
-   with here: without them the grid is indented by the list's own padding and
-   the step numbers hang outside their cells. `list-style-position: inside`
-   rather than `list-style: none` keeps the numbers — on a page whose heading is
-   "Tiga langkah" they are content — and moves them into the cell. */
+/* An `<ol>`, so `margin` and `padding-left` have to be dealt with here or the
+   grid is indented by the list's own padding and the numbers hang outside their
+   cells. The markers themselves are KEPT — on a section headed "Tiga langkah"
+   they are content, and `list-style: none` would cost the list semantics
+   Safari/VoiceOver reads from it — and with `padding-left: 0` a grid item's
+   marker sits in its own cell as a hanging indent.
+
+   ONE COLUMN here, N at md below. Not `auto-fit`: `.landing` is 44rem wide, so
+   its content box is 664px and `minmax(16rem, 1fr)` can never reach three
+   tracks (that needs 770px). Three steps in two tracks leave a FOURTH, EMPTY
+   track, and an empty track in a 1px-gap mesh paints the container's own line
+   colour — a grey block where a step should be, which is worse than the
+   hairline this mesh replaced. */
 .landing-steps {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
   gap: 1px;
   background: var(--line-soft);
   border-top: 1px solid var(--line-soft);
   border-bottom: 1px solid var(--line-soft);
   margin: 0;
   padding-left: 0;
-  list-style-position: inside;
   line-height: 1.7;
 }
 
 /* The dividers are 1px GAPS with the container's colour showing through, not a
-   border-right per cell: `auto-fit` reflows to two columns and then to one, and
-   a per-cell border leaves a hairline hanging at the container edge at every
-   width the last cell of a row is not the last cell of the grid — which on a
-   phone-first page is the common case, not the corner one. */
+   border-right per cell: the cells reflow, and a per-cell border leaves a
+   hairline hanging at the container edge at every width where the last cell of
+   a row is not the last cell of the grid — which on a phone-first page is the
+   common case, not the corner one. */
 .landing-steps > * {
   padding: 2.5rem 2.5rem 2.75rem;
   background: var(--canvas);
@@ -1588,6 +1613,14 @@ button:disabled {
 }
 
 @media (min-width: 768px) {
+  /* One track per step, created by the items themselves: `grid-auto-flow:
+     column` cannot produce a track nothing occupies, whatever number of steps
+     the copy ends up with. `auto-columns: 1fr` keeps them equal. */
+  .landing-steps {
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+  }
+
   .landing-steps > * {
     padding: 2.5rem;
   }
