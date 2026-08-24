@@ -8,19 +8,27 @@ const ALGORITHM = "HS256";
 const DEFAULT_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
 /**
- * Token type discriminator. Mirrors `HonoJwtTokenIssuer`'s `TOKEN_TYPE`
- * exactly, but stamped `"user"` instead of `"creator"` — the two token
- * issuers share the SAME `JWT_SECRET`, and this claim is the entire thing
- * separating a creator's session from a user's. Every issuer sharing the
- * secret must stamp its own `typ`, and every verifier must require its own.
+ * Token type discriminator, stamped on issue and REQUIRED on verify.
+ *
+ * It existed because two issuers shared the SAME `JWT_SECRET`: this one and
+ * the creator `HonoJwtTokenIssuer`, which stamped `"creator"`, and this claim
+ * was the entire thing separating the two sessions. Retire-telegram Task 7's
+ * fix round deleted that issuer with the creator login it served, so there is
+ * one audience left — AND THE CLAIM STAYS, for the rule it encodes rather
+ * than for the sibling that is gone: every issuer sharing a secret must stamp
+ * its own `typ`, and every verifier must require its own. What it says now is
+ * "this secret may sign more than sessions; only a session is accepted here".
+ * `user-auth.middleware.test.ts` still proves it, forging the other shape.
  */
 const TOKEN_TYPE = "user";
 
 /**
- * Mirrors `HonoJwtTokenIssuer` field for field, with `typ: "user"` and a
- * `sessionEpoch` claim `HonoJwtTokenIssuer` has no equivalent of — a creator
- * session has no password-reset-driven revocation mechanism today, a user
- * session does (see `UserTokenPayload`'s own docstring).
+ * The one token issuer this process has. It was written to mirror the creator
+ * `HonoJwtTokenIssuer` field for field, differing in `typ: "user"` and in
+ * carrying a `sessionEpoch` claim that issuer had no equivalent of — a
+ * creator session had no password-reset-driven revocation mechanism, a user
+ * session does (see `UserTokenPayload`'s own docstring). Retire-telegram
+ * Task 7's fix round deleted the class this mirrored; the shape is unchanged.
  */
 export class HonoJwtUserTokenIssuer implements UserTokenIssuerPort {
   constructor(

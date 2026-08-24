@@ -71,6 +71,17 @@ afterEach(() => {
 });
 
 describe("routing — the personal-account routes", () => {
+  it("the old dashboard routes are gone — /dashboard falls through to not-found", async () => {
+    renderAt("/dashboard");
+    // NotFoundPage has NO data-testid — assert on the copy it actually renders.
+    expect(await screen.findByText("Halaman tidak ditemukan")).toBeTruthy();
+  });
+
+  it("the landing page still renders at /", async () => {
+    renderAt("/");
+    expect(document.body.textContent).toContain("DIUDARA");
+  });
+
   it("resolves /masuk to the login page, not swallowed by the profile route", () => {
     renderAt("/masuk");
 
@@ -143,30 +154,6 @@ describe("routing — the personal-account routes", () => {
 
     expect(await screen.findByText("Budi Santoso")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Mengikuti" })).toBeTruthy();
-  });
-
-  it("still resolves the creator dashboard's own /dashboard/login, unaffected by the new routes", () => {
-    renderAt("/dashboard/login");
-
-    expect(screen.getByRole("heading", { name: "Masuk ke DIUDARA" })).toBeTruthy();
-  });
-
-  it("still resolves the public checkout route at /c/:slug", async () => {
-    global.fetch = mock(async () =>
-      jsonResponse({
-        id: "community-1",
-        name: "Kelas Bimbel Budi",
-        niche: null,
-        slug: "kelas-budi",
-        acceptingNewMembers: true,
-        accessMode: "paid",
-        tiers: [],
-      })
-    ) as unknown as typeof fetch;
-
-    renderAt("/c/kelas-budi");
-
-    expect(await screen.findByText("Kelas Bimbel Budi")).toBeTruthy();
   });
 
   it("renders the shared 404 page for an unknown single-segment path with no leading @", () => {
@@ -509,9 +496,11 @@ interface FlatRoute {
  * `renderAt` assertions were needed to cover five routes, and why a sixth
  * route could arrive uncovered).
  *
- * A route that has BOTH a `path` and children (`/dashboard`) is recorded and
- * its children skipped — the dashboard owns its own nesting and is explicitly
- * out of scope for this phase (UI spec §6: not restyled, not touched).
+ * A route that has BOTH a `path` and children would be recorded with its
+ * children skipped — no route in the current table does this (the old
+ * `/dashboard` nesting was retired in Phase 8's Task 1), but the branch is
+ * kept so a future nested route does not silently vanish from the flattened
+ * list instead of failing loudly.
  */
 function flattenRouteTable(): FlatRoute[] {
   const table = AppRoutes();
@@ -579,16 +568,10 @@ describe("routing — the shell partition of the real route table", () => {
       "/:handleParam",
       "/:handleParam/mengikuti",
       "/:handleParam/pengikut",
-      "/c/:slug",
-      "/c/:slug/request/:joinRequestId",
-      "/c/:slug/status/:subscriptionId",
-      "/dashboard",
-      "/dashboard/login",
       "/lupa-sandi",
       "/masuk",
       "/reset/:token",
       "/signup",
-      "/watch/:token",
     ]);
   });
 });

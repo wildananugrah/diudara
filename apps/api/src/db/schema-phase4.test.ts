@@ -71,9 +71,11 @@ describe("phase 4 schema", () => {
    * for one (member, tier); Phase 4 is the first phase to act on one, and two
    * activations mean two single-use invite links for the same member.
    *
-   * `markPaid`'s `not exists` predicate handles the ordinary case, but under READ
-   * COMMITTED two concurrent activations cannot see each other's uncommitted row,
-   * so the predicate alone is a TOCTOU. THIS INDEX is the arbiter — the test lives
+   * An application-level "is one already active" predicate handles the ordinary
+   * case, but under READ COMMITTED two concurrent activations cannot see each
+   * other's uncommitted row, so a predicate alone is a TOCTOU — the same division
+   * of labour the surviving membership path records for
+   * `user_subscription_one_active`. THIS INDEX is the arbiter, and the test lives
    * here, beside the membership constraint, because both are "the database decides"
    * mechanisms and both must exist in the database rather than only in schema.ts.
    */

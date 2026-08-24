@@ -4,33 +4,22 @@ import { join } from "node:path";
 import {
   bootstrap,
   DEFAULT_APP_BASE_URL,
-  DEFAULT_AI_DAILY_MESSAGE_LIMIT,
   RELAXED_NODE_ENVS,
-  resolveAiDailyMessageLimit,
-  resolveAiFakeBehaviour,
   resolveAppBaseUrl,
   resolveCallbackToken,
   resolveMaxPostImages,
-  resolveTelegramWebhookSecret,
-  selectAiProvider,
   selectEmailProvider,
   selectMediaStorage,
   selectMessagingProviders,
   selectPaymentProvider,
   selectStreamingProvider,
   TEST_CALLBACK_TOKEN,
-  TEST_TELEGRAM_WEBHOOK_SECRET,
   type Dependencies,
 } from "./bootstrap";
 import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-storage.adapter";
 import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage.adapter";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
-import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
-import { FAKE_AI_BEHAVIOURS, FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
-import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
-import { SendAiMessage } from "./application/use-cases/send-ai-message";
-import { ListLiveSessions } from "./application/use-cases/schedule-live-session";
 import {
   StartUserStream,
   ListLiveStreams,
@@ -45,8 +34,6 @@ import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapt
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
 import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter";
-import { RegisterCreator } from "./application/use-cases/register-creator";
-import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
 import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
@@ -63,40 +50,11 @@ import type {
   PasswordResetUnitOfWorkPort,
 } from "./application/ports/password-reset-unit-of-work.port";
 import type { SignupNoticeRepositoryPort } from "./application/ports/signup-notice-repository.port";
-import { CreateCommunity } from "./application/use-cases/create-community";
-import { ListCommunities } from "./application/use-cases/list-communities";
-import { UpdateCommunity } from "./application/use-cases/update-community";
-import { GetCommunity } from "./application/use-cases/get-community";
-import {
-  DefineMembershipTier,
-  ListTiers,
-  UpdateTier,
-} from "./application/use-cases/manage-tiers";
-import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
-import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
-import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
 import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
 import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
 import { StartUserSubscription } from "./application/use-cases/start-user-subscription";
-import { GetPublicCommunity } from "./application/use-cases/get-public-community";
-import { StartCheckout } from "./application/use-cases/start-checkout";
-import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
-import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
-import { DecideJoinRequest, ListJoinRequests } from "./application/use-cases/decide-join-request";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
-import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
-import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
-import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
-import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
-import { GetCommunityActivity } from "./application/use-cases/get-community-activity";
-import { ListCommunityMembers } from "./application/use-cases/list-community-members";
-import { ExportCommunityMembers } from "./application/use-cases/export-community-members";
-import { XENDIT_ACCOUNT_PROVISIONING } from "./domain/payment-account";
-import type {
-  CreatorRecord,
-  CreatorRepositoryPort,
-} from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { UserPayoutRepositoryPort } from "./application/ports/user-payout-repository.port";
 import type { UserTierRepositoryPort } from "./application/ports/user-tier-repository.port";
@@ -110,25 +68,12 @@ import { MediaEntitlement } from "./application/use-cases/media-entitlement";
 import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
-import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
-import type { MembershipTierRepositoryPort } from "./application/ports/membership-tier-repository.port";
-import type { ChannelRepositoryPort } from "./application/ports/channel-repository.port";
-import type { MemberRepositoryPort } from "./application/ports/member-repository.port";
-import type { SubscriptionRepositoryPort } from "./application/ports/subscription-repository.port";
 import type { WebhookEventRepositoryPort } from "./application/ports/webhook-event-repository.port";
-import type { ActivityLogRepositoryPort } from "./application/ports/activity-log-repository.port";
-import type { AnalyticsRepositoryPort } from "./application/ports/analytics-repository.port";
-import type { ChannelMembershipRepositoryPort } from "./application/ports/channel-membership-repository.port";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
-import type { OutboxRepositoryPort } from "./application/ports/outbox-repository.port";
-import type { EventRepositoryPort } from "./application/ports/event-repository.port";
 import type { PaymentActivationUnitOfWorkPort } from "./application/ports/payment-activation-unit-of-work.port";
 import type { UserPurchaseUnitOfWorkPort } from "./application/ports/user-purchase-unit-of-work.port";
-import type { JoinRequestRepositoryPort } from "./application/ports/join-request-repository.port";
-import type { JoinRequestUnitOfWorkPort } from "./application/ports/join-request-unit-of-work.port";
-import type { PostEditUnitOfWorkPort } from "./application/ports/post-edit-unit-of-work.port";
+import type { PostWriteUnitOfWorkPort } from "./application/ports/post-write-unit-of-work.port";
 import type { PasswordHasherPort } from "./application/ports/password-hasher.port";
-import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 
 /**
@@ -138,22 +83,19 @@ import type { PaymentProviderPort } from "./application/ports/payment-provider.p
  * and `bun run typecheck` fails. No `as` casts are allowed in this file — a cast
  * would hide exactly the regression this test exists to catch.
  *
- * `registerCreator`/`authenticateCreator`/`createCommunity`/`listCommunities`/
- * `updateCommunity`/`defineTier`/`listTiers`/`updateTier`/`connectChannel`/
- * `listChannels`/`createPaymentAccount`/`getPublicCommunity`/`startCheckout`/
- * `getSubscriptionStatus` are typed as the
- * concrete use-case classes (there's only one implementation of each, so no
- * port exists for them) — a class with private members can't be satisfied by
- * a plain object literal without a cast, so the fakes below construct real
- * instances of those classes wrapping hand-written fake ports instead.
+ * Most use-case fields are typed as the concrete use-case classes (there is
+ * only one implementation of each, so no port exists for them) — a class with
+ * private members can't be satisfied by a plain object literal without a cast,
+ * so the fakes below construct real instances of those classes wrapping
+ * hand-written fake ports instead.
  */
 /**
  * Task 5's delivery routes need `mediaRepository` on `Dependencies` in
  * addition to `uploadMedia`, and Task 6's post use cases take it as a
  * constructor argument. No test that builds a `Dependencies` by hand below
  * calls any of it — every use of this fake is here purely to satisfy a shape —
- * so one shared fake, reused at every call site, is enough; unlike
- * `fakeCreatorRepository` below it needs no per-test state.
+ * so one shared fake, reused at every call site, is enough — it needs no
+ * per-test state.
  */
 const fakeMediaRepository: MediaRepositoryPort = {
   async create(): Promise<never> {
@@ -179,15 +121,6 @@ const fakeMediaRepository: MediaRepositoryPort = {
   },
   async deleteIfUnclaimed() {
     return false;
-  },
-};
-
-const fakeTokenIssuer: TokenIssuerPort = {
-  async issue() {
-    return "fake.token.value";
-  },
-  async verify() {
-    return null;
   },
 };
 
@@ -407,84 +340,15 @@ const fakePostRepository: PostRepositoryPort = {
 };
 
 /**
- * Task 5 fix round 1: `EditPost` now takes a `PostEditUnitOfWorkPort`
+ * Task 5 fix round 1: `EditPost` now takes a `PostWriteUnitOfWorkPort`
  * instead of the two repositories directly — see that port's own docstring.
  * Runs the work inline against the same fakes, like every other unit of
  * work in this file: bootstrap wiring, not atomicity, is what this file
  * pins.
  */
-const fakePostEditUnitOfWork: PostEditUnitOfWorkPort = {
+const fakePostWriteUnitOfWork: PostWriteUnitOfWorkPort = {
   async run(work) {
     return work({ posts: fakePostRepository, media: fakeMediaRepository });
-  },
-};
-
-const fakeCommunityRepository: CommunityRepositoryPort = {
-  async create() {
-    throw new Error("not used");
-  },
-  async findByIdForCreator() {
-    return null;
-  },
-  async listByCreator() {
-    return [];
-  },
-  async slugExists() {
-    return false;
-  },
-  async update() {
-    return null;
-  },
-  async findBySlug() {
-    return null;
-  },
-};
-
-const fakeMembershipTierRepository: MembershipTierRepositoryPort = {
-  async create() {
-    throw new Error("not used");
-  },
-  async listByCommunity() {
-    return [];
-  },
-  async updateForCommunity() {
-    return null;
-  },
-};
-
-const fakeChannelRepository: ChannelRepositoryPort = {
-  async create() {
-    throw new Error("not used");
-  },
-  async listByCommunity() {
-    return [];
-  },
-};
-
-const fakeEventRepository: EventRepositoryPort = {
-  async createForCreator() {
-    throw new Error("not used");
-  },
-  async findByIdForCreator() {
-    return null;
-  },
-  async listForCommunityForCreator() {
-    return [];
-  },
-  async markLive() {
-    return null;
-  },
-  async markEnded() {
-    return null;
-  },
-  async findByStreamKey() {
-    return null;
-  },
-  async findById() {
-    return null;
-  },
-  async findLiveByCommunityId() {
-    return null;
   },
 };
 
@@ -513,15 +377,6 @@ const fakeUserStreamRepository: UserStreamRepositoryPort = {
   },
   async listStaleLive() {
     return [];
-  },
-};
-
-const fakeMemberRepository: MemberRepositoryPort = {
-  async findOrCreateByWhatsappNumber() {
-    throw new Error("not used");
-  },
-  async findById() {
-    return null;
   },
 };
 
@@ -583,118 +438,9 @@ const fakeSignupNoticeRepository: SignupNoticeRepositoryPort = {
   },
 };
 
-const fakeSubscriptionRepository: SubscriptionRepositoryPort = {
-  async createPending() {
-    throw new Error("not used");
-  },
-  async createActiveWithoutBilling() {
-    throw new Error("not used");
-  },
-  async findCurrentSubscriptionForTier() {
-    return null;
-  },
-  async createTransaction() {
-    throw new Error("not used");
-  },
-  async findById() {
-    throw new Error("not used");
-  },
-  async findByIdWithCommunity() {
-    return null;
-  },
-  async findTransactionByExternalId() {
-    return null;
-  },
-  async attachGatewayReference() {
-    return true;
-  },
-  async findDueForRenewal() {
-    // Phase 5's renewal pass runs in the worker, not behind an HTTP route.
-    return [];
-  },
-  async markPastDue() {
-    return false;
-  },
-  async findPastGraceDeadline() {
-    // Phase 5's churn pass runs in the worker, not behind an HTTP route.
-    return [];
-  },
-  async markChurned() {
-    return false;
-  },
-  async findRenewalContext() {
-    // Phase 5's reminder delivery runs in the worker, not behind an HTTP route.
-    return null;
-  },
-  async hasLiveSubscriptionInCommunity() {
-    // Read only by the churn revoke, which runs in the worker.
-    return false;
-  },
-  async listActiveForCommunity() {
-    // Read only by NotifyStreamLive, which runs in the worker.
-    return [];
-  },
-  async markPaid() {
-    throw new Error("not used");
-  },
-};
-
 const fakeWebhookEventRepository: WebhookEventRepositoryPort = {
   async recordIfNew() {
     return true;
-  },
-};
-
-const fakeActivityLogRepository: ActivityLogRepositoryPort = {
-  async record() {
-    // not used
-  },
-};
-
-/**
- * Phase 6's dashboard reads. Every method is creator-scoped by the port itself
- * (there is no unscoped variant to fake), so this fake answers `null` — the
- * "not yours / does not exist" answer — for everything.
- */
-const fakeAnalyticsRepository: AnalyticsRepositoryPort = {
-  async getMetricsForCreator() {
-    return null;
-  },
-  async listActivityForCreator() {
-    return null;
-  },
-  async listMembersForCreator() {
-    return null;
-  },
-};
-
-const fakeOutboxRepository: OutboxRepositoryPort = {
-  async enqueue() {
-    return { id: "fake-outbox-1" };
-  },
-  async enqueueMany(inputs) {
-    return inputs.map((_, index) => ({ id: `fake-outbox-${index + 1}` }));
-  },
-  async claimBatch() {
-    return [];
-  },
-  async touchProcessing() {
-    // not used
-  },
-  async releaseToPending() {
-    return 0;
-  },
-  async markSent() {
-    // not used
-  },
-  async markFailed() {
-    // not used
-  },
-  async markPermanentlyFailed() {
-    // not used
-  },
-  async reclaimStaleProcessing() {
-    return 0;
   },
 };
 
@@ -709,81 +455,19 @@ const fakeUserPurchaseUnitOfWork: UserPurchaseUnitOfWorkPort = {
 const fakePaymentActivationUnitOfWork: PaymentActivationUnitOfWorkPort = {
   async run(work) {
     return work({
-      subscriptions: fakeSubscriptionRepository,
       userSubscriptions: fakeUserSubscriptionRepository,
       userTiers: fakeUserTierRepository,
       webhookEvents: fakeWebhookEventRepository,
-      activityLog: fakeActivityLogRepository,
-      outbox: fakeOutboxRepository,
     });
-  },
-};
-
-const fakeJoinRequestRepository: JoinRequestRepositoryPort = {
-  async createPending() {
-    return null;
-  },
-  async findById() {
-    return null;
-  },
-  async listPendingForCommunity() {
-    return [];
-  },
-  async findNotificationContext() {
-    return null;
-  },
-  async decide() {
-    return false;
-  },
-};
-
-/** Runs the work inline — no real transaction is needed to satisfy the type. */
-const fakeJoinRequestUnitOfWork: JoinRequestUnitOfWorkPort = {
-  async run(work) {
-    return work({
-      joinRequests: fakeJoinRequestRepository,
-      outbox: fakeOutboxRepository,
-      activityLog: fakeActivityLogRepository,
-      // Task 4's addition to the port — `createActiveWithoutBilling` runs in
-      // the same transaction as `joinRequests.decide` now.
-      subscriptions: fakeSubscriptionRepository,
-    });
-  },
-};
-
-/**
- * `RevokeChannelAccess` is a concrete class with private members, so — like the
- * other use-cases above — the fake is a REAL instance wrapping hand-written fake
- * ports. Nothing here reaches a database or a provider.
- */
-const fakeChannelMembershipRepository: ChannelMembershipRepositoryPort = {
-  async claim() {
-    throw new Error("not used");
-  },
-  async recordGrant() {
-    return true;
-  },
-  async releaseMintWindow() {
-    // not used
-  },
-  async recordPlatformMemberIdByInviteLink() {
-    return { outcome: "unknown_invite_link" };
-  },
-  async revoke() {
-    return false;
-  },
-  async listActiveForMemberInCommunity() {
-    return [];
-  },
-  async findByIdWithChannel() {
-    return null;
   },
 };
 
 const fakeMessagingProvider: MessagingProviderPort = {
-  platform: "telegram",
+  // The WhatsApp notifier is the only provider left on `MessagingProviders` after
+  // retire-telegram Task 2, and it is the one that cannot gate.
+  platform: "whatsapp",
   capabilities() {
-    return { canGateAccess: true };
+    return { canGateAccess: false };
   },
   async grantAccess() {
     throw new Error("not used");
@@ -812,344 +496,20 @@ const fakePaymentProvider: PaymentProviderPort = {
 };
 
 describe("Dependencies (composition root contract)", () => {
-  it("accepts a hand-written fake CreatorRepositoryPort with no casts", async () => {
-    const stored: CreatorRecord[] = [];
-
-    const fakeCreatorRepository: CreatorRepositoryPort = {
-      async create(input) {
-        const record: CreatorRecord = {
-          id: `fake-${stored.length + 1}`,
-          name: input.name,
-          whatsappNumber: input.whatsappNumber ?? null,
-          email: input.email ?? null,
-          tierPlan: "starter",
-          xenditAccountId: null,
-          createdAt: new Date(0),
-        };
-        stored.push(record);
-        return record;
-      },
-      async findById(id) {
-        return stored.find((record) => record.id === id) ?? null;
-      },
-      async findByEmail(email) {
-        return stored.find((record) => record.email === email) ?? null;
-      },
-      async findCredentialsByEmail() {
-        return null;
-      },
-      // Mirrors the real repository's three conditional UPDATEs: only the caller
-      // that finds the column EMPTY claims it, and only the caller holding the
-      // sentinel may replace or release it.
-      async beginXenditAccountProvisioning(id) {
-        const record = stored.find((r) => r.id === id);
-        if (!record || record.xenditAccountId !== null) return false;
-        record.xenditAccountId = XENDIT_ACCOUNT_PROVISIONING;
-        return true;
-      },
-      async finishXenditAccountProvisioning(id, accountId) {
-        const record = stored.find((r) => r.id === id);
-        if (!record || record.xenditAccountId !== XENDIT_ACCOUNT_PROVISIONING) return false;
-        record.xenditAccountId = accountId;
-        return true;
-      },
-      async abandonXenditAccountProvisioning(id) {
-        const record = stored.find((r) => r.id === id);
-        if (!record || record.xenditAccountId !== XENDIT_ACCOUNT_PROVISIONING) return false;
-        record.xenditAccountId = null;
-        return true;
-      },
-    };
-
-    const deps: Dependencies = {
-      creatorRepository: fakeCreatorRepository,
-      tokenIssuer: fakeTokenIssuer,
-      payments: fakePaymentProvider,
-      email: null,
-      registerCreator: new RegisterCreator(
-        fakeCreatorRepository,
-        fakePasswordHasher,
-        fakeTokenIssuer
-      ),
-      authenticateCreator: new AuthenticateCreator(
-        fakeCreatorRepository,
-        fakePasswordHasher,
-        fakeTokenIssuer
-      ),
-      userRepository: fakeUserRepository,
-      userPayoutRepository: fakeUserPayoutRepository,
-      userTierRepository: fakeUserTierRepository,
-      userTokenIssuer: fakeUserTokenIssuer,
-      registerUser: new RegisterUser(
-        fakeUserRepository,
-        fakePasswordHasher,
-        null,
-        fakeMessagingProvider,
-        fakeSignupNoticeRepository,
-        fakeClock
-      ),
-      authenticateUser: new AuthenticateUser(
-        fakeUserRepository,
-        fakePasswordHasher,
-        fakeUserTokenIssuer
-      ),
-      getUserProfile: new GetUserProfile(
-        fakeUserRepository,
-        fakeFollowRepository,
-        fakeUserTierRepository,
-        // Task 10's fourth dependency: the REAL `IsMemberOf` over the two
-        // fakes already in this file, never a stub of its own.
-        new IsMemberOf(fakeUserSubscriptionRepository, fakeClock)
-      ),
-      updateUserProfile: new UpdateUserProfile(fakeUserRepository),
-      followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
-      listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
-      exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
-      createPost: new CreatePost(fakePostEditUnitOfWork),
-      maxPostImages: 5,
-      editPost: new EditPost(fakePostEditUnitOfWork),
-      deletePost: new DeletePost(fakePostRepository),
-      listFeed: new ListFeed(
-        fakePostRepository,
-        fakeMediaRepository,
-        fakeUserSubscriptionRepository,
-        fakeClock
-      ),
-      listUserPosts: new ListUserPosts(
-        fakeUserRepository,
-        fakePostRepository,
-        fakeMediaRepository,
-        fakeUserSubscriptionRepository,
-        fakeClock
-      ),
-      requestPasswordReset: new RequestPasswordReset(
-        fakeUserRepository,
-        fakePasswordResetRepository,
-        null,
-        fakeMessagingProvider,
-        fakeClock,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
-      completePasswordReset: new CompletePasswordReset(
-        fakePasswordResetRepository,
-        fakePasswordHasher,
-        new FakePasswordResetUnitOfWork(),
-        fakeClock
-      ),
-      createCommunity: new CreateCommunity(fakeCommunityRepository),
-      listCommunities: new ListCommunities(fakeCommunityRepository),
-      updateCommunity: new UpdateCommunity(fakeCommunityRepository),
-      getCommunity: new GetCommunity(fakeCommunityRepository),
-      defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
-      listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
-      updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
-      connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
-      listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
-      createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
-      getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
-      connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
-      getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
-      manageUserTiers: new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository),
-      startUserSubscription: new StartUserSubscription(
-        fakeUserRepository,
-        fakeUserTierRepository,
-        fakeUserPayoutRepository,
-        fakeUserSubscriptionRepository,
-        fakeUserPurchaseUnitOfWork,
-        fakePaymentProvider,
-        fakeClock,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
-      listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
-      getPublicCommunity: new GetPublicCommunity(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository
-      ),
-      startCheckout: new StartCheckout(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeMemberRepository,
-        fakeSubscriptionRepository,
-        fakeCreatorRepository,
-        fakePaymentProvider,
-        fakeClock,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
-      requestToJoin: new RequestToJoin(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeMemberRepository,
-        fakeSubscriptionRepository,
-        fakeJoinRequestUnitOfWork
-      ),
-      getJoinRequestStatus: new GetJoinRequestStatus(
-        fakeCommunityRepository,
-        fakeJoinRequestRepository,
-        fakeSubscriptionRepository
-      ),
-      listJoinRequests: new ListJoinRequests(fakeCommunityRepository, fakeJoinRequestRepository),
-      decideJoinRequest: new DecideJoinRequest(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeJoinRequestRepository,
-        fakeSubscriptionRepository,
-        fakeJoinRequestUnitOfWork
-      ),
-      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
-        streamTokenSecret: undefined,
-      }),
-      handlePaymentWebhook: new HandlePaymentWebhook(
-        fakeSubscriptionRepository,
-        fakeUserSubscriptionRepository,
-        fakePaymentActivationUnitOfWork,
-        fakeClock
-      ),
-      getCommunityMetrics: new GetCommunityMetrics(fakeAnalyticsRepository),
-      getCommunityActivity: new GetCommunityActivity(fakeAnalyticsRepository),
-      listCommunityMembers: new ListCommunityMembers(fakeAnalyticsRepository),
-      exportCommunityMembers: new ExportCommunityMembers(
-        fakeCommunityRepository,
-        fakeAnalyticsRepository
-      ),
-      revokeChannelAccess: new RevokeChannelAccess(
-        fakeCommunityRepository,
-        fakeChannelMembershipRepository,
-        fakeActivityLogRepository,
-        new Map([["telegram", fakeMessagingProvider]]),
-        fakeOutboxRepository
-      ),
-      recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
-      sendRenewalReminder: new SendRenewalReminder(
-        fakeSubscriptionRepository,
-        fakeMemberRepository,
-        fakeActivityLogRepository,
-        fakeMessagingProvider,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
-      messaging: {
-        gating: new Map([["telegram", fakeMessagingProvider]]),
-        notifier: fakeMessagingProvider,
-      },
-      telegramWebhookSecret: "fake-telegram-webhook-secret",
-      xenditCallbackToken: "fake-callback-token",
-      appBaseUrl: "https://app.diudara.test",
-      sql: async () => [{ one: 1 }],
-      // Phase 7's AI co-builder. `undefined` is a valid value of both fields
-      // (the feature disabled) and needs no fake use-case to satisfy the
-      // type — these two tests are not about the AI path.
-      aiProvider: undefined,
-      sendAiMessage: undefined,
-      // Task 2's streaming provider. Same reasoning: `undefined` (disabled)
-      // needs no fake adapter to satisfy the type, and these tests are not
-      // about the streaming path.
-      streamingProvider: undefined,
-      // Task 3's scheduling endpoints. `scheduleLiveSession` mirrors
-      // `streamingProvider`'s undefined-ness for the same reason;
-      // `listLiveSessions` is never undefined, so it needs a fake here even
-      // though these tests are not about the streaming path either.
-      scheduleLiveSession: undefined,
-      listLiveSessions: new ListLiveSessions(fakeEventRepository),
-      // Task 3 of Phase 7's Siaran. `startUserStream` mirrors
-      // `scheduleLiveSession`'s undefined-ness (both need a real
-      // `streamingProvider`, which is `undefined` here); the other two are
-      // never undefined on a real `Dependencies`, so they need fakes.
-      startUserStream: undefined,
-      listLiveStreams: new ListLiveStreams(
-        fakeUserStreamRepository,
-        fakeUserSubscriptionRepository,
-        fakeClock
-      ),
-      endOwnUserStream: new EndOwnUserStream(fakeUserStreamRepository, fakeClock),
-      // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`
-      // below (both need STREAM_TOKEN_SECRET, absent here).
-      mintUserWatchToken: undefined,
-      // Task 4's authorisation webhook. `authoriseStream` mirrors
-      // `scheduleLiveSession`'s undefined-ness for the same reason (needs
-      // STREAM_TOKEN_SECRET, which is absent here); these tests are not
-      // about the streaming path.
-      authoriseStream: undefined,
-      mediamtxWebhookSecret: undefined,
-      // Task 5's lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
-      handleStreamLifecycle: undefined,
-      // Task 6's user-world lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
-      endUserStream: undefined,
-      // Task 8's `GET /c/watch/:token`. Same undefined-ness reasoning as `authoriseStream`.
-      resolveWatchToken: undefined,
-      // Phase 4's image storage. Never undefined/null in a real Dependencies —
-      // see `mediaStorage`'s own field docstring — so this needs a real fake,
-      // unlike the streaming fields just above.
-      mediaStorage: new FakeMediaStorageAdapter(),
-      // Task 4's upload endpoint. Never undefined/null either — mirrors
-      // `mediaStorage` just above. Neither of these two tests calls
-      // `uploadMedia.execute`, so its repository fake (the module-level
-      // `fakeMediaRepository`) never needs to do anything but satisfy the
-      // port's shape.
-      uploadMedia: new UploadMedia(fakeMediaRepository, new FakeMediaStorageAdapter()),
-      // Task 5's delivery routes. Same fake as `uploadMedia` above — neither
-      // test calls `mediaRepository.findById` either.
-      mediaRepository: fakeMediaRepository,
-      // Phase 6's barrier two. Built from the module-level fakes rather than
-      // `null`ed out, because this block's whole job is to prove a
-      // hand-written `Dependencies` still SATISFIES the container's type with
-      // no casts — a field that only `bootstrap()` can supply would defeat it.
-      mediaEntitlement: new MediaEntitlement(
-        fakeMediaRepository,
-        fakePostRepository,
-        fakeUserSubscriptionRepository,
-        fakeClock
-      ),
-    };
-
-    const created = await deps.creatorRepository.create({
-      name: "Fake Creator",
-      whatsappNumber: "+6281000000000",
-      email: "fake@example.com",
-    });
-
-    expect(await deps.creatorRepository.findByEmail("fake@example.com")).toEqual(created);
-    expect(await deps.creatorRepository.findById("nope")).toBeNull();
-  });
-
+  /*
+   * ONE CONTAINER TEST, NOT TWO. A sibling above this one ("accepts a
+   * hand-written fake CreatorRepositoryPort with no casts") built the same
+   * `Dependencies` literal and then round-tripped a creator through its fake
+   * repository. Retire-telegram Task 7's fix round deleted
+   * `CreatorRepositoryPort` with `/auth` and `/payment-account`, so that
+   * test's SUBJECT no longer exists and it went with it. Everything it
+   * actually guarded is guarded here: this test builds the identical literal,
+   * with no `as` casts anywhere, and then drives the real app through it.
+   */
   it("lets a fully faked Dependencies drive the app with no database", async () => {
-    const fakeCreatorRepository: CreatorRepositoryPort = {
-      async create() {
-        throw new Error("not used");
-      },
-      async findById() {
-        return null;
-      },
-      async findByEmail() {
-        return null;
-      },
-      async findCredentialsByEmail() {
-        return null;
-      },
-      async beginXenditAccountProvisioning() {
-        return false;
-      },
-      async finishXenditAccountProvisioning() {
-        return false;
-      },
-      async abandonXenditAccountProvisioning() {
-        return false;
-      },
-    };
-
     const deps: Dependencies = {
-      creatorRepository: fakeCreatorRepository,
-      tokenIssuer: fakeTokenIssuer,
       payments: fakePaymentProvider,
       email: null,
-      registerCreator: new RegisterCreator(
-        fakeCreatorRepository,
-        fakePasswordHasher,
-        fakeTokenIssuer
-      ),
-      authenticateCreator: new AuthenticateCreator(
-        fakeCreatorRepository,
-        fakePasswordHasher,
-        fakeTokenIssuer
-      ),
       userRepository: fakeUserRepository,
       userPayoutRepository: fakeUserPayoutRepository,
       userTierRepository: fakeUserTierRepository,
@@ -1179,9 +539,9 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
-      createPost: new CreatePost(fakePostEditUnitOfWork),
+      createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,
-      editPost: new EditPost(fakePostEditUnitOfWork),
+      editPost: new EditPost(fakePostWriteUnitOfWork),
       deletePost: new DeletePost(fakePostRepository),
       listFeed: new ListFeed(
         fakePostRepository,
@@ -1210,17 +570,6 @@ describe("Dependencies (composition root contract)", () => {
         new FakePasswordResetUnitOfWork(),
         fakeClock
       ),
-      createCommunity: new CreateCommunity(fakeCommunityRepository),
-      listCommunities: new ListCommunities(fakeCommunityRepository),
-      updateCommunity: new UpdateCommunity(fakeCommunityRepository),
-      getCommunity: new GetCommunity(fakeCommunityRepository),
-      defineTier: new DefineMembershipTier(fakeCommunityRepository, fakeMembershipTierRepository),
-      listTiers: new ListTiers(fakeCommunityRepository, fakeMembershipTierRepository),
-      updateTier: new UpdateTier(fakeCommunityRepository, fakeMembershipTierRepository),
-      connectChannel: new ConnectChannel(fakeCommunityRepository, fakeChannelRepository),
-      listChannels: new ListChannels(fakeCommunityRepository, fakeChannelRepository),
-      createPaymentAccount: new CreatePaymentAccount(fakeCreatorRepository, fakePaymentProvider),
-      getPaymentAccountStatus: new GetPaymentAccountStatus(fakeCreatorRepository),
       connectUserPayout: new ConnectUserPayout(fakeUserPayoutRepository, fakePaymentProvider),
       getUserPayoutStatus: new GetUserPayoutStatus(fakeUserPayoutRepository),
       manageUserTiers: new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository),
@@ -1235,98 +584,23 @@ describe("Dependencies (composition root contract)", () => {
         { appBaseUrl: "https://app.diudara.test" }
       ),
       listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
-      getPublicCommunity: new GetPublicCommunity(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository
-      ),
-      startCheckout: new StartCheckout(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeMemberRepository,
-        fakeSubscriptionRepository,
-        fakeCreatorRepository,
-        fakePaymentProvider,
-        fakeClock,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
-      requestToJoin: new RequestToJoin(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeMemberRepository,
-        fakeSubscriptionRepository,
-        fakeJoinRequestUnitOfWork
-      ),
-      getJoinRequestStatus: new GetJoinRequestStatus(
-        fakeCommunityRepository,
-        fakeJoinRequestRepository,
-        fakeSubscriptionRepository
-      ),
-      listJoinRequests: new ListJoinRequests(fakeCommunityRepository, fakeJoinRequestRepository),
-      decideJoinRequest: new DecideJoinRequest(
-        fakeCommunityRepository,
-        fakeMembershipTierRepository,
-        fakeJoinRequestRepository,
-        fakeSubscriptionRepository,
-        fakeJoinRequestUnitOfWork
-      ),
-      getSubscriptionStatus: new GetSubscriptionStatus(fakeSubscriptionRepository, fakeEventRepository, {
-        streamTokenSecret: undefined,
-      }),
       handlePaymentWebhook: new HandlePaymentWebhook(
-        fakeSubscriptionRepository,
         fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
         fakeClock
       ),
-      getCommunityMetrics: new GetCommunityMetrics(fakeAnalyticsRepository),
-      getCommunityActivity: new GetCommunityActivity(fakeAnalyticsRepository),
-      listCommunityMembers: new ListCommunityMembers(fakeAnalyticsRepository),
-      exportCommunityMembers: new ExportCommunityMembers(
-        fakeCommunityRepository,
-        fakeAnalyticsRepository
-      ),
-      revokeChannelAccess: new RevokeChannelAccess(
-        fakeCommunityRepository,
-        fakeChannelMembershipRepository,
-        fakeActivityLogRepository,
-        new Map([["telegram", fakeMessagingProvider]]),
-        fakeOutboxRepository
-      ),
-      recordChannelJoin: new RecordChannelJoin(fakeChannelMembershipRepository),
-      sendRenewalReminder: new SendRenewalReminder(
-        fakeSubscriptionRepository,
-        fakeMemberRepository,
-        fakeActivityLogRepository,
-        fakeMessagingProvider,
-        { appBaseUrl: "https://app.diudara.test" }
-      ),
-      messaging: {
-        gating: new Map([["telegram", fakeMessagingProvider]]),
-        notifier: fakeMessagingProvider,
-      },
-      telegramWebhookSecret: "fake-telegram-webhook-secret",
+      messaging: { notifier: fakeMessagingProvider },
       xenditCallbackToken: "fake-callback-token",
       appBaseUrl: "https://app.diudara.test",
       sql: async () => [{ one: 1 }],
-      // Phase 7's AI co-builder. `undefined` is a valid value of both fields
-      // (the feature disabled) and needs no fake use-case to satisfy the
-      // type — these two tests are not about the AI path.
-      aiProvider: undefined,
-      sendAiMessage: undefined,
       // Task 2's streaming provider. Same reasoning: `undefined` (disabled)
       // needs no fake adapter to satisfy the type, and these tests are not
       // about the streaming path.
       streamingProvider: undefined,
-      // Task 3's scheduling endpoints. `scheduleLiveSession` mirrors
-      // `streamingProvider`'s undefined-ness for the same reason;
-      // `listLiveSessions` is never undefined, so it needs a fake here even
-      // though these tests are not about the streaming path either.
-      scheduleLiveSession: undefined,
-      listLiveSessions: new ListLiveSessions(fakeEventRepository),
       // Task 3 of Phase 7's Siaran. `startUserStream` mirrors
-      // `scheduleLiveSession`'s undefined-ness (both need a real
-      // `streamingProvider`, which is `undefined` here); the other two are
-      // never undefined on a real `Dependencies`, so they need fakes.
+      // `streamingProvider`'s undefined-ness (it needs a real one, and there is
+      // none here); the other two are never undefined on a real `Dependencies`,
+      // so they need fakes.
       startUserStream: undefined,
       listLiveStreams: new ListLiveStreams(
         fakeUserStreamRepository,
@@ -1337,18 +611,15 @@ describe("Dependencies (composition root contract)", () => {
       // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`
       // below (both need STREAM_TOKEN_SECRET, absent here).
       mintUserWatchToken: undefined,
-      // Task 4's authorisation webhook. `authoriseStream` mirrors
-      // `scheduleLiveSession`'s undefined-ness for the same reason (needs
-      // STREAM_TOKEN_SECRET, which is absent here); these tests are not
-      // about the streaming path.
+      // Task 4's authorisation webhook. `authoriseStream` needs
+      // STREAM_TOKEN_SECRET, which is absent here; these tests are not about the
+      // streaming path.
       authoriseStream: undefined,
       mediamtxWebhookSecret: undefined,
-      // Task 5's lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
-      handleStreamLifecycle: undefined,
-      // Task 6's user-world lifecycle webhook. Same undefined-ness reasoning as `authoriseStream`.
+      // The lifecycle webhook's only remaining handler, since retire-telegram
+      // Task 3 deleted `handleStreamLifecycle` and `resolveWatchToken` beside it.
+      // Same undefined-ness reasoning as `authoriseStream`.
       endUserStream: undefined,
-      // Task 8's `GET /c/watch/:token`. Same undefined-ness reasoning as `authoriseStream`.
-      resolveWatchToken: undefined,
       // Phase 4's image storage. Never undefined/null in a real Dependencies —
       // see `mediaStorage`'s own field docstring — so this needs a real fake,
       // unlike the streaming fields just above.
@@ -1518,6 +789,32 @@ describe("resolveAppBaseUrl", () => {
   });
 });
 
+/**
+ * Retire-telegram Task 2. The container is the one place every deleted use-case
+ * would still be reachable from, so this asserts on the SHAPE of what
+ * `bootstrap()` returns rather than on any one field: a key whose name mentions
+ * a channel or a join request means the machinery is still wired, whatever the
+ * route table says.
+ *
+ * A literal empty array, never a count — the failure message has to name what
+ * survived.
+ */
+describe("bootstrap() after the Telegram and channel deletion", () => {
+  it("wires no channel or join-request dependency", () => {
+    withJwtSecret("x".repeat(32), () => {
+      const keys = Object.keys(bootstrap()).filter((k) => /channel|joinrequest/i.test(k));
+      expect(keys).toEqual([]);
+    });
+  });
+
+  it("wires no telegram dependency", () => {
+    withJwtSecret("x".repeat(32), () => {
+      const keys = Object.keys(bootstrap()).filter((k) => /telegram/i.test(k));
+      expect(keys).toEqual([]);
+    });
+  });
+});
+
 describe("bootstrap() APP_BASE_URL", () => {
   it("builds a checkout redirect from the configured origin", async () => {
     // End-to-end through the composition root: the value in the environment has
@@ -1531,27 +828,6 @@ describe("bootstrap() APP_BASE_URL", () => {
     });
   });
 
-  /**
-   * Phase 5's reminder delivery is DISPATCHED by the worker, but it is built here too,
-   * from the same resolved `appBaseUrl` `StartCheckout` gets — so the link in a reminder
-   * and the `success_redirect_url` in an invoice cannot disagree about which deployment
-   * a member is sent to. Constructing it is the assertion: it is the only thing that
-   * fails if the field is dropped from the root while the type still has it.
-   *
-   * The FUNCTIONAL proof that the origin reaches a sent message lives in
-   * worker-bootstrap.test.ts, because the worker is the process that sends.
-   */
-  it("also builds the renewal reminder sender, so the two roots cannot drift", async () => {
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ APP_BASE_URL: "https://wired.example/" }, () => {
-        const deps = bootstrap();
-        expect(deps.sendRenewalReminder).toBeInstanceOf(SendRenewalReminder);
-        // The notifier it was handed is the WhatsApp one, not a gating provider:
-        // TelegramBotAdapter.notify throws.
-        expect(deps.messaging.notifier.capabilities().canGateAccess).toBe(false);
-      });
-    });
-  });
 });
 
 describe(".env.example", () => {
@@ -1591,7 +867,10 @@ describe(".env.example", () => {
     const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
     const lines = example.split("\n");
 
-    for (const name of ["TELEGRAM_BOT_TOKEN", "FONNTE_API_TOKEN", "TELEGRAM_WEBHOOK_SECRET"]) {
+    // Retire-telegram Task 2 dropped TELEGRAM_BOT_TOKEN and
+    // TELEGRAM_WEBHOOK_SECRET from this list: `bootstrap()` reads neither, so
+    // `.env.example` documenting them would be documenting nothing.
+    for (const name of ["FONNTE_API_TOKEN"]) {
       const line = lines.find((l) => l.trim().startsWith(`# ${name}=`));
       expect(line).toBeDefined();
       // No committed value — these are bearer credentials.
@@ -1608,18 +887,9 @@ describe(".env.example", () => {
     }
   });
 
-  it("tells an operator how to install the Telegram webhook, including allowed_updates", () => {
-    // The one step nothing in the code can do for them, and the one that silently
-    // breaks everything if it is missed: Telegram does NOT send `chat_member`
-    // updates unless `allowed_updates` asks for them, so a bot with a webhook
-    // installed the obvious way records no member ids at all and revocation stays
-    // unautomatable with no error anywhere.
-    const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
-    expect(example).toContain("setWebhook");
-    expect(example).toContain("secret_token=");
-    expect(example).toContain("allowed_updates");
-    expect(example).toContain("chat_member");
-  });
+  // Retire-telegram Task 2 deleted the test that stood here: "tells an operator how
+  // to install the Telegram webhook, including allowed_updates". The block it read
+  // is gone from `.env.example` along with `POST /webhooks/telegram`.
 
   /**
    * Same shape as the messaging-tokens test above, extended to five
@@ -1774,8 +1044,8 @@ describe("selectPaymentProvider", () => {
   // NEGATIVE assertion is the one that matters here, not just the `null`: a
   // future "helpful" fallback to the fake adapter must not satisfy this test
   // (see the CRITICAL comment above this describe block's predecessor tests
-  // — `FakePaymentAdapter` writes unrecoverable `fake-acct-*` ids into
-  // `creator.xendit_account_id`).
+  // — `FakePaymentAdapter` writes unrecoverable `fake-acct-*` ids into the
+  // payout column `ConnectUserPayout` provisions).
   it("disables payments (returns null, never the fake adapter) in production with no Xendit configuration", () => {
     const logs = captureConsoleLog(() => {
       const provider = selectPaymentProvider({
@@ -1962,9 +1232,7 @@ describe("bootstrap() payment provider selection", () => {
           XENDIT_SECRET_KEY: undefined,
           XENDIT_SPLIT_RULE_ID: undefined,
           XENDIT_CALLBACK_TOKEN: undefined,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -1975,8 +1243,14 @@ describe("bootstrap() payment provider selection", () => {
             }).not.toThrow();
             expect(deps!.payments).toBeNull();
             expect(deps!.payments).not.toBeInstanceOf(FakePaymentAdapter);
-            expect(deps!.startCheckout).toBeUndefined();
-            expect(deps!.createPaymentAccount).toBeUndefined();
+            // The two money use cases this root still builds. There were four:
+            // retire-telegram Task 4 deleted `startCheckout` with the community
+            // checkout it opened, and Task 7's fix round deleted
+            // `createPaymentAccount` with `POST /payment-account`. Both of the
+            // survivors must be UNCONSTRUCTED, not merely unreachable — see
+            // each field's own docstring on `Dependencies`.
+            expect(deps!.startUserSubscription).toBeUndefined();
+            expect(deps!.connectUserPayout).toBeUndefined();
             expect(deps!.xenditCallbackToken).toBeUndefined();
           });
         }
@@ -2019,8 +1293,7 @@ const REAL_CALLBACK_TOKEN = `xnd_${"R".repeat(40)}`;
  * with no S3 vars set (Task 2, images), so every test in this file that
  * simulates a production box to isolate some OTHER provider's own disabled
  * path (payments/email/AI/streaming) must supply this too, or `bootstrap()`
- * throws on media storage before it ever reaches the guard under test — same
- * reasoning as `TELEGRAM_WEBHOOK_SECRET` joining those same blocks in Task 7b.
+ * throws on media storage before it ever reaches the guard under test.
  */
 const REAL_S3_CONFIG = {
   S3_ACCESS_KEY_ID: "test-s3-access-key",
@@ -2302,15 +1575,11 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          // Phase 4: the API now selects messaging providers too (revocation is
-          // synchronous), under the same allowlist. A production box must
-          // configure them, so "fully configured" means all SIX variables —
-          // TELEGRAM_WEBHOOK_SECRET joined the set in Task 7b, because a bot token
-          // without it means no member's Telegram user id is ever recorded and the
-          // creator can never remove anybody.
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
+          // Phase 4: the API selects a messaging provider too, under the same
+          // allowlist, so a production box must configure it. Retire-telegram
+          // Task 2 took TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET out of
+          // this set — bootstrap() no longer reads either.
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -2336,9 +1605,7 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
           XENDIT_SECRET_KEY: undefined,
           XENDIT_SPLIT_RULE_ID: undefined,
           XENDIT_CALLBACK_TOKEN: undefined,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -2357,10 +1624,10 @@ describe("bootstrap() XENDIT_CALLBACK_TOKEN guard", () => {
 });
 
 describe("bootstrap() messaging provider selection", () => {
-  it("refuses to boot a production process with no messaging tokens", () => {
+  it("refuses to boot a production process with no messaging token", () => {
     // Reached through bootstrap(), not just the selector in isolation: the API
-    // process performs REVOCATION, and a fake adapter there would report a
-    // removal it never performed.
+    // process sends password-reset and signup notices, and a fake adapter there
+    // would report a send it never performed.
     //
     // APP_BASE_URL is set explicitly, not inherited, for the same reason as the
     // callback-token tests above: resolveAppBaseUrl is the guard immediately
@@ -2374,119 +1641,82 @@ describe("bootstrap() messaging provider selection", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          TELEGRAM_BOT_TOKEN: undefined,
           FONNTE_API_TOKEN: undefined,
         },
         () => {
           captureConsoleLog(() => {
-            expect(() => bootstrap()).toThrow(/TELEGRAM_BOT_TOKEN and FONNTE_API_TOKEN/);
+            expect(() => bootstrap()).toThrow(/FONNTE_API_TOKEN is not set/);
           });
         }
       );
     });
   });
-
-  it("wires the revocation use-case, so the route is not calling nothing", () => {
-    const deps = bootstrap();
-    // A wiring assertion, like the appBaseUrl one: Phase 3 shipped a whole phase
-    // with an unreachable confirmation page because nothing checked the root.
-    expect(deps.revokeChannelAccess).toBeInstanceOf(RevokeChannelAccess);
-  });
 });
 
+/**
+ * Retire-telegram Task 2 removed two tests from this block along with the
+ * `TELEGRAM_BOT_TOKEN` half of this selector: one asserted the gating map held a
+ * `TelegramBotAdapter` and a `FonnteWhatsAppAdapter`, and one — "refuses HALF
+ * configuration in every environment" — pinned the throw when exactly one of the
+ * two tokens was set. There is no half to be in any more: one token cannot
+ * disagree with itself, so that guard has no state to detect and was deleted with
+ * the branch it guarded. The ALLOWLIST guard below, which is the one that stops a
+ * production box booting a fake, is untouched and still covers every nodeEnv.
+ */
 describe("selectMessagingProviders", () => {
-  it("selects the real adapters when both tokens are set", () => {
+  it("selects the real adapter when the token is set", () => {
     const providers = captureConsoleLogValue(() =>
       selectMessagingProviders({
-        telegramBotToken: "123456:real-bot-token",
         fonnteApiToken: "real-fonnte-token",
         nodeEnv: "production",
       })
     );
 
-    expect(providers.gating.get("telegram")).toBeInstanceOf(TelegramBotAdapter);
-    // WhatsApp is in the GATING map on purpose: a whatsapp channel must resolve
-    // to a provider that reports `canGateAccess: false` — which the grant
-    // use-case turns into "a human will add you" — rather than to nothing, which
-    // it treats as an unwired platform and an error.
-    expect(providers.gating.get("whatsapp")).toBeInstanceOf(FonnteWhatsAppAdapter);
     expect(providers.notifier).toBeInstanceOf(FonnteWhatsAppAdapter);
   });
 
-  it("selects the fake adapters when neither token is set, in development or test", () => {
+  it("selects the fake adapter when the token is not set, in development or test", () => {
     captureConsoleLog(() => {
       for (const nodeEnv of [...RELAXED_NODE_ENVS]) {
-        const providers = selectMessagingProviders({
-          telegramBotToken: undefined,
-          fonnteApiToken: undefined,
-          nodeEnv,
-        });
-        expect(providers.gating.get("telegram")).toBeInstanceOf(FakeMessagingAdapter);
+        const providers = selectMessagingProviders({ fonnteApiToken: undefined, nodeEnv });
         expect(providers.notifier).toBeInstanceOf(FakeMessagingAdapter);
+        // Never a gating provider: the one thing this notifier is for is reaching
+        // a person, and `canGateAccess` is what the rest of the codebase reads to
+        // tell the two apart.
+        expect(providers.notifier.capabilities().canGateAccess).toBe(false);
       }
     });
   });
 
   /**
    * Same allowlist, same reason as the payment adapter: a box that looks like it
-   * is inviting paying members while only appending to an array is this phase's
-   * worst failure mode — the member appears granted and is not.
+   * is messaging paying members while only appending to an array is this phase's
+   * worst failure mode — the member appears told and is not.
    */
   it("refuses to start for ANY nodeEnv outside the allowlist, including unset", () => {
     for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "dev", "", "production"]) {
-      expect(() =>
-        selectMessagingProviders({
-          telegramBotToken: undefined,
-          fonnteApiToken: undefined,
-          nodeEnv,
-        })
-      ).toThrow(/permitted ONLY/);
+      expect(() => selectMessagingProviders({ fonnteApiToken: undefined, nodeEnv })).toThrow(
+        /permitted ONLY/
+      );
     }
-  });
-
-  it("refuses HALF configuration in every environment", () => {
-    // A set Telegram token with no Fonnte token means invites are created and
-    // never delivered: the member pays, a link is minted, and nobody is told.
-    expect(() =>
-      selectMessagingProviders({
-        telegramBotToken: "123456:real",
-        fonnteApiToken: undefined,
-        nodeEnv: "test",
-      })
-    ).toThrow(/FONNTE_API_TOKEN/);
-
-    expect(() =>
-      selectMessagingProviders({
-        telegramBotToken: undefined,
-        fonnteApiToken: "real",
-        nodeEnv: "test",
-      })
-    ).toThrow(/TELEGRAM_BOT_TOKEN/);
   });
 
   it("treats a blank token as unset rather than as configuration", () => {
     captureConsoleLog(() => {
-      const providers = selectMessagingProviders({
-        telegramBotToken: "   ",
-        fonnteApiToken: "",
-        nodeEnv: "test",
-      });
-      expect(providers.gating.get("telegram")).toBeInstanceOf(FakeMessagingAdapter);
+      const providers = selectMessagingProviders({ fonnteApiToken: "   ", nodeEnv: "test" });
+      expect(providers.notifier).toBeInstanceOf(FakeMessagingAdapter);
     });
   });
 
-  it("keeps the tokens out of the startup log line", () => {
+  it("keeps the token out of the startup log line", () => {
     const lines = captureConsoleLog(() => {
       selectMessagingProviders({
-        telegramBotToken: "123456:AA-secret-bot-token",
         fonnteApiToken: "secret-fonnte-token",
         nodeEnv: "production",
       });
     });
 
-    const printed = lines.join("\n");
-    expect(printed).not.toContain("AA-secret-bot-token");
-    expect(printed).not.toContain("secret-fonnte-token");
+    expect(lines.join("\n")).not.toContain("secret-fonnte-token");
   });
 });
 
@@ -2709,9 +1939,7 @@ describe("bootstrap() email provider selection", () => {
           XENDIT_SECRET_KEY: undefined,
           XENDIT_SPLIT_RULE_ID: undefined,
           XENDIT_CALLBACK_TOKEN: undefined,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -2746,505 +1974,16 @@ function captureConsoleLogValue<T>(fn: () => T): T {
   return value;
 }
 
-/**
- * Task 7b. `TELEGRAM_WEBHOOK_SECRET` is the ONLY authentication on
- * `POST /webhooks/telegram`, and it is a sharper weapon than it looks: a forged
- * `chat_member` update writes an attacker-chosen `external_member_id` onto a
- * membership, and that is the id a later `banChatMember` is aimed at. Forging one
- * turns a creator's "remove this member" into "remove somebody else from my group".
- *
- * So it is held to the SAME four rules as `resolveCallbackToken` above, and these
- * tests are deliberately its mirror image.
+/*
+ * Retire-telegram Task 2 deleted two whole blocks that stood here — sixteen tests
+ * for `resolveTelegramWebhookSecret` and three for the `bootstrap()`
+ * TELEGRAM_WEBHOOK_SECRET guard. They pinned the ONLY authentication on
+ * `POST /webhooks/telegram`; that route, its secret resolver and the
+ * `RecordChannelJoin` behind it are all gone. `resolveCallbackToken`'s block above
+ * — which those tests were written as the mirror image of — is untouched and still
+ * covers the same four rules for the Xendit token, which is the one static webhook
+ * secret this process still has.
  */
-const REAL_TELEGRAM_WEBHOOK_SECRET = `tg_${"S".repeat(40)}`;
-const NO_TELEGRAM_BOT = { telegramBotToken: undefined };
-const CONFIGURED_TELEGRAM_BOT = { telegramBotToken: "123456:ABC-DEF" };
-
-describe("resolveTelegramWebhookSecret", () => {
-  it("uses a configured secret as-is", () => {
-    expect(
-      resolveTelegramWebhookSecret({
-        webhookSecret: REAL_TELEGRAM_WEBHOOK_SECRET,
-        ...CONFIGURED_TELEGRAM_BOT,
-        nodeEnv: "production",
-      })
-    ).toBe(REAL_TELEGRAM_WEBHOOK_SECRET);
-  });
-
-  it("refuses a secret shorter than 32 characters, in EVERY environment", () => {
-    for (const nodeEnv of ["production", "development", "test", undefined]) {
-      for (const short of ["x", "tg_short", "a".repeat(31)]) {
-        expect(() =>
-          resolveTelegramWebhookSecret({
-            webhookSecret: short,
-            ...NO_TELEGRAM_BOT,
-            nodeEnv,
-          })
-        ).toThrow(/TELEGRAM_WEBHOOK_SECRET is too short/);
-      }
-      expect(
-        resolveTelegramWebhookSecret({
-          webhookSecret: "a".repeat(32),
-          ...NO_TELEGRAM_BOT,
-          nodeEnv,
-        })
-      ).toBe("a".repeat(32));
-    }
-  });
-
-  it("refuses characters Telegram's setWebhook will not accept", () => {
-    // secret_token is 1-256 of A-Z a-z 0-9 _ - only. Caught at BOOT rather than as
-    // an opaque 400 from setWebhook on a box whose endpoint then rejects everything.
-    for (const bad of [`${"a".repeat(32)} b`, `${"a".repeat(32)}+`, `${"a".repeat(32)}=`, `å${"a".repeat(32)}`]) {
-      expect(() =>
-        resolveTelegramWebhookSecret({
-          webhookSecret: bad,
-          ...NO_TELEGRAM_BOT,
-          nodeEnv: "production",
-        })
-      ).toThrow(/setWebhook will not accept/);
-    }
-    // The output of the command the error message suggests.
-    expect(
-      resolveTelegramWebhookSecret({
-        webhookSecret: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: "production",
-      })
-    ).toBeTruthy();
-  });
-
-  it("defaults ONLY under NODE_ENV=test", () => {
-    expect(
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: "test",
-      })
-    ).toBe(TEST_TELEGRAM_WEBHOOK_SECRET);
-  });
-
-  it("lets a DEVELOPER boot without it — a webhook needs a public URL they may not have", () => {
-    captureConsoleLog(() => {
-      expect(
-        resolveTelegramWebhookSecret({
-          webhookSecret: undefined,
-          ...NO_TELEGRAM_BOT,
-          nodeEnv: "development",
-        })
-      ).toBeUndefined();
-    });
-  });
-
-  it("refuses to boot without it for ANY nodeEnv outside the allowlist", () => {
-    // Including UNSET, which is what a real deployment has: nothing in this
-    // repository sets NODE_ENV.
-    for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "Production", "dev", ""]) {
-      expect(() =>
-        resolveTelegramWebhookSecret({ webhookSecret: undefined, ...NO_TELEGRAM_BOT, nodeEnv })
-      ).toThrow(/permitted ONLY when NODE_ENV is exactly/);
-    }
-  });
-
-  it("distinguishes an unset NODE_ENV from an unrecognised one", () => {
-    expect(() =>
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: undefined,
-      })
-    ).toThrow(/NODE_ENV is not set/);
-    expect(() =>
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: "staging",
-      })
-    ).toThrow(/NODE_ENV is staging/);
-  });
-
-  it("refuses to start on PARTIAL configuration in every environment", () => {
-    // A bot token with no webhook secret means real invite links are issued and no
-    // join can be authenticated — so no member's Telegram user id is ever recorded
-    // and the creator can never remove anybody. Never intentional.
-    for (const nodeEnv of ["development", "production", "staging", undefined]) {
-      expect(() =>
-        resolveTelegramWebhookSecret({
-          webhookSecret: undefined,
-          ...CONFIGURED_TELEGRAM_BOT,
-          nodeEnv,
-        })
-      ).toThrow(/TELEGRAM_BOT_TOKEN is set but TELEGRAM_WEBHOOK_SECRET is not/);
-    }
-  });
-
-  it("treats empty and whitespace-only configuration as unset", () => {
-    for (const blank of ["", "   ", "\t", "\n"]) {
-      expect(() =>
-        resolveTelegramWebhookSecret({
-          webhookSecret: blank,
-          ...NO_TELEGRAM_BOT,
-          nodeEnv: "production",
-        })
-      ).toThrow(/NODE_ENV is production/);
-      expect(
-        resolveTelegramWebhookSecret({ webhookSecret: blank, ...NO_TELEGRAM_BOT, nodeEnv: "test" })
-      ).toBe(TEST_TELEGRAM_WEBHOOK_SECRET);
-    }
-  });
-
-  it("refuses the committed test secret outside tests", () => {
-    for (const nodeEnv of ["production", "development", undefined]) {
-      expect(() =>
-        resolveTelegramWebhookSecret({
-          webhookSecret: TEST_TELEGRAM_WEBHOOK_SECRET,
-          ...NO_TELEGRAM_BOT,
-          nodeEnv,
-        })
-      ).toThrow(/committed to this repository/);
-    }
-  });
-
-  it("never returns an empty string, which would vouch for an empty header", () => {
-    for (const nodeEnv of ["test", "development"]) {
-      let secret: string | undefined;
-      captureConsoleLog(() => {
-        secret = resolveTelegramWebhookSecret({
-          webhookSecret: undefined,
-          ...NO_TELEGRAM_BOT,
-          nodeEnv,
-        });
-      });
-      expect(secret).not.toBe("");
-    }
-  });
-
-  it("says out loud in development that revocation cannot be automated without it", () => {
-    const loud = captureConsoleLog(() => {
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: "development",
-      });
-    });
-    expect(loud.some((line) => /TELEGRAM_WEBHOOK_SECRET not set/.test(line))).toBe(true);
-    expect(loud.some((line) => /revocation cannot be automated/.test(line))).toBe(true);
-
-    const quiet = captureConsoleLog(() => {
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...NO_TELEGRAM_BOT,
-        nodeEnv: "test",
-      });
-    });
-    expect(quiet).toEqual([]);
-  });
-
-  it("mentions the file an operator has to edit", () => {
-    expect(() =>
-      resolveTelegramWebhookSecret({
-        webhookSecret: undefined,
-        ...CONFIGURED_TELEGRAM_BOT,
-        nodeEnv: "production",
-      })
-    ).toThrow(/apps\/api\/\.env/);
-  });
-});
-
-describe("bootstrap() TELEGRAM_WEBHOOK_SECRET guard", () => {
-  it("wires the configured secret into Dependencies", () => {
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET }, () => {
-        expect(bootstrap().telegramWebhookSecret).toBe(REAL_TELEGRAM_WEBHOOK_SECRET);
-      });
-    });
-  });
-
-  it("falls back to the test secret under bun test, so the suite can sign updates", () => {
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ TELEGRAM_WEBHOOK_SECRET: undefined }, () => {
-        expect(bootstrap().telegramWebhookSecret).toBe(TEST_TELEGRAM_WEBHOOK_SECRET);
-      });
-    });
-  });
-
-  it("wires a RecordChannelJoin into Dependencies", () => {
-    // Without it nothing populates channel_membership.external_member_id, and
-    // RevokeChannelAccess can only ever report no_provider_member_id_recorded.
-    withJwtSecret("x".repeat(32), () => {
-      expect(bootstrap().recordChannelJoin).toBeInstanceOf(RecordChannelJoin);
-    });
-  });
-});
-
-describe("selectAiProvider", () => {
-  it("selects OpenRouterAiAdapter when both env vars are set", () => {
-    captureConsoleLog(() => {
-      const provider = selectAiProvider({
-        apiKey: "sk-or-x",
-        model: "openai/gpt-4o-mini",
-        nodeEnv: "test",
-      });
-      expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
-    });
-  });
-
-  it("selects the real adapter in production when fully configured", () => {
-    const logs = captureConsoleLog(() => {
-      const provider = selectAiProvider({
-        apiKey: "sk-or-x",
-        model: "openai/gpt-4o-mini",
-        nodeEnv: "production",
-      });
-      expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
-    });
-    expect(logs.some((line) => /OpenRouterAiAdapter/.test(line))).toBe(true);
-  });
-
-  it("selects FakeAiAdapter when both env vars are unset in development or test", () => {
-    captureConsoleLog(() => {
-      for (const nodeEnv of ["test", "development"]) {
-        expect(
-          selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv })
-        ).toBeInstanceOf(FakeAiAdapter);
-      }
-    });
-  });
-
-  // THE DELIBERATE DIVERGENCE from selectPaymentProvider/selectMessagingProviders:
-  // absent configuration outside the allowlist returns undefined — the feature is
-  // disabled, not the boot (design spec §11).
-  it("returns undefined — does NOT throw — outside the allowlist with no configuration", () => {
-    captureConsoleLog(() => {
-      for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "production"]) {
-        expect(selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv })).toBeUndefined();
-      }
-    });
-  });
-
-  it("says out loud that the feature is disabled, outside the allowlist with no configuration", () => {
-    const logs = captureConsoleLog(() => {
-      selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv: "production" });
-    });
-    expect(logs.some((line) => /AI co-builder is DISABLED/.test(line))).toBe(true);
-  });
-
-  // Gate-review finding: every OTHER fakeBehaviour test below passes
-  // nodeEnv: "development" (or ambient "test") — none of them establishes
-  // that the switch is INERT outside RELAXED_NODE_ENVS, which is the
-  // combination that actually matters. `resolveAiFakeBehaviour` is only
-  // ever called from inside the `isRelaxedNodeEnv` branch — it does not
-  // even take a `nodeEnv` parameter to gate on — so this is really pinning
-  // THAT CALL SITE, not a second guard inside the resolver. A refactor that
-  // hoisted the resolve above the allowlist check would make a production
-  // box with a stray AI_FAKE_BEHAVIOUR throw (on a typo) or, worse, serve
-  // fake AI behaviour from an env var — and every other test in this file
-  // would keep passing while it happened.
-  it("does NOT throw and does NOT consult fakeBehaviour outside the allowlist with no configuration", () => {
-    captureConsoleLog(() => {
-      for (const nodeEnv of ["production", "Development", undefined]) {
-        // A VALID value must still be ignored...
-        expect(
-          selectAiProvider({
-            apiKey: undefined,
-            model: undefined,
-            nodeEnv,
-            fakeBehaviour: "timeout",
-          })
-        ).toBeUndefined();
-        // ...and so must a GARBAGE one: if resolveAiFakeBehaviour were ever
-        // reached here, this would throw instead of returning undefined.
-        expect(
-          selectAiProvider({
-            apiKey: undefined,
-            model: undefined,
-            nodeEnv,
-            fakeBehaviour: "not-a-real-behaviour",
-          })
-        ).toBeUndefined();
-      }
-    });
-  });
-
-  it("still starts on the allowlist when OpenRouter IS configured, whatever nodeEnv says", () => {
-    captureConsoleLog(() => {
-      for (const nodeEnv of [undefined, "staging", "prod", "production"]) {
-        expect(
-          selectAiProvider({ apiKey: "sk-or-x", model: "openai/gpt-4o-mini", nodeEnv })
-        ).toBeInstanceOf(OpenRouterAiAdapter);
-      }
-    });
-  });
-
-  it("refuses to start on PARTIAL configuration in EVERY environment", () => {
-    for (const nodeEnv of ["test", "development", "production", undefined]) {
-      expect(() =>
-        selectAiProvider({ apiKey: "sk-or-x", model: undefined, nodeEnv })
-      ).toThrow(/half-configured/);
-      expect(() =>
-        selectAiProvider({ apiKey: undefined, model: "openai/gpt-4o-mini", nodeEnv })
-      ).toThrow(/half-configured/);
-    }
-  });
-
-  it("names the missing variable, not the one that is set", () => {
-    expect(() =>
-      selectAiProvider({ apiKey: "sk-or-x", model: undefined, nodeEnv: "test" })
-    ).toThrow(/OPENROUTER_API_KEY is set but OPENROUTER_MODEL is not/);
-  });
-
-  it("treats empty and whitespace-only configuration as unset", () => {
-    captureConsoleLog(() => {
-      for (const blank of ["", "   "]) {
-        expect(
-          selectAiProvider({ apiKey: blank, model: blank, nodeEnv: "test" })
-        ).toBeInstanceOf(FakeAiAdapter);
-      }
-    });
-  });
-
-  it("stays silent under NODE_ENV=test and speaks up everywhere else", () => {
-    const quiet = captureConsoleLog(() => {
-      selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv: "test" });
-    });
-    expect(quiet).toEqual([]);
-
-    const loud = captureConsoleLog(() => {
-      selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv: "development" });
-    });
-    expect(loud.length).toBeGreaterThan(0);
-  });
-
-  // Task 8's gate: before this, FakeAiAdapter.nextBehaviour could only be
-  // set by a test holding the instance directly, so every hostile-payload
-  // path (refusal, injection, malformed-JSON-> 502, timeout -> 503) was
-  // unreachable from a real browser — the fake always answered "draft".
-  it("sets the returned FakeAiAdapter's nextBehaviour from fakeBehaviour", () => {
-    captureConsoleLog(() => {
-      const provider = selectAiProvider({
-        apiKey: undefined,
-        model: undefined,
-        nodeEnv: "development",
-        fakeBehaviour: "timeout",
-      }) as FakeAiAdapter;
-      expect(provider).toBeInstanceOf(FakeAiAdapter);
-      expect(provider.nextBehaviour).toBe("timeout");
-    });
-  });
-
-  it("leaves nextBehaviour at its default when fakeBehaviour is unset", () => {
-    captureConsoleLog(() => {
-      const provider = selectAiProvider({
-        apiKey: undefined,
-        model: undefined,
-        nodeEnv: "development",
-      }) as FakeAiAdapter;
-      expect(provider.nextBehaviour).toBe("draft");
-    });
-  });
-
-  it("mentions the configured AI_FAKE_BEHAVIOUR in the startup log", () => {
-    const logs = captureConsoleLog(() => {
-      selectAiProvider({
-        apiKey: undefined,
-        model: undefined,
-        nodeEnv: "development",
-        fakeBehaviour: "injection",
-      });
-    });
-    expect(logs.some((line) => /AI_FAKE_BEHAVIOUR=injection/.test(line))).toBe(true);
-  });
-
-  it("propagates resolveAiFakeBehaviour's own failure-closed guard", () => {
-    expect(() =>
-      selectAiProvider({
-        apiKey: undefined,
-        model: undefined,
-        nodeEnv: "development",
-        fakeBehaviour: "not-a-real-behaviour",
-      })
-    ).toThrow(/AI_FAKE_BEHAVIOUR must be one of/);
-  });
-
-  // Strengthened per gate review: the original version passed a VALID
-  // fakeBehaviour and asserted only `instanceof OpenRouterAiAdapter`, which
-  // would keep passing even if resolveAiFakeBehaviour were (wrongly) called
-  // in this branch with a value that happened to validate. A GARBAGE value
-  // is the assertion that actually proves the resolver is never reached
-  // here at all — if it were, this would throw instead of returning the
-  // real adapter.
-  it("never consults fakeBehaviour in the real-adapter branch, not even to validate it", () => {
-    captureConsoleLog(() => {
-      const provider = selectAiProvider({
-        apiKey: "sk-or-x",
-        model: "openai/gpt-4o-mini",
-        nodeEnv: "test",
-        fakeBehaviour: "not-a-real-behaviour",
-      });
-      expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
-    });
-  });
-});
-
-describe("resolveAiFakeBehaviour", () => {
-  it("returns undefined when unset", () => {
-    expect(resolveAiFakeBehaviour({ value: undefined })).toBeUndefined();
-  });
-
-  it("treats empty and whitespace-only as unset", () => {
-    expect(resolveAiFakeBehaviour({ value: "" })).toBeUndefined();
-    expect(resolveAiFakeBehaviour({ value: "   " })).toBeUndefined();
-  });
-
-  it("accepts every behaviour FakeAiAdapter itself supports", () => {
-    for (const behaviour of FAKE_AI_BEHAVIOURS) {
-      expect(resolveAiFakeBehaviour({ value: behaviour })).toBe(behaviour);
-    }
-  });
-
-  it("fails closed on an unrecognised value rather than silently keeping the default", () => {
-    expect(() => resolveAiFakeBehaviour({ value: "garbage" })).toThrow(
-      /AI_FAKE_BEHAVIOUR must be one of/
-    );
-  });
-
-  it("is case-sensitive — the fake's own union is lowercase-hyphenated", () => {
-    expect(() => resolveAiFakeBehaviour({ value: "Draft" })).toThrow(
-      /AI_FAKE_BEHAVIOUR must be one of/
-    );
-  });
-});
-
-describe("resolveAiDailyMessageLimit", () => {
-  it("defaults to DEFAULT_AI_DAILY_MESSAGE_LIMIT when unset", () => {
-    expect(resolveAiDailyMessageLimit({ value: undefined })).toBe(
-      DEFAULT_AI_DAILY_MESSAGE_LIMIT
-    );
-  });
-
-  it("uses a configured positive whole number", () => {
-    expect(resolveAiDailyMessageLimit({ value: "10" })).toBe(10);
-  });
-
-  it("treats an empty or whitespace-only value as unset", () => {
-    expect(resolveAiDailyMessageLimit({ value: "" })).toBe(DEFAULT_AI_DAILY_MESSAGE_LIMIT);
-    expect(resolveAiDailyMessageLimit({ value: "   " })).toBe(DEFAULT_AI_DAILY_MESSAGE_LIMIT);
-  });
-
-  it("fails closed on a non-numeric value rather than silently allowing nothing", () => {
-    expect(() => resolveAiDailyMessageLimit({ value: "abc" })).toThrow(
-      /must be a positive whole number/
-    );
-  });
-
-  it("fails closed on zero, a negative number, or a fraction", () => {
-    for (const bad of ["0", "-5", "1.5"]) {
-      expect(() => resolveAiDailyMessageLimit({ value: bad })).toThrow(
-        /must be a positive whole number/
-      );
-    }
-  });
-});
 
 describe("resolveMaxPostImages", () => {
   it("defaults to 5 when MAX_POST_IMAGES is unset", () => {
@@ -3291,109 +2030,6 @@ describe("bootstrap() MAX_POST_IMAGES wiring", () => {
       withEnv({ MAX_POST_IMAGES: "not-a-number" }, () => {
         expect(() => bootstrap()).toThrow(/MAX_POST_IMAGES must be a whole number/);
       });
-    });
-  });
-});
-
-describe("bootstrap() AI provider wiring", () => {
-  it("wires a SendAiMessage and a FakeAiAdapter under NODE_ENV=test with no OpenRouter config", () => {
-    withJwtSecret("x".repeat(32), () => {
-      const deps = bootstrap();
-      expect(deps.aiProvider).toBeInstanceOf(FakeAiAdapter);
-      expect(deps.sendAiMessage).toBeInstanceOf(SendAiMessage);
-    });
-  });
-
-  it("wires OpenRouterAiAdapter and a SendAiMessage when both env vars are configured", () => {
-    withJwtSecret("x".repeat(32), () => {
-      withEnv(
-        { OPENROUTER_API_KEY: "sk-or-x", OPENROUTER_MODEL: "openai/gpt-4o-mini" },
-        () => {
-          const deps = bootstrap();
-          expect(deps.aiProvider).toBeInstanceOf(OpenRouterAiAdapter);
-          expect(deps.sendAiMessage).toBeInstanceOf(SendAiMessage);
-        }
-      );
-    });
-  });
-
-  it("wires AI_FAKE_BEHAVIOUR through to the constructed FakeAiAdapter", () => {
-    // End-to-end through the composition root: the env var has to reach the
-    // ACTUAL instance bootstrap() hands to SendAiMessage, not just
-    // selectAiProvider in isolation — otherwise a browser-driven turn would
-    // still hit the untouched default.
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ AI_FAKE_BEHAVIOUR: "refusal" }, () => {
-        const deps = bootstrap();
-        expect(deps.aiProvider).toBeInstanceOf(FakeAiAdapter);
-        expect((deps.aiProvider as FakeAiAdapter).nextBehaviour).toBe("refusal");
-      });
-    });
-  });
-
-  it("fails closed on an invalid AI_FAKE_BEHAVIOUR rather than silently keeping the default", () => {
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ AI_FAKE_BEHAVIOUR: "not-a-real-behaviour" }, () => {
-        expect(() => bootstrap()).toThrow(/AI_FAKE_BEHAVIOUR must be one of/);
-      });
-    });
-  });
-
-  it("fails closed on an invalid AI_DAILY_MESSAGE_LIMIT rather than silently keeping the default", () => {
-    // This only proves resolveAiDailyMessageLimit's own guard fires from
-    // inside bootstrap() — it does NOT prove a configured valid value
-    // reaches SendAiMessage's constructor (hardcoding 50 there would still
-    // pass this). That wiring is covered by routes/ai.test.ts's
-    // AI_DAILY_MESSAGE_LIMIT=1 test, which observes the cap actually bind at
-    // 1 through a real HTTP call.
-    withJwtSecret("x".repeat(32), () => {
-      withEnv({ AI_DAILY_MESSAGE_LIMIT: "not-a-number" }, () => {
-        expect(() => bootstrap()).toThrow(/must be a positive whole number/);
-      });
-    });
-  });
-
-  it("boots with the co-builder disabled even when AI_DAILY_MESSAGE_LIMIT is garbage — absent/irrelevant AI config must never block boot", () => {
-    // `NODE_ENV=production` with no OPENROUTER_API_KEY/OPENROUTER_MODEL is
-    // exactly `selectAiProvider`'s disabled path — see "THE DELIBERATE
-    // DIVERGENCE" above. Every OTHER provider is fully configured (mirrors
-    // the "refuses to boot a production process with no callback token" test
-    // above) so the only thing under test is the AI wiring: a fat-fingered
-    // AI_DAILY_MESSAGE_LIMIT must not even be READ, let alone thrown on,
-    // once the feature it belongs to is off.
-    //
-    // APP_BASE_URL is set explicitly, not inherited, same as every other
-    // fully-configured production block in this file: resolveAppBaseUrl sits
-    // between resolveCallbackToken and selectMessagingProviders in bootstrap()'s
-    // guard order, so without it bootstrap() throws before it ever reaches the
-    // AI wiring this test is actually about.
-    withJwtSecret("x".repeat(32), () => {
-      withEnv(
-        {
-          NODE_ENV: "production",
-          APP_BASE_URL: "http://localhost:5173",
-          XENDIT_SECRET_KEY: "sk_live_x",
-          XENDIT_SPLIT_RULE_ID: "splitrule_1",
-          XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
-          FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
-          OPENROUTER_API_KEY: undefined,
-          OPENROUTER_MODEL: undefined,
-          AI_DAILY_MESSAGE_LIMIT: "fifty",
-          ...REAL_S3_CONFIG,
-        },
-        () => {
-          captureConsoleLog(() => {
-            let deps: Dependencies;
-            expect(() => {
-              deps = bootstrap();
-            }).not.toThrow();
-            expect(deps!.aiProvider).toBeUndefined();
-            expect(deps!.sendAiMessage).toBeUndefined();
-          });
-        }
-      );
     });
   });
 });
@@ -3622,9 +2258,9 @@ describe("bootstrap() streaming provider wiring", () => {
           const deps = bootstrap();
           const session = deps.streamingProvider!.createSession({
             streamKey: "abc123",
-            namespace: "live",
+            namespace: "u",
           });
-          expect(session.whipUrl).toBe("https://stream.example.com/whip/abc123");
+          expect(session.whipUrl).toBe("https://stream.example.com/whip/u/abc123");
         }
       );
     });
@@ -3647,9 +2283,7 @@ describe("bootstrap() streaming provider wiring", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -3730,9 +2364,7 @@ describe("bootstrap() streaming provider wiring", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           ...REAL_S3_CONFIG,
         },
         () => {
@@ -3763,9 +2395,7 @@ describe("bootstrap() media storage selection", () => {
           XENDIT_SECRET_KEY: "sk_live_x",
           XENDIT_SPLIT_RULE_ID: "splitrule_1",
           XENDIT_CALLBACK_TOKEN: REAL_CALLBACK_TOKEN,
-          TELEGRAM_BOT_TOKEN: "123456:real-bot-token",
           FONNTE_API_TOKEN: "real-fonnte-token",
-          TELEGRAM_WEBHOOK_SECRET: REAL_TELEGRAM_WEBHOOK_SECRET,
           S3_ACCESS_KEY_ID: undefined,
           S3_SECRET_ACCESS_KEY: undefined,
           S3_BUCKET: undefined,

@@ -8,7 +8,7 @@ can follow it from a fresh clone to a working local stack, then a green test sui
 | Workspace | What it is | Needs a `.env`? |
 | --- | --- | --- |
 | `apps/api` | Hono HTTP API, Drizzle, all the use-cases | **Yes** — `apps/api/.env` is the only application `.env` in the repo |
-| `apps/worker` | The outbox worker, plus Phase 5's renewal and churn passes | **No, deliberately** — it reads `apps/api/.env` |
+| `apps/worker` | The five scheduled passes, plus the (writer-less) outbox drain | **No, deliberately** — it reads `apps/api/.env` |
 | `apps/web` | React + Vite public checkout/confirmation pages | No |
 | `packages/shared` | Zod schemas shared by API and web | No |
 
@@ -70,103 +70,68 @@ cd apps/worker && bun run src/main.ts  # NOT `bun run --filter @diudara/worker s
 cd apps/web    && bun run dev          # http://localhost:5173
 ```
 
-### The worker must be running, or a payment appears to do nothing
+### A payment no longer needs the worker
 
-This is the single most common local surprise. The API **never** issues a Telegram invite
-and **never** sends a WhatsApp message on the checkout path. A settled payment writes a
-`grant_access` row to the `outbox` table inside its own transaction and returns; the
-**worker** is what claims that row and performs the send. Same for renewal reminders and
-for the removal of a churned member.
+It used to. A settled payment wrote a `grant_access` row to the `outbox` table inside its
+own transaction and returned, and the **worker** was what claimed that row and issued the
+Telegram invite — so with no worker running the invoice was paid, the subscription went
+`active`, and nothing ever arrived, with no error anywhere because nothing had failed yet.
+That was the single most common local surprise.
 
-So with no worker running: the invoice is paid, the subscription goes `active`, the
-confirmation page says so — and nothing ever arrives. There is no error anywhere, because
-nothing has failed yet. Check `select status, event_type, attempts, last_error from outbox`
-if you are unsure; `pending` rows with `attempts = 0` mean nobody is polling.
+**Retire-telegram removed it.** A membership grants access by BEING `active`, which is a
+single index hit at read time; there is nothing to send and nothing to queue. The payment
+webhook writes `user_transaction`, `user_subscription` and `webhook_event`, in one
+transaction, and that is the whole of it. `outbox` now has no writer and no registered
+handler: the worker still drains it, so a row left behind by an older deploy fails loudly
+rather than sitting `pending` and unread, and `bootstrapWorker` records the recommendation
+that the pass and the table be retired together.
 
-The worker also runs Phase 5's two clock-driven passes:
+The worker is still required for the things that happen because TIME has passed — the
+membership-expiry reminder above all, since nothing in this system recurs and that pass is
+the only thing that tells a member their access is about to end.
 
-- **renewals** — the reminder schedule (`pre_3d`, `due`, `overdue_1d`, `overdue_3d`,
-  `overdue_7d`) and the `active` → `past_due` transition;
-- **churn** — `past_due` past its stored `grace_ends_at` → `churned`, with a queued
-  revocation. The grace period is **10 days** after the due date, deliberately not 7.
+The worker runs **five** clock-driven passes, all of them built in
+`apps/worker/src/scheduled-passes.ts`:
 
-That last number is load-bearing and easy to "tidy" back into a bug. `overdue_7d` is the
-final warning, and the grace period must exceed the last reminder offset by enough that
-the warning is always claimable well before churn. When both were 7 the warning opened at
-00:00 WIB on day 7 and the deadline fell at 07:00 WIB the same day — a seven-hour window
-in which the two passes, which run on independent loops, raced. Measured: churn won both
-times a lifecycle was walked in a real worker, so the member was revoked having received
-`overdue_3d` as their last word. `GRACE_DAYS` in `apps/api/src/domain/renewal-schedule.ts`
-has the full account, and `renewal-schedule.test.ts` asserts the *relationship* — the last
-stage's offset against the deadline, with a minimum gap — so changing one number alone
-fails rather than silently reintroducing the race.
+- **the membership reminder** (`RemindExpiringMembership`, in `apps/api`) — warns a member
+  three days before their period ends. Email always, plus WhatsApp when a number is on
+  file;
+- **the expired-membership sweep** (`SweepExpiredMemberships`) — retires an `active` row
+  whose period has passed, so it stops sitting `active` for ever;
+- **the orphan-media sweep** (`SweepOrphanMedia`) — deletes uploaded bytes no post ever
+  claimed, older than `ORPHAN_SWEEP_WINDOW_MS` (24 hours);
+- **the stale-pending-checkout cleanup** (`SweepStalePendingCheckouts`) — expires a
+  checkout nobody paid, older than `STALE_PENDING_CHECKOUT_WINDOW_MS` (2 hours);
+- **the user-stream sweep** (`SweepStaleUserStreams`) — ends a broadcast still marked live
+  after `MAX_USER_STREAM_MS` (12 hours), which is what a publisher that vanished without a
+  lifecycle webhook leaves behind.
 
-They run hourly by default, not every 5 seconds like the outbox, and not daily. See
-`DEFAULT_RENEWAL_INTERVAL_MS` in `apps/worker/src/scheduled-passes.ts` for the reasoning,
-and set `WORKER_RENEWAL_INTERVAL_MS` (milliseconds) to something small when you want to
-watch a lifecycle locally. Reminders are claimed once per `(subscription, stage)` by a
-unique index, so running the pass more often does **not** send more messages.
+**Phase 5's renewal and churn passes are gone** — retire-telegram Task 4 deleted them,
+along with `apps/api/src/domain/renewal-schedule.ts`, `GRACE_DAYS` and the whole
+`renewal_reminder` per-stage schedule (`pre_3d`, `due`, `overdue_1d`, …). Nothing in this
+system charges anybody twice: the Xendit adapter has two operations and no tokenisation,
+so **a membership does not renew, it ends and is bought again** (`StartUserSubscription`
+retires the lapsed row as part of the new purchase). That is exactly why the reminder pass
+above matters — it is the only thing that tells a member their access is about to stop.
+There is no grace period, deliberately: with nothing to retry, grace is just free access.
+
+The five run hourly by default, not every 5 seconds like the outbox, and not daily. See
+`DEFAULT_RENEWAL_INTERVAL_MS` in `apps/worker/src/scheduled-passes.ts` for the reasoning
+and for why the env var keeps Phase 5's name, and set `WORKER_RENEWAL_INTERVAL_MS`
+(milliseconds) to something small when you want to watch a pass locally. The reminder is
+claimed once per membership by `membership_reminder`'s unique index, so running the pass
+more often does **not** send more messages.
 
 ### Start the worker as the process, not behind a wrapper
 
 `bun run --filter @diudara/worker start` stays in the foreground as a **parent** process
 and does not forward SIGTERM to the child. Signalling it kills only the parent; the worker
-is reparented and keeps polling and claiming outbox rows until it is SIGKILLed, so its
-graceful shutdown never runs and whatever it had claimed sits in `processing` for five
+is reparented and keeps running every pass until it is SIGKILLed, so its graceful
+shutdown never runs. Nothing writes `outbox` rows any more, so in practice the cost is a
+pass interrupted mid-flight rather than a claimed row stranded — but if an older deploy
+did leave a row behind, whatever the drain had claimed sits in `processing` for five
 minutes until `reclaimStaleProcessing` picks it up. Run `bun run src/main.ts` from
 `apps/worker` instead.
-
-## Telegram
-
-Three rules, each of which has already been learned the hard way.
-
-### 1. `TELEGRAM_WEBHOOK_SECRET` must be hex, from `openssl rand -hex 32`
-
-```bash
-openssl rand -hex 32
-```
-
-**Not `openssl rand -base64 32`.** A base64 secret is rejected at boot with an
-explanation, because Telegram's `setWebhook` accepts only `A-Z a-z 0-9 _ -` in
-`secret_token` (1–256 characters) and base64 produces `+`, `/` and `=`. Without the boot
-check, the value looks fine, the API starts, `setWebhook` fails with an opaque 400 — and
-the endpoint then rejects every real delivery, which looks like a completely different
-problem. It must also be at least 32 characters: this secret is the **only**
-authentication on `POST /webhooks/telegram`, and a forged `chat_member` update writes an
-attacker-chosen user id onto a membership — the very id `banChatMember` is later aimed at.
-
-### 2. `setWebhook` must list `chat_member` in `allowed_updates`
-
-```bash
-curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
-  -d "url=https://<your-host>/webhooks/telegram" \
-  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>" \
-  -d 'allowed_updates=["chat_member"]'
-```
-
-Telegram does **not** send `chat_member` by default, and omitting it fails silently: the
-webhook installs, returns `ok: true`, and no update ever arrives. That update is the only
-thing that tells us a member's numeric Telegram user id — checkout only ever knew a
-WhatsApp number — so without it `channel_membership.external_member_id` stays `NULL`
-forever and a member who stops paying can never be removed.
-
-Locally, `cloudflared tunnel --url http://localhost:3000` is enough of a public HTTPS URL
-to install a webhook against.
-
-### 3. A Telegram channel needs the **numeric** chat id
-
-Connect a channel with `-1001234567890`, not `@kelasbudi` and not an invite URL. The
-`@username` form is what you see in the Telegram client and it is the form everyone
-reaches for — and it **works for the outbound half**: `createChatInviteLink` succeeds and
-the member gets a working link. The inbound half is where it breaks. The `chat_member`
-update carries `chat.id` as a number, and it must match the stored id for the join to be
-attributed to that channel; `@kelasbudi` never equals `-1001234567890`, so the update is
-dropped as `unknown_invite_link`, no user id is recorded, and every later revocation
-reports `no_provider_member_id_recorded` — forever, in a log line that looks like ordinary
-noise. `POST /communities/:communityId/channels` therefore rejects a non-numeric Telegram id at
-connect time, while you can still go and find the right one (`getChat`, or any group-info
-bot). WhatsApp ids (`120363…@g.us`) are unconstrained, because nothing inbound depends on
-them.
 
 ## Live streaming (MediaMTX)
 
@@ -193,9 +158,8 @@ via `envsubst` at deploy time, never committed as plaintext), because nginx's ow
 `runOnOnline`/`runOnOffline` hooks do. **If this third copy ever drifts from the other
 two, the failure is silent and total**: `/webhooks/mediamtx/auth-request` returns `401`,
 nginx's `auth_request` treats a `401` as an ordinary access denial — not an error, nothing
-logged beyond the routine deny — and **every single viewer** sees "Tautan sudah tidak
-berlaku" (`WatchPage.tsx`'s generic-refusal message), indistinguishable from an expired
-token. There is no alarm, no distinct error page, nothing in `apps/api`'s own logs (the
+logged beyond the routine deny — and **every single viewer** sees the player's generic
+refusal (`StreamPlayer.tsx`), indistinguishable from an expired token. There is no alarm, no distinct error page, nothing in `apps/api`'s own logs (the
 request never reaches a route handler that would log anything — the secret check in
 `mediamtx-webhooks.ts` throws before that). If every viewer suddenly can't watch anything
 at once, and the creator says their broadcast is definitely running, this three-way secret
@@ -209,25 +173,27 @@ docker compose -f infra/docker-compose.yml up -d mediamtx
 ```
 
 A creator publishes with OBS (or, to prove it locally, `ffmpeg`) to the `rtmpUrl` that
-`POST /communities/:communityId/events` returns. Every publish and every read is
-authorised against `apps/api`'s `/webhooks/mediamtx/auth` — MediaMTX has no other
-access-control mechanism, and without it a stream key is just "a path that's hard to
-guess."
+`POST /streams` returns, or from their browser through WHIP (see "Browser publishing"
+below). Every publish and every read is authorised against `apps/api`'s
+`/webhooks/mediamtx/auth` — MediaMTX has no other access-control mechanism, and without
+it a stream key is just "a path that's hard to guess."
 
-**A member never sees `rtmpUrl` or the stream key at all — final whole-branch review
-fix.** An earlier version of this feature had `POST .../events`'s `hlsPlaybackPath`
-(built from the SAME stream key that authorises a publish) go straight to the member's
-browser via `GET /c/watch/:token`, which meant every paying member's network tab, browser
-history, and any link they forwarded carried the creator's publish credential — directly
-contradicting `EventRepositoryPort`'s own docstring on `streamKey` ("A SECRET. It travels
-to the creator who owns the community and nobody else."). Fixed by decoupling the two
-identities: MediaMTX's INTERNAL path is still `live/<streamKey>` (RTMP publishing is
-completely unaffected), but the PUBLIC HLS path a member's browser ever requests is now
-`/live/<eventId>/...` — an opaque row id, not a credential — and nginx (see below) rewrites
-one onto the other after re-authorising. `AuthoriseStream` grew a second read entry point
-(`authoriseReadByEventId`, resolving via the existing unscoped `findById` lookup) alongside
-the original stream-key-based one MediaMTX's own `authHTTPAddress` still uses; the two
-never share which identifier is legitimate for the other's purpose.
+**ONE NAMESPACE, `u/<streamKey>`.** Retire-telegram deleted the community `event` world
+and its `live/<streamKey>` namespace with it: `parseStreamPath` (`authorise-stream.ts`)
+now recognises `u` and nothing else, `StreamNamespace` declares `"u"` alone, and
+`infra/nginx/live-hls.conf.template` carries only the `/u/` and `/whip/u/` locations.
+Anything still saying `live/` in this repository is describing history, and should say so.
+
+**A viewer never sees `rtmpUrl` or the stream key at all.** The stream key is the PUBLISH
+credential; putting it in a playback URL would hand every reader every creator's
+credential — the community world shipped exactly that defect once (its `hlsPlaybackPath`,
+built from the stream key, went straight to the member's browser) and the fix is what the
+current design inherits. The two identities are decoupled: MediaMTX's INTERNAL path is
+`u/<streamKey>` (RTMP and WHIP publishing unaffected), while the PUBLIC HLS path a
+viewer's browser ever requests is `/u/<streamId>/...` — an opaque `user_stream` row id,
+not a credential — and nginx (see below) rewrites one onto the other after re-authorising.
+`GET /streams` (`userStreamPlaybackPath`) publishes only the id form, and it is a PUBLIC
+listing: signed in or not, anyone can see who is live.
 
 ### The image must be the `-ffmpeg` tag, not the plain one — found running this for real
 
@@ -268,8 +234,8 @@ cannot.
 nginx surface.** A query-string secret lands in access logs and sits in plain text as part
 of a request URL — exposure a header does not have. MediaMTX reaches `apps/api` over the
 container/host boundary (`host.docker.internal`), never through nginx, so publishing that
-route publicly would only leak the secret for no functional gain. The nginx location block
-below deliberately proxies `/live/` (MediaMTX's HLS output) and nothing under
+route publicly would only leak the secret for no functional gain. The nginx template
+below deliberately proxies `/u/` (MediaMTX's HLS output) and `deny all`s everything under
 `/webhooks/mediamtx/`.
 
 ### The port asymmetry is deliberate
@@ -291,10 +257,10 @@ sub-manifest URI as a `?session=` query parameter for clients that never send co
 all (confirmed with a real browser: `hls.js`'s default, credential-less cross-origin XHR
 loader never sends a `Cookie` header, over hundreds of real requests) — and every
 subsequent request carrying that identifier is let through **without calling
-`authHTTPAddress` again**. A member who churns mid-stream keeps receiving segments in an
+`authHTTPAddress` again**. A viewer whose membership lapses mid-stream keeps receiving segments in an
 already-open tab for as long as that MediaMTX-internal session lives, which for a real
-broadcast is the rest of it — directly contradicting design spec §5.2 and
-`authorise-stream.ts`'s own docstring. See `task-9-report.md` for the full empirical trace
+broadcast is the rest of it — directly contradicting `authorise-stream.ts`'s own
+docstring. See `task-9-report.md` for the full empirical trace
 (including how the finding was obtained: a raw-socket test proving portability across
 connections, then a real Chromium/`hls.js` session with request-header interception).
 
@@ -312,23 +278,24 @@ carry the same empirical findings (the `$arg_token`-is-empty-in-subrequests bug,
 error-log token exposure, the trailing-slash regex bug, all found running this for real) at
 the point in the config they apply to. In short:
 
-- It is **seven `location` blocks, not a standalone `server`** (three at the time this
-  paragraph was first written; the browser-publishing phase's Task 1 added the fourth, the
-  `/whip/` location covered in its own "Browser publishing (WebRTC / WHIP)" section above; and
-  the Siaran phase's Task 4 added the last three, `^~ /u/`, `^~ /whip/u/` and
-  `= /_internal/mediamtx-user-auth-request`, for the per-user `u/<streamKey>` namespace — see
-  "Pre-deploy checklist: browser publishing and Siaran" below for what an operator has to do
-  about them; the count is worth keeping current here because it is the operator-facing description of a
-  manual step `scripts/deploy.sh` explicitly does not automate — a real deploy has to notice a
-  new block was added, not just re-paste however many it remembers. **The one authority on
-  the count is `grep -c '^location' infra/nginx/live-hls.conf.template`; run it rather than
-  trusting this sentence, which has been wrong before.**) — meant to be pasted (or,
-  after rendering `${MEDIAMTX_WEBHOOK_SECRET}`, `include`d) inside the real public HTTPS
-  server block that already serves this app's SPA and API paths, not a second listener on a
-  second port. (An earlier version of the template WAS its own `server { listen 8443; }` —
-  that was this task's own local Docker-based proof harness, committed as if it were the
-  deployable artifact. Fixed.)
-- Both `proxy_pass` targets are `127.0.0.1`, matching the documented deployment: nginx and
+- It is **four `location` blocks, not a standalone `server`**: `^~ /webhooks/mediamtx/`
+  (a `deny all`), `^~ /whip/u/` (browser publishing — see "Browser publishing (WebRTC /
+  WHIP)" below), `^~ /u/` (HLS playback), and `= /_internal/mediamtx-user-auth-request`
+  (the internal `auth_request` upstream `/u/` calls). It was SEVEN until retire-telegram
+  Task 7 removed the community half — `^~ /live/`, `^~ /whip/` and
+  `= /_internal/mediamtx-auth-request` — and **an existing deploy still has all seven
+  pasted into its server block**, so removing them there is a manual step exactly like
+  adding one; see the pre-deploy checklist below. The count is worth keeping current
+  because `scripts/deploy.sh` explicitly does not automate any of this — a real deploy has
+  to notice blocks were added OR removed, not just re-paste however many it remembers.
+  **The one authority on the count is
+  `grep -c '^location' infra/nginx/live-hls.conf.template`; run it rather than trusting
+  this sentence, which has been wrong before.** Meant to be pasted (or, after rendering
+  `${MEDIAMTX_WEBHOOK_SECRET}`, `include`d) inside the real public HTTPS server block that
+  already serves this app's SPA and API paths, not a second listener on a second port. (An
+  earlier version of the template WAS its own `server { listen 8443; }` — that was a local
+  Docker-based proof harness, committed as if it were the deployable artifact. Fixed.)
+- Every `proxy_pass` target is `127.0.0.1`, matching the documented deployment: nginx and
   `apps/api` both run directly on the VPS host (there is no `api` service in
   `infra/docker-compose.yml` to containerise it), and MediaMTX's HLS port is mapped to the
   *host's* loopback by that same compose file, not to a container-network address.
@@ -355,9 +322,10 @@ this new route is reached only by the `internal;`-marked location's own subreque
 same private `127.0.0.1` path MediaMTX's own webhook calls already use.
 
 **"Nothing is proxied there" is now enforced by the template, not only a claim about
-what it omits — final whole-branch review, Important.** `/webhooks/xendit` and
-`/webhooks/telegram` MUST be publicly proxied (Xendit and Telegram both call them from the
-internet), and the ordinary way to wire that is one `location /webhooks/ { proxy_pass
+what it omits — final whole-branch review, Important.** `/webhooks/xendit` MUST be
+publicly proxied (Xendit calls it from the internet; `/webhooks/telegram`, which this
+paragraph used to name alongside it, went with retire-telegram Task 2),
+and the ordinary way to wire that is one `location /webhooks/ { proxy_pass
 ...; }` covering the whole prefix — which `/webhooks/mediamtx/*` sits directly under. A
 template that said nothing about this would make the DEFAULT outcome of that ordinary
 `/webhooks/` proxy a PUBLICLY REACHABLE `/webhooks/mediamtx/auth?secret=...`, writing the
@@ -366,7 +334,7 @@ shared secret into `apps/api`'s access log on every call. The template now ships
 over a shorter `/webhooks/` prefix location purely by being the longer, more specific match
 (nginx's own longest-prefix rule, independent of file order or `^~`), and which additionally
 cannot lose to any REGEX location a real deploy's own config might also have. Paste this
-block anywhere in the server block — unlike the `/live/` location below, its ordering
+block anywhere in the server block — unlike the `/u/` location below, its ordering
 relative to other locations does not matter.
 
 **Regex-location ordering could otherwise defeat the whole `auth_request` fix silently —
@@ -375,64 +343,69 @@ now avoids it.** nginx evaluates REGEX (`~`) locations in the order they appear 
 config file and uses the FIRST one that matches — not the most specific one. A real
 deploy's existing SPA/static-asset config plausibly already has something like
 `location ~ \.(m3u8|ts)$ { ... }` for caching headers; if that location happened to be
-declared before an equivalent `~ /live/...` location, it would intercept every HLS request
+declared before an equivalent `~ /u/...` location, it would intercept every HLS request
 with `auth_request` never running at all — a silent, total bypass that neither `nginx -t`
 nor a quick read of the file would reveal. The template sidesteps this rather than merely
-warning about it: `/live/` is a `location ^~ /live/` PREFIX location, not a regex one.
+warning about it: playback is a `location ^~ /u/` PREFIX location, not a regex one.
 Per nginx's own location-selection algorithm, once a `^~` prefix location is the longest
 matching prefix, nginx **never evaluates any regex location at all** for that request —
-not "first match wins", but "the regex phase does not run". Verified directly for this
-fix wave: a real nginx server block with a deliberately-planted `location ~
-\.(m3u8|ts)$ { return 200 "INTERCEPTED..."; }` declared BEFORE the `/live/` include still
-routed every `/live/...` request through `auth_request` (a bad token correctly got `403`,
+not "first match wins", but "the regex phase does not run". Verified directly (against the
+community `/live/` location this one is the surviving twin of, before Task 7 deleted it):
+a real nginx server block with a deliberately-planted `location ~
+\.(m3u8|ts)$ { return 200 "INTERCEPTED..."; }` declared BEFORE the include still
+routed every prefixed request through `auth_request` (a bad token correctly got `403`,
 not the trap's `200`), while the SAME trap location still correctly caught an unrelated
-`.m3u8` path outside `/live/` — see `final-fix-report.md` for the transcript. (This
-guarantee assumes no OTHER `^~` or exact-match `location =` shares the `/live/` prefix
+`.m3u8` path outside the prefix — see `final-fix-report.md` for the transcript. (This
+guarantee assumes no OTHER `^~` or exact-match `location =` shares the `/u/` prefix
 with equal or greater specificity — worth an explicit `grep` before pasting this in, same
-as any nginx change.)
+as any nginx change. `/u/` is also a SHORT, generic prefix: anything else the server block
+wants to serve under `/u/...` would be swallowed by it. This app's profile route is
+`/@<handle>`, so nothing collides today.)
 
-**The public path carries only an event id — the rewrite, and the redirect it has to
-cover too.** `/live/` used to be a straight pass-through (`location ~
-^/live/(?<mtx_key>[^/]+)...`, proxying the SAME path segment MediaMTX itself understood).
-As of the final whole-branch review's Critical fix, the public segment is an EVENT ID and
-MediaMTX's own internal path is UNCHANGED (still `live/<streamKey>`), so this location has
-to translate one into the other:
-1. The event id (and the rest of the requested path — `index.m3u8`, a segment filename,
+**The public path carries only a stream id — the rewrite, and the redirect it has to
+cover too.** The public segment is a `user_stream` ID and MediaMTX's own internal path is
+UNCHANGED (`u/<streamKey>`), so this location has to translate one into the other:
+1. The stream id (and the rest of the requested path — `index.m3u8`, a segment filename,
    a part filename) is captured with a plain `if ($request_uri ~ "...")` inside the `^~`
    location (a `~` LOCATION can't be used here without reopening the ordering problem
    above, but a `~` inside an `if` is a different, safe mechanism — see the template's own
    comment for why this specific "if" is not the kind the "if is evil" warnings are about).
-2. `auth_request` calls `/webhooks/mediamtx/auth-request` with the event id as
-   `X-Mtx-Event-Id` (NOT `X-Mtx-Path` — that header is gone; `AuthoriseStream` now resolves
-   this call via `findById`, the same unscoped-by-id lookup `ResolveWatchToken` uses,
-   never via `findByStreamKey`).
-3. On success, the route hands back the resolved event's stream key as an `X-Stream-Key`
+2. `auth_request` calls `/webhooks/mediamtx/auth-request` with the stream id as
+   `X-Mtx-Stream-Id`, resolved through `UserStreamRepositoryPort.findById` — one of that
+   port's two sanctioned unscoped lookups, never `findByStreamKey`. The location also sends
+   `X-Mtx-Event-Id ""`; apps/api stopped reading that header when Task 6 deleted the
+   community world, and the line stays as hygiene so a future re-reader of it can never be
+   client-controlled (an `auth_request` subrequest INHERITS the client's own headers, and
+   `proxy_set_header` only overrides the fields it names).
+3. On success, the route hands back the resolved stream's key as an `X-Stream-Key`
    RESPONSE HEADER — read only by nginx's `auth_request_set` over `127.0.0.1`, never
    forwarded to the client — and `proxy_pass` uses it to rewrite the request onto
-   MediaMTX's internal `live/<streamKey>/...` path before proxying to port `8888`.
+   MediaMTX's internal `u/<streamKey>/...` path before proxying to port `8888`.
 4. **Found running this for real, not anticipated from the design**: MediaMTX answers a
    stream's first HLS request with its own `302` "cookie check" redirect (see below), and
    that redirect's `Location` header is MediaMTX echoing back the path it actually
    received — the rewritten, streamKey-shaped INTERNAL one. Left unhandled, the stream key
-   would reach the member's browser through this header instead of the body, defeating the
-   fix through a different channel. `proxy_redirect /live/$mtx_key/ /live/$mtx_event/;`
-   rewrites it back before nginx returns it. MediaMTX's own sub-manifest URIs (segment and
-   part filenames) needed no equivalent handling — they are RELATIVE, with no `/live/<key>/`
-   prefix at all, so they resolve against whatever path the browser already has (the public,
-   event-id one).
+   would reach the viewer's browser through this header instead of the body, defeating the
+   whole id-in-the-URL decision through a different channel. `proxy_redirect
+   /u/$mtx_ukey/ /u/$mtx_stream/;` rewrites it back before nginx returns it. MediaMTX's own
+   sub-manifest URIs (segment and part filenames) need no equivalent handling — they are
+   RELATIVE, with no `/u/<key>/` prefix at all, so they resolve against whatever path the
+   browser already has (the public, id one).
 
-Verified end to end against the SHIPPED file (not a hand-reproduced stand-in): a real
-`nginx:1.27-alpine` container with the actual template `include`d inside a real `server {}`
-block (self-signed local proof, not the production TLS termination — that part of nginx is
-untouched by any of this), a real MediaMTX, a real `apps/api`, and a real `ffmpeg` publish.
-`GET /c/watch/:token` returned an `hlsUrl` containing the event id and, byte-for-byte, not
-the stream key; the master playlist, its `302` cookie-check redirect, the variant playlist,
-the init segment and a media segment all played through the proxy with no stream key
-anywhere in a header or a body; cancelling the subscription mid-playback cut the SAME
-already-open session off on its very next request (`403`, both the playlist reload and the
-next segment); and an `ffmpeg` publish attempt using the event id in place of a stream key
-was refused by MediaMTX itself (`RTMP ... failed to authenticate: server replied with code
-403`). See `final-fix-report.md` for the full transcript.
+**All four numbered points above were proven end to end against the SHIPPED file — for the
+community twin.** A real `nginx:1.27-alpine` container with the actual template `include`d
+inside a real `server {}` block (self-signed local proof, not the production TLS
+termination), a real MediaMTX, a real `apps/api`, and a real `ffmpeg` publish: the
+playback URL carried the row id and, byte-for-byte, not the stream key; the master
+playlist, its `302` cookie-check redirect, the variant playlist, the init segment and a
+media segment all played through the proxy with no stream key anywhere in a header or a
+body; revoking entitlement mid-playback cut the SAME already-open session off on its very
+next request (`403`, both the playlist reload and the next segment); and an `ffmpeg`
+publish attempt using the row id in place of a stream key was refused by MediaMTX itself
+(`RTMP ... failed to authenticate: server replied with code 403`). See
+`final-fix-report.md` for the full transcript. **The `/u/` location is the same config with
+one namespace changed, and it has NOT had that transcript re-captured against it** — it is
+verified by the pre-deploy checklist below, not by a committed run.
 
 **The watch token's exposure through nginx, stated precisely rather than as a blanket
 "never logged" claim**: it travels as a header (`X-Watch-Token`) into the internal auth
@@ -451,9 +424,9 @@ must be handled as a secret-bearing file**, the same way `apps/api/.env` already
 (restricted permissions, never shipped to a less-trusted log aggregator without stripping
 query strings first) — not treated as an ordinary, freely-shippable log. The token DOES still
 appear in the *client-facing* HLS URLs themselves (`?token=...` on every playlist/segment
-request) — that was always true since Task 8 and is unrelated to this change; see
-`apps/web/src/pages/WatchPage.tsx`'s own docstring for why the token, not a header, is the
-only mechanism `hls.js` and Safari's native player both have available.
+request); see `apps/web/src/user/StreamPlayer.tsx`'s own docstring for why the token, not a
+header, is the only mechanism `hls.js` and Safari's native player both have available, and
+for the silent re-mint loop the ten-minute `USER_WATCH_TOKEN_TTL_MS` needs.
 
 ### `host.docker.internal` needs an explicit mapping on Linux, not macOS
 
@@ -473,15 +446,16 @@ development, which is exactly the shape of bug that survives review.
 
 ### `$MTX_PATH`'s runtime shape, confirmed
 
-`apps/api/src/application/use-cases/authorise-stream.ts`'s `streamKeyFromPath` and
-`handle-stream-lifecycle.ts` both require `$MTX_PATH`/the auth webhook's `path` field to be
-exactly `live/<key>`, reasoned from MediaMTX's docs ("MTX_PATH: path name") rather than a
-running instance. Confirmed against a real publish: publishing to
-`rtmp://localhost:1935/live/<key>` makes `$MTX_PATH` arrive as `live/<key>`, matching what
-both use-cases assume, and the event correctly transitions `scheduled` → `live` → `ended`.
-If a future MediaMTX version ever changes this, `handle-stream-lifecycle.ts` logs a
-`console.warn` on the branch where parsing fails — watch for it, since the alternative is
-every session silently staying `scheduled` forever with no error anywhere.
+`apps/api/src/application/use-cases/authorise-stream.ts`'s `parseStreamPath` and the
+`/webhooks/mediamtx/lifecycle` route both require `$MTX_PATH`/the auth webhook's `path`
+field to be exactly `<namespace>/<key>`, reasoned from MediaMTX's docs ("MTX_PATH: path
+name") rather than a running instance. Confirmed against a real publish: publishing to
+`rtmp://localhost:1935/<namespace>/<key>` makes `$MTX_PATH` arrive as `<namespace>/<key>`,
+matching what both assume. The one namespace this API still serves is `u` — the hooks fire
+for EVERY path (`all_others`) and send `$MTX_PATH` verbatim, so `/lifecycle` answers **404**
+for anything that is not `u/<key>`, deliberately, so a stale path configuration surfaces
+there instead of looking like a healthy broadcast. (A `u/<key>` naming no live row is still
+a 200 — see that route's own docstring for why those two are different answers.)
 
 ### A failing hook is not silent, but it is easy to miss — where to look
 
@@ -497,109 +471,84 @@ wget: server returned error: HTTP/1.0 401 Unauthorized
 
 No surrounding context, no indication of which hook or which stream it came from beyond
 its position in the log relative to `runOnOnline command started`/`command exited` lines
-just above it. If a session's `event.status` is stuck at `scheduled` after a real publish
-started (MediaMTX itself says `stream is available and online`, but the database
-disagrees), this — not `apps/api`'s own logs, which never see the request at all — is the
-first place to look: `docker logs infra-mediamtx-1 | grep -A2 -B2 runOnOnline`.
+just above it. If a `user_stream` row is stuck at `live` long after the broadcast really
+ended (MediaMTX itself says the path went offline, but the database disagrees), this — not
+`apps/api`'s own logs, which never see the request at all — is the first place to look:
+`docker logs infra-mediamtx-1 | grep -A2 -B2 runOnOffline`.
 
-### Finding events stuck by a lost hook — the reconciliation query
+### Finding streams stuck by a lost hook — and why the worker usually finds them first
 
-Both failure directions above are MUTE: a lost `runOnOnline` leaves an event `scheduled`
-forever with nobody notified while the creator sees a working broadcast in OBS; a lost
-`runOnOffline` leaves an event `live` forever, which is also what widens the publish-key
-reuse window `authorise-stream.ts`'s own docstring describes (`PUBLISHABLE_STATUSES`
-includes `live`, so an event stuck `live` stays publishable by anyone who still has the
-key for far longer than a real session ever runs). Neither failure raises an alert on its
-own — this query is how an operator finds them rather than waiting for a support message.
+A lost `runOnOffline` leaves a `user_stream` row `live` for ever: the creator's broadcast
+is over, Siaran still lists them as on the air, and nothing raises an alert on its own.
+The failure is MUTE, exactly like the hook failure above.
 
-`event` carries no `created_at`/`updated_at` column of its own, so "how long has this been
-stuck" has to be reconstructed from whatever timestamp IS available for each direction:
+**The worker already reconciles this.** `SweepStaleUserStreams`
+(`apps/worker/src/scheduled-passes.ts`) runs hourly and ends any row still `live` more than
+`MAX_USER_STREAM_MS` — **12 hours** — after its `started_at`. So a lost hook self-heals
+within an hour of that cap, and the query below is for the window BEFORE it, or for
+confirming the sweep is running at all. (The community world had no such pass, which is
+why this section used to be a pair of hand-written reconciliation queries and a manual
+`update`; it is not any more.)
 
 ```sql
--- Stuck SCHEDULED (a lost runOnOnline): flags anything scheduled more than
--- 2 hours in the past. "Go live now" sessions (scheduledAt IS NULL) have NO
--- timestamp anywhere on the row to judge age by — listed separately rather
--- than silently dropped, since ignoring them would miss exactly the
--- sessions a creator most likely started immediately.
-select id, community_id, title, scheduled_at,
-       (stream_key is not null) as has_stream_key
-from event
-where status = 'scheduled'
-  and scheduled_at is not null
-  and scheduled_at < now() - interval '2 hours'
-order by scheduled_at;
-
-select id, community_id, title
-from event
-where status = 'scheduled' and scheduled_at is null;
--- ^ no age to filter on — cross-check each one with the creator directly
---   ("did you ever open OBS for this one?") rather than a date threshold.
-
--- Stuck LIVE (a lost runOnOffline): joins the `stream_live` activity_log
--- row HandleStreamLifecycle writes on go-live (metadata->>'eventId') for a
--- went-live timestamp the event row itself doesn't have. Flags anything
--- live for more than 6 hours — longer than any realistic single session.
-select e.id, e.community_id, e.title, al.created_at as went_live_at,
-       now() - al.created_at as live_for
-from event e
-join activity_log al
-  on al.event_type = 'stream_live'
-  and al.metadata ->> 'eventId' = e.id::text
-where e.status = 'live'
-  and al.created_at < now() - interval '6 hours'
-order by al.created_at;
+-- Live longer than any realistic single broadcast, but not yet past the
+-- sweep's 12-hour cap. `user_stream` carries `started_at` on the row
+-- itself, so the age needs no join.
+select id, owner_id, title, started_at, now() - started_at as live_for
+from user_stream
+where status = 'live'
+  and started_at < now() - interval '6 hours'
+order by started_at;
 ```
 
 **What to do about a hit:**
-1. Check `docker logs infra-mediamtx-1 | grep -A2 -B2 runOnOnline` (or `runOnOffline`) for
-   the failure symptom described just above — a wrong-secret 401, a connection failure to
-   `apps/api`, or a malformed URL. Fix whatever it names (the usual culprit is the
-   three-way `MEDIAMTX_WEBHOOK_SECRET` drift the previous section describes, or `apps/api`
-   having been down at the moment the hook fired).
-2. For a stuck `live` row where the creator confirms the broadcast is genuinely over: it is
-   safe to `update event set status = 'ended' where id = '<id>';` directly — `markEnded`'s
-   own allowlist predicate (`{scheduled, live}` -> `ended`) is exactly what this mirrors,
-   and nothing downstream re-notifies members on end (`NotifyStreamLive` only ever fires on
-   go-live), so a manual correction here has no side effect beyond closing the publish
-   window early.
-3. For a stuck `scheduled` row: ask the creator whether they ever opened OBS for it. If
-   not, it is simply a forgotten schedule — safe to leave, or the creator can just start a
-   new session. If they DID try and the hook failure is now fixed, have them stop and
-   restart their publish in OBS — a fresh RTMP connection is what re-fires `runOnOnline`;
-   nothing retries the original failed call on its own.
+1. Check `docker logs infra-mediamtx-1 | grep -A2 -B2 runOnOffline` for the failure
+   symptom described just above — a wrong-secret 401, a connection failure to `apps/api`,
+   or a `404` from `/lifecycle` (which means `$MTX_PATH` did not arrive as `u/<key>`). The
+   usual culprit is the three-way `MEDIAMTX_WEBHOOK_SECRET` drift described earlier, or
+   `apps/api` having been down at the moment the hook fired.
+2. If the creator confirms the broadcast is genuinely over and you do not want to wait for
+   the sweep, `update user_stream set status = 'ended', ended_at = now() where id =
+   '<id>';` mirrors exactly what `EndUserStream` and the sweep both do. Ending a row has no
+   downstream side effect beyond closing the publish window — nothing is notified on end.
+3. If rows keep piling up past 12 hours, the sweep itself is not running: check the worker
+   process is up (`apps/worker`, `bun run src/main.ts`) and look for its own error line,
+   since a pass that throws is logged rather than silent.
 
-### Deferred, on purpose: an OBS reconnect currently kills the session
+### Deferred, on purpose: an OBS reconnect currently kills the broadcast
 
-**Known, accepted, not fixed in this wave — a creator support question this note exists to
-answer, not a bug to chase.** `runOnOffline` fires on ANY publisher disconnect, not only a
-deliberate stop — a Task 6 end-to-end run proved this directly (`ffmpeg` stopped → `live` →
-`ended`). So a few seconds of packet loss that makes OBS auto-reconnect hits exactly the
-same hook a deliberate "Stop Streaming" click does: the event flips to `ended`, and `ended`
-is excluded from `PUBLISHABLE_STATUSES` (`authorise-stream.ts`), so the creator's own
-reconnecting encoder is refused by the SAME authorisation that protects the stream from
-everyone else. Every member's watch token is bound to that `eventId`, and any WhatsApp link
-already sent is now dead too. **The only way to resume today is scheduling a brand-new
-session** (`POST .../events` again) — there is no "resume" affordance, and telling a creator
-to "just reconnect OBS" is the wrong answer; tell them to start a fresh session instead.
-This is a known, real gap for the most likely first-hour failure mode on an Indonesian
-home/mobile uplink, deliberately left alone for this wave rather than folded in with the
-security fixes above — do not attempt to fix the underlying behaviour without a fresh
-design pass (naively excluding `ended` from `runOnOffline`'s effect would reopen the
-republish window `PUBLISHABLE_STATUSES` excluding `ended` exists to close).
+**Known, accepted, not fixed — a creator support question this note exists to answer, not
+a bug to chase.** `runOnOffline` fires on ANY publisher disconnect, not only a deliberate
+stop — proven directly against a real MediaMTX (`ffmpeg` stopped → `live` → `ended`). So a
+few seconds of packet loss that makes OBS auto-reconnect hits exactly the same hook a
+deliberate "Stop" does: the row flips to `ended`, and only a `live` row is publishable
+(`USER_PUBLISHABLE_STATUS` in `authorise-stream.ts`), so the creator's own reconnecting
+encoder is refused by the SAME authorisation that protects the stream from everyone else.
+Every viewer's watch token is bound to that `streamId` too, so it is dead with the row.
+**The only way to resume today is starting a brand-new broadcast** (`POST /streams` again,
+which mints a fresh stream key) — there is no "resume" affordance, and telling a creator to
+"just reconnect OBS" is the wrong answer. This is a real gap for the most likely first-hour
+failure mode on an Indonesian home or mobile uplink, deliberately left alone rather than
+folded in with security work — do not attempt to fix the underlying behaviour without a
+fresh design pass, since naively ignoring `runOnOffline` would reopen the republish window
+that refusing a non-`live` row exists to close.
 
 ### Browser publishing (WebRTC / WHIP) — Task 1 of the browser-publishing phase
 
 A **second** way to publish, alongside RTMP above — RTMP is completely unchanged, and this
 adds **no new credential and no new auth path**: MediaMTX asks the SAME `authHTTPAddress`
-`{action: "publish", path: "live/<streamKey>", ...}` for a WebRTC publish that it asks for an
-RTMP one, so `AuthoriseStream`'s existing publish branch (`scheduled`/`live` allow, `ended`
-refuses) is the only gate. Confirmed against a live instance, not assumed — see the
-verification transcript below.
+`{action: "publish", path: "u/<streamKey>", ...}` for a WebRTC publish that it asks for an
+RTMP one, so `AuthoriseStream`'s existing publish branch (a `live` row allows, anything
+else refuses) is the only gate. Confirmed against a live instance, not assumed — see the
+verification transcript below. **The transcripts in this section were captured against the
+community namespace, `live/<streamKey>`, before retire-telegram deleted it; the log lines
+are quoted as they were observed. Everything they establish is about MediaMTX and nginx,
+not about which segment leads the path, and the surviving namespace is `u`.**
 
-**The verified WHIP endpoint — this is the fact Task 2's adapter is built against:**
+**The verified WHIP endpoint — this is the fact the adapter is built against:**
 
 ```
-POST http://<webrtc-host>:8889/live/<streamKey>/whip
+POST http://<webrtc-host>:8889/u/<streamKey>/whip
 ```
 
 Confirmed two ways before anything was built on it: (1) mediamtx.org's own WebRTC-clients
@@ -612,7 +561,7 @@ track record: a real Chromium browser POSTing a real SDP offer to this exact URL
 real MediaMTX instance, real ICE negotiating, and the event flipping to `live`. See below.
 
 **This is a DIFFERENT url from MediaMTX's own browser publish PAGE**, one path segment
-longer: `http://<webrtc-host>:8889/live/<streamKey>/publish` is an HTML page (MediaMTX's own
+longer: `http://<webrtc-host>:8889/u/<streamKey>/publish` is an HTML page (MediaMTX's own
 debug tool, embedded in the binary) whose own JavaScript (`publisher.js`) is what POSTs to
 the `/whip` url above. This task's own verification drove that page directly, per the task
 brief; Task 2's real product UI builds the `/whip` url itself instead, since a real product
@@ -623,7 +572,7 @@ needs its own camera/mic picker, not MediaMTX's test page.
 - `webrtcAddress: :8889` — WHIP **signalling** (the POST above, and the PATCH/DELETE against
   the session it creates). Bound to `127.0.0.1` on the host, exactly like `hlsAddress`/8888
   above, and for the identical reason: nginx is the public front door, proxying this over 443
-  (see the `/whip/` location below) so Cloudflare — which does not proxy UDP — never has to
+  (see the `/whip/u/` location below) so Cloudflare — which does not proxy UDP — never has to
   touch it directly.
 - `webrtcLocalUDPAddress: :8189` — the actual audio/video **media**, all UDP. Published
   **directly and publicly** (`"8189:8189/udp"`, no loopback restriction), because a creator's
@@ -646,21 +595,26 @@ needs its own camera/mic picker, not MediaMTX's test page.
   the local interface candidate already connects) — **set it to the VPS's real public IP
   before ever testing this feature on a real server.**
 
-**The nginx location — `/whip/`, a SEPARATE prefix from `/live/`, not nested under it.**
-MediaMTX's own WHIP url shape (`/live/<streamKey>/whip[/<sessionId>]`) sits literally under
-the `/live/` prefix the HLS read location above already owns as `^~` — and per nginx's own
+**The nginx location — `/whip/u/`, a SEPARATE prefix from `/u/`, not nested under it.**
+MediaMTX's own WHIP url shape (`/u/<streamKey>/whip[/<sessionId>]`) sits literally under
+the `/u/` prefix the HLS read location above already owns as `^~` — and per nginx's own
 location-selection rules (see that location's own comment for the citation), once a `^~`
 prefix location is selected as the longest match, nginx skips every regex location for that
 request, unconditionally, regardless of file order. That makes it impossible to give WHIP
-requests different handling from HLS reads with a regex location nested under `/live/`, so
+requests different handling from HLS reads with a regex location nested under `/u/`, so
 `infra/nginx/live-hls.conf.template` instead gives WHIP a prefix that does not literally
-start with `/live/` at all: public url `/whip/<streamKey>` (and
-`/whip/<streamKey>/<sessionId>` for the session sub-resource), one segment shorter than
-MediaMTX's own shape since the fixed `whip` text moves from the middle to the front.
+start with `/u/` at all: public url `/whip/u/<streamKey>` (and
+`/whip/u/<streamKey>/<sessionId>` for the session sub-resource), one segment shorter than
+MediaMTX's own shape since the fixed `whip` text moves from the middle to the front. (The
+`u/` sits AFTER `/whip/` for a now-historical reason: the community world's WHIP url was
+the bare `/whip/<key>`, frozen by its own deployment proof, so Phase 7 gave the user world
+an extra segment rather than renaming a deployed shape. Task 7 deleted the community
+location; the shape stays, because changing it now buys nothing and costs a coordinated
+config-and-code change.)
 `proxy_pass` rebuilds MediaMTX's internal shape from the captured pieces; `proxy_redirect`
 rewrites MediaMTX's own `201 Created` `Location` header (which names the new session
-resource using its OWN internal path) back to the public `/whip/<key>/<sessionId>` form
-before nginx returns it — the same class of fix `/live/`'s own `proxy_redirect` already
+resource using its OWN internal path) back to the public `/whip/u/<key>/<sessionId>` form
+before nginx returns it — the same class of fix `/u/`'s own `proxy_redirect` already
 applies to HLS's cookie-check redirect. **No `auth_request` on this location** — deliberate:
 a publish is authorised by MediaMTX's own `authHTTPAddress` call straight to `apps/api`,
 never through this nginx at all, the same gate RTMP already goes through; this location's
@@ -668,8 +622,9 @@ only job is carrying WHIP's signalling bytes across the one hop Cloudflare can c
 on 443). `access_log off`, per this task's own constraint: the stream key travels in this
 url's path.
 
-**Verified end to end, twice — direct against MediaMTX, and through the nginx `/whip/`
-location — not assumed from the config alone:**
+**Verified end to end, twice — direct against MediaMTX, and through the nginx WHIP
+location — not assumed from the config alone (against `live/<key>`, the namespace of the
+day; see the note at the top of this section):**
 
 A real Chromium browser (Playwright-driven; a getUserMedia override — a canvas
 `captureStream()` + a Web Audio oscillator, standing in for the real camera/mic — was necessary
@@ -681,7 +636,7 @@ installed Google Chrome.app with `--use-fake-device-for-media-stream
 the native system dialog. Everything downstream of `getUserMedia` — MediaMTX's own unmodified
 publish page and `publisher.js`, the real `RTCPeerConnection`, the real SDP offer/answer, the
 real WHIP POST, the real ICE negotiation — was untouched and real) published against a real
-`scheduled` session's stream key from `POST /communities/:id/events`:
+session's stream key:
 
 ```
 INF [WebRTC] [session ...] peer connection established, local candidate: host/udp/127.0.0.1/8189, remote candidate: prflx/udp/172.26.0.1/...
@@ -715,7 +670,7 @@ after any change here is MediaMTX logging `stream is available and online, 2 tra
 Opus)`, not merely that a publish connects** — a healthy-looking connection with the wrong
 codec is this defect exactly.
 
-`GET .../events` then showed `"status": "live"`. Stopping the publish (closing the browser)
+The session's row then showed `"status": "live"`. Stopping the publish (closing the browser)
 produced:
 
 ```
@@ -724,9 +679,9 @@ INF [path live/<key>] runOnOffline command launched
 INF [WebRTC] [session ...] closed: peer connection closed
 ```
 
-— and the event flipped to `"status": "ended"`. A **wrong** key (a path that resolves to no
-event) was refused at the WHIP layer itself, both directly against MediaMTX and through the
-nginx `/whip/` location:
+— and the row flipped to `"status": "ended"`. A **wrong** key (a path that resolves to no
+row) was refused at the WHIP layer itself, both directly against MediaMTX and through the
+nginx WHIP location:
 
 ```
 $ curl -i -X POST http://localhost:8889/live/not-a-real-key/whip -d 'v=0'
@@ -738,18 +693,21 @@ HTTP/1.1 401 Unauthorized
 replied with code 403: {"ok":false}`, i.e. `apps/api`'s `/webhooks/mediamtx/auth` route
 answering `REFUSED_BODY` with a `403`, which MediaMTX's WHIP layer translates into the `401`
 a client sees. The same real-browser flow, repeated through a real `nginx:1.27-alpine`
-container running the actual (envsubst-rendered) `infra/nginx/live-hls.conf.template`'s
-`/whip/` location, reached `RTCPeerConnection.connectionState === "connected"` end to end —
+container running the actual (envsubst-rendered) `infra/nginx/live-hls.conf.template`'s WHIP
+location, reached `RTCPeerConnection.connectionState === "connected"` end to end —
 including the `proxy_redirect`-rewritten session `Location` — and produced the identical
 `runOnOnline` → `live` → `runOnOffline` → `ended` lifecycle.
 
 **This nginx proof is a committed, re-runnable harness, not only a narrated transcript** —
 `infra/nginx/whip-proxy-test/` (`run.sh` + `negotiate.mjs`, isolated from the root workspace so
 `bun run test`/`bun run typecheck` never touch it — see its own `package.json`). Given a real
-scheduled session's stream key, it stands up the actual committed template in a real nginx
+`user_stream` row's stream key, it stands up the actual committed template in a real nginx
 container and drives a real `RTCPeerConnection` through it, printing the same `RESULT: { ... }`
-JSON shape quoted above. Re-run it after any change to `/whip/`'s location block rather than
-trusting this section to still be accurate:
+JSON shape quoted above. Re-run it after any change to `^~ /whip/u/`'s location block rather
+than trusting this section to still be accurate. (It is the ONLY script left in that
+directory: retire-telegram Task 7 deleted `run-dashboard.sh`, `run-gate.sh` and five
+`drive-*.mjs` drivers, all of which stood up the deleted creator dashboard and drove it
+through deleted API routes.)
 
 ```
 $ infra/nginx/whip-proxy-test/run.sh <streamKey>
@@ -786,7 +744,7 @@ To run one workspace or one file:
 
 ```bash
 cd apps/api && bun test
-cd apps/api && bun test src/application/use-cases/process-renewals.test.ts
+cd apps/api && bun test src/application/use-cases/remind-expiring-membership.test.ts
 ```
 
 ### Each run gets its own database
@@ -885,12 +843,13 @@ than a formality.
 nginx, the host firewall, or the VPS provider's own network layer, so browser publishing
 needs four manual steps on the box that nothing in the automated deploy performs for you.
 
-**All four apply to Siaran (`/siaran`, a person going live from their own profile) exactly
-as they do to a community event's browser publish** — same MediaMTX, same WHIP signalling,
-same UDP media port, same `MEDIAMTX_WHIP_BASE_URL`. The one difference is step 3: Siaran
-added three `location` blocks of its own, and an operator who re-pastes the four they
-remember leaves Siaran dark while every other part of the deploy looks healthy.
-Do them in this order — the `.env` variables first, because a missing one restart-loops the
+**Siaran (`/siaran`, a person going live from their own profile) is the only streaming
+world left** — retire-telegram deleted the community event world and, with it, three of the
+seven nginx `location` blocks. **Step 3 therefore now REMOVES blocks as well as installing
+them**: a box still carrying the old seven keeps three dead blocks whose only remaining
+safety is one `proxy_set_header` line with an out-of-date comment (step 3 spells this out,
+including why "dead" is not the same as "exploitable"). Do them in this order — the
+`.env` variables first, because a missing one restart-loops the
 API the moment `git pull` lands the code that requires it; the reload and the firewall
 changes are independent of each other but both have to be done before a creator can
 actually go live from a browser:
@@ -901,7 +860,7 @@ actually go live from a browser:
    boot the instant this variable is required but absent, in every environment. Skip this
    and the API restart-loops; `scripts/deploy.sh`'s own health-check poll is what catches
    it, loudly, not a fix. **It must be the same public origin as `MEDIAMTX_HLS_BASE_URL`** —
-   nginx serves `/live/` and `/whip/` from the same server block on the same origin, and
+   nginx serves `/u/` and `/whip/u/` from the same server block on the same origin, and
    nothing cross-checks the two strings against each other; see `apps/api/.env.example`'s
    own note on both variables.
 2. **`infra/.env` on the box: set `MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS` to the box's real
@@ -911,38 +870,67 @@ actually go live from a browser:
    completes, no error appears on either side, and media never connects, because MediaMTX
    only offers a LOCAL-interface ICE candidate that no browser on the public internet can
    route to.
-3. **Re-install the WHOLE nginx fragment — all seven `location` blocks — and reload nginx.**
-   `scripts/deploy.sh` explicitly does not deploy nginx config. This step used to say
-   "install the new *fourth* block" and name only `/whip/`, which was correct for the
-   browser-publishing phase and has been wrong ever since Siaran's Task 4 added three more.
-   **Do not count from this sentence; count from the file** —
-   `grep -c '^location' infra/nginx/live-hls.conf.template` is the authority, and it answers
-   **7** at the time of writing:
+3. **Re-install the WHOLE nginx fragment — and, on an already-deployed box, REMOVE the
+   three blocks retire-telegram deleted — then reload nginx.** `scripts/deploy.sh`
+   explicitly does not deploy nginx config. This step has been wrong twice by counting from
+   prose instead of from the file, so: **do not count from this sentence; count from the
+   file** — `grep -c '^location' infra/nginx/live-hls.conf.template` is the authority, and
+   it answers **4** at the time of writing:
 
    | block | what goes dark if it is missing |
    |---|---|
    | `^~ /webhooks/mediamtx/ { deny all; }` | the auth surface is reachable from the public internet |
-   | `^~ /whip/` | community browser publishing — the WHIP POST never reaches MediaMTX |
    | `^~ /whip/u/` | **Siaran browser publishing** — a creator's *Mulai siaran* never gets past negotiation |
-   | `^~ /live/` | community HLS playback |
-   | `^~ /u/` | **Siaran playback** — every member's player 404s on the manifest |
-   | `= /_internal/mediamtx-auth-request` | `^~ /live/`'s `auth_request` has no upstream; community playback fails closed |
+   | `^~ /u/` | **Siaran playback** — every viewer's player 404s on the manifest |
    | `= /_internal/mediamtx-user-auth-request` | `^~ /u/`'s `auth_request` has no upstream; Siaran playback fails closed |
+
+   **GONE, and they should be removed from the box, not merely absent from the template:**
+   `^~ /live/`, `^~ /whip/` and `= /_internal/mediamtx-auth-request`.
+
+   **These three are DEAD, not exploitable, and the distinction matters because someone
+   will reason from this paragraph.** A box still carrying all three is not currently
+   vulnerable: `^~ /live/` refuses every read (its `auth_request` upstream sends apps/api no
+   stream id, and apps/api resolves reads by stream id alone since Task 6), and `^~ /whip/`
+   refuses every publish (MediaMTX's own `authHTTPAddress` hook asks apps/api, whose
+   `parseStreamPath` no longer recognises the `live` namespace). Nothing gets through
+   either one.
+
+   The reason to remove them is that they are **unreachable, confusing, and one careless
+   edit from mattering** — not that they are a live hole. `^~ /live/` is the only location
+   in the old set that forwards a request into an `auth_request`, and an `auth_request`
+   subrequest INHERITS the client's own headers. What stops a client-supplied
+   `X-Mtx-Stream-Id` from reaching apps/api on a `/live/...` URL is exactly one line inside
+   `= /_internal/mediamtx-auth-request`:
+
+   ```nginx
+   proxy_set_header X-Mtx-Stream-Id "";
+   ```
+
+   That line does its job today. The hazard is its COMMENT, which justified it by a
+   both-or-neither rule apps/api stopped enforcing in Task 6 — so a future editor
+   tidying dead config has a written, wrong reason to delete it as obsolete, and deleting
+   it is what would let a client choose which stream apps/api resolves, putting a real
+   `user_stream`'s PUBLISH KEY into nginx's upstream URL and error log. Removing the whole
+   `/live/` location removes the reachable path instead of relying on a guard nobody
+   maintains. (`infra/nginx/live-hls.conf.template`'s own header makes the same argument;
+   if these two ever disagree, the template is the one that has been checked against the
+   config.)
 
    Render the template with `envsubst` (it carries `${MEDIAMTX_WEBHOOK_SECRET}`) into a
    snippet, `include` that snippet from the real server block rather than re-pasting the
    bodies by hand, then `nginx -t` and reload — an `include` is the only form of this step
-   that cannot silently ship a subset. See "The nginx location block the real VPS needs"
-   above for the full reasoning and citations, and note that `^~ /whip/u/` and `^~ /u/` are
-   ORDER-INDEPENDENT with respect to `^~ /whip/` and any regex location (nginx picks the
-   longest matching prefix and, for `^~`, then skips every regex) — but they must both
-   actually be present, because `^~ /whip/` hard-rewrites onto the community path and would
-   otherwise swallow `/whip/u/...` into the wrong namespace.
+   that cannot silently ship a subset, and on this deploy it is also what makes the REMOVAL
+   automatic rather than a thing to remember. See "The nginx location block the real VPS
+   needs" above for the full reasoning and citations. `^~ /whip/u/` and `^~ /u/` are
+   ORDER-INDEPENDENT with respect to each other and to any regex location: nginx picks the
+   longest matching prefix and, for `^~`, then skips the regex phase entirely.
 
-   **Skip any of this and RTMP and community HLS keep working, `deploy.sh`'s health check
-   still passes, and the whole test suite is still green** — which is exactly how Siaran
-   ships dark. This is the step to suspect first when the code is right and the feature is
-   not there.
+   **Skip any of this and RTMP keeps working, `deploy.sh`'s health check still passes, and
+   the whole test suite is still green** — which is exactly how Siaran ships dark. This is
+   the step to suspect first when the code is right and the feature is not there.
+   **Nothing in this repository can run nginx**, so the template's own removal of those
+   three blocks is unverified here too: `nginx -t`, one real playback and one real publish
+   on the box are the verification.
 4. **Open UDP 8189 at two layers: the host firewall AND the VPS provider's network-level
    firewall or security group.** See "The ports, and why the split exists" above — this is
    the media, not the signalling, and it is published directly and publicly, never through
@@ -964,10 +952,10 @@ not their network.
 ### Pre-deploy checklist: photo uploads (`client_max_body_size`)
 
 **The production nginx configuration does not live in this repository.** The only nginx
-artifact here is `infra/nginx/live-hls.conf.template`, and it is a *fragment* — seven
-`location` blocks for `/live/`, `/whip/`, `/u/`, `/whip/u/`, the webhook `deny all`, and the
-two internal auth subrequests, meant to be pasted into the real server block on the VPS.
-The server block itself, with the SPA root and the `/users/` and `/c/` proxies, exists only
+artifact here is `infra/nginx/live-hls.conf.template`, and it is a *fragment* — four
+`location` blocks: `/u/`, `/whip/u/`, the webhook `deny all`, and the internal auth
+subrequest, meant to be pasted into the real server block on the VPS.
+The server block itself, with the SPA root and the `/users/` proxy, exists only
 on that box and is edited by hand. So the
 setting below cannot be shipped by `git pull`; somebody has to type it on the server.
 
@@ -1008,7 +996,7 @@ contents. A `413` is the failure this step exists to prevent.
 
 ### The secrets boundary
 
-A credential that reaches a real external service — a Xendit key, a Telegram bot token, an
+A credential that reaches a real external service — a Xendit key, a Fonnte token, an
 SSH or deploy key — **is** a repository secret, full stop. Nothing that reaches a real
 service belongs in a workflow file, in a script, or in a committed `.env`.
 
@@ -1026,8 +1014,8 @@ configured, add `MEDIAMTX_WHIP_BASE_URL` to that box's `apps/api/.env` first** (
 `.env.example` for the value's shape) — do this BEFORE the `git pull`, not after, since
 `scripts/deploy.sh`'s own post-reload health check (see below) will otherwise catch the
 half-configured box only by failing loudly, not by fixing it. The same rule applies to any
-future variable added to an existing all-or-nothing group (Xendit, Telegram/Fonnte,
-streaming): update the box's `.env` file by hand before the code that requires it lands.
+future variable added to an existing all-or-nothing group (Xendit, Fonnte, streaming):
+update the box's `.env` file by hand before the code that requires it lands.
 
 `scripts/deploy.sh` polls `GET /health` after `pm2 startOrReload` and fails the deploy
 (non-zero exit, loud message) if the api never becomes healthy — added specifically because
@@ -1067,16 +1055,23 @@ the state `0003` needs.
 - **Ports and adapters.** Use-cases depend on interfaces in
   `apps/api/src/application/ports`; Drizzle and HTTP live in `infrastructure/` and
   `routes/`.
-- **Time is injected**, never `Date.now()` inside a use-case — `ClockPort`. Renewal dates
-  are interpreted in **Asia/Jakarta**, in one place (`domain/renewal-schedule.ts`).
-- **Creator-scoped reads return 404, not 403**, so a stranger cannot confirm that a
-  community exists.
+- **Time is injected**, never `Date.now()` inside a use-case — `ClockPort`. Billing dates are
+  computed in **UTC**, in one place (`computeNextBillingDate` in `domain/billing-cycle.ts`, whose
+  TIMEZONE ASSUMPTION note says so and records the accepted consequence: a payment at 06:00 WIB is
+  23:00 UTC the previous day, so a stored date can read one day earlier than the member would
+  count). **There is no Asia/Jakarta boundary logic left in live code.** The WIB calendar-day
+  comparison that used to decide it lived in `domain/renewal-schedule.ts`, which went with the
+  renewal pass in retire-telegram Task 4; the only WIB handling that survives is
+  *presentational* — `formatWibDate` in `remind-expiring-membership.ts`, which shifts by a fixed
+  `WIB_OFFSET_MS` purely to print a date a member can read.
+- **Owner-scoped reads return 404, not 403**, so a stranger cannot confirm that a
+  row exists.
 - `NODE_ENV` is an **allowlist**: only exactly `development` or `test` may relax a guard.
   Anything else — including unset — refuses to start. That is why a box with no messaging
-  tokens fails loudly instead of quietly using fakes. **Xendit is the one exception** (Task 2,
-  free communities): absent Xendit keys outside the allowlist no longer refuse to boot —
-  `selectPaymentProvider` returns `null`, `POST /c/:slug/checkout` is not even registered
-  (404s, not a fake invoice), and a community can only be `access_mode = "paid"` when a real
+  tokens fails loudly instead of quietly using fakes. **Xendit is the one exception**:
+  absent Xendit keys outside the allowlist no longer refuse to boot —
+  `selectPaymentProvider` returns `null`, the checkout route is not even registered
+  (404s, not a fake invoice), and a membership tier can only carry a price when a real
   payment provider is configured. See `apps/api/.env.example`'s Xendit block for the full
   table. Partial Xendit configuration (one key set, the other not) still refuses to start in
   every environment, unchanged.

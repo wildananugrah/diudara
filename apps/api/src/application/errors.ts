@@ -61,13 +61,21 @@ export class UnsupportedOperationError extends AppError {
 }
 
 /**
- * The AI co-builder's daily spend cap (Phase 7) was already reached for this
- * creator. Carries `resetAt` — an ISO-8601 UTC instant — as a typed field
- * rather than only inside `message`, so `errorHandler` can put it in the
- * response body as its own key and a caller (the dashboard) never has to
- * parse a timestamp out of human prose. `message` still carries a
- * human-readable Indonesian sentence with the same instant baked in, for any
- * caller that only reads `error`.
+ * A rate limit was already reached for this caller. Carries `resetAt` — an
+ * ISO-8601 UTC instant — as a typed field rather than only inside `message`,
+ * so `errorHandler` can put it in the response body as its own key and a
+ * caller never has to parse a timestamp out of human prose. `message` still
+ * carries a human-readable Indonesian sentence with the same instant baked
+ * in, for any caller that only reads `error`.
+ *
+ * NOTHING RAISES IT TODAY. Its only raiser was the AI co-builder's daily
+ * spend cap (Phase 7), which retire-telegram Task 4 deleted. The class and
+ * `errorHandler`'s 429 branch are kept deliberately: the branch is the only
+ * thing in this codebase that knows how to shape a 429 body, it is still
+ * covered by `error-handler.test.ts`, and it is what the next rate limit will
+ * be built on. If that never comes, it is one class and one `instanceof` to
+ * remove — but removing it now would delete a tested behaviour to save
+ * nothing.
  */
 export class RateLimitedError extends AppError {
   constructor(message: string, readonly resetAt: string) {
@@ -76,41 +84,21 @@ export class RateLimitedError extends AppError {
 }
 
 /**
- * "The AI co-builder is not available RIGHT NOW" — two distinct triggers,
- * both legitimately a 503:
+ * "This feature is not configured on THIS BOX" — the only trigger left after
+ * retire-telegram Task 4 deleted the AI co-builder, which contributed the
+ * other one (a provider that answered with a transport-level failure).
  *
- *  1. Not configured on this box at all — `Dependencies.sendAiMessage` is
- *     `undefined` (see `selectAiProvider` in bootstrap.ts). Unlike a
- *     404/409/etc, this is never the caller's fault: the same request would
- *     succeed on a fully configured box. `GET /ai/status` lets the
- *     dashboard avoid ever reaching this by hiding the chat screen instead.
- *  2. `AiProviderError.kind === "unavailable"` — the provider answered with
- *     a transport-level failure (network error, timeout, non-2xx) and
- *     `SendAiMessage` deliberately did NOT retry it (see
- *     `converseWithRetry`'s docstring in send-ai-message.ts for why an
- *     immediate retry there would be worse, not better).
+ * Raised where a `Dependencies` field is `undefined`/`null` because the
+ * environment did not configure the feature: payments
+ * (`POST /payment-account`, `POST /users/me/payout`,
+ * `POST /users/:handle/subscribe`) and streaming (`POST /streams`,
+ * `POST /streams/:id/watch-token`). Unlike a 404/409/etc this is never the
+ * caller's fault — the same request would succeed on a fully configured box —
+ * which is why it is a 503 and not a 400.
  */
 export class ServiceUnavailableError extends AppError {
   constructor(message = "service unavailable") {
     super(message, 503);
-  }
-}
-
-/**
- * A `"malformed"` `AiProviderError` survived one retry — the provider
- * answered both times, but what came back could not be turned into a valid
- * turn (prose/truncated/invalid JSON, a schema mismatch, an over-length
- * reply). 502, not 500: this box is fine, the upstream model's OUTPUT is
- * what failed. NOT used for a transport-level failure (network error,
- * timeout, non-2xx) — that is `ServiceUnavailableError` (503), and is never
- * retried at all; see `AiProviderError.kind`'s docstring in
- * `ai-provider.port.ts` for the split. The conversation is left exactly as
- * it was before the call — the creator's message is saved, no assistant
- * reply is appended — so retrying is just sending another message.
- */
-export class AiUpstreamError extends AppError {
-  constructor(message = "AI provider error") {
-    super(message, 502);
   }
 }
 
@@ -198,8 +186,9 @@ export const UniqueRule = {
    * the first caller to hit this from an INSERT: an already-approved member
    * can file a fresh pending request (the partial index on `join_request`
    * only covers `pending` rows), and approving it a second time would
-   * otherwise raise a raw `23505`. See `DrizzleSubscriptionRepository.
-   * createActiveWithoutBilling`.
+   * otherwise raise a raw `23505`. The community subscription repository's
+   * `createActiveWithoutBilling` was where this surfaced; retire-telegram
+   * Task 6 deleted it, and the rule this constant names outlives it.
    */
   subscriptionMemberTierActive: "subscription_member_tier_active",
   /**

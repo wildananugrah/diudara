@@ -25,10 +25,10 @@ describe("FakePaymentAdapter", () => {
   it("creates a distinct account id per creator", async () => {
     const adapter = new FakePaymentAdapter();
     const a = await adapter.createPaymentAccount({
-      creatorId: "c1", email: "a@example.com", name: "A",
+      ownerId: "c1", email: "a@example.com", name: "A",
     });
     const b = await adapter.createPaymentAccount({
-      creatorId: "c2", email: "b@example.com", name: "B",
+      ownerId: "c2", email: "b@example.com", name: "B",
     });
     expect(a.accountId).not.toBe(b.accountId);
   });

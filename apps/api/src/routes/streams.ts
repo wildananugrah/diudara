@@ -59,8 +59,10 @@ const streamIdParams = z.object({ id: uuidParam });
  * **`deps.startUserStream` is `undefined` exactly when
  * `Dependencies.streamingProvider` is** (see `selectStreamingProvider` in
  * bootstrap.ts): live streaming is not configured on this box. That is a 503
- * here, the same shape `POST /ai/messages` and
- * `POST /communities/:communityId/events` already use.
+ * here, the same shape `POST /users/me/payout` and
+ * `POST /users/:handle/subscribe` already use (retire-telegram Task 4 deleted
+ * `POST /ai/messages` and `POST /communities/:communityId/events`, which this
+ * sentence used to name).
  * `deps.mintUserWatchToken` is `undefined` on a slightly DIFFERENT condition
  * — exactly when `STREAM_TOKEN_SECRET` is absent, mirroring
  * `Dependencies.authoriseStream` rather than `startUserStream` — because
@@ -129,8 +131,8 @@ export function streamRoutes(
    *
    * NEITHER THE TOKEN NOR THE STREAM KEY IS EVER LOGGED here or anywhere
    * downstream — `MintUserWatchToken` returns the token and the route puts it
-   * straight in the body. The rule `HandleStreamLifecycle`'s docstring states
-   * for stream keys covers this credential for the same reason.
+   * straight in the body. The never-log rule this codebase has always applied to
+   * stream keys covers this credential for the same reason.
    *
    * 200, not 201: nothing is created. The token is derived from a row that
    * already exists and a clock, and the same viewer re-mints every few

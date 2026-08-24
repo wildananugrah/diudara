@@ -41,8 +41,9 @@ export function payoutStatusOf(xenditAccountId: string | null): UserPayoutStatus
  * it must keep working on a box with NO payment provider configured: that box
  * has no `ConnectUserPayout` to construct at all (see `bootstrap.ts`), and Task
  * 4's publish screen still has to be able to ask, and be told, that this user is
- * not connected. The creator flow separates `GetPaymentAccountStatus` from
- * `CreatePaymentAccount` for exactly the same reason.
+ * not connected. (The creator flow split its own status reader from its own
+ * connect use case for exactly the same reason; retire-telegram Task 7's fix
+ * round deleted both with `GET|POST /payment-account`.)
  */
 export class GetUserPayoutStatus {
   constructor(private readonly users: UserPayoutRepositoryPort) {}

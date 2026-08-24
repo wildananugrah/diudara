@@ -1,67 +1,60 @@
 /**
- * Phase 5's two CLOCK-driven passes, plus Task 10's orphan-media sweep, Phase 5b's
- * expired-membership sweep (Task 3), membership-reminder pass (Task 4) and
- * pending-checkout cleanup (Task 5), and Phase 7's user-stream sweep (Task 6), as
- * loops this process can run.
+ * Task 10's orphan-media sweep, Phase 5b's expired-membership sweep (Task 3),
+ * membership-reminder pass (Task 4) and pending-checkout cleanup (Task 5), and
+ * Phase 7's user-stream sweep (Task 6), as loops this process can run.
  *
  * Everything in `apps/worker` before this file was request-triggered at one remove:
- * a payment wrote an outbox row and the worker delivered it. These seven are
+ * a payment wrote an outbox row and the worker delivered it. These five are
  * triggered by nothing but the passage of time, which is why they need a schedule at
  * all — and why this module exists separately from `main.ts`: the composition root
  * cannot be imported by a test (it reaches `db/client.ts`), and "a throwing pass does
  * not take the process down" is exactly the property that must be pinned by one.
  *
+ * Retire-telegram Task 4 deleted the two CLOCK-driven passes this file was built
+ * for — Phase 5's `ProcessRenewals` and `ProcessChurn` — along with the community
+ * subscriptions they dunned. What is left is five sweeps, and the shared cadence
+ * they were given for the sake of those two.
+ *
  * It deliberately imports only the API's dependency-free `log-safety` helper at
- * runtime; the renewal/churn result shapes come in as TYPES, which erase.
+ * runtime; the reminder pass's result shape comes in as a TYPE, which erases.
  * `SweepOrphanMedia`, `SweepExpiredMemberships`, `SweepStalePendingCheckouts` and
  * `SweepStaleUserStreams` are the exceptions to "the pass lives in `apps/api`" — none
  * has domain logic worth the name (no WIB days, no grace periods, just a
- * cutoff/predicate and a try/catch), so unlike
- * `ProcessRenewals`/`ProcessChurn`/`RemindExpiringMembership` each is defined and
- * tested entirely IN this file, against structural interfaces the caller supplies —
- * never against a database.
+ * cutoff/predicate and a try/catch), so unlike `RemindExpiringMembership` each is
+ * defined and tested entirely IN this file, against structural interfaces the caller
+ * supplies — never against a database.
  */
 import { redactLinks, safeErrorSummary } from "../../api/src/application/log-safety";
-import type { ProcessChurnResult } from "../../api/src/application/use-cases/process-churn";
 import type { RemindExpiringMembershipResult } from "../../api/src/application/use-cases/remind-expiring-membership";
-import type { ProcessRenewalsResult } from "../../api/src/application/use-cases/process-renewals";
 import { PollLoop, resolveIntervalMs } from "./poll-loop";
 
 /**
- * How often the renewal and churn passes run when nothing configures it: one hour.
+ * How often the SCHEDULED passes run when nothing configures it: one hour.
+ *
+ * The name and its env var (`WORKER_RENEWAL_INTERVAL_MS`) are Phase 5's, from the
+ * renewal and churn passes this interval was chosen for. Retire-telegram Task 4
+ * deleted both; the five sweeps that shared their cadence stayed, so the value and
+ * the knob stayed with them rather than being renamed — an env var is a deployment's
+ * contract, and renaming it would silently reset every box that sets it back to the
+ * default.
  *
  * WHY NOT 5 SECONDS, like the outbox. That interval is the delay a paying member sees
  * between their payment settling and their invite arriving, so it is sized for human
- * impatience. These passes decide whole **WIB calendar days**: `dueStageFor` answers
- * with a stage per day, and `renewal_reminder`'s unique `(subscription_id, stage)`
- * means the first pass of a WIB day claims that day's reminder and every later pass
- * that day is a no-op. Running them every 5 seconds would be ~17,000 queries a day to
- * do one day's worth of work.
+ * impatience. None of the five passes on this cadence is latency-sensitive that way:
+ * each one's OWN window is what actually protects the thing it sweeps — the orphan
+ * sweep's 24 hours (`ORPHAN_SWEEP_WINDOW_MS`), the pending-checkout cleanup's two
+ * (`STALE_PENDING_CHECKOUT_WINDOW_MS`), the user-stream sweep's twelve
+ * (`MAX_USER_STREAM_MS`), and the reminder pass's three-day warning — so an hourly
+ * wake-up closes any of their gaps within about an hour of it opening.
  *
  * WHY NOT 24 HOURS, which is what "daily" would literally mean. `PollLoop` measures
  * its interval from the previous pass, not from a wall-clock time of day, so a 24-hour
- * interval pins the pass to whatever time of day the worker last restarted: a worker
- * that came up at 23:50 WIB would act on each WIB day's boundary 23 hours 50 minutes
- * late, for ever, and a redeploy would silently move everybody's reminder time. There
- * is no cron here and adding one would be the scheduler this task exists not to write.
+ * interval pins each pass to whatever time of day the worker last restarted: a worker
+ * that came up at 23:50 would act 23 hours 50 minutes late for ever, and a redeploy
+ * would silently move everybody's reminder time. There is no cron here and adding one
+ * would be the scheduler this file exists not to write.
  *
- * ONE HOUR makes the phase irrelevant. Whenever the worker happens to boot, a member
- * crosses into `past_due` — and a churned member loses access — within an hour of the
- * WIB midnight that decided it, and the cost is 24 passes a day against two queries,
- * against the outbox pass's 17,280. The **effect** is still daily, because the
- * schedule's unit is a day; only the latency changes.
- *
- * THOSE TWO QUERIES ARE INDEXED, and this comment used to say so before they were.
- * `subscription_status_next_billing_date_idx` and `subscription_status_grace_ends_at_idx`
- * (migration 0012) cover `findDueForRenewal` and `findPastGraceDeadline` respectively;
- * without them both passes seq-scanned and SORTED the whole `subscription` table every
- * hour, and the renewal pass's keyset pagination re-scanned it once per page. The claim
- * is now pinned by `schema-phase5.test.ts`, which reads `pg_indexes` and the query plans
- * rather than trusting a sentence in a docstring.
- *
- * Raise it (`WORKER_RENEWAL_INTERVAL_MS`) if the backlog ever makes a pass expensive;
- * lowering it below a minute buys nothing at all, because no second pass inside the
- * same WIB day can send a second reminder.
+ * Raise it (`WORKER_RENEWAL_INTERVAL_MS`) if a backlog ever makes a pass expensive.
  */
 export const DEFAULT_RENEWAL_INTERVAL_MS = 60 * 60_000;
 
@@ -79,56 +72,6 @@ export function resolveRenewalIntervalMs(raw: string | undefined): number {
 }
 
 /**
- * The renewal pass's summary line, or `null` when there is nothing to say.
- *
- * COUNTS ONLY, and not for tidiness: the rows this pass walks carry a member's
- * WhatsApp number, and the outbox rows it writes are read by a process that will
- * shortly hold an invite link. A subscription id would be defensible; a member id or a
- * phone number would not, so none of them are here — `ProcessRenewals` itself logs the
- * one id worth having, on the skip it records in `activity_log`.
- *
- * Silent on a pass that did nothing, so an hourly line saying "considered=0" does not
- * bury the one that says a reminder went out. `considered > 0` with `reminded = 0` is
- * NOT nothing — that is the shape of a pass finding rows and failing to act on them —
- * so it speaks.
- */
-export function formatRenewalPassLine(result: ProcessRenewalsResult): string | null {
-  if (
-    result.considered === 0 &&
-    result.reminded === 0 &&
-    result.alreadyReminded === 0 &&
-    result.skipped === 0 &&
-    result.transitionedToPastDue === 0
-  ) {
-    return null;
-  }
-  return (
-    `[renewals] considered=${result.considered} reminded=${result.reminded} ` +
-    `already_reminded=${result.alreadyReminded} skipped=${result.skipped} ` +
-    `past_due=${result.transitionedToPastDue}`
-  );
-}
-
-/** The churn pass's summary line, or `null` when there is nothing to say. Counts only, as above. */
-export function formatChurnPassLine(result: ProcessChurnResult): string | null {
-  if (
-    result.considered === 0 &&
-    result.churned === 0 &&
-    result.alreadyChurned === 0 &&
-    result.revocationsQueued === 0 &&
-    result.skippedRevocation === 0
-  ) {
-    return null;
-  }
-  return (
-    `[churn] considered=${result.considered} churned=${result.churned} ` +
-    `already_churned=${result.alreadyChurned} ` +
-    `revocations_queued=${result.revocationsQueued} ` +
-    `skipped_revocation=${result.skippedRevocation}`
-  );
-}
-
-/**
  * One log-safe line for a pass that threw — the worker's ONLY way of logging a thrown
  * value, which is why every loop shares it.
  *
@@ -142,8 +85,6 @@ export function formatChurnPassLine(result: ProcessChurnResult): string | null {
 export function formatPassFailure(
   pass:
     | "outbox"
-    | "renewals"
-    | "churn"
     | "media"
     | "memberships"
     | "membership-reminders"
@@ -175,7 +116,7 @@ export const ORPHAN_SWEEP_WINDOW_MS = 24 * 60 * 60_000;
  */
 const DEFAULT_ORPHAN_SWEEP_BATCH_SIZE = 500;
 
-/** Just enough of `MediaRepositoryPort` for the sweep. Structural, like `RenewalPass`. */
+/** Just enough of `MediaRepositoryPort` for the sweep. Structural, like `OrphanSweepPass`. */
 export interface OrphanMediaRepository {
   listUnclaimedBefore(cutoff: Date, limit: number): Promise<{ id: string }[]>;
   /** Re-read immediately before the bytes go — see `sweepOne`. `null` when the row is already gone. */
@@ -802,7 +743,7 @@ export function formatStalePendingSweepLine(result: StalePendingSweepResult): st
 
 /**
  * Phase 7's backstop against a LOST `user_stream` lifecycle webhook (design spec
- * §7). The failure mode: `HandleStreamLifecycle`'s sibling for the `u/<key>` world —
+ * §7). The failure mode: the `u/<key>` world's lifecycle handler —
  * `apps/api/src/application/use-cases/end-user-stream.ts`'s `EndUserStream` — ends a
  * stream the moment MediaMTX's `offline` hook arrives, but that hook is a
  * fire-and-forget shell command (`runOnOffline`), and a crash, a restart, or a
@@ -991,16 +932,10 @@ export function formatOrphanSweepLine(result: OrphanSweepResult): string | null 
 }
 
 /**
- * Just enough of `ProcessRenewals` / `ProcessChurn` to be scheduled. Structural, so a
- * test can supply a pass that throws on demand without a database.
+ * Just enough of `SweepOrphanMedia` to be scheduled — or any test double with a
+ * matching `execute()`. Structural, so a test can supply a pass that throws on
+ * demand without a database.
  */
-export interface RenewalPass {
-  execute(): Promise<ProcessRenewalsResult>;
-}
-export interface ChurnPass {
-  execute(): Promise<ProcessChurnResult>;
-}
-/** Same shape, for `SweepOrphanMedia` — or any test double with a matching `execute()`. */
 export interface OrphanSweepPass {
   execute(): Promise<OrphanSweepResult>;
 }
@@ -1022,8 +957,6 @@ export interface UserStreamSweepPass {
 }
 
 export interface ScheduledPassLoopsOptions {
-  processRenewals: RenewalPass;
-  processChurn: ChurnPass;
   processOrphanSweep: OrphanSweepPass;
   processMembershipSweep: MembershipSweepPass;
   processMembershipReminder: MembershipReminderPass;
@@ -1035,50 +968,45 @@ export interface ScheduledPassLoopsOptions {
 }
 
 /**
- * The renewal, churn, orphan-sweep, membership-retirement, membership-reminder,
- * stale-pending-checkout AND user-stream sweep passes as SEVEN `PollLoop`s — the SAME
+ * The orphan-sweep, membership-retirement, membership-reminder,
+ * stale-pending-checkout AND user-stream sweep passes as FIVE `PollLoop`s — the SAME
  * loop the outbox uses, so they inherit both of its properties for free: passes of
  * one type never overlap (each pass pages through the whole backlog, and a second
  * copy of itself would be reading the same rows), and `stop()` wakes the loop
  * immediately instead of sleeping out an interval, which is what makes an hour-long
  * interval survivable under SIGTERM.
  *
- * SEVEN LOOPS, not one pass that does everything, for one reason: a renewal pass that
- * throws every time — a query the schema no longer matches, say — must not also stop
- * churn, the orphan sweep, the membership sweep, the reminders, the pending-checkout
- * cleanup, or the user-stream sweep from running, and vice versa. That last pairing —
- * the user-stream sweep and everything else — matters for a reason specific to Phase
- * 7: a lost `user_stream` lifecycle webhook leaves a creator permanently unable to go
- * live again (see `MAX_USER_STREAM_MS`'s own docstring), so the ONE pass that fixes
- * that must keep running even on a box where, say, the membership-reminder query has
- * started failing for an unrelated reason. Each loop's `onError` is its own, so a
- * failing pass costs its own retries and nothing else's. All seven share an interval
- * because they share a cadence — none of them is latency-sensitive the way the
- * outbox's 5-second poll is, INCLUDING the pending-checkout cleanup (its own window,
- * `STALE_PENDING_CHECKOUT_WINDOW_MS`, is what actually protects a live checkout, not
- * this cadence) and the user-stream sweep (its own 12-hour cap, `MAX_USER_STREAM_MS`,
- * is what actually protects a genuinely-running stream — an hourly cadence against a
- * 12-hour cap closes a lost-webhook gap within about an hour of it opening, nowhere
- * near urgent enough to earn its own knob) — and none of the seven ever share a
- * failure. The membership sweep is Task 3's hygiene pass (spec — Phase 5b): a member
- * who never returns must not sit `active` forever, but nothing about noticing that is
- * urgent, so it shares the renewal/churn/media cadence rather than inventing a fifth
- * interval knob nobody would ever have reason to set differently — see
- * `apps/worker/src/main.ts`'s own docstring for the same reasoning about the media
- * sweep, and Task 5's pending-checkout cleanup shares it for the identical reason.
+ * FIVE LOOPS, not one pass that does everything, for one reason: a pass that throws
+ * every time — a query the schema no longer matches, say — must not also stop the
+ * others from running. That matters most for the user-stream sweep, for a reason
+ * specific to Phase 7: a lost `user_stream` lifecycle webhook leaves a creator
+ * permanently unable to go live again (see `MAX_USER_STREAM_MS`'s own docstring), so
+ * the ONE pass that fixes that must keep running even on a box where, say, the
+ * membership-reminder query has started failing for an unrelated reason. Each loop's
+ * `onError` is its own, so a failing pass costs its own retries and nothing else's.
+ *
+ * All five share an interval because they share a cadence — none of them is
+ * latency-sensitive the way the outbox's 5-second poll is, and in every case it is the
+ * pass's OWN window rather than this cadence that protects the thing it sweeps: the
+ * pending-checkout cleanup's `STALE_PENDING_CHECKOUT_WINDOW_MS`, the user-stream
+ * sweep's `MAX_USER_STREAM_MS`, the orphan sweep's `ORPHAN_SWEEP_WINDOW_MS`. The
+ * membership sweep is Task 3's hygiene pass (spec — Phase 5b): a member who never
+ * returns must not sit `active` forever, but nothing about noticing that is urgent, so
+ * it shares this cadence rather than inventing an interval knob nobody would ever have
+ * reason to set differently. Retire-telegram Task 4 deleted the renewal and churn
+ * loops this shared cadence was originally chosen for; see
+ * `DEFAULT_RENEWAL_INTERVAL_MS` for why the knob keeps their name.
  *
  * Per-row failures never reach this level at all: `SweepOrphanMedia`,
  * `SweepExpiredMemberships`, `RemindExpiringMembership`, `SweepStalePendingCheckouts`
  * and `SweepStaleUserStreams` each catch them internally (see their own docstrings),
  * so `onError` here only fires on something the pass-level query itself could not
- * survive, same as renewals/churn.
+ * survive.
  *
  * No loop is started here. The caller runs them alongside the outbox loop and decides
  * when they stop.
  */
 export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
-  renewalLoop: PollLoop;
-  churnLoop: PollLoop;
   orphanSweepLoop: PollLoop;
   membershipSweepLoop: PollLoop;
   membershipReminderLoop: PollLoop;
@@ -1088,34 +1016,16 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
   const log = options.log ?? ((line: string) => console.log(line));
   const logError = options.logError ?? ((line: string) => console.error(line));
 
-  const renewalLoop = new PollLoop({
-    intervalMs: options.intervalMs,
-    poll: async () => {
-      const line = formatRenewalPassLine(await options.processRenewals.execute());
-      if (line !== null) log(line);
-    },
-    // A failed PASS is not a failed subscription: whatever this pass did not claim is
-    // still in the database, unclaimed, and the next pass is its retry. Never
-    // rethrown — an unhandled rejection here would take the whole process down,
-    // including the outbox loop that delivers what payments have already bought.
-    onError: (err) => logError(formatPassFailure("renewals", err)),
-  });
-
-  const churnLoop = new PollLoop({
-    intervalMs: options.intervalMs,
-    poll: async () => {
-      const line = formatChurnPassLine(await options.processChurn.execute());
-      if (line !== null) log(line);
-    },
-    onError: (err) => logError(formatPassFailure("churn", err)),
-  });
-
   const orphanSweepLoop = new PollLoop({
     intervalMs: options.intervalMs,
     poll: async () => {
       const line = formatOrphanSweepLine(await options.processOrphanSweep.execute());
       if (line !== null) log(line);
     },
+    // A failed PASS is not a failed row: whatever this pass did not claim is still in
+    // the database, unclaimed, and the next pass is its retry. Never rethrown — an
+    // unhandled rejection here would take the whole process down, including the outbox
+    // loop.
     onError: (err) => logError(formatPassFailure("media", err)),
   });
 
@@ -1158,8 +1068,6 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
   });
 
   return {
-    renewalLoop,
-    churnLoop,
     orphanSweepLoop,
     membershipSweepLoop,
     membershipReminderLoop,

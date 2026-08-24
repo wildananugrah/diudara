@@ -2,15 +2,23 @@
  * Signed, time-limited tokens that gate a read of ONE PERSON'S live stream —
  * Phase 7's `user_stream`, design spec §5.
  *
- * A SEPARATE MODULE FROM `watch-token.ts`, DELIBERATELY, and this is the one
- * decision here worth defending. `watch-token.ts` serves the community
- * `event` world, which Phase 8 deletes; widening it to also carry a
- * `viewerId`/`streamId` pair would couple a thing being removed to a thing
- * being built, and the removal would then have to disentangle them under time
- * pressure. So the two live side by side until the old one goes, and the
- * short duplication below (an HMAC, a base64url payload, a constant-time
- * compare) is the price of that separation — the same trade `ResolveWatchToken`
- * already documents for `ENTITLED_STATUS`.
+ * THE ONLY WATCH-TOKEN MODULE IN THIS CODEBASE, as of retire-telegram Task 3.
+ * It was written as a SEPARATE module from `watch-token.ts` deliberately —
+ * that one served the community `event` world Phase 8 was about to delete, and
+ * widening it to also carry a `viewerId`/`streamId` pair would have coupled a
+ * thing being removed to a thing being built, leaving the removal to
+ * disentangle them under time pressure. The price of that separation was a
+ * short duplication: an HMAC, a base64url payload, a constant-time compare,
+ * carried twice.
+ *
+ * THAT DUPLICATION IS GONE, AND IT RESOLVED BY SUBTRACTION rather than by
+ * anybody extracting a shared helper. Task 3 deleted `watch-token.ts` with the
+ * world it gated, which left these ~15 lines as the only copy — so there is
+ * nothing here to de-duplicate and no refactor owed. The plan worked exactly
+ * as intended: the deletion touched one file and this one did not move. Two
+ * comments further down still credit `watch-token.ts` for a fix and a
+ * contract this module INHERITED from it; they name a file that no longer
+ * exists on purpose, because where a guard came from is why it is trusted.
  *
  * WHAT IT PROVES, AND WHAT IT DOES NOT. It names WHO the request is for
  * (`viewerId`) and WHICH stream it opens (`streamId`), at MINT time.
@@ -130,18 +138,23 @@ export function verifyUserWatchToken(input: {
   if (!encoded || !signature) return null;
 
   const expected = sign(encoded, input.secret);
-  // Compare BYTE length, not JS string length — inherited verbatim from
-  // `watch-token.ts`, which shipped the fix after a crafted signature with one
-  // multi-byte character (43 JS characters, 44 bytes) reached `timingSafeEqual`
-  // with mismatched buffer sizes and threw `RangeError` straight out of a
-  // function contracted never to throw. Same primitive, same hazard, same
-  // guard; `user-watch-token.test.ts` carries the same case.
+  // Compare BYTE length, not JS string length — inherited verbatim from the
+  // now-deleted `watch-token.ts`, which shipped the fix after a crafted
+  // signature with one multi-byte character (43 JS characters, 44 bytes)
+  // reached `timingSafeEqual` with mismatched buffer sizes and threw
+  // `RangeError` straight out of a function contracted never to throw. Same
+  // primitive, same hazard, same guard; `user-watch-token.test.ts` carries the
+  // case, which is what keeps this line honest now that the file it was
+  // learned in is gone.
   const signatureBytes = Buffer.from(signature);
   const expectedBytes = Buffer.from(expected);
   if (signatureBytes.length !== expectedBytes.length) return null;
-  // Backstop, not the primary defence — see `watch-token.ts` for why a
-  // "never throws" contract does not get to depend on this file having
-  // enumerated every way `timingSafeEqual` can reject its inputs.
+  // Backstop, not the primary defence. The length check above is: this catch
+  // exists because a "never throws" contract does not get to depend on this
+  // file having enumerated every way `timingSafeEqual` can reject its inputs.
+  // (The reasoning was originally written out in `watch-token.ts`, deleted with
+  // the community world — restated here rather than left as a dangling
+  // pointer.)
   let signaturesMatch: boolean;
   try {
     signaturesMatch = timingSafeEqual(signatureBytes, expectedBytes);

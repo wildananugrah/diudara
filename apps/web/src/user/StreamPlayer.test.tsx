@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import StreamPlayer, {
   defaultAttachHls,
+  withToken,
   type AttachHls,
   type AttachHlsInput,
   type StreamPlayerHandle,
@@ -11,11 +12,52 @@ import { UserApiError, type StreamView, type WatchTokenResult } from "./apiClien
 afterEach(() => cleanup());
 
 /**
+ * Retire-telegram Task 1, fix round 1 (review Major 2). Ported verbatim
+ * from `pages/WatchPage.test.tsx`'s own
+ * `describe("withToken — the exact re-attachment logic MediaMTX's
+ * per-request auth depends on")`, deleted along with that file. The
+ * function body that moved into `StreamPlayer.tsx` is byte-identical to
+ * the original, but its only direct test coverage was not — and the
+ * branch that actually depends on this behaviour (`xhrSetup` in
+ * `defaultAttachHls` below, on every segment request) is unreachable
+ * under happy-dom, so these pure-function tests are the only guard this
+ * behaviour has at all. In particular, "preserves the path and any OTHER
+ * query parameters already on the URL" is the one that would have caught
+ * a naive `url.split("?")[0] + "?token=" + token` rewrite — which
+ * destroys a pre-existing `?session=` the same way it destroys `?m=1234`
+ * here — while leaving the rest of this file's suite green.
+ */
+describe("withToken — the exact re-attachment logic MediaMTX's per-request auth depends on", () => {
+  it("appends the token as a query parameter to a bare URL", () => {
+    const result = withToken("https://hls.diudara.test/live/key/index.m3u8", "tok-1");
+    expect(result).toBe("https://hls.diudara.test/live/key/index.m3u8?token=tok-1");
+  });
+
+  it("OVERWRITES an existing token rather than duplicating the parameter", () => {
+    const result = withToken("https://hls.diudara.test/live/key/index.m3u8?token=stale", "tok-2");
+    const url = new URL(result);
+    expect(url.searchParams.getAll("token")).toEqual(["tok-2"]);
+  });
+
+  it("preserves the path and any OTHER query parameters already on the URL", () => {
+    const result = withToken("https://hls.diudara.test/live/key/seg-0.ts?m=1234", "tok-3");
+    const url = new URL(result);
+    expect(url.pathname).toBe("/live/key/seg-0.ts");
+    expect(url.searchParams.get("m")).toBe("1234");
+    expect(url.searchParams.get("token")).toBe("tok-3");
+  });
+
+  it("resolves a relative URL against the current origin — the shape a segment URL inside a playlist can take", () => {
+    const result = withToken("/live/key/seg-1.ts", "tok-4");
+    expect(result).toContain("/live/key/seg-1.ts?token=tok-4");
+  });
+});
+
+/**
  * `StreamPlayer` owns the re-mint loop — the task brief's own words: "a
  * player that mints once and never again works for ten minutes and then
  * fails SILENTLY." Every test here injects `attachHls` and `mintToken`
- * rather than touching real `hls.js` or a real network call, the identical
- * shape `WatchPage.test.tsx` uses for `attachPlayer` — happy-dom has no
+ * rather than touching real `hls.js` or a real network call — happy-dom has no
  * `MediaSource`, so a real `hls.js` attach is not exercisable in this
  * environment at all, and none of this suite's own guarantees (mint order,
  * re-mint timing, cleanup) depend on `hls.js` internals.
@@ -142,9 +184,7 @@ function recordingNativeAttach(): {
  * always answers `""` from `canPlayType(...)` (confirmed empirically; there
  * is no native HLS engine in this test environment at all), so a test that
  * needs `defaultAttachHls` to actually TAKE the native branch has to hand it
- * an object that reports canPlayType truthily, the same idea
- * `WatchPage.test.tsx`'s own `safariLikeVideo()` helper uses for
- * `choosePlaybackStrategy`. `Hls.isSupported()` itself is `false` in this
+ * an object that reports canPlayType truthily. `Hls.isSupported()` itself is `false` in this
  * environment regardless (no `MediaSource`), so `defaultAttachHls` reaches
  * this branch's `canPlayType` check for ANY video object passed to it here.
  */
@@ -670,11 +710,10 @@ describe("defaultAttachHls — the native branch re-reads the token (fix round 1
 
     expect(handle).not.toBeNull();
     expect(srcHistory.length).toBe(1);
-    // `withToken` resolves a relative URL against the current origin (see
-    // its own docstring in `pages/WatchPage.tsx`) — matched with `toContain`
-    // for the same reason `WatchPage.test.tsx`'s own equivalent test does:
-    // the origin string itself is an environment detail, not what this test
-    // is pinning.
+    // `withToken` (defined locally in StreamPlayer.tsx — see its own
+    // docstring) resolves a relative URL against the current origin —
+    // matched with `toContain` because the origin string itself is an
+    // environment detail, not what this test is pinning.
     expect(srcHistory[0]).toContain("/u/stream-1/index.m3u8?token=tok-1");
     expect(new URL(srcHistory[0]!, "http://localhost").searchParams.get("token")).toBe("tok-1");
     expect(loadCount()).toBe(1);

@@ -12,13 +12,15 @@ import type {
  */
 export class FakePaymentAdapter implements PaymentProviderPort {
   readonly invoices: CreateInvoiceInput[] = [];
-  readonly accounts: { creatorId: string; accountId: string }[] = [];
+  readonly accounts: { ownerId: string; accountId: string }[] = [];
   failNextInvoice = false;
   /**
    * Makes the next `createPaymentAccount` throw. Exists so a test can exercise
-   * `CreatePaymentAccount`'s release-the-claim path: since Task 7 the creator's
-   * row is claimed with a sentinel BEFORE this call, so a provider failure that
-   * did not release the claim would wedge the creator permanently.
+   * a caller's release-the-claim path: the row is claimed with a sentinel
+   * BEFORE this call, so a provider failure that did not release the claim
+   * would wedge that owner permanently. `ConnectUserPayout` is the caller
+   * today; the creator-side `CreatePaymentAccount` this was first written for
+   * went with `POST /payment-account` in retire-telegram Task 7's fix round.
    */
   failNextPaymentAccount = false;
   /**
@@ -37,7 +39,7 @@ export class FakePaymentAdapter implements PaymentProviderPort {
   failNextInvoiceExpiry = false;
 
   async createPaymentAccount(input: {
-    creatorId: string;
+    ownerId: string;
     email: string;
     name: string;
   }): Promise<{ accountId: string }> {
@@ -45,8 +47,8 @@ export class FakePaymentAdapter implements PaymentProviderPort {
       this.failNextPaymentAccount = false;
       throw new Error("fake payment provider: createPaymentAccount failed");
     }
-    const accountId = `fake-acct-${this.accounts.length + 1}-${input.creatorId}`;
-    this.accounts.push({ creatorId: input.creatorId, accountId });
+    const accountId = `fake-acct-${this.accounts.length + 1}-${input.ownerId}`;
+    this.accounts.push({ ownerId: input.ownerId, accountId });
     return { accountId };
   }
 

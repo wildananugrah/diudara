@@ -1,8 +1,11 @@
 // Drives a REAL RTCPeerConnection (real Chromium, via Playwright) through
 // whatever nginx origin it is pointed at, performing manual WHIP negotiation
-// against the /whip/<streamKey> location infra/nginx/live-hls.conf.template
-// adds — see run.sh in this directory for how to stand up that nginx
-// container and how to get a real streamKey to pass here.
+// against the `^~ /whip/u/<streamKey>` location
+// infra/nginx/live-hls.conf.template adds — see run.sh in this directory for
+// how to stand up that nginx container and how to get a real streamKey to pass
+// here. (It targeted the community world's bare `/whip/<streamKey>` until
+// retire-telegram Task 7 deleted that location; the negotiation itself is
+// unchanged, only the public prefix it POSTs to.)
 //
 // This is the harness that produced the "RESULT: { ... }" JSON quoted in
 // task-1-report.md's "Second run: through the new nginx /whip/ location"
@@ -79,7 +82,7 @@ const result = await page.evaluate(
     videoStream.getVideoTracks().forEach((t) => pc.addTrack(t, videoStream));
     dest.stream.getAudioTracks().forEach((t) => pc.addTrack(t, dest.stream));
 
-    // Mirrors `preferH264` in apps/web/src/dashboard/whip-publisher.ts —
+    // Mirrors `preferH264` in apps/web/src/user/whip-publisher.ts —
     // MUST run before `createOffer`, same as the shipped module, since
     // `setCodecPreferences` only affects offers built after it. Without
     // this, Chromium's default video codec preference (VP8) is what gets
@@ -133,7 +136,7 @@ const result = await page.evaluate(
       setTimeout(resolve, 4000); // don't hang forever waiting for gathering
     });
 
-    const whipUrl = `${nginxOrigin}/whip/${streamKey}`;
+    const whipUrl = `${nginxOrigin}/whip/u/${streamKey}`;
     const postRes = await fetch(whipUrl, {
       method: "POST",
       headers: { "Content-Type": "application/sdp" },

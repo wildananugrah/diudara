@@ -158,8 +158,8 @@ export function postRoutes(
 
   // Review round 1, I3: an `:id` that is not a uuid used to reach
   // `ownershipOf`, which queries a uuid column — Postgres throws and the
-  // request 500s with the failing SQL on stderr. `validateParams` (the same
-  // idiom `routes/communities.ts`'s `/:id` uses) rejects it as a 400 before
+  // request 500s with the failing SQL on stderr. `validateParams` (whose own
+  // docstring in `http/validate.ts` carries the idiom) rejects it as a 400 before
   // any repository call, matching how a malformed `?before=` is already
   // handled: a bad id is a bad request, not a silent reinterpretation. A
   // well-formed but UNKNOWN uuid still reaches the use case and 404s there.

@@ -3,8 +3,8 @@
  * their hash — never their plaintext.
  *
  * Pure module: no imports from `application/` or `infrastructure/`, no
- * database, no clock — mirrors `domain/watch-token.ts` in that discipline,
- * though unlike that module this one is not itself signed. A reset token is
+ * database, no clock — mirrors `domain/user-watch-token.ts` in that
+ * discipline, though unlike that module this one is not itself signed. A reset token is
  * a bare random secret whose only proof of validity is "the database has a
  * row whose hash matches, unexpired and unused" — there is no payload to
  * verify offline, so there is nothing here for a `verify` function to do.
@@ -25,8 +25,8 @@ export const RESET_TOKEN_TTL_MS = 30 * 60 * 1000;
  * NOT a uuid. A uuid's job is to identify a row cheaply and uniquely; it is
  * not drawn from a CSPRNG and several of its bits are fixed by the version,
  * so it is unsuitable as a bearer secret. `randomBytes` from `node:crypto`
- * is the CSPRNG this process already trusts `HonoJwtTokenIssuer` and
- * `watch-token.ts` to sit on top of.
+ * is the CSPRNG this process already trusts `HonoJwtUserTokenIssuer` and
+ * `user-watch-token.ts` to sit on top of.
  */
 const TOKEN_BYTES = 32;
 

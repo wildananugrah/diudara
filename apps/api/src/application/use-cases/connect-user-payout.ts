@@ -76,13 +76,12 @@ export class ConnectUserPayout {
     let accountId: string;
     try {
       ({ accountId } = await this.payments.createPaymentAccount({
-        // An app_user id in a field called `creatorId`. The name is historical
-        // and NOT a claim that this is a creator — see
-        // `CreatePaymentAccountInput`, which now documents that this field is the
-        // OWNER's id (`creator.id` or `app_user.id`) and must never be joined to
-        // `creator`. Renaming it would edit the frozen creator flow to no
-        // functional end.
-        creatorId: user.id,
+        // `ownerId` was `creatorId` until retire-telegram Task 7's fix round 2.
+        // The old name was kept because renaming it would have edited the frozen
+        // creator flow; fix round 1 deleted that flow, so it was renamed to what
+        // it always held — see `CreatePaymentAccountInput`. Nothing stored
+        // changed: a field name, not a value.
+        ownerId: user.id,
         email: user.email,
         name: user.displayName,
       }));

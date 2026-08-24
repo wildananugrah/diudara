@@ -46,10 +46,12 @@ function sourceFiles(dir: string): string[] {
 
 /**
  * `fetch(`, `apiFetch(`/`apiFetch<T>(`, `apiRequest(`, `publicPost(`,
- * `publicGet(` — the FIVE call sites this app ever reaches the network
- * through (see `user/apiClient.ts` and `dashboard/apiClient.ts`, which both
- * define `apiFetch`/`apiRequest` in terms of a bare `fetch`, and `api.ts`'s
- * own direct `fetch` calls for the public checkout surface).
+ * `publicGet(` — the network call sites this app reaches through (see
+ * `user/apiClient.ts`, which defines `apiFetch`/`apiRequest` in terms of a
+ * bare `fetch`). Retire-telegram Task 1 deleted `dashboard/apiClient.ts` and
+ * `api.ts`'s own direct-`fetch` public-checkout functions along with the
+ * rest of the old creator dashboard — `user/apiClient.ts` is the only
+ * definer of `apiFetch`/`apiRequest` left in the tree.
  * `publicGet` (Task 5, review round 2 — Important 4) backs every public GET
  * `apiClient.ts` makes for following/Jelajah (`listFollowers`,
  * `listFollowing`, `exploreUsers`) — omitting it here left this guard blind
@@ -57,9 +59,7 @@ function sourceFiles(dir: string): string[] {
  * still reported every check green, exactly the failure mode this file
  * exists to catch. Captures the literal path argument — a plain string or a
  * template literal — and deliberately does NOT match a bare identifier
- * (`fetch(url, init)` in `user/whip-publisher.ts` — moved there from
- * `dashboard/whip-publisher.ts` by Task 8 of the streaming-siaran phase,
- * since Phase 8 deletes the directory it used to live in — is exactly that: an
+ * (`fetch(url, init)` in `user/whip-publisher.ts` is exactly that: an
  * absolute URL handed in from elsewhere, not a same-origin app path, and
  * has nothing here to proxy).
  */
@@ -74,7 +74,7 @@ function literalPath(raw: string): string | null {
   return path.startsWith("/") ? path : null;
 }
 
-/** The first path segment — `/communities` from `/communities/${id}/members.csv`. */
+/** The first path segment — `/users` from `/users/${handle}/posts`. */
 function firstSegment(path: string): string {
   const match = /^\/[^/]+/.exec(path);
   return match ? match[0] : path;
@@ -102,7 +102,7 @@ function fetchedPrefixes(): Set<string> {
  * which a plain grep finds reliably. Restricted to lines whose VALUE starts
  * an object or an `"http` string, so this cannot accidentally match a
  * quoted path mentioned only in a comment (this file has several, e.g.
- * `` `/c/some-slug` `` — backtick-quoted, not double-quoted, so it never
+ * `` `/users/...` `` — backtick-quoted, not double-quoted, so it never
  * matches this pattern regardless).
  */
 const PROXY_ENTRY = /^\s*"(\^?\/[^"]+)"\s*:\s*(?:\{|"http)/gm;
@@ -114,16 +114,63 @@ function proxyKeys(): string[] {
 
 /**
  * Whether some proxy key would forward a request for `prefix`. A `^`-led
- * key is the regex form `vite.config.ts` uses for the three segment-precise
- * entries (`^/c/`, `^/users/`); tested against `prefix + "/"` so `^/c/`
- * matches the derived prefix `/c` the same way it matches a real request to
- * `/c/some-slug`. A plain key is the string form every other entry uses,
- * matched by exact equality — every derived prefix here is already reduced
- * to a single leading path segment, which is exactly the shape those keys
- * are written in (`/auth`, `/communities`, `/ai`, …).
+ * key is the regex form `vite.config.ts` uses for its segment-precise entry
+ * (`^/users/`, the only one left after retire-telegram Task 4 removed
+ * `^/c/`); tested against `prefix + "/"` so `^/users/` matches the derived
+ * prefix `/users` the same way it matches a real request to
+ * `/users/by-handle/wildan`. A plain key is the string form every other entry
+ * uses, matched by exact equality — every derived prefix here is already
+ * reduced to a single leading path segment, which is exactly the shape those
+ * keys are written in (`/auth`, `/payment-account`, `/streams`, …).
  */
 function isCovered(prefix: string, keys: string[]): boolean {
   return keys.some((key) =>
+    key.startsWith("^") ? new RegExp(key).test(`${prefix}/`) : key === prefix
+  );
+}
+
+/**
+ * THE OTHER DIRECTION, and the blind spot this file shipped with (found by
+ * retire-telegram Task 7's sweep). Every check above asks "does each prefix
+ * the app FETCHES have an entry?" — nothing asked whether each ENTRY still
+ * forwards something. So when Task 3 deleted the streaming pages and Task 4
+ * deleted `/communities`, `/ai` and `^/c/`, FOUR proxy entries went stale
+ * pointing at API paths that no longer existed and this file stayed green
+ * through all of it. A stale entry is much less dangerous than a missing one
+ * (it forwards a request nobody makes), but it is a dangling reference in an
+ * executable file, and the whole reason this guard exists is that dead entries
+ * here are invisible to every other check in the repo.
+ *
+ * The rule: every proxy key must be a prefix this app actually fetches, OR be
+ * listed below with a reason. `/streaming` would have failed it the moment
+ * `StreamingPage` was deleted, because the deletion removed its last caller.
+ *
+ * DELIBERATELY AN ALLOW-LIST OF KEYS, NOT OF REASONS: adding an entry the app
+ * never calls costs a line here and a sentence saying why, which is exactly
+ * the friction that keeps a stale one from being re-justified in passing.
+ */
+const NOT_FETCHED_BY_THIS_APP: Record<string, string> = {
+  // apps/api's `/webhooks` — Xendit calls it from the internet, never this
+  // app. Proxied so a webhook can be replayed against the dev origin by hand
+  // (`curl localhost:5173/webhooks/...`) instead of remembering :3000.
+  "/webhooks": "inbound provider callbacks; no browser caller by design",
+  // ONE ENTRY, AND THAT IS THE POINT. This list opened with three: `/auth`
+  // (the old creator login) and `/payment-account` (a creator's Xendit
+  // onboarding) sat here for one commit, written down as "API surface with no
+  // surviving web caller". That framing was wrong. They were not surface to
+  // keep — they were two dead apps/api mounts, and a documented exception
+  // would have given them a permanent home. Retire-telegram Task 7's fix round
+  // deleted both routes, all four use cases behind them,
+  // `CreatorRepositoryPort` and its Drizzle adapter, the creator token issuer
+  // and the creator `requireAuth` middleware. The reverse check below is what
+  // surfaced them; an exception belongs here only for a key that genuinely has
+  // no browser caller BY DESIGN, like the one above.
+};
+
+/** Whether `key` forwards something this app fetches, or is an accounted-for exception. */
+function isJustified(key: string, prefixes: Set<string>): boolean {
+  if (key in NOT_FETCHED_BY_THIS_APP) return true;
+  return [...prefixes].some((prefix) =>
     key.startsWith("^") ? new RegExp(key).test(`${prefix}/`) : key === prefix
   );
 }
@@ -145,9 +192,45 @@ describe("vite proxy coverage", () => {
     // nothing, the test above would pass vacuously. Pinning that `/users`
     // specifically is found keeps this tied to the incident that motivated
     // it (Task 6's missing `^/users/` entry).
+    //
+    // Retire-telegram Task 1: this threshold used to be `> 3` — it counted
+    // every prefix `api.ts` and `dashboard/apiClient.ts` reached (`/c`,
+    // `/auth`, `/communities`, `/payment-account`, …) before Phase 8 deleted
+    // both files along with every screen that called them. `/users` and
+    // `/streams` are the only two fetch families left in the surviving
+    // `apps/web/src` tree, so `> 1` is what "finds more than one real
+    // prefix, not just a coincidental single match" now means — still a
+    // guard against the extraction matching nothing or matching only one
+    // degenerate case.
     const prefixes = fetchedPrefixes();
-    expect(prefixes.size).toBeGreaterThan(3);
+    expect(prefixes.size).toBeGreaterThan(1);
     expect(prefixes.has("/users")).toBe(true);
+  });
+
+  it("has no proxy entry that forwards nothing — every key is fetched by this app or listed as an exception", () => {
+    const prefixes = fetchedPrefixes();
+    const unjustified = proxyKeys()
+      .filter((key) => !isJustified(key, prefixes))
+      .sort();
+
+    // Printed as strings: a key here is an entry pointing at an API path this
+    // app stopped calling — the state `/streaming` sat in, unreported, from
+    // Task 3 until Task 4 happened to remove it.
+    expect(unjustified).toEqual([]);
+  });
+
+  it("detects a stale proxy entry — the mutation the reverse check exists to catch", () => {
+    // Simulates `/streaming` still being in the table after the pages that
+    // fetched it were deleted: a key that is neither fetched nor excepted.
+    // Run against the same `isJustified` the test above uses, so this pins the
+    // real logic rather than a restatement of it.
+    expect(isJustified("/streaming", fetchedPrefixes())).toBe(false);
+    // And the exception list — one entry, `/webhooks` — is what makes that key
+    // pass, not a loophole in the matching. Deleting it from
+    // `NOT_FETCHED_BY_THIS_APP` must turn the check above red; this asserts the
+    // half of that which a test can assert without editing itself.
+    expect("/webhooks" in NOT_FETCHED_BY_THIS_APP).toBe(true);
+    expect(isJustified("/webhooks", new Set(["/users", "/streams"]))).toBe(true);
   });
 
   it("detects an uncovered prefix when a proxy entry is missing — the mutation this test exists to catch", () => {

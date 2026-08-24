@@ -1,35 +1,28 @@
 import { Hono } from "hono";
 import { healthRoute } from "./routes/health";
-import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
 import { postRoutes } from "./routes/posts";
 import { mediaRoutes } from "./routes/media";
-import { communityRoutes } from "./routes/communities";
-import { tierRoutes } from "./routes/tiers";
-import { channelRoutes } from "./routes/channels";
-import { membershipRoutes } from "./routes/memberships";
-import { joinRequestRoutes } from "./routes/join-requests";
-import { analyticsRoutes } from "./routes/analytics";
-import { paymentAccountRoutes } from "./routes/payment-account";
-import { publicCommunityRoutes } from "./routes/public-community";
-import { publicSubscriptionRoutes } from "./routes/public-subscription";
 import { webhookRoutes } from "./routes/webhooks";
 import { mediamtxWebhookRoutes } from "./routes/mediamtx-webhooks";
-import { aiRoutes } from "./routes/ai";
-import { eventRoutes } from "./routes/events";
-import { streamingRoutes } from "./routes/streaming";
 import { streamRoutes } from "./routes/streams";
 import { errorHandler } from "./http/error-handler";
-import type { AuthVariables } from "./http/auth.middleware";
+import type { UserAuthVariables } from "./http/user-auth.middleware";
 import type { Dependencies } from "./bootstrap";
 
 export function createApp(deps: Dependencies) {
-  const app = new Hono<{ Variables: AuthVariables }>();
+  const app = new Hono<{ Variables: UserAuthVariables }>();
   app.onError(errorHandler);
   app.route("/health", healthRoute(deps));
-  app.route("/auth", authRoutes(deps));
-  // Phase 9's personal accounts — distinct from creator auth above. A
-  // separate top-level path, so mount order relative to /auth does not matter.
+  // Phase 9's personal accounts. Retire-telegram Task 7's fix round deleted
+  // the `/auth` mount that used to sit directly above this one — the OLD
+  // creator login (`registerCreator`/`authenticateCreator`, the `creator`
+  // table) — along with `/payment-account`, the creator's Xendit onboarding.
+  // Task 1 deleted the dashboard that was the only caller of either, so both
+  // had been unreachable for six tasks. Their whole audience went with them:
+  // there is one token issuer left, one auth middleware, and `AuthVariables`
+  // (which carried `creatorId`) is replaced here by `UserAuthVariables`, the
+  // generic every surviving router below already used.
   //
   // TWO routers share this one prefix, deliberately (Task 2 of
   // posts-and-feed): mounting `postRoutes` here rather than growing
@@ -66,16 +59,6 @@ export function createApp(deps: Dependencies) {
   // shadow it. Mount order relative to `postRoutes` does not matter: neither
   // router declares a literal segment the other one does.
   app.route("/users", mediaRoutes(deps));
-  app.route("/payment-account", paymentAccountRoutes(deps));
-  // Mounted before publicCommunityRoutes: /c/:slug is a single path segment,
-  // while this route's literal "subscription"/"watch" prefixes and their
-  // multi-segment shapes never collide with it — but ordering it first makes
-  // that reasoning visible instead of relying on segment-count math staying
-  // true forever. A community whose slug is literally "watch" or
-  // "subscription" would be shadowed by this route; slug allocation has no
-  // reserved-word list today, and this is one more reason it should.
-  app.route("/c", publicSubscriptionRoutes(deps));
-  app.route("/c", publicCommunityRoutes(deps));
   // Public by design and authenticated by X-CALLBACK-TOKEN instead of a bearer
   // token — see routes/webhooks.ts. Never put this behind requireAuth.
   app.route("/webhooks", webhookRoutes(deps));
@@ -83,50 +66,25 @@ export function createApp(deps: Dependencies) {
   // webhook (`/lifecycle`). Public by design and authenticated the same way
   // as the routes above — a shared secret (a `secret` query parameter or
   // X-Mediamtx-Secret header) rather than a bearer token — so never put
-  // either behind requireAuth. A distinct path prefix from /webhooks/xendit
-  // and /webhooks/telegram, so mount order relative to webhookRoutes above
-  // does not matter.
+  // either behind requireAuth. A distinct path prefix from /webhooks/xendit,
+  // so mount order relative to webhookRoutes above does not matter.
   app.route("/webhooks/mediamtx", mediamtxWebhookRoutes(deps));
-  // Nested routes for tiers/channels (Tasks 10, 11) mount at
-  // /communities/:communityId/tiers and /communities/:communityId/channels.
-  // They must be registered BEFORE this line so the more specific path
-  // matches first — keep this route the last one mounted under /communities.
-  app.route("/communities/:communityId/tiers", tierRoutes(deps));
-  app.route("/communities/:communityId/channels", channelRoutes(deps));
-  app.route("/communities/:communityId/members", membershipRoutes(deps));
-  // Task 4 of free communities: the owner's decisions on free-community join
-  // requests. Same reason as tiers/channels/members above: it must be
-  // registered before the catch-all /communities mount so this more specific
-  // path matches first.
-  app.route("/communities/:communityId/join-requests", joinRequestRoutes(deps));
-  // Task 3's scheduling endpoint. Same reason as tiers/channels above: it must
-  // be registered before the catch-all /communities mount so this more
-  // specific path matches first.
-  app.route("/communities/:communityId/events", eventRoutes(deps));
-  // Phase 6's dashboard reads: /communities/:communityId/metrics, /activity,
-  // /members and /members.csv. Mounted at /communities rather than at
-  // /communities/:communityId because `members.csv` is a SIBLING path segment of
-  // `members`, so it falls outside the membershipRoutes mount above.
-  //
-  // Its middleware is per-route, never `use("*")` — a `*` under /communities also
-  // matches /communities itself, so a communityId check there would 400 the
-  // community list and create endpoints. See routes/analytics.ts.
-  app.route("/communities", analyticsRoutes(deps));
-  app.route("/communities", communityRoutes(deps));
-  // Phase 7's AI co-builder chat. A distinct top-level path, so mount order
-  // relative to /communities does not matter.
-  app.route("/ai", aiRoutes(deps));
-  // Task 7's "is live streaming configured" flag — GET /streaming/status,
-  // the same shape as /ai/status above. A distinct top-level path (the flag
-  // is not community-scoped), so mount order does not matter here either.
-  app.route("/streaming", streamingRoutes(deps));
   // Phase 7's Siaran (Task 3): GET /streams (public), POST /streams and
-  // DELETE /streams/:id (a person's own broadcast). A distinct top-level path
-  // — /streams, plural — from /streaming above, whose single route is the
-  // dashboard's "is live streaming configured" flag for the OLD, community
-  // world. Neither is a prefix of the other, so mount order does not matter
-  // here; the near-identical names are worth reading twice before adding a
-  // route to either.
+  // DELETE /streams/:id (a person's own broadcast). A distinct top-level path,
+  // and since retire-telegram Task 3 deleted /streaming (the dashboard's "is
+  // live streaming configured" flag for the OLD, community world) it is no
+  // longer one careless read away from a near-identical sibling.
+  //
+  // Retire-telegram Task 4 removed every remaining mount that used to sit
+  // between this one and /webhooks/mediamtx above — /c (twice, for the public
+  // community page and the public checkout/status pair), /communities,
+  // /communities/:communityId/tiers and /ai — along with the ordering rules
+  // that governed them: the /c pair's slug-shadowing note, and the rule that
+  // kept the nested tier mount ahead of the catch-all /communities one. Every
+  // prefix left in this file is distinct at its first segment except /users,
+  // whose three routers keep the ordering rule documented above them, so no
+  // mount order below /users is load-bearing any more. `app.test.ts` pins the
+  // whole set.
   app.route("/streams", streamRoutes(deps));
   return app;
 }

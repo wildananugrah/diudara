@@ -9,9 +9,10 @@ import { UniqueRule } from "../../application/errors";
 import { rethrowUniqueViolation } from "./pg-errors";
 
 /**
- * Same literal, same reasoning, as `drizzle-event.repository.ts`'s own copy:
- * a value that is not a uuid at all must be a MISS, not a Postgres
- * `invalid input syntax for type uuid` that becomes a 500.
+ * A value that is not a uuid at all must be a MISS, not a Postgres
+ * `invalid input syntax for type uuid` that becomes a 500. The retired
+ * community `event` repository carried the identical literal for the
+ * identical reason; this is the copy that outlived it.
  *
  * Task 4 is what made this load-bearing here rather than merely tidy.
  * nginx's `^~ /u/` location captures the id straight out of the PUBLIC
@@ -128,8 +129,9 @@ export class DrizzleUserStreamRepository implements UserStreamRepositoryPort {
 
   async endById(id: string, endedAt: Date): Promise<UserStreamRow | null> {
     // `status = LIVE_STATUS` is IN the predicate, not read first — the same
-    // atomic-predicate shape as `DrizzleEventRepository.markEnded`, and for
-    // the same reason: it is what makes the transition safe under a
+    // atomic-predicate shape the retired community `event` repository used
+    // for its own `markEnded`, and for the same reason: it is what makes the
+    // transition safe under a
     // flapping lifecycle webhook, or the hourly sweep racing the webhook
     // for the same row. Only the caller that actually flips the status gets
     // a non-null result back; a repeat call is a no-op.

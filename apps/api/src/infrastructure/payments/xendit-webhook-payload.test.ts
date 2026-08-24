@@ -150,54 +150,38 @@ describe("parseXenditInvoiceCallback", () => {
 });
 
 /**
- * MINOR, final whole-branch review: the callback's `payment_method` was
- * discarded and every transaction kept the literal "invoice" StartCheckout
- * created it with. The dashboard phase needs to know how members actually pay.
+ * The parser reads FIVE fields and ignores every other key in the body.
+ *
+ * That is not laxity, it is the rule that keeps a genuine payment from being
+ * refused: a `ValidationError` for an unexpected or unusable field would 400 a
+ * real PAID callback, and the member who paid would never be activated. Xendit
+ * sends a large body and adds to it over time, and the whole thing is kept
+ * verbatim on `webhook_event.payload` anyway.
+ *
+ * Retire-telegram Task 5 removed the one field that used to be read beyond those
+ * five, `payment_method` — captured for `transaction.payment_method`, a column
+ * on a table the deleted community dashboard read. `user_transaction` has no
+ * such column, so it was a value nothing could consume.
  */
-describe("parseXenditInvoiceCallback — payment_method", () => {
+describe("parseXenditInvoiceCallback — everything else in the body", () => {
   const base = { id: "inv_1", external_id: "txn-1", status: "PAID", amount: 50000 };
 
-  it("captures the method the callback reports", () => {
-    expect(parseXenditInvoiceCallback({ ...base, payment_method: "BANK_TRANSFER" }).paymentMethod)
-      .toBe("BANK_TRANSFER");
-    expect(parseXenditInvoiceCallback({ ...base, payment_method: "  EWALLET  " }).paymentMethod)
-      .toBe("EWALLET");
-  });
-
-  it("is undefined when the callback does not report one", () => {
-    expect(parseXenditInvoiceCallback(base).paymentMethod).toBeUndefined();
-  });
-
-  /**
-   * The whole point of it being optional. A ValidationError here would 400 a
-   * GENUINE paid callback, so a member who really paid would never be activated
-   * — an absurd price for a display string. The amount and the invoice id are
-   * what authorise anything; this is decoration.
-   */
-  it("NEVER throws on an unusable value — it degrades to undefined", () => {
-    for (const unusable of [
-      "",
-      "   ",
-      42,
-      null,
-      { code: "BANK_TRANSFER" },
-      ["BANK_TRANSFER"],
-      // Longer than transaction.payment_method's varchar(16), which would
-      // otherwise be SQLSTATE 22001 from the driver — a 500 on a real payment.
-      "A_VERY_LONG_PAYMENT_METHOD_NAME",
-      "x".repeat(17),
+  it("NEVER throws on an extra or unusable field — it ignores it", () => {
+    for (const extra of [
+      { payment_method: "" },
+      { payment_method: 42 },
+      { payment_method: "A_VERY_LONG_PAYMENT_METHOD_NAME" },
+      { payment_channel: "BCA" },
+      { payer_email: "siti@example.com", payer_name: "Siti" },
+      { paid_at: "2026-08-09T11:00:00Z" },
+      { something_xendit_adds_next_year: { nested: true } },
     ]) {
-      const event = parseXenditInvoiceCallback({ ...base, payment_method: unusable });
-      expect(event.paymentMethod).toBeUndefined();
-      // ...and the fields that DO authorise things are untouched.
+      const event = parseXenditInvoiceCallback({ ...base, ...extra });
+      // The fields that DO authorise things are untouched, and nothing threw.
       expect(event.amount).toBe(50000);
       expect(event.invoiceId).toBe("inv_1");
+      expect(event.externalId).toBe("txn-1");
+      expect(event.status).toBe("PAID");
     }
-  });
-
-  it("accepts exactly 16 characters, the column's width", () => {
-    expect(
-      parseXenditInvoiceCallback({ ...base, payment_method: "x".repeat(16) }).paymentMethod
-    ).toBe("x".repeat(16));
   });
 });

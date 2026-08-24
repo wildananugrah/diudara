@@ -1,13 +1,19 @@
 import { computeNextBillingDate } from "./billing-cycle";
 
 /**
- * Prefixes the `external_id` of every user-subscription invoice.
+ * Prefixes the `external_id` of every invoice this codebase mints.
  *
- * Xendit delivers ONE webhook stream, and the community-scoped handler already
- * resolves its own invoices by treating `external_id` as a bare `transaction.id`
- * uuid. A user-subscription invoice must be distinguishable WITHOUT GUESSING —
- * so it is namespaced here, the webhook routes on the prefix, and anything
- * matching neither shape is IGNORED rather than assumed to be either.
+ * Xendit delivers ONE webhook stream to ONE public endpoint, and that endpoint
+ * receives whatever anybody holding the static callback token sends it. An
+ * invoice of OURS must therefore be distinguishable WITHOUT GUESSING — so it is
+ * namespaced here, the webhook routes on the prefix, and anything else is
+ * IGNORED rather than assumed to be ours.
+ *
+ * THE NAMESPACE OUTLIVED THE REASON IT WAS INTRODUCED. Phase 5a added it to tell
+ * a membership invoice apart from a community one, whose `external_id` was a bare
+ * `transaction.id` uuid; retire-telegram Task 5 deleted that second kind. The
+ * prefix stays, because what it really buys is the ability to say "not ours" at
+ * all — see `routeInvoiceExternalId`.
  */
 export const USER_SUBSCRIPTION_EXTERNAL_ID_PREFIX = "usub_";
 
@@ -23,61 +29,63 @@ export function userTransactionIdFromExternalId(externalId: string): string | nu
 }
 
 /**
- * The two shapes an `external_id` on a DIUDARA invoice can legitimately have.
+ * The ONE shape an `external_id` on a DIUDARA invoice can legitimately have:
+ * `usub_<user_transaction.id>`. Nothing else is ours.
  *
- * A community invoice carries a BARE `transaction.id` uuid (`StartCheckout`
- * passes `transaction.id` straight through), and a user-subscription invoice
- * carries `usub_<user_transaction.id>`. Nothing else is ours.
+ * Retire-telegram Task 5 removed the second: a bare `transaction.id` uuid, which
+ * `StartCheckout` put on the wire for every community invoice `/dashboard/*` ever
+ * opened. That handler is gone, so a bare uuid is now nobody's.
  */
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Where a delivered `external_id` belongs. `unknown` is a real answer, not a failure. */
-export type InvoiceRoute =
-  | { kind: "user"; transactionId: string }
-  | { kind: "community"; transactionId: string }
-  | { kind: "unknown" };
+export type InvoiceRoute = { kind: "user"; transactionId: string } | { kind: "unknown" };
 
 /**
- * Decides which handler a delivered `external_id` belongs to — the whole reason
+ * Decides whether a delivered `external_id` is ours at all — the whole reason
  * this namespace exists.
  *
- * Xendit delivers ONE webhook stream to ONE public endpoint, and the two flows
- * that mint invoices in this codebase have different ideas about what an
- * `external_id` is. Routing therefore happens on SHAPE, before a database is
- * touched, and it has exactly three answers:
+ * Xendit delivers ONE webhook stream to ONE PUBLIC endpoint, authenticated by a
+ * static header token that authenticates the SENDER and not the message. Routing
+ * therefore happens on SHAPE, before a database is touched, and it has exactly
+ * two answers:
  *
- *  - `usub_<uuid>`  → a user subscription (Phase 5a).
- *  - `<uuid>`       → a community subscription — `StartCheckout` puts a bare
- *                     `transaction.id` on the wire, so this is the shape every
- *                     invoice `/dashboard/*` has ever opened carries. Handed
- *                     back verbatim and unsliced.
+ *  - `usub_<uuid>`  → a user subscription.
  *  - anything else  → `unknown`. NOT an error, and above all NOT a guess: it is
- *                     somebody else's invoice, or a probe. Neither handler may
- *                     be asked to resolve it.
+ *                     somebody else's invoice, or a probe. No handler may be
+ *                     asked to resolve it.
  *
- * THE UUID CHECK ON THE USER BRANCH IS NOT DECORATION. Stripping the prefix off
- * `"usub_"` yields `""` and off `"usub_x"` yields `"x"`; Task 6's re-review
- * measured both reaching the driver as `invalid input syntax for type uuid`, and
- * this endpoint is PUBLIC — every throw is a 500 that anyone holding the static
- * callback token can trigger at will. The repositories carry their own uuid
- * guards as the second line; this is the first, and it is the one that decides a
- * junk id is nobody's rather than ours-but-broken.
+ * TWO ANSWERS IS NOT ONE ANSWER, and this is the line where that matters most.
+ * Phase 5a wrote this rule when there were two kinds of invoice, and the obvious
+ * thing to do when retire-telegram deleted the second was to collapse it: with
+ * one kind left, "not recognised" looks like it must mean "the kind that is
+ * left". It does not. `user_transaction` would then be searched for an id that
+ * was never one of ours, and — for a uuid that happens to collide, or a delivery
+ * an attacker aims deliberately — a membership would be activated against a
+ * payment for something else. `unknown` stays a first-class outcome for exactly
+ * as long as this endpoint is public, which is for ever.
+ *
+ * THE UUID CHECK IS NOT DECORATION. Stripping the prefix off `"usub_"` yields
+ * `""` and off `"usub_x"` yields `"x"`; Phase 5a's re-review measured both
+ * reaching the driver as `invalid input syntax for type uuid`, and every throw
+ * here is a 500 anyone holding the callback token can trigger at will. The
+ * repositories carry their own uuid guards as the second line; this is the
+ * first, and it is the one that decides a junk id is nobody's rather than
+ * ours-but-broken.
  *
  * Case-insensitive because Postgres accepts either case for a `uuid`, so an
  * upper-case delivery of an id we really minted must not read as junk.
  */
 export function routeInvoiceExternalId(externalId: string): InvoiceRoute {
   const userTransactionId = userTransactionIdFromExternalId(externalId);
-  if (userTransactionId !== null) {
-    // Namespaced, so it is ours or it is nothing — it must never fall through to
-    // the community branch below, which would look `usub_…`'s uuid up in the
-    // wrong table and 404 a payment that really is ours.
-    return UUID_PATTERN.test(userTransactionId)
-      ? { kind: "user", transactionId: userTransactionId }
-      : { kind: "unknown" };
+  if (userTransactionId === null) {
+    // Not namespaced, so not ours. This is the branch that must never learn to
+    // guess: falling through to the user path from here is precisely how a
+    // payment for something else activates a membership.
+    return { kind: "unknown" };
   }
-  return UUID_PATTERN.test(externalId)
-    ? { kind: "community", transactionId: externalId }
+  return UUID_PATTERN.test(userTransactionId)
+    ? { kind: "user", transactionId: userTransactionId }
     : { kind: "unknown" };
 }
 
@@ -95,8 +103,8 @@ export function routeInvoiceExternalId(externalId: string): InvoiceRoute {
  * yearly member eleven months of nothing. It throws, which the webhook surfaces
  * as a 500 with the delivery unrecorded and therefore replayable.
  *
- * WHY THIS IS AN INSTANT AND NOT A DATE. `subscription.next_billing_date` under
- * `/dashboard/*` is a Postgres `date` — it names a DAY — but
+ * WHY THIS IS AN INSTANT AND NOT A DATE. `computeNextBillingDate` answers with a
+ * `YYYY-MM-DD` DAY, because the column it was written for was a Postgres `date`.
  * `user_subscription.current_period_end` is a `timestamptz`, because the
  * question asked of it is "is this viewer a member RIGHT NOW". Taking only the
  * day and starting it at midnight UTC would end the period BEFORE the instant it

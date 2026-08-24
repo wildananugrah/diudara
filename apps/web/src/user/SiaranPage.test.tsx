@@ -8,9 +8,10 @@ import { setUserSession, type StreamView } from "./apiClient";
 /**
  * `/siaran` — who is live, and a lock where a stranger cannot watch (task
  * brief; design spec §8). `GET /streams` is mocked directly on
- * `global.fetch` for every test here, the same shape `WatchPage.test.tsx`
- * uses for `GET /c/watch/:token` — `SiaranPage` never reads `import.meta`
- * config or anything else that would need a heavier mock.
+ * `global.fetch` for every test here — `SiaranPage` never reads `import.meta`
+ * config or anything else that would need a heavier mock. (This note used to
+ * cite `WatchPage.test.tsx`'s mock of `GET /c/watch/:token` as the shape it
+ * copied; retire-telegram deleted that page, that route and that test.)
  *
  * A fake `attachHls` is injected into every test that exercises an UNLOCKED
  * row, so a real `hls.js` attach (unreachable in happy-dom — there is no

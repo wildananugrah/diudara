@@ -38,7 +38,8 @@ describe("FakeEmailAdapter", () => {
  *
  * Exactly the gap the PREVIOUS phase's gate found for `FakeAiAdapter` (whose
  * non-default behaviours were reachable only by a test holding the instance) and
- * closed with `AI_FAKE_BEHAVIOUR` — see `resolveAiFakeBehaviour` in bootstrap.ts.
+ * closed with an `AI_FAKE_BEHAVIOUR` env var. Both went with the AI co-builder in
+ * retire-telegram Task 4; the gap they illustrate is the reason this test exists.
  */
 describe("FakeEmailAdapter echo", () => {
   const original = console.log;

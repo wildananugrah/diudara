@@ -1,31 +1,30 @@
 import type { ClockPort } from "../ports/clock.port";
 import type { UserStreamRepositoryPort } from "../ports/user-stream-repository.port";
 
-/** The two lifecycle edges MediaMTX's hooks report — see `HandleStreamLifecycle`'s own docstring. */
+/** The two lifecycle edges MediaMTX's hooks report (`runOnOnline`/`runOnOffline`). */
 export type UserStreamLifecycleHook = "online" | "offline";
 
 /**
- * `POST /webhooks/mediamtx/lifecycle`'s decision logic for the `u/<key>` world — the
- * sibling `HandleStreamLifecycle` never grew (its own docstring says so explicitly:
- * "wiring it up is later work, not this one"). This is that later work, but it is a
- * SEPARATE class rather than a branch added to that one, because the two worlds'
- * `online` hooks do genuinely different things: the community world's `online`
- * transitions a `scheduled` event to `live` (`markLive`, plus an activity-log row and
- * one `notify_stream_live` outbox row per member) — real domain work with a real
- * "first time" to guard. The user world has none of that: `user_stream` is already
- * `live` the INSTANT `StartUserStream.execute` inserts the row (design spec §7,
- * *"Mulai siaran creates the row"*) — there is no `scheduled` state, and therefore no
- * transition left for `online` to make. Folding this into `HandleStreamLifecycle`
- * would give it an `online` branch with nothing to do, which is worse than no branch
- * at all: a reader has to prove the no-op is deliberate rather than see one class
- * with one job.
+ * `POST /webhooks/mediamtx/lifecycle`'s decision logic for the `u/<key>` world, and
+ * — since retire-telegram Task 3 deleted the community `live/<key>` world's own
+ * handler — the ONLY decision logic that route has left.
  *
- * `POST /webhooks/mediamtx/lifecycle` (the route) resolves which class to call by
- * parsing `$MTX_PATH` with `parseStreamPath` ONCE, itself, and dispatching on
- * `parsed.world` — see that route's own docstring. This class therefore takes the
- * BARE key (`parsed.key`), never the raw `u/<key>` path; unlike
- * `HandleStreamLifecycle.execute`, which still takes the raw path because its own
- * signature could not change (Task 6's brief leaves that file untouched).
+ * IT WAS ALWAYS A SEPARATE CLASS, never a branch inside the community one, and the
+ * reason is worth keeping now that the sibling is gone: the two worlds' `online`
+ * hooks did genuinely different things. The community world's `online` transitioned
+ * a `scheduled` event to `live` — real domain work with a real "first time" to
+ * guard. The user world has none of that: `user_stream` is already `live` the
+ * INSTANT `StartUserStream.execute` inserts the row (design spec §7, *"Mulai siaran
+ * creates the row"*) — there is no `scheduled` state, and therefore no transition
+ * left for `online` to make. That asymmetry is what the "online" no-op below rests
+ * on, and it is a fact about `user_stream`, not about the class that used to sit
+ * beside this one.
+ *
+ * `POST /webhooks/mediamtx/lifecycle` (the route) still parses `$MTX_PATH` with
+ * `parseStreamPath` ONCE, itself, before reaching this class — and now REFUSES with
+ * a 404 when the path names anything other than the user world, rather than handing
+ * it to a second class. See that route's own docstring. This class therefore takes
+ * the BARE key (`parsed.key`), never the raw `u/<key>` path.
  *
  * ==========================================================================
  * "online" IS A DELIBERATE NO-OP, and that is the guard that matters most here
@@ -41,16 +40,20 @@ export type UserStreamLifecycleHook = "online" | "offline";
  * `offline` branch below is the only place this class ever touches the database.
  * ==========================================================================
  *
- * AN UNKNOWN STREAM KEY IS A NORMAL, LOGGED, SILENT-TO-THE-CALLER NO-OP — same
- * reasoning as `HandleStreamLifecycle`'s own docstring: a stale session, a probe, or
- * a race with the row not yet committed must not make MediaMTX retry forever, and the
- * key itself is NEVER logged (it is `user_stream.stream_key`, a SECRET — see
- * `UserStreamRepositoryPort`'s own docstring).
+ * AN UNKNOWN STREAM KEY IS A NORMAL, LOGGED, SILENT-TO-THE-CALLER NO-OP: a stale
+ * session, a probe, or a race with the row not yet committed must not make MediaMTX
+ * retry forever, and the key itself is NEVER logged (it is `user_stream.stream_key`,
+ * a SECRET — see `UserStreamRepositoryPort`'s own docstring).
+ *
+ * NOTE THE ASYMMETRY WITH THE ROUTE'S OWN 404: an unknown `u/<key>` is acknowledged
+ * with a 200, while a `live/<key>` is refused. Those are different statements. The
+ * first says "this key names no live row right now", which is ordinary and expected;
+ * the second says "this server has no namespace by that name", which is a
+ * misconfiguration nothing else would surface.
  *
  * `endById`'s status check is IN the UPDATE's predicate, not a preceding read (see
- * that port's docstring) — the same atomic-predicate shape `HandleStreamLifecycle`
- * relies on for the community world, and for the identical reason: it is what makes
- * the `offline` branch safe under a flapping publisher (repeated `offline`) or a race
+ * that port's docstring). That atomic-predicate shape is what makes the `offline`
+ * branch safe under a flapping publisher (repeated `offline`) or a race
  * with the hourly sweep ending the same row first. A repeat or a raced `offline` finds
  * `endById` return `null` and this method simply returns — nothing further to do,
  * nothing to log, no error.

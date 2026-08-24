@@ -72,7 +72,7 @@ export interface PostRepositoryPort {
    * reads fresh data": the second edit's read happens strictly after the
    * first edit's write is visible, never before.
    *
-   * MUST be called inside an open transaction (see `PostEditUnitOfWorkPort`).
+   * MUST be called inside an open transaction (see `PostWriteUnitOfWorkPort`).
    * Called outside one, the lock is released the instant the statement
    * completes and buys no serialisation at all — `ownershipOf` above is the
    * right choice for every caller that does not need this guarantee

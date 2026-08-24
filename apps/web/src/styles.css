@@ -1,15 +1,29 @@
 /*
- * The creator dashboard's stylesheet. Hand-written, no component library, no new
- * runtime dependency — and imported ONLY from main.tsx, never from a component,
- * so `bun test` (which has no CSS loader) never has to parse it.
+ * The shared stylesheet for DIUDARA's surviving web app: the landing page,
+ * the auth pages (signup/login/reset), and the member-facing "new world"
+ * (profile, follow lists, Beranda, Jelajah, Siaran). Hand-written, no
+ * component library, no new runtime dependency — and imported ONLY from
+ * main.tsx, never from a component, so `bun test` (which has no CSS
+ * loader) never has to parse it.
  *
- * The palette and the system font stack match the shipped checkout pages
- * (pages/CheckoutPage.tsx), which style themselves inline: green #16a34a for the
- * primary action, #b91c1c for errors, greys from #f8f9fa to #111.
+ * Retire-telegram Task 1, fix round 1 (review Minor 3): this file used to
+ * open "The creator dashboard's stylesheet" and be desktop-first with a
+ * 720px breakpoint built for the dashboard's own header/table chrome. That
+ * framing is gone along with the dashboard itself: every rule below this
+ * comment is either reused by the surviving pages (`.card`, `.button-*`,
+ * `.notice`, `.field`, `.empty`, ...) or belongs to a later, separately
+ * added section (landing, profile, follow, memberships, app shell) with
+ * its own comment banner further down. The rules that were dashboard-only
+ * and had zero references left in any surviving `.tsx` — header/nav chrome,
+ * badges, metric tiles, join-request queue styling, tables, browser-
+ * publishing preview, copyable-link row, activity feed, and the AI
+ * co-builder chat — were removed in that same fix round, verified by
+ * checking every `className` string in the surviving source tree.
  *
- * Desktop-first, as the plan allows for a dashboard, with one breakpoint at 720px
- * that collapses the header and turns wide tables into horizontal scrollers rather
- * than letting the page itself scroll sideways.
+ * The palette and the system font stack originally matched the (now
+ * deleted) checkout pages, which styled themselves inline: green #16a34a
+ * for the primary action, #b91c1c for errors, greys from #f8f9fa to #111.
+ * The surviving pages below still draw from the same palette.
  */
 
 :root {
@@ -131,82 +145,6 @@ code {
   margin: 0 0 8px;
 }
 
-/* ---------- header / layout ---------- */
-
-.dashboard-header {
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
-}
-
-.dashboard-header-inner,
-.dashboard-main {
-  max-width: 1040px;
-  margin: 0 auto;
-  padding: 0 20px;
-}
-
-.dashboard-header-inner {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  min-height: 60px;
-}
-
-.dashboard-header-inner .brand {
-  margin: 0;
-}
-
-.dashboard-main {
-  padding-top: 24px;
-  padding-bottom: 64px;
-}
-
-.top-nav {
-  display: flex;
-  gap: 16px;
-  flex: 1;
-}
-
-.top-nav a,
-.tabs a {
-  color: var(--ink-soft);
-  text-decoration: none;
-  font-size: 0.925rem;
-  padding: 6px 0;
-  border-bottom: 2px solid transparent;
-}
-
-.top-nav a.active,
-.tabs a.active {
-  color: var(--ink);
-  font-weight: 600;
-  border-bottom-color: var(--green);
-}
-
-.session {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: 0.9rem;
-}
-
-.session-name {
-  color: var(--ink-soft);
-}
-
-.tabs {
-  display: flex;
-  gap: 18px;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 20px;
-  overflow-x: auto;
-}
-
-.breadcrumb {
-  font-size: 0.875rem;
-  margin-bottom: 4px;
-}
-
 /* ---------- cards, panels ---------- */
 
 .card {
@@ -219,16 +157,6 @@ code {
 .card-list {
   display: grid;
   gap: 12px;
-}
-
-.card-link {
-  text-decoration: none;
-  color: inherit;
-  display: block;
-}
-
-.card-link:hover {
-  border-color: var(--green);
 }
 
 .section {
@@ -324,22 +252,6 @@ code {
   padding: 8px 10px;
 }
 
-/*
- * A CELL that carries "somebody still has to act", inside a table of cells that
- * mostly do not.
- *
- * The member roster's revoke column uses it for a revocation the provider could
- * not carry out: the entitlement is gone from our records and the member is still
- * inside the creator's paid group. It reads as amber rather than as `.muted`
- * precisely because the muted version of that sentence — which is what this
- * column used to show — is indistinguishable from a removal that worked.
- */
-.cell-warning {
-  color: var(--amber);
-  font-weight: 600;
-  font-size: 0.8125rem;
-}
-
 .form-ok {
   color: #166534;
   background: #f0fdf4;
@@ -348,13 +260,6 @@ code {
   padding: 8px 10px;
   font-size: 0.875rem;
   margin: 0;
-}
-
-.inline-form {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 12px;
-  align-items: start;
 }
 
 /* ---------- buttons ---------- */
@@ -420,12 +325,6 @@ button:disabled {
 
 /* ---------- notices ---------- */
 
-/*
- * `.notice-warning` is the one that must not be scrollable-past: it carries "you
- * have no payment account, so nobody can buy anything" and the activity feed's
- * two *_manual_required entries, which mean automation could not finish and a
- * person has to act.
- */
 .notice {
   border: 1px solid var(--line);
   border-left-width: 4px;
@@ -445,344 +344,17 @@ button:disabled {
   margin-bottom: 0;
 }
 
-.notice-warning {
-  background: var(--amber-bg);
-  border-color: var(--amber-border);
-  border-left-color: #d97706;
-  color: var(--amber);
-}
-
-.notice-info {
-  border-left-color: var(--green);
-}
-
-/* ---------- badges ---------- */
-
-.badge {
-  display: inline-block;
-  font-size: 0.75rem;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--canvas);
-  color: var(--ink-soft);
-  white-space: nowrap;
-}
-
-.badge-active {
-  background: #f0fdf4;
-  border-color: #bbf7d0;
-  color: #166534;
-}
-
-.badge-past-due {
-  background: var(--amber-bg);
-  border-color: var(--amber-border);
-  color: var(--amber);
-}
-
-/*
- * `.badge-ended` (EventsPage.tsx's live-session status) JOINS this rule
- * rather than repeating its hex triple: same meaning ("finished, no longer
- * actionable") as a churned member or an archived community, so it shares
- * their rule the same way `.badge-archived` already does — one edit here
- * moves all three together instead of three rules silently drifting apart.
- */
-.badge-churned,
-.badge-archived,
-.badge-ended {
-  background: #f3f4f6;
-  border-color: #d1d5db;
-  color: #4b5563;
-}
-
-/*
- * `.badge-scheduled` (EventsPage.tsx) JOINS this rule for the same reason:
- * "not happening yet, nothing wrong" is the same meaning as a paused
- * community, so it shares the rule instead of duplicating its hex triple.
- */
-.badge-paused,
-.badge-scheduled {
-  background: #eff6ff;
-  border-color: #bfdbfe;
-  color: #1e40af;
-}
-
-/*
- * `.badge-live` (EventsPage.tsx) — no existing badge means "this is
- * happening RIGHT NOW, pay attention", so this borrows `.button-danger`'s
- * red literals directly (via existing custom properties where one exists)
- * rather than joining an unrelated rule just to avoid a second declaration.
- */
-.badge-live {
-  background: var(--red-bg);
-  border-color: #fca5a5;
-  color: var(--red);
-}
-
-/* ---------- metric tiles ---------- */
-
-.metrics {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 12px;
-}
-
-.metric {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-}
-
-.metric-label {
-  font-size: 0.8125rem;
-  color: var(--ink-faint);
-  margin: 0;
-}
-
-.metric-value {
-  font-size: 1.6rem;
-  font-weight: 700;
-  margin: 2px 0 4px;
-  font-variant-numeric: tabular-nums;
-}
-
-.metric-note {
-  font-size: 0.78rem;
-  color: var(--ink-faint);
-  margin: 0;
-}
-
-/* ---------- join requests ---------- */
-
-/*
- * The pending join-request queue (MembersPage.tsx) sits above the paid roster
- * it feeds into. A plain heading followed immediately by another table read
- * as one continuous list in review — this border is the only thing telling a
- * creator "everything above this line is still waiting on you; everything
- * below it is already settled".
- */
-.join-requests {
-  padding-bottom: 20px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--line);
-}
-
-/* ---------- tables ---------- */
-
-/* Wide content scrolls inside its own box; the page body never scrolls sideways. */
-.table-scroll {
-  overflow-x: auto;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9rem;
-}
-
-th,
-td {
-  text-align: left;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--line);
-  white-space: nowrap;
-}
-
-th {
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--ink-faint);
-  background: var(--canvas);
-}
-
-tbody tr:last-child td {
-  border-bottom: none;
-}
-
-.numeric {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-/* ---------- browser publishing (Task 3) ---------- */
-
-/*
- * `PublishOptions` (EventsPage.tsx) lays "Siaran dari browser" and "OBS /
- * Streamlabs" side by side on desktop — the two-column view the Task 3
- * brief describes as "presenting both paths for a session" — and stacks
- * them on narrow screens, same breakpoint as the rest of this dashboard.
- */
-.publish-options {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 16px;
-  align-items: start;
-}
-
-/*
- * The muted local preview shown once device permission is granted. A fixed
- * aspect-ratio box (rather than sizing off the actual video dimensions,
- * which vary per camera) keeps the panel from jumping around as
- * `BrowserPublishSection` swaps devices.
- */
-.video-preview {
-  width: 100%;
-  max-width: 360px;
-  aspect-ratio: 16 / 9;
-  background: #111827;
-  border-radius: var(--radius);
-  object-fit: cover;
-}
-
-/* ---------- copyable link ---------- */
-
-.copy-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.copy-row code {
-  flex: 1;
-  min-width: 200px;
-  overflow-x: auto;
-  padding: 8px 10px;
-  white-space: nowrap;
-}
-
-/* ---------- activity feed ---------- */
-
-.feed {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 8px;
-}
-
-.feed-item {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-left: 4px solid var(--line);
-  border-radius: 6px;
-  padding: 10px 14px;
-}
-
-.feed-item-warning {
-  background: var(--amber-bg);
-  border-color: var(--amber-border);
-  border-left-color: #d97706;
-}
-
-.feed-label {
-  font-weight: 600;
-}
-
-.feed-item-warning .feed-label {
-  color: var(--amber);
-}
-
-.feed-meta {
-  font-size: 0.8125rem;
-  color: var(--ink-faint);
-}
-
-/* ---------- AI co-builder chat ---------- */
-
-.chat-transcript {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-bottom: 16px;
-  max-height: 480px;
-  overflow-y: auto;
-}
-
-.chat-bubble {
-  max-width: 640px;
-  border-radius: 10px;
-  padding: 10px 14px;
-}
-
-.chat-bubble p {
-  margin: 0;
-  white-space: pre-wrap;
-}
-
-.chat-bubble-user {
-  align-self: flex-end;
-  background: #f0fdf4;
-  border: 1px solid #bbf7d0;
-}
-
-.chat-bubble-assistant {
-  align-self: flex-start;
-  background: var(--surface);
-  border: 1px solid var(--line);
-}
-
-.chat-composer {
-  display: flex;
-  gap: 10px;
-  align-items: flex-end;
-  margin-bottom: 24px;
-}
-
-.chat-composer textarea {
-  flex: 1;
-  min-height: 64px;
-  font: inherit;
-  font-size: 1rem;
-  padding: 10px 12px;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  resize: vertical;
-}
-
-.chat-composer textarea:focus {
-  outline: 2px solid var(--green);
-  outline-offset: 1px;
-  border-color: var(--green);
-}
-
-.cobuilder-draft h3 {
-  margin-top: 20px;
-}
-
 /* ---------- responsive ---------- */
 
+/*
+ * Fix round 1 (review Minor 3): this block used to also collapse the
+ * dashboard's own header/nav chrome at this breakpoint — removed along
+ * with that chrome (see the file's own header comment). The one rule
+ * below is a bare element selector with no dashboard-only class gating
+ * it, so it is kept: it still shrinks every `<h1>` on narrow screens,
+ * landing page included.
+ */
 @media (max-width: 720px) {
-  .dashboard-header-inner {
-    flex-wrap: wrap;
-    gap: 10px;
-    padding-top: 10px;
-    padding-bottom: 10px;
-  }
-
-  .top-nav {
-    order: 3;
-    flex-basis: 100%;
-    overflow-x: auto;
-  }
-
-  .session {
-    margin-left: auto;
-  }
-
-  .dashboard-header-inner,
-  .dashboard-main {
-    padding-left: 14px;
-    padding-right: 14px;
-  }
-
   h1 {
     font-size: 1.3rem;
   }

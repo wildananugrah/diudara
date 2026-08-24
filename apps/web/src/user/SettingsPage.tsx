@@ -221,9 +221,10 @@ function SettingsForm() {
 
       {/*
         Task 9 (spec §5-§6): connecting a payout account and defining what you
-        sell live in Pengaturan, on the seller's own account — not in
-        `/dashboard/*`, which is a different app for a different account type
-        and which Phase 8 deletes.
+        sell live in Pengaturan, on the seller's own account. They used to be
+        expected in `/dashboard/*`, a different app for a different account
+        type; Phase 8 (retire-telegram) deleted it, so this is not one of two
+        places they could be — it is the only one.
 
         It loads its own payout status rather than being handed one, so a
         failure on either side is independent: this page already refuses to

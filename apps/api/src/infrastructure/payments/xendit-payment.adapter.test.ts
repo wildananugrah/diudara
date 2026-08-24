@@ -332,7 +332,7 @@ describe("XenditPaymentAdapter.createInvoice", () => {
 });
 
 describe("XenditPaymentAdapter.createPaymentAccount", () => {
-  const ACCOUNT_INPUT = { creatorId: "c1", email: "a@b.co", name: "Budi" };
+  const ACCOUNT_INPUT = { ownerId: "c1", email: "a@b.co", name: "Budi" };
 
   it("returns the sub-account id", async () => {
     const { fetchFn } = captureFetch({ id: "acct_1" });
@@ -343,9 +343,11 @@ describe("XenditPaymentAdapter.createPaymentAccount", () => {
     expect(await adapter.createPaymentAccount(ACCOUNT_INPUT)).toEqual({ accountId: "acct_1" });
   });
 
-  // Before the fix this returned { accountId: "undefined" }, which
-  // CreatePaymentAccount would have written into creator.xendit_account_id —
-  // and then 409'd on forever, with no reset path.
+  // Before the fix this returned { accountId: "undefined" }, which the calling
+  // use case would have written into the owner's payout column — and then
+  // 409'd on forever, with no reset path. (Measured against the creator flow's
+  // `CreatePaymentAccount`, deleted in retire-telegram Task 7's fix round;
+  // `ConnectUserPayout` calls this adapter method the same way.)
   it("throws on a 200 whose body carries no account id", async () => {
     const { fetchFn } = captureFetch({});
     const adapter = new XenditPaymentAdapter({

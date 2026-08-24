@@ -1,13 +1,8 @@
 import { db, sql } from "./db/client";
-import { DrizzleCreatorRepository } from "./infrastructure/repositories/drizzle-creator.repository";
 import { DrizzleUserRepository } from "./infrastructure/repositories/drizzle-user.repository";
 import { DrizzleUserPayoutRepository } from "./infrastructure/repositories/drizzle-user-payout.repository";
-import { DrizzleCommunityRepository } from "./infrastructure/repositories/drizzle-community.repository";
 import { BunPasswordHasher } from "./infrastructure/auth/bun-password.hasher";
-import { HonoJwtTokenIssuer } from "./infrastructure/auth/hono-jwt.token-issuer";
 import { HonoJwtUserTokenIssuer } from "./infrastructure/auth/hono-jwt.user-token-issuer";
-import { RegisterCreator } from "./application/use-cases/register-creator";
-import { AuthenticateCreator } from "./application/use-cases/authenticate-creator";
 import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
@@ -28,68 +23,25 @@ import { CompletePasswordReset } from "./application/use-cases/complete-password
 import { DrizzlePasswordResetRepository } from "./infrastructure/repositories/drizzle-password-reset.repository";
 import { DrizzlePasswordResetUnitOfWork } from "./infrastructure/repositories/drizzle-password-reset-unit-of-work";
 import { DrizzleSignupNoticeRepository } from "./infrastructure/repositories/drizzle-signup-notice.repository";
-import { CreateCommunity } from "./application/use-cases/create-community";
-import { ListCommunities } from "./application/use-cases/list-communities";
-import { UpdateCommunity } from "./application/use-cases/update-community";
-import { GetCommunity } from "./application/use-cases/get-community";
-import { DrizzleMembershipTierRepository } from "./infrastructure/repositories/drizzle-membership-tier.repository";
-import {
-  DefineMembershipTier,
-  ListTiers,
-  UpdateTier,
-} from "./application/use-cases/manage-tiers";
-import { DrizzleChannelRepository } from "./infrastructure/repositories/drizzle-channel.repository";
-import { ConnectChannel, ListChannels } from "./application/use-cases/manage-channels";
-import { CreatePaymentAccount } from "./application/use-cases/create-payment-account";
-import { GetPaymentAccountStatus } from "./application/use-cases/get-payment-account-status";
 import { ConnectUserPayout } from "./application/use-cases/connect-user-payout";
 import { GetUserPayoutStatus } from "./application/use-cases/get-user-payout-status";
 import { DrizzleUserTierRepository } from "./infrastructure/repositories/drizzle-user-tier.repository";
 import { ManageUserTiers } from "./application/use-cases/manage-user-tiers";
 import { DrizzleUserSubscriptionRepository } from "./infrastructure/repositories/drizzle-user-subscription.repository";
 import { StartUserSubscription } from "./application/use-cases/start-user-subscription";
-import { GetPublicCommunity } from "./application/use-cases/get-public-community";
-import { StartCheckout } from "./application/use-cases/start-checkout";
-import { GetJoinRequestStatus, RequestToJoin } from "./application/use-cases/request-to-join";
-import { DecideJoinRequest, ListJoinRequests } from "./application/use-cases/decide-join-request";
-import { DrizzleJoinRequestRepository } from "./infrastructure/repositories/drizzle-join-request.repository";
-import { DrizzleJoinRequestUnitOfWork } from "./infrastructure/repositories/drizzle-join-request-unit-of-work";
-import { DrizzlePostEditUnitOfWork } from "./infrastructure/repositories/drizzle-post-edit-unit-of-work";
-import { GetSubscriptionStatus } from "./application/use-cases/get-subscription-status";
+import { DrizzlePostWriteUnitOfWork } from "./infrastructure/repositories/drizzle-post-write-unit-of-work";
 import { HandlePaymentWebhook } from "./application/use-cases/handle-payment-webhook";
-import { RevokeChannelAccess } from "./application/use-cases/revoke-channel-access";
-import { RecordChannelJoin } from "./application/use-cases/record-channel-join";
-import { SendRenewalReminder } from "./application/use-cases/send-renewal-reminder";
 import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapter";
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
 import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter";
-import { DrizzleMemberRepository } from "./infrastructure/repositories/drizzle-member.repository";
-import { DrizzleSubscriptionRepository } from "./infrastructure/repositories/drizzle-subscription.repository";
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
 import { DrizzleUserPurchaseUnitOfWork } from "./infrastructure/repositories/drizzle-user-purchase.unit-of-work";
-import { DrizzleChannelMembershipRepository } from "./infrastructure/repositories/drizzle-channel-membership.repository";
-import { DrizzleActivityLogRepository } from "./infrastructure/repositories/drizzle-activity-log.repository";
-import { DrizzleAnalyticsRepository } from "./infrastructure/repositories/drizzle-analytics.repository";
-import { GetCommunityMetrics } from "./application/use-cases/get-community-metrics";
-import { GetCommunityActivity } from "./application/use-cases/get-community-activity";
-import { ListCommunityMembers } from "./application/use-cases/list-community-members";
-import { ExportCommunityMembers } from "./application/use-cases/export-community-members";
-import { DrizzleOutboxRepository } from "./infrastructure/repositories/drizzle-outbox.repository";
 import { SystemClock } from "./infrastructure/clock/system.clock";
 import { FakeMessagingAdapter } from "./infrastructure/messaging/fake-messaging.adapter";
 import { FonnteWhatsAppAdapter } from "./infrastructure/messaging/fonnte-whatsapp.adapter";
-import { TelegramBotAdapter } from "./infrastructure/messaging/telegram-bot.adapter";
-import { FAKE_AI_BEHAVIOURS, FakeAiAdapter, type FakeAiBehaviour } from "./infrastructure/ai/fake-ai.adapter";
-import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
-import { DrizzleAiConversationRepository } from "./infrastructure/repositories/drizzle-ai-conversation.repository";
-import { DrizzleAiUsageRepository } from "./infrastructure/repositories/drizzle-ai-usage.repository";
-import { SendAiMessage } from "./application/use-cases/send-ai-message";
 import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
 import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
-import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
-import { DrizzleStreamLifecycleUnitOfWork } from "./infrastructure/repositories/drizzle-stream-lifecycle.unit-of-work";
-import { ScheduleLiveSession, ListLiveSessions } from "./application/use-cases/schedule-live-session";
 import {
   StartUserStream,
   ListLiveStreams,
@@ -98,23 +50,18 @@ import {
 } from "./application/use-cases/start-user-stream";
 import { DrizzleUserStreamRepository } from "./infrastructure/repositories/drizzle-user-stream.repository";
 import { AuthoriseStream } from "./application/use-cases/authorise-stream";
-import { HandleStreamLifecycle } from "./application/use-cases/handle-stream-lifecycle";
 import { EndUserStream } from "./application/use-cases/end-user-stream";
-import { ResolveWatchToken } from "./application/use-cases/resolve-watch-token";
 import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-storage.adapter";
 import { S3MediaStorageAdapter } from "./infrastructure/storage/s3-media-storage.adapter";
 import type { MessagingProviderPort } from "./application/ports/messaging-provider.port";
 import type { MediaStoragePort } from "./application/ports/media-storage.port";
 import type { MediaRepositoryPort } from "./application/ports/media-repository.port";
-import type { CreatorRepositoryPort } from "./application/ports/creator-repository.port";
 import type { UserRepositoryPort } from "./application/ports/user-repository.port";
 import type { UserPayoutRepositoryPort } from "./application/ports/user-payout-repository.port";
 import type { UserTierRepositoryPort } from "./application/ports/user-tier-repository.port";
-import type { TokenIssuerPort } from "./application/ports/token-issuer.port";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 import type { EmailProviderPort } from "./application/ports/email-provider.port";
-import type { AiProviderPort } from "./application/ports/ai-provider.port";
 import type { StreamingProviderPort } from "./application/ports/streaming-provider.port";
 
 /** Values that may be interpolated into a `DatabasePing` tagged template. */
@@ -143,16 +90,14 @@ export type DatabasePing = (
  * use-case tests can inject plain-object fakes without casts.
  */
 export interface Dependencies {
-  creatorRepository: CreatorRepositoryPort;
-  tokenIssuer: TokenIssuerPort;
   /**
    * The payment adapter THIS process selected — `null` when
    * `selectPaymentProvider` decided the box has no payment provider at all
    * (see that function's own docstring). Exposed for the same reason
    * `messaging`/`aiProvider` are: a test must be able to prove what a given
-   * environment actually wired. `null` here is why `startCheckout` and
-   * `createPaymentAccount` below are themselves optional — there is nothing
-   * to construct either against.
+   * environment actually wired. `null` here is why `connectUserPayout` and
+   * `startUserSubscription` below are themselves optional — there is
+   * nothing to construct either against.
    */
   payments: PaymentProviderPort | null;
   /**
@@ -166,20 +111,18 @@ export interface Dependencies {
    * this field happens to be `truthy` for — to send a reset link over.
    */
   email: EmailProviderPort | null;
-  registerCreator: RegisterCreator;
-  authenticateCreator: AuthenticateCreator;
   /**
-   * Phase 9's personal-account identity, distinct from `creatorRepository`
-   * above. Exposed here for the same reason `creatorRepository` is: a test
-   * must be able to seed/read `app_user` rows through the port rather than
-   * poking Drizzle directly.
+   * Phase 9's personal-account identity, and — since retire-telegram
+   * Task 7's fix round deleted `creatorRepository` alongside it — the ONLY
+   * identity this process has. Exposed here so a test can seed/read
+   * `app_user` rows through the port rather than poking Drizzle directly.
    */
   userRepository: UserRepositoryPort;
   /**
    * Phase 5a's payout column on `app_user`, kept off `userRepository` so that
    * `UserRecord` — which is projected straight into profile responses — never
    * carries a provider account id. Exposed here for the same reason
-   * `creatorRepository` is: a test must be able to put the column into its
+   * `userRepository` is: a test must be able to put the column into its
    * claimed state WITHOUT going through the POST route, which in the real
    * adapter provisions a KYC entity that has no delete endpoint.
    */
@@ -193,10 +136,14 @@ export interface Dependencies {
    */
   userTierRepository: UserTierRepositoryPort;
   /**
-   * Signs and verifies user-session tokens. A SEPARATE class from
-   * `tokenIssuer` even though both share `JWT_SECRET` — see
-   * `HonoJwtUserTokenIssuer`'s own docstring for why the `typ` claim, not a
-   * different secret, is what keeps the two session kinds apart.
+   * Signs and verifies user-session tokens, and since retire-telegram
+   * Task 7's fix round they are the only session kind there is. This was a
+   * SEPARATE class from the creator `tokenIssuer`, sharing the same
+   * `JWT_SECRET` and kept apart by a `typ` claim rather than a second
+   * secret; that issuer went with the creator login it served. `typ: "user"`
+   * stays and is still checked — see `HonoJwtUserTokenIssuer`'s own
+   * docstring, and `user-auth.middleware.test.ts`, which now FORGES the
+   * other audience's token rather than minting one.
    */
   userTokenIssuer: UserTokenIssuerPort;
   /** `POST /users/signup`. Returns `{ ok: true }` only — see the use case's own docstring. */
@@ -281,51 +228,16 @@ export interface Dependencies {
    * for all three — see the use-case's own docstring.
    */
   completePasswordReset: CompletePasswordReset;
-  createCommunity: CreateCommunity;
-  listCommunities: ListCommunities;
-  updateCommunity: UpdateCommunity;
   /**
-   * `GET /communities/:id` (Phase 7 carry-forward from Phase 6). Creator-scoped
-   * through `CommunityRepositoryPort.findByIdForCreator` — the same method
-   * `UpdateCommunity` uses — so a stranger's id 404s rather than 403ing and
-   * confirming the resource exists.
-   */
-  getCommunity: GetCommunity;
-  defineTier: DefineMembershipTier;
-  listTiers: ListTiers;
-  updateTier: UpdateTier;
-  connectChannel: ConnectChannel;
-  listChannels: ListChannels;
-  /**
-   * `POST /payment-account`. `undefined` EXACTLY when `payments` is `null` —
-   * mirrors `sendAiMessage`'s undefined-ness: there is no `PaymentProviderPort`
-   * to construct this against when payments are disabled, so connecting a
-   * creator to one makes no sense on this box. `routes/payment-account.ts`
-   * checks this the same way `routes/ai.ts` checks `sendAiMessage` and answers
-   * 503 rather than crashing on a null provider it was never handed.
-   */
-  createPaymentAccount: CreatePaymentAccount | undefined;
-  /**
-   * `GET /payment-account` (Phase 7 carry-forward from Phase 6): whether the
-   * AUTHENTICATED creator has connected payments, read from
-   * `creator.xendit_account_id` through the same `isConnectedPaymentAccount` /
-   * `isProvisioningPlaceholder` predicates `CreatePaymentAccount` uses. Read-only
-   * and safe to call on every dashboard load — unlike the POST route above, it
-   * provisions nothing at Xendit. Replaces the dashboard's per-browser
-   * `localStorage` guess (see apps/web's `paymentAccount.ts`) with the server's
-   * own truth. NOT read by the AI co-builder's model path — `SendAiMessage`
-   * has no dependency on this and the system prompt never mentions it; only
-   * the SCREEN reads it, via `PaymentAccountNotice` rendered above the
-   * co-builder chat (`CoBuilderPage.tsx`), so a creator sees the warning
-   * without the model itself being aware payments are connected or not.
-   */
-  getPaymentAccountStatus: GetPaymentAccountStatus;
-  /**
-   * `POST /users/me/payout` (Phase 5a). `undefined` EXACTLY when `payments` is
-   * `null`, mirroring `createPaymentAccount` above: there is no
-   * `PaymentProviderPort` to construct it against on a box with payments
-   * disabled, and `routes/users.ts` answers 503 rather than crashing on a
-   * provider it was never handed.
+   * `POST /users/me/payout` (Phase 5a). `undefined` EXACTLY when `payments`
+   * is `null`: there is no `PaymentProviderPort` to construct it against on
+   * a box with payments disabled, and `routes/users.ts` answers 503 rather
+   * than crashing on a provider it was never handed. (The creator-world
+   * `CreatePaymentAccount` this docstring used to mirror went with
+   * `POST /payment-account` in retire-telegram Task 7's fix round. The
+   * ADAPTER method both use cases call, `PaymentProviderPort
+   * .createPaymentAccount`, is UNTOUCHED — it is what this one still
+   * provisions through.)
    */
   connectUserPayout: ConnectUserPayout | undefined;
   /**
@@ -364,92 +276,7 @@ export interface Dependencies {
    * unconditionally regardless of whether this box takes payments.
    */
   listSubscribers: ListSubscribers;
-  getPublicCommunity: GetPublicCommunity;
-  /**
-   * `POST /c/:slug/checkout`. `undefined` EXACTLY when `payments` is `null` —
-   * this use-case's constructor requires a real `PaymentProviderPort`, so
-   * there is nothing to construct it against when payments are disabled (see
-   * `selectPaymentProvider`). `routes/public-community.ts` does NOT register
-   * the checkout route at all in that case (mirrors `scheduleLiveSession`'s
-   * own undefined-ness, not `listLiveSessions`'s), so the route 404s through
-   * the ordinary not-found path rather than answering with a 503 from a route
-   * that does exist.
-   */
-  startCheckout: StartCheckout | undefined;
-  /**
-   * `POST /c/:slug/join-request`. Constructed unconditionally, unlike
-   * `startCheckout` — whether a community accepts a free join is decided by
-   * its own `accessMode`, never by this deployment's payment configuration.
-   * See `RequestToJoin`'s own docstring for the 404 that keeps a `paid`
-   * community from ever falling back to this path.
-   */
-  requestToJoin: RequestToJoin;
-  /** `GET /c/:slug/request/:joinRequestId`. See `GetJoinRequestStatus`'s own docstring. */
-  getJoinRequestStatus: GetJoinRequestStatus;
-  /**
-   * Task 4's `GET /communities/:communityId/join-requests` — the owner's
-   * pending-requests dashboard list.
-   */
-  listJoinRequests: ListJoinRequests;
-  /**
-   * Task 4's `POST /communities/:communityId/join-requests/:requestId/approve`
-   * and `.../reject`. ONE use case for both decisions — see its own docstring
-   * for why splitting it into two would let the ownership check, the
-   * already-decided check and the `activity_log` write drift apart.
-   */
-  decideJoinRequest: DecideJoinRequest;
-  getSubscriptionStatus: GetSubscriptionStatus;
   handlePaymentWebhook: HandlePaymentWebhook;
-  /**
-   * Phase 6's creator dashboard reads. All three go through
-   * `AnalyticsRepositoryPort`, whose every method is creator-scoped and which has
-   * no unscoped variant — see the port for why that absence is the protection.
-   */
-  getCommunityMetrics: GetCommunityMetrics;
-  getCommunityActivity: GetCommunityActivity;
-  listCommunityMembers: ListCommunityMembers;
-  /**
-   * The roster as a downloadable CSV. It STREAMS — see the use-case for why one
-   * unbounded select would put twice a successful creator's roster in memory per
-   * concurrent download — and it carries members' WhatsApp numbers, so it is
-   * authenticated like everything else and never logged.
-   */
-  exportCommunityMembers: ExportCommunityMembers;
-  /**
-   * The creator's manual "remove this member" action. It lives in the API rather
-   * than the worker because revocation is SYNCHRONOUS: a creator removing someone
-   * expects to be told whether it worked (see the use-case docstring). That is
-   * also why the API selects messaging providers at all — the grant path never
-   * calls one from this process.
-   */
-  revokeChannelAccess: RevokeChannelAccess;
-  /**
-   * Attaches a joining member's Telegram user id to the membership whose
-   * single-use invite link they used. It lives in the API rather than the worker
-   * because it is driven by an INBOUND webhook — see routes/webhooks.ts for why a
-   * webhook rather than a `getUpdates` poll.
-   *
-   * Without it `channel_membership.external_member_id` is NULL forever and
-   * `RevokeChannelAccess` can only report `no_provider_member_id_recorded`.
-   */
-  recordChannelJoin: RecordChannelJoin;
-  /**
-   * Phase 5's renewal reminder delivery.
-   *
-   * The DISPATCHER lives in the worker — `bootstrapWorker` registers it against the
-   * `send_renewal_reminder` outbox event type, and this process claims no outbox rows.
-   * It is constructed here anyway, and exposed, for the reason `messaging` and
-   * `payments` are: so a test can prove what THIS process wired. Specifically that the
-   * reminder's checkout link is built from the same resolved `appBaseUrl` this root
-   * hands `StartCheckout` for `success_redirect_url` — the two must never disagree
-   * about which deployment a member is sent to, and the only way to check that is to
-   * be able to see both from one place.
-   *
-   * Phase 4's lesson, restated: a guard that exists in the API and has never crossed
-   * the workspace seam is not a guard. Both roots build this use-case, and both are
-   * tested.
-   */
-  sendRenewalReminder: SendRenewalReminder;
   /**
    * The messaging adapters THIS process selected. Exposed for the same reason
    * `payments` and `WorkerDependencies.messaging` are: a test must be able to prove
@@ -459,15 +286,6 @@ export interface Dependencies {
    * prove only that the test can call the fake.
    */
   messaging: MessagingProviders;
-  /**
-   * The static secret Telegram sends as `X-Telegram-Bot-Api-Secret-Token`, the
-   * ONLY thing authenticating `POST /webhooks/telegram`. `undefined` when the box
-   * is not configured for it (never outside the NODE_ENV allowlist —
-   * `resolveTelegramWebhookSecret` throws there), in which case
-   * `verifyCallbackToken` rejects every delivery rather than accepting any. Not
-   * narrowed to `string` for the same reason as `xenditCallbackToken`.
-   */
-  telegramWebhookSecret: string | undefined;
   /**
    * The static token Xendit sends as `X-CALLBACK-TOKEN`, the ONLY thing
    * authenticating the webhook route. `undefined` when the box is not
@@ -484,33 +302,13 @@ export interface Dependencies {
   xenditCallbackToken: string | undefined;
   /**
    * The resolved public origin of `apps/web` — see `resolveAppBaseUrl`. Exposed
-   * here rather than kept private inside `StartCheckout` so a test can prove the
+   * here rather than kept private inside the use cases that build links from it
+   * (`StartUserSubscription`, `RequestPasswordReset`) so a test can prove the
    * environment variable actually reaches the composition root: the confirmation
    * page was unreachable for an entire phase because nothing checked the wiring.
    */
   appBaseUrl: string;
   sql: DatabasePing;
-  /**
-   * The AI co-builder's provider adapter (Phase 7), `undefined` when the
-   * feature is disabled — see `selectAiProvider`. Exposed for the same
-   * reason `payments` and `messaging` are: a test must be able to prove what
-   * THIS process actually wired (e.g. drive `FakeAiAdapter.nextBehaviour`
-   * directly against a route test built on `bootstrap()`), and reading it
-   * off a fake constructed by the test instead would prove only that the
-   * test can call the fake.
-   */
-  aiProvider: AiProviderPort | undefined;
-  /**
-   * `undefined` EXACTLY when `aiProvider` is `undefined`. This is the ONE
-   * signal `GET /ai/status` (routes/ai.ts) surfaces to the dashboard so it
-   * can hide the chat screen instead of linking to one that always 503s —
-   * see `selectAiProvider` for when that happens: a NODE_ENV outside
-   * `RELAXED_NODE_ENVS` with no `OPENROUTER_API_KEY`/`OPENROUTER_MODEL`
-   * configured. Unlike every other feature in this codebase, this is NOT a
-   * reason to refuse to boot (design spec §11): the product works fine
-   * without a co-builder.
-   */
-  sendAiMessage: SendAiMessage | undefined;
   /**
    * Task 2's live-streaming provider — the SECOND feature in this codebase
    * (after `aiProvider`) that boots DISABLED rather than refusing to start
@@ -524,35 +322,13 @@ export interface Dependencies {
    */
   streamingProvider: StreamingProviderPort | undefined;
   /**
-   * Task 3's `POST /communities/:communityId/events` — scheduling a live
-   * session. `undefined` EXACTLY when `streamingProvider` is: this use-case
-   * requires a real `StreamingProviderPort` (see `ScheduleLiveSession`'s own
-   * docstring for why the "is streaming configured" decision is made once,
-   * here, rather than inside the use-case), so there is nothing to construct
-   * it against when streaming is disabled. `routes/events.ts` checks this
-   * exactly the way `routes/ai.ts` checks `sendAiMessage` and answers 503.
-   */
-  scheduleLiveSession: ScheduleLiveSession | undefined;
-  /**
-   * Task 3's `GET /communities/:communityId/events`. Unlike
-   * `scheduleLiveSession`, this FIELD is NEVER `undefined` — listing always
-   * works whether streaming is configured on this box or not. The
-   * `StreamingProviderPort` it is constructed with (below) MAY be
-   * `undefined` though (Task 2 review, Important #3): it is passed through
-   * as an OPTIONAL constructor param so `ListLiveSessions` can rebuild each
-   * row's `rtmpUrl`/`whipUrl` from its persisted `streamKey` when a provider
-   * is available, and return them `null` — never omit them, never throw —
-   * when it is not. See `ListLiveSessions`'s own docstring for the full
-   * reasoning.
-   */
-  listLiveSessions: ListLiveSessions;
-  /**
    * Task 3 of Phase 7's `POST /streams` — a person goes live on their own
-   * profile. `undefined` EXACTLY when `streamingProvider` is, mirroring
-   * `scheduleLiveSession` immediately above: `StartUserStream` requires a
-   * real `StreamingProviderPort` rather than accepting `| undefined` and
-   * checking internally, so there is nothing to construct it against when
-   * streaming is disabled. `routes/streams.ts` checks THIS and answers 503.
+   * profile. `undefined` EXACTLY when `streamingProvider` is: `StartUserStream`
+   * requires a real `StreamingProviderPort` rather than accepting `| undefined`
+   * and checking internally, so there is nothing to construct it against when
+   * streaming is disabled — the "is streaming configured" decision is made once,
+   * in `bootstrap()`, not inside the use-case. `routes/streams.ts` checks THIS
+   * and answers 503.
    */
   startUserStream: StartUserStream | undefined;
   /**
@@ -561,9 +337,10 @@ export interface Dependencies {
    * rows and derives each row's playback path from its own id
    * (`userStreamPlaybackPath`), so it needs no provider at all. A listing
    * that failed over a WRITER's dependency would take Siaran down for every
-   * reader on a box where nobody configured MediaMTX — the same argument
-   * `listLiveSessions` above makes, with one fewer moving part (it does not
-   * even take an optional provider).
+   * reader on a box where nobody configured MediaMTX. It does not even take an
+   * optional provider, unlike the community `ListLiveSessions` retire-telegram
+   * Task 3 deleted, which had to rebuild each row's URLs from a provider it
+   * might not have.
    */
   listLiveStreams: ListLiveStreams;
   /**
@@ -580,7 +357,7 @@ export interface Dependencies {
    * actually checked for watching.
    *
    * `undefined` EXACTLY when `streamTokenSecret` is — in LOCKSTEP with
-   * `authoriseStream` and `resolveWatchToken`, not with `startUserStream`.
+   * `authoriseStream`, not with `startUserStream`.
    * The distinction is real and is pinned by a test: a relaxed dev box
    * (`development`/`test` with no streaming vars) gets a truthy
    * `FakeStreamingAdapter`, so `startUserStream` is DEFINED while
@@ -592,8 +369,8 @@ export interface Dependencies {
   mintUserWatchToken: MintUserWatchToken | undefined;
   /**
    * Task 4's `POST /webhooks/mediamtx/auth` decision logic — `undefined`
-   * EXACTLY when `streamTokenSecret` is. Mirrors `scheduleLiveSession`'s
-   * undefined-ness rather than `listLiveSessions`'s: unlike listing,
+   * EXACTLY when `streamTokenSecret` is. Mirrors `startUserStream`'s
+   * undefined-ness rather than `listLiveStreams`'s: unlike listing,
    * authorising a read needs `STREAM_TOKEN_SECRET` to verify a watch
    * token's signature, so there is nothing to construct it against when
    * streaming is disabled.
@@ -605,12 +382,12 @@ export interface Dependencies {
    * truthy `FakeStreamingAdapter` (see that function's case 3), so
    * `streamingProvider` is defined while `MEDIAMTX_WEBHOOK_SECRET` /
    * `STREAM_TOKEN_SECRET` are genuinely absent and `authoriseStream` stays
-   * `undefined`. Concretely: a relaxed dev box has "schedule a session"
-   * enabled (`scheduleLiveSession` is set) while every call to
+   * `undefined`. Concretely: a relaxed dev box has "go live" enabled
+   * (`startUserStream` is set) while every call to
    * `POST /webhooks/mediamtx/auth` 401s (see `mediamtxWebhookSecret`
    * below) — a real, if confusing-looking, combination, and the correct
    * one: fail-closed on authorisation is the right default even when
-   * scheduling itself is happily faked. Do not "fix" the route's
+   * publishing itself is happily faked. Do not "fix" the route's
    * `!deps.authoriseStream` guard as dead code on the strength of the old
    * (wrong) claim that it can never be reached — this is exactly the case
    * that reaches it.
@@ -624,7 +401,7 @@ export interface Dependencies {
    * can carry, since it has no way to attach a custom header — see
    * `routes/mediamtx-webhooks.ts`'s docstring). It is the ONLY
    * authentication on that route either way, exactly like
-   * `xenditCallbackToken`/`telegramWebhookSecret` above. `undefined` in
+   * `xenditCallbackToken` above. `undefined` in
    * lockstep with `authoriseStream` (see that field — and see that field
    * for why "in lockstep with `authoriseStream`" is NOT the same thing as
    * "in lockstep with `streamingProvider`"), in which case
@@ -635,39 +412,25 @@ export interface Dependencies {
    */
   mediamtxWebhookSecret: string | undefined;
   /**
-   * Task 5's `POST /webhooks/mediamtx/lifecycle` decision logic — `undefined`
-   * in lockstep with `mediamtxWebhookSecret` (both are read off the same
-   * `MEDIAMTX_WEBHOOK_SECRET`; see that field for what "in lockstep" does and
-   * does not imply). Unlike `authoriseStream`, this class needs no secret of
-   * its own to do its job — it only reads and writes `event`, `activity_log`
-   * and `outbox` — so gating its construction on the secret is a choice made
-   * for symmetry with the route it serves (there is no reachable path to
-   * `POST /lifecycle` on a box where the secret is unset, so wiring the
-   * use-case anyway would only be dead weight) rather than a requirement of
-   * the class itself.
-   */
-  handleStreamLifecycle: HandleStreamLifecycle | undefined;
-  /**
-   * Task 6 of Phase 7's `POST /webhooks/mediamtx/lifecycle` decision logic for the
-   * `u/<key>` world — `undefined` in lockstep with `mediamtxWebhookSecret`, same
-   * reasoning as `handleStreamLifecycle` immediately above (this class needs no
-   * secret of its own either; it only reads and writes `user_stream`, unscoped by
-   * owner, same as that class). The route (`routes/mediamtx-webhooks.ts`) parses
-   * `$MTX_PATH` with `parseStreamPath` itself and dispatches to THIS field when the
-   * path names the user world, and to `handleStreamLifecycle` otherwise — see that
-   * route's own docstring for why the dispatch lives there rather than inside either
-   * class.
+   * `POST /webhooks/mediamtx/lifecycle`'s decision logic — and, since
+   * retire-telegram Task 3 deleted `HandleStreamLifecycle` and the community
+   * `live/<key>` world beside it, the ONLY one that route has left.
+   *
+   * `undefined` in lockstep with `mediamtxWebhookSecret` (both are read off the
+   * same `MEDIAMTX_WEBHOOK_SECRET`; see that field for what "in lockstep" does
+   * and does not imply). This class needs no secret of its own to do its job —
+   * it only reads and writes `user_stream`, unscoped by owner — so gating its
+   * construction on the secret is a choice made for symmetry with the route it
+   * serves (there is no reachable path to `POST /lifecycle` on a box where the
+   * secret is unset) rather than a requirement of the class itself.
+   *
+   * The route (`routes/mediamtx-webhooks.ts`) still parses `$MTX_PATH` with
+   * `parseStreamPath` itself before reaching THIS field, and now REFUSES with a
+   * 404 when the path names anything other than the user world — see that
+   * route's own docstring for why an unserved namespace must not be
+   * acknowledged.
    */
   endUserStream: EndUserStream | undefined;
-  /**
-   * Task 8's `GET /c/watch/:token` decision logic — `undefined` in lockstep
-   * with `authoriseStream` (both are read off `STREAM_TOKEN_SECRET`; see
-   * that field for what "in lockstep" does and does not imply). A member
-   * opening a `/watch/<token>` URL on a box with streaming disabled sees the
-   * SAME "link is not valid" message as an expired token — see
-   * `routes/public-subscription.ts`'s `WATCH_REFUSED_BODY`.
-   */
-  resolveWatchToken: ResolveWatchToken | undefined;
   /**
    * Phase 4's image storage (Task 2). Never `undefined` and never `null` —
    * mirrors `messaging`, not `payments`/`email`/`streamingProvider`: unlike
@@ -753,9 +516,9 @@ export function assertUsableJwtSecret(secret: string | undefined): string {
  * The ONLY `NODE_ENV` values allowed to reach a relaxed configuration branch:
  * the fake payment adapter, and an absent `XENDIT_CALLBACK_TOKEN`.
  *
- * An ALLOWLIST, deliberately — this is the same shape as `VISIBLE_STATUSES` in
- * get-public-community.ts, for the same reason: an unanticipated value must fail
- * CLOSED. The denylist this replaced (`if (nodeEnv === "production") throw`)
+ * An ALLOWLIST, deliberately — the same shape as `NAMESPACES` in
+ * `routes/mediamtx-webhooks.ts`, for the same reason: an unanticipated value
+ * must fail CLOSED. The denylist this replaced (`if (nodeEnv === "production") throw`)
  * looked equivalent and was not, because nothing in this repository ever sets
  * `NODE_ENV`:
  *
@@ -825,10 +588,12 @@ function presentOrUndefined(value: string | undefined): string | undefined {
  * rather than ever taking fake money for real.
  *
  * The fake adapter settles nothing while looking, from the outside, exactly
- * like it did. Worse, `CreatePaymentAccount` writes its `fake-acct-*` id into
- * `creator.xendit_account_id` and then 409s forever, so a creator onboarded on
- * a misconfigured production box can never connect a real Xendit sub-account
- * without manual SQL. A `console.log` is not a safety mechanism — these two
+ * like it did. Worse, a connect use case writes its `fake-acct-*` id into the
+ * payout column and then 409s forever, so anyone onboarded on a misconfigured
+ * production box can never connect a real Xendit sub-account without manual
+ * SQL. (Measured on the creator flow, whose `CreatePaymentAccount` went with
+ * `POST /payment-account` in retire-telegram Task 7's fix round;
+ * `ConnectUserPayout` writes `app_user.xendit_account_id` the same way.) A `console.log` is not a safety mechanism — these two
  * guards are (see the plan's Global Constraints):
  *
  *   1. PARTIAL configuration throws in EVERY environment. A set secret key with
@@ -846,16 +611,20 @@ function presentOrUndefined(value: string | undefined): string | undefined {
  * became the unhelpful one. `null` — see the return type — is what replaced
  * the throw:
  *
- *   - The fake adapter writes unrecoverable `fake-acct-*` ids into
- *     `creator.xendit_account_id`, so falling back to it here (`?? new
+ *   - The fake adapter writes unrecoverable `fake-acct-*` ids into the payout
+ *     column, so falling back to it here (`?? new
  *     FakePaymentAdapter()`, or any other stand-in that answers real calls)
  *     would ship exactly the disaster the original throw existed to prevent
  *     — a box that LOOKS like it takes payments and only takes fake ones.
  *   - `null` is genuinely absent instead: `bootstrap()` does not construct
- *     `StartCheckout` when this returns `null`, and `POST /c/:slug/checkout`
- *     is never registered, so it 404s through the ordinary not-found path.
+ *     `StartUserSubscription` or `ConnectUserPayout` when this returns `null`,
+ *     and each of their routes answers 503 off its own `undefined` dependency.
  *     There is nothing left in the process for a caller to reach that would
- *     pretend to take a payment.
+ *     pretend to take a payment. (There were four. Retire-telegram Task 4
+ *     deleted `StartCheckout`, whose `POST /c/:slug/checkout` route was not
+ *     even registered in that case — the community checkout and that
+ *     asymmetry went together; Task 7's fix round deleted
+ *     `CreatePaymentAccount` with `POST /payment-account`.)
  *
  * Mirrors `assertUsableJwtSecret` above in shape and error wording for the
  * two cases that still throw.
@@ -911,25 +680,22 @@ export function selectPaymentProvider(env: {
 }
 
 /**
- * The messaging providers a process needs to turn a payment into access.
+ * The messaging providers a process needs to reach a person.
  *
- * Two fields rather than one map, because notifying and gating are different
- * capabilities and conflating them is a real bug: `TelegramBotAdapter.notify`
- * THROWS (it addresses a WhatsApp number it cannot reach), so a member who paid
- * would never be told anything.
+ * ONE field now. It used to carry a second — `gating`, a map of providers keyed
+ * by `channel.platform`, whose only consumers were the channel-access use cases
+ * retire-telegram Task 2 deleted along with the Telegram adapter that was the
+ * only thing in it that could actually gate. The distinction it encoded
+ * (notifying and gating are different capabilities, and `TelegramBotAdapter.notify`
+ * THREW) has no second side left to be confused with.
+ *
+ * Still a wrapper rather than a bare `MessagingProviderPort`: both composition
+ * roots expose this so a test can prove which adapters an environment selected,
+ * and the field name is what makes "the WhatsApp one" explicit at every call
+ * site.
  */
 export interface MessagingProviders {
-  /**
-   * Gating providers keyed by `channel.platform`.
-   *
-   * WhatsApp is in here too, even though it cannot gate: a `whatsapp` channel must
-   * resolve to a provider that reports `canGateAccess: false` — which
-   * `GrantChannelAccess` turns into "a human will add you", recorded in
-   * `activity_log` — rather than to nothing, which it treats as an unwired
-   * platform and an error.
-   */
-  gating: ReadonlyMap<string, MessagingProviderPort>;
-  /** How the MEMBER is reached. WhatsApp, always. */
+  /** How the PERSON is reached. WhatsApp, always. */
   notifier: MessagingProviderPort;
 }
 
@@ -940,13 +706,8 @@ export interface MessagingProviders {
  * Deliberately the same shape, thresholds and reasoning as
  * `selectPaymentProvider` above:
  *
- *   1. Both tokens set -> the real adapters, in every environment.
- *   2. PARTIAL configuration throws EVERYWHERE. A Telegram token with no Fonnte
- *      token mints a single-use invite link and has no way to deliver it: the
- *      member pays, a credential is created, and nobody is told. A Fonnte token
- *      with no Telegram token notifies members that they have access to a group
- *      nothing ever added them to.
- *   3. ABSENT configuration selects `FakeMessagingAdapter` ONLY when `NODE_ENV`
+ *   1. `FONNTE_API_TOKEN` set -> the real adapter, in every environment.
+ *   2. ABSENT configuration selects `FakeMessagingAdapter` ONLY when `NODE_ENV`
  *      is in `RELAXED_NODE_ENVS` — so `undefined`, `"staging"`, `"prod"` and
  *      `"production"` all throw. The fake records sends into an array instead of
  *      making them, so a box running it looks exactly like a working one from the
@@ -954,69 +715,47 @@ export interface MessagingProviders {
  *      arrive. That is this phase's worst failure mode (plan, Global
  *      Constraints), and it is worth refusing to boot over.
  *
- * Both tokens are bearer credentials — the Telegram one is part of every Bot API
- * request PATH — so the startup line names the adapters and never the values.
+ * `FONNTE_API_TOKEN` is a bearer credential, so the startup line names the
+ * adapter and never the value.
+ *
+ * Retire-telegram Task 2 removed the `TELEGRAM_BOT_TOKEN` half. There is no
+ * half-configured case left to throw over — one token cannot disagree with
+ * itself — so case 2 above is gone with it, and the block-boot guard on the
+ * ABSENT case, which is the one that actually protects a paying member, is
+ * unchanged.
  */
 export function selectMessagingProviders(env: {
-  telegramBotToken: string | undefined;
   fonnteApiToken: string | undefined;
   nodeEnv: string | undefined;
 }): MessagingProviders {
-  const telegramBotToken = presentOrUndefined(env.telegramBotToken);
   const fonnteApiToken = presentOrUndefined(env.fonnteApiToken);
 
-  if (telegramBotToken && fonnteApiToken) {
+  if (fonnteApiToken) {
     logProviderChoice(
       env.nodeEnv,
-      "[bootstrap] messaging providers: TelegramBotAdapter (gating) + FonnteWhatsAppAdapter " +
-        "(notification) — TELEGRAM_BOT_TOKEN and FONNTE_API_TOKEN are set, so real invites " +
-        "will be issued and real messages sent"
+      "[bootstrap] messaging provider: FonnteWhatsAppAdapter (notification) — " +
+        "FONNTE_API_TOKEN is set, so real messages will be sent"
     );
-    const notifier = new FonnteWhatsAppAdapter({ apiToken: fonnteApiToken });
-    return {
-      gating: new Map<string, MessagingProviderPort>([
-        ["telegram", new TelegramBotAdapter({ botToken: telegramBotToken })],
-        ["whatsapp", notifier],
-      ]),
-      notifier,
-    };
-  }
-
-  if (telegramBotToken || fonnteApiToken) {
-    const missing = telegramBotToken ? "FONNTE_API_TOKEN" : "TELEGRAM_BOT_TOKEN";
-    const present = telegramBotToken ? "TELEGRAM_BOT_TOKEN" : "FONNTE_API_TOKEN";
-    throw new Error(
-      `Messaging is half-configured: ${present} is set but ${missing} is not. Set both or ` +
-        "neither — see apps/api/.env.example. Refusing to start rather than issuing invite " +
-        "links nobody can be told about, or telling members about access nobody granted."
-    );
+    return { notifier: new FonnteWhatsAppAdapter({ apiToken: fonnteApiToken }) };
   }
 
   if (!isRelaxedNodeEnv(env.nodeEnv)) {
     throw new Error(
-      "TELEGRAM_BOT_TOKEN and FONNTE_API_TOKEN are not set, and NODE_ENV is " +
+      "FONNTE_API_TOKEN is not set, and NODE_ENV is " +
         `${describeNodeEnv(env.nodeEnv)}. FakeMessagingAdapter is permitted ONLY when ` +
         `NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}: it appends sends to an array, so a ` +
-        "box running it looks like it is inviting paying members while nobody receives " +
-        "anything. Add the tokens to apps/api/.env — see .env.example — or set " +
+        "box running it looks like it is messaging paying members while nobody receives " +
+        "anything. Add the token to apps/api/.env — see .env.example — or set " +
         "NODE_ENV=development."
     );
   }
 
   logProviderChoice(
     env.nodeEnv,
-    "[bootstrap] messaging providers: FakeMessagingAdapter for both gating and notification " +
-      "(TELEGRAM_BOT_TOKEN/FONNTE_API_TOKEN not set — no invite is issued and no message is " +
-      "sent; set both to switch to the real adapters)"
+    "[bootstrap] messaging provider: FakeMessagingAdapter for notification " +
+      "(FONNTE_API_TOKEN not set — no message is sent; set it to switch to the real adapter)"
   );
-  const fakeNotifier = new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false });
-  return {
-    gating: new Map<string, MessagingProviderPort>([
-      ["telegram", new FakeMessagingAdapter({ platform: "telegram", canGateAccess: true })],
-      ["whatsapp", fakeNotifier],
-    ]),
-    notifier: fakeNotifier,
-  };
+  return { notifier: new FakeMessagingAdapter({ platform: "whatsapp", canGateAccess: false }) };
 }
 
 /**
@@ -1115,177 +854,6 @@ export function selectEmailProvider(env: {
 }
 
 /**
- * Resolves `AI_FAKE_BEHAVIOUR`, the switch that makes `FakeAiAdapter`'s
- * hostile-payload behaviours reachable from OUTSIDE the API process.
- *
- * Before this, `FakeAiAdapter.nextBehaviour` could only be set by a test
- * holding a reference to the adapter instance bootstrap() constructed — so a
- * creator driving the co-builder chat screen in a real browser could only
- * ever see `"draft"` (the fake's hardcoded default), and the 502 ("prose"/
- * "truncated-json"), 503 ("timeout"), and any non-draft-happy-path response
- * were unreachable from the UI in every environment, including local dev
- * with no OpenRouter key. Task 8's gate found that gap and it is now closed:
- * an operator restarts the API with this set to drive any behaviour the
- * fake supports.
- *
- * Fails CLOSED on an unrecognised value, same rule as
- * `resolveAiDailyMessageLimit` and every other env parser in this file: a
- * typo'd behaviour name silently falling back to `"draft"` would look like
- * "it works" while testing nothing the operator intended to test.
- *
- * Deliberately NOT itself gated on `RELAXED_NODE_ENVS` — `selectAiProvider`
- * only ever calls this from inside the branch that is already behind that
- * allowlist (a `FakeAiAdapter` is never constructed outside it), so a second
- * check here would be dead code, not a second layer of safety. This
- * function has no effect at all in production: `OPENROUTER_API_KEY`/
- * `OPENROUTER_MODEL` set there selects `OpenRouterAiAdapter`, which has no
- * `nextBehaviour` to set, and unset selects `undefined` (the feature
- * disabled) — a `FakeAiAdapter` never exists for this value to reach.
- */
-export function resolveAiFakeBehaviour(env: {
-  value: string | undefined;
-}): FakeAiBehaviour | undefined {
-  const raw = presentOrUndefined(env.value);
-  if (raw === undefined) {
-    return undefined;
-  }
-
-  if (!(FAKE_AI_BEHAVIOURS as readonly string[]).includes(raw)) {
-    throw new Error(
-      `AI_FAKE_BEHAVIOUR must be one of ${FAKE_AI_BEHAVIOURS.join(", ")} (got "${raw}"). ` +
-        "Unset it to keep the fake's default, draft."
-    );
-  }
-  return raw as FakeAiBehaviour;
-}
-
-/**
- * Chooses the AI co-builder's provider adapter (Phase 7) — the ONE selector
- * in this file that does NOT refuse to boot when configuration is absent.
- * Unlike payments and messaging, nothing is on the line if the co-builder is
- * unavailable: no money moves and no invite is issued through this path
- * (design spec §11, plan Global Constraints) — the AI never writes to the
- * database beyond its own conversation transcript and usage counter.
- *
- *   1. Both `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` set -> the real
- *      adapter, in every environment.
- *   2. PARTIAL configuration throws in EVERY environment — same reasoning as
- *      `selectPaymentProvider`/`selectMessagingProviders`: a key with no
- *      model id (or vice versa) is a typo, never intentional.
- *   3. ABSENT configuration selects `FakeAiAdapter` ONLY inside
- *      `RELAXED_NODE_ENVS` (development/test) — the SAME allowlist reused
- *      from `isRelaxedNodeEnv`, not a second gate. `AI_FAKE_BEHAVIOUR` (see
- *      `resolveAiFakeBehaviour`) sets that instance's `nextBehaviour` so the
- *      fake's hostile-payload paths are reachable from a real browser, not
- *      only from a test holding the instance directly.
- *   4. ABSENT configuration OUTSIDE the allowlist returns `undefined` RATHER
- *      THAN THROWING: this is the one deliberate divergence from every other
- *      selector in this file. The feature is disabled, not the boot.
- *      `Dependencies.sendAiMessage` becomes `undefined` too, and
- *      `GET /ai/status` (routes/ai.ts) reports `enabled: false` so the
- *      dashboard hides the chat screen rather than linking to one that
- *      always 503s (plan Task 7).
- */
-export function selectAiProvider(env: {
-  apiKey: string | undefined;
-  model: string | undefined;
-  nodeEnv: string | undefined;
-  fakeBehaviour?: string | undefined;
-}): AiProviderPort | undefined {
-  const apiKey = presentOrUndefined(env.apiKey);
-  const model = presentOrUndefined(env.model);
-
-  if (apiKey && model) {
-    logProviderChoice(
-      env.nodeEnv,
-      "[bootstrap] AI provider: OpenRouterAiAdapter " +
-        "(OPENROUTER_API_KEY and OPENROUTER_MODEL are set)"
-    );
-    return new OpenRouterAiAdapter({ apiKey, model });
-  }
-
-  if (apiKey || model) {
-    const missing = apiKey ? "OPENROUTER_MODEL" : "OPENROUTER_API_KEY";
-    const present = apiKey ? "OPENROUTER_API_KEY" : "OPENROUTER_MODEL";
-    throw new Error(
-      `AI co-builder is half-configured: ${present} is set but ${missing} is not. ` +
-        "Set both or neither — see apps/api/.env.example. Refusing to start rather " +
-        "than booting the fake AI adapter while looking configured."
-    );
-  }
-
-  if (isRelaxedNodeEnv(env.nodeEnv)) {
-    // Resolved BEFORE the fake is constructed: an invalid AI_FAKE_BEHAVIOUR
-    // must throw with nothing left half-built, not discard an already-built
-    // instance. The adapter's own constructor has no side effects, so this
-    // reordering is cosmetic today — but it is the right shape to keep, not
-    // the one to have to notice later.
-    const behaviour = resolveAiFakeBehaviour({ value: env.fakeBehaviour });
-    const fake = new FakeAiAdapter();
-    if (behaviour !== undefined) {
-      fake.nextBehaviour = behaviour;
-    }
-    logProviderChoice(
-      env.nodeEnv,
-      "[bootstrap] AI provider: FakeAiAdapter " +
-        "(OPENROUTER_API_KEY/OPENROUTER_MODEL not set — no real model will be called; " +
-        "set both to switch to OpenRouterAiAdapter)" +
-        (behaviour !== undefined
-          ? ` — AI_FAKE_BEHAVIOUR=${behaviour}, so every turn from here on gets that ` +
-            "response rather than the fake's default draft"
-          : "")
-    );
-    return fake;
-  }
-
-  logProviderChoice(
-    env.nodeEnv,
-    "[bootstrap] AI provider: none — the AI co-builder is DISABLED " +
-      "(OPENROUTER_API_KEY/OPENROUTER_MODEL not set, and NODE_ENV is " +
-      `${describeNodeEnv(env.nodeEnv)}, outside ${RELAXED_NODE_ENVS_LIST}). Unlike ` +
-      "payments/messaging this does NOT block boot: GET /ai/status reports " +
-      "enabled: false and POST /ai/messages returns 503. Set both env vars to enable it."
-  );
-  return undefined;
-}
-
-/**
- * The per-creator daily message cap `SendAiMessage` enforces through
- * `AiUsageRepositoryPort.consumeOne` — the only thing standing between a
- * creator (or a bug, or a stolen session) and an unbounded bill once a real
- * key is configured (see `ai-usage-repository.port.ts`). 50 is a judgement
- * call, not a mirrored value from anywhere else: generous enough that a
- * real onboarding conversation (a dozen or so turns) never gets cut off
- * mid-conversation, tight enough that a runaway loop cannot run up a
- * meaningful bill in one day.
- */
-export const DEFAULT_AI_DAILY_MESSAGE_LIMIT = 50;
-
-/**
- * Parses `AI_DAILY_MESSAGE_LIMIT`, failing closed on anything that is not a
- * positive whole number — the same rule `WORKER_POLL_INTERVAL_MS` follows in
- * `apps/worker`, for the same reason: `Number("abc")` is `NaN`, and a cap
- * that silently became `NaN` would make every `message_count < NaN`
- * comparison false, which is "allow nothing" rather than "no cap", the
- * opposite of what an operator fat-fingering this value would expect.
- */
-export function resolveAiDailyMessageLimit(env: { value: string | undefined }): number {
-  const raw = presentOrUndefined(env.value);
-  if (raw === undefined) {
-    return DEFAULT_AI_DAILY_MESSAGE_LIMIT;
-  }
-
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(
-      `AI_DAILY_MESSAGE_LIMIT must be a positive whole number (got "${raw}"). Unset it to ` +
-        `use the default of ${DEFAULT_AI_DAILY_MESSAGE_LIMIT}.`
-    );
-  }
-  return parsed;
-}
-
-/**
  * The most images a single post may carry. Task 6 built `mediaIds` on both
  * create and edit but deliberately left the cap unenforced; this is it.
  *
@@ -1330,11 +898,11 @@ export function resolveMaxPostImages(value: string | undefined): number {
 
 /**
  * Minimum `MEDIAMTX_WEBHOOK_SECRET`/`STREAM_TOKEN_SECRET` length, the same
- * floor as `JWT_SECRET`/`XENDIT_CALLBACK_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`
- * above and for the same reason: `MEDIAMTX_WEBHOOK_SECRET` is the ONLY
- * authentication on both MediaMTX webhooks (Task 4), and
+ * floor as `JWT_SECRET`/`XENDIT_CALLBACK_TOKEN` above and for the same reason:
+ * `MEDIAMTX_WEBHOOK_SECRET` is the ONLY authentication on both MediaMTX
+ * webhooks (Task 4), and
  * `STREAM_TOKEN_SECRET` signs every watch token
- * (`apps/api/src/domain/watch-token.ts`) — a short one is
+ * (`apps/api/src/domain/user-watch-token.ts`) — a short one is
  * offline-brute-forceable from a single leaked token or webhook payload, and
  * either lets an attacker reach a paid stream they never paid for.
  */
@@ -1728,132 +1296,6 @@ export function resolveCallbackToken(env: {
 }
 
 /**
- * The secret `resolveTelegramWebhookSecret` hands back under `NODE_ENV=test`, and
- * the one value it refuses to accept anywhere else — same rule, and the same
- * reason, as `TEST_CALLBACK_TOKEN` above: it is committed to this repository, so
- * treating it as real would ship a publicly known webhook password.
- */
-export const TEST_TELEGRAM_WEBHOOK_SECRET = "test-telegram-webhook-secret";
-
-/**
- * Minimum `TELEGRAM_WEBHOOK_SECRET` length, mirroring `MIN_CALLBACK_TOKEN_LENGTH`
- * and `MIN_JWT_SECRET_LENGTH` on purpose. This secret is the ONLY authentication
- * on `POST /webhooks/telegram`, and forging a `chat_member` update means writing
- * an attacker-chosen `external_member_id` onto a membership — which is the id
- * `banChatMember` is aimed at, so it would turn a revocation into "remove somebody
- * else from the creator's group".
- */
-const MIN_TELEGRAM_WEBHOOK_SECRET_LENGTH = 32;
-
-/**
- * Characters Telegram's `setWebhook` accepts in `secret_token`: 1–256 of
- * `A-Z a-z 0-9 _ -`. Checked here so a secret with a space or a `+` in it fails at
- * BOOT with an explanation, rather than as an opaque 400 from `setWebhook` on a
- * box where the endpoint then rejects every real delivery.
- */
-const TELEGRAM_WEBHOOK_SECRET_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
-
-/**
- * Resolves the static secret that is the ONLY authentication on
- * `POST /webhooks/telegram`, delivered in the `X-Telegram-Bot-Api-Secret-Token`
- * header that `setWebhook`'s `secret_token` parameter installs.
- *
- * Deliberately the same four cases, thresholds and wording as
- * `resolveCallbackToken` above, because it is the same kind of thing: a STATIC
- * token that authenticates the sender and not the message.
- *
- *   1. A configured secret is used as-is (empty and whitespace-only count as
- *      unset), subject to the length floor and Telegram's charset.
- *   2. PARTIAL configuration throws in EVERY environment. A box with
- *      `TELEGRAM_BOT_TOKEN` set is gating real Telegram groups; without this
- *      secret the join endpoint rejects every delivery, so no
- *      `external_member_id` is ever recorded and revocation can never be
- *      automated — the exact gap this feature exists to close.
- *   3. ABSENT configuration returns `undefined` when `NODE_ENV` is one of
- *      `RELAXED_NODE_ENVS`, and throws for EVERYTHING else — `undefined`,
- *      `"staging"`, `"prod"`, `"PRODUCTION"`. A developer must be able to
- *      `bun run dev` without a public URL to point Telegram at.
- *   4. The committed test value is refused outside `NODE_ENV=test`.
- *
- * `undefined` fails CLOSED: `verifyCallbackToken` refuses an unset `expected`
- * before any comparison, so an unconfigured box rejects every update rather than
- * accepting every forged one.
- */
-export function resolveTelegramWebhookSecret(env: {
-  webhookSecret: string | undefined;
-  telegramBotToken: string | undefined;
-  nodeEnv: string | undefined;
-}): string | undefined {
-  const secret = presentOrUndefined(env.webhookSecret);
-
-  if (secret !== undefined) {
-    if (secret === TEST_TELEGRAM_WEBHOOK_SECRET) {
-      if (env.nodeEnv !== "test") {
-        throw new Error(
-          "TELEGRAM_WEBHOOK_SECRET is the value committed to this repository for tests. " +
-            "Anyone can read it, so it would authenticate a forged chat_member update — and " +
-            "that update writes the very user id banChatMember is aimed at. Generate a real " +
-            "one: openssl rand -hex 32"
-        );
-      }
-      // Exempt from the length floor: it is the suite's own known value, and it is
-      // already refused everywhere else by the branch above.
-      return secret;
-    }
-    if (secret.length < MIN_TELEGRAM_WEBHOOK_SECRET_LENGTH) {
-      throw new Error(
-        `TELEGRAM_WEBHOOK_SECRET is too short (${secret.length} characters; ` +
-          `${MIN_TELEGRAM_WEBHOOK_SECRET_LENGTH} required). It is the ONLY authentication on ` +
-          "POST /webhooks/telegram, and a forged update writes an attacker-chosen member id " +
-          "onto a membership. Generate one: openssl rand -hex 32"
-      );
-    }
-    if (!TELEGRAM_WEBHOOK_SECRET_PATTERN.test(secret)) {
-      throw new Error(
-        "TELEGRAM_WEBHOOK_SECRET contains characters Telegram's setWebhook will not accept " +
-          "(only A-Z, a-z, 0-9, _ and - are allowed, 1-256 of them). Refusing to start " +
-          "rather than serving an endpoint whose secret can never be installed. Generate " +
-          "one: openssl rand -hex 32"
-      );
-    }
-    return secret;
-  }
-
-  // Before the production rule, so the suite — which never sets the variable —
-  // keeps working even when a test hands this a configured bot token.
-  if (env.nodeEnv === "test") {
-    return TEST_TELEGRAM_WEBHOOK_SECRET;
-  }
-
-  if (presentOrUndefined(env.telegramBotToken)) {
-    throw new Error(
-      "TELEGRAM_BOT_TOKEN is set but TELEGRAM_WEBHOOK_SECRET is not. Real invite links " +
-        "would be issued and no chat_member update could be authenticated, so no member's " +
-        "Telegram user id would ever be recorded — and RevokeChannelAccess needs one, so " +
-        "the creator could never remove anybody. Set both — see apps/api/.env.example."
-    );
-  }
-
-  if (!isRelaxedNodeEnv(env.nodeEnv)) {
-    throw new Error(
-      "TELEGRAM_WEBHOOK_SECRET is not set, and NODE_ENV is " +
-        `${describeNodeEnv(env.nodeEnv)}. Booting without it is permitted ONLY when ` +
-        `NODE_ENV is exactly ${RELAXED_NODE_ENVS_LIST}. Add it to apps/api/.env — see ` +
-        ".env.example — or set NODE_ENV=development. Refusing to start rather than serving " +
-        "a webhook endpoint that rejects every real delivery."
-    );
-  }
-
-  logProviderChoice(
-    env.nodeEnv,
-    "[bootstrap] TELEGRAM_WEBHOOK_SECRET not set — POST /webhooks/telegram will reject " +
-      "every delivery, so no member's Telegram user id will be recorded and revocation " +
-      "cannot be automated. Set it (and setWebhook's secret_token to match) to exercise it."
-  );
-  return undefined;
-}
-
-/**
  * The `APP_BASE_URL` a developer gets for free: Vite's default dev-server
  * origin, which is what `apps/web` serves the confirmation page from.
  */
@@ -1919,20 +1361,26 @@ function logProviderChoice(nodeEnv: string | undefined, message: string): void {
 export function bootstrap(): Dependencies {
   const jwtSecret = assertUsableJwtSecret(process.env.JWT_SECRET);
 
-  const creatorRepository = new DrizzleCreatorRepository(db);
   const passwordHasher = new BunPasswordHasher();
-  const tokenIssuer = new HonoJwtTokenIssuer(jwtSecret);
-  const registerCreator = new RegisterCreator(creatorRepository, passwordHasher, tokenIssuer);
-  const authenticateCreator = new AuthenticateCreator(
-    creatorRepository,
-    passwordHasher,
-    tokenIssuer
-  );
 
-  // Phase 9's personal accounts. `userTokenIssuer` deliberately reuses the
-  // SAME `jwtSecret` as the creator `tokenIssuer` above — see
-  // `HonoJwtUserTokenIssuer`'s own docstring for why the `typ` claim is what
-  // keeps the two session kinds apart, not a second secret.
+  // Phase 9's personal accounts, and since retire-telegram Task 7's fix round
+  // the ONLY accounts. This block used to be preceded by four lines building
+  // the creator identity `/auth` served — a `DrizzleCreatorRepository`, a
+  // second `HonoJwtTokenIssuer` on this same `jwtSecret`, `RegisterCreator`
+  // and `AuthenticateCreator`. Task 1 deleted the dashboard that was their
+  // only caller; the fix round deleted the routes, the use cases, the
+  // repository, both ports and the creator `requireAuth` middleware behind
+  // them.
+  //
+  // `passwordHasher` above is SHARED and stays: `RegisterUser` and
+  // `AuthenticateUser` need it exactly as the creator pair did.
+  //
+  // ONE `typ` CLAIM, STILL CHECKED. `HonoJwtUserTokenIssuer` stamps and
+  // verifies `typ: "user"`; it was what kept two audiences on one `JWT_SECRET`
+  // apart, and with one audience left it is what stops any OTHER token signed
+  // with this secret from being accepted as a session. See that class's own
+  // docstring, and `user-auth.middleware.test.ts`, which now forges the
+  // creator-shaped token it used to mint.
   const userRepository = new DrizzleUserRepository(db);
   // Phase 5a. Its own repository over the same table — see the port's docstring
   // for why the payout column is not on `userRepository`.
@@ -2018,13 +1466,13 @@ export function bootstrap(): Dependencies {
   const maxPostImages = resolveMaxPostImages(process.env.MAX_POST_IMAGES);
   // Task 5 fix rounds 1 and 2: the post write and the media claim run in ONE
   // transaction, for `CreatePost` and `EditPost` alike (`EditPost` also locks
-  // the row first) — see `PostEditUnitOfWorkPort`'s own docstring for the
+  // the row first) — see `PostWriteUnitOfWorkPort`'s own docstring for the
   // paths that left a members-only post with zero images before this
   // existed on each side. ONE instance, shared by both, the same way
   // `postRepository`/`mediaRepository` above are.
-  const postEditUnitOfWork = new DrizzlePostEditUnitOfWork(db);
-  const createPost = new CreatePost(postEditUnitOfWork);
-  const editPost = new EditPost(postEditUnitOfWork);
+  const postWriteUnitOfWork = new DrizzlePostWriteUnitOfWork(db);
+  const createPost = new CreatePost(postWriteUnitOfWork);
+  const editPost = new EditPost(postWriteUnitOfWork);
   const deletePost = new DeletePost(postRepository);
   // The SAME `userSubscriptionRepository` and the SAME `clock` `isMemberOf`
   // and `listSubscribers` read, so the paywall gate cannot disagree with the
@@ -2049,19 +1497,6 @@ export function bootstrap(): Dependencies {
     clock
   );
 
-  const communityRepository = new DrizzleCommunityRepository(db);
-  const listCommunities = new ListCommunities(communityRepository);
-  const getCommunity = new GetCommunity(communityRepository);
-
-  const tierRepository = new DrizzleMembershipTierRepository(db);
-  const defineTier = new DefineMembershipTier(communityRepository, tierRepository);
-  const listTiers = new ListTiers(communityRepository, tierRepository);
-  const updateTier = new UpdateTier(communityRepository, tierRepository);
-
-  const channelRepository = new DrizzleChannelRepository(db);
-  const connectChannel = new ConnectChannel(communityRepository, channelRepository);
-  const listChannels = new ListChannels(communityRepository, channelRepository);
-
   const payments: PaymentProviderPort | null = selectPaymentProvider({
     secretKey: process.env.XENDIT_SECRET_KEY,
     splitRuleId: process.env.XENDIT_SPLIT_RULE_ID,
@@ -2070,37 +1505,24 @@ export function bootstrap(): Dependencies {
 
   // Task 4. Resolved here rather than down with `messaging` below: nothing in
   // THIS task's `Dependencies` depends on it (Task 5's `RequestPasswordReset`
-  // is the first consumer), so its position is not load-bearing the way
-  // `payments`'s is for `createCommunity`/`updateCommunity` above.
+  // is the first consumer), so its position is not load-bearing.
   const email: EmailProviderPort | null = selectEmailProvider({
     apiKey: process.env.RESEND_API_KEY,
     from: process.env.EMAIL_FROM,
     nodeEnv: process.env.NODE_ENV,
   });
 
-  // `createCommunity`/`updateCommunity` are constructed here, after `payments`
-  // is known, rather than up with `communityRepository` above: both need to
-  // know whether this box has a payment provider at all, to refuse
-  // `accessMode: "paid"` — see CreateCommunity/UpdateCommunity's own
-  // docstrings — while `payments` itself has to be resolved here anyway
-  // (see the `xenditCallbackToken` comment below for why THIS position is
-  // fixed).
-  const createCommunity = new CreateCommunity(communityRepository, {
-    paymentsEnabled: payments !== null,
-  });
-  const updateCommunity = new UpdateCommunity(communityRepository, {
-    paymentsEnabled: payments !== null,
-  });
-  // `undefined` EXACTLY when `payments` is `null` — see `createPaymentAccount`'s
-  // own field docstring on `Dependencies`.
-  const createPaymentAccount = payments
-    ? new CreatePaymentAccount(creatorRepository, payments)
-    : undefined;
-  const getPaymentAccountStatus = new GetPaymentAccountStatus(creatorRepository);
-  // Phase 5a's parallel flow for `app_user`. `undefined` on the same condition
-  // `createPaymentAccount` is, and for the same reason; the STATUS reader below
-  // is always constructed, because a box with payments disabled must still be
-  // able to answer the question.
+  // Phase 5a's payout flow for `app_user`, and the only one left: the
+  // creator-scoped `CreatePaymentAccount`/`GetPaymentAccountStatus` pair that
+  // stood here went with `POST|GET /payment-account` in retire-telegram
+  // Task 7's fix round. `undefined` EXACTLY when `payments` is `null` — see
+  // `connectUserPayout`'s own field docstring on `Dependencies`. The STATUS
+  // reader below is always constructed, because a box with payments disabled
+  // must still be able to answer the question.
+  //
+  // `PaymentProviderPort.createPaymentAccount` — the ADAPTER method both the
+  // deleted use case and this one call — is untouched, and so is every
+  // adapter implementing it.
   const connectUserPayout = payments
     ? new ConnectUserPayout(userPayoutRepository, payments)
     : undefined;
@@ -2111,9 +1533,11 @@ export function bootstrap(): Dependencies {
   const manageUserTiers = new ManageUserTiers(userTierRepository, userPayoutRepository);
   // After selectPaymentProvider on purpose — two reasons, one of them dated.
   //
-  // STILL TRUE: `createCommunity`/`updateCommunity`/`createPaymentAccount` above
-  // all need `payments` already resolved, so this call has to happen no later
-  // than it does regardless of anything below it.
+  // STILL TRUE: `connectUserPayout` above needs `payments` already resolved,
+  // so this call has to happen no later than it does regardless of anything
+  // below it. (Retire-telegram Task 4 deleted `createCommunity`/
+  // `updateCommunity`, which shared that constraint; Task 7's fix round
+  // deleted `createPaymentAccount`, which this sentence used to name.)
   //
   // NO LONGER TRUE (fix round 1 correction): this comment used to say the order
   // matters because "you are about to take fake money" is the more urgent of two
@@ -2132,47 +1556,14 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
-  // `paymentsEnabled` for the same reason `createCommunity`/`updateCommunity`
-  // take it, and it MUST be the same `payments !== null` they read: that is what
-  // decides whether `POST /c/:slug/checkout` is registered, so it is also what
-  // decides whether a `paid` community has any join path on this box. Without
-  // it, such a community advertised a price and a buy button whose route 404s.
-  const getPublicCommunity = new GetPublicCommunity(communityRepository, tierRepository, {
-    paymentsEnabled: payments !== null,
-  });
-
-  const memberRepository = new DrizzleMemberRepository(db);
-  const subscriptionRepository = new DrizzleSubscriptionRepository(db);
-  // Task 3's event repository, constructed here (rather than down by
-  // `scheduleLiveSession`/`listLiveSessions`, where it used to live alone)
-  // because `getSubscriptionStatus` below needs it too — one shared instance,
-  // same rule `subscriptionRepository` already follows for its own many
-  // consumers.
-  const eventRepository = new DrizzleEventRepository(db);
   const appBaseUrl = resolveAppBaseUrl({
     appBaseUrl: process.env.APP_BASE_URL,
     nodeEnv: process.env.NODE_ENV,
   });
-  // `undefined` EXACTLY when `payments` is `null` — see this field's own
-  // docstring on `Dependencies`. `routes/public-community.ts` does not
-  // register `POST /c/:slug/checkout` at all when this is `undefined`, so a
-  // request to it 404s through the ordinary not-found path.
-  const startCheckout = payments
-    ? new StartCheckout(
-        communityRepository,
-        tierRepository,
-        memberRepository,
-        subscriptionRepository,
-        creatorRepository,
-        payments,
-        clock,
-        { appBaseUrl }
-      )
-    : undefined;
-
-  // Task 6 of Phase 5a. `undefined` on the same condition `startCheckout` above
-  // is, and for the same reason — but the ROUTE stays registered and answers
-  // 503, see this field's own docstring on `Dependencies`.
+  // Task 6 of Phase 5a. `undefined` EXACTLY when `payments` is `null` — the
+  // constructor requires a real `PaymentProviderPort` — but the ROUTE stays
+  // registered and answers 503, see this field's own docstring on
+  // `Dependencies`.
   const startUserSubscription = payments
     ? new StartUserSubscription(
         userRepository,
@@ -2192,42 +1583,9 @@ export function bootstrap(): Dependencies {
       )
     : undefined;
 
-  // Task 3 (free communities): constructed UNCONDITIONALLY, unlike
-  // `startCheckout` above — see `Dependencies.requestToJoin`'s own docstring
-  // for why a community's `accessMode`, not this deployment's payment
-  // configuration, is what decides whether a free join is accepted.
-  const joinRequestRepository = new DrizzleJoinRequestRepository(db);
-  const joinRequestUnitOfWork = new DrizzleJoinRequestUnitOfWork(db);
-  const requestToJoin = new RequestToJoin(
-    communityRepository,
-    tierRepository,
-    memberRepository,
-    subscriptionRepository,
-    joinRequestUnitOfWork
-  );
-  const getJoinRequestStatus = new GetJoinRequestStatus(
-    communityRepository,
-    joinRequestRepository,
-    subscriptionRepository
-  );
-  // Task 4: the owner's decisions. `decideJoinRequest` shares
-  // `joinRequestUnitOfWork` with `requestToJoin` above — same transaction
-  // mechanism, different use of it — and reads `joinRequestRepository`/
-  // `subscriptionRepository` off the pool for its pre-transaction checks
-  // (ownership, the request lookup, the tier-active check, and the graceful
-  // already-active pre-check), exactly like `requestToJoin` does.
-  const listJoinRequests = new ListJoinRequests(communityRepository, joinRequestRepository);
-  const decideJoinRequest = new DecideJoinRequest(
-    communityRepository,
-    tierRepository,
-    joinRequestRepository,
-    subscriptionRepository,
-    joinRequestUnitOfWork
-  );
-
-  // Task 8's watch link. Read directly off `process.env` here (rather than
-  // derived from `streamingProvider`'s truthiness) for the exact reason
-  // `authoriseStream`/`mediamtxWebhookSecret` do this further down: by the
+  // The streaming signing secret. Read directly off `process.env` here (rather
+  // than derived from `streamingProvider`'s truthiness) for the exact reason
+  // `mediamtxWebhookSecret` does this further down: by the
   // time `selectStreamingProvider` (below) has run without throwing, either
   // all five streaming vars are set and length-valid or all five are
   // genuinely absent — so a plain `presentOrUndefined` read here is exactly
@@ -2237,46 +1595,31 @@ export function bootstrap(): Dependencies {
   // this function ever returns anything, so nothing constructed off this
   // value here is ever handed to a caller in that case.
   const streamTokenSecret = presentOrUndefined(process.env.STREAM_TOKEN_SECRET);
-  const getSubscriptionStatus = new GetSubscriptionStatus(subscriptionRepository, eventRepository, {
-    streamTokenSecret,
-  });
 
-  // The webhook's three writes commit together or not at all — see
-  // PaymentActivationUnitOfWorkPort. The read that precedes them uses the
+  // The webhook's writes commit together or not at all — see
+  // PaymentActivationUnitOfWorkPort. The reads that precede them use the
   // pooled repository directly.
   const paymentActivationUnitOfWork = new DrizzlePaymentActivationUnitOfWork(db);
   const handlePaymentWebhook = new HandlePaymentWebhook(
-    subscriptionRepository,
-    // Phase 5a's parallel flow. Xendit delivers ONE webhook stream, so the same
-    // use case resolves both kinds of invoice — routed on the `external_id`
-    // namespace, never guessed (see `domain/user-payment.ts`).
+    // The ONLY kind of invoice this codebase mints. Xendit still delivers one
+    // shared webhook stream to one public endpoint, so `external_id` is still
+    // routed on the `usub_` namespace and never guessed — an id that is not in
+    // it is ignored rather than resolved here (see `domain/user-payment.ts`).
+    // Retire-telegram Task 5 removed the community half and, with it, this
+    // constructor's community subscription-repository argument; Task 6 deleted
+    // that port and its implementation outright.
     userSubscriptionRepository,
     paymentActivationUnitOfWork,
     clock
   );
 
-  // Phase 6's dashboard reads. One repository, three use-cases, every method
-  // creator-scoped at the port.
-  const analyticsRepository = new DrizzleAnalyticsRepository(db);
-  const getCommunityMetrics = new GetCommunityMetrics(analyticsRepository);
-  const getCommunityActivity = new GetCommunityActivity(analyticsRepository);
-  const listCommunityMembers = new ListCommunityMembers(analyticsRepository);
-  // Takes the COMMUNITY repository too, for the slug the download's filename needs
-  // — and its `findByIdForCreator` is the ownership check, which has to happen
-  // before a single roster row is read because a stream cannot be un-sent.
-  const exportCommunityMembers = new ExportCommunityMembers(
-    communityRepository,
-    analyticsRepository
-  );
-
-  // Revocation used to be the ONE messaging call the API process made outside
-  // signup/login (granting happens in apps/worker) — Task 5's password reset and
-  // its existing-email signup notice are the second and third. Same allowlist as
-  // the payment adapter either way: on a box with no tokens and a NODE_ENV
-  // outside the allowlist this throws rather than booting a fake that would
-  // report a send it never performed.
+  // What this process still messages people about: Task 5's password reset and
+  // its existing-email signup notice. (Revocation used to be the first of these,
+  // and granting has always happened in apps/worker.) Same allowlist as the
+  // payment adapter: on a box with no token and a NODE_ENV outside the allowlist
+  // this throws rather than booting a fake that would report a send it never
+  // performed.
   const messaging = selectMessagingProviders({
-    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
     fonnteApiToken: process.env.FONNTE_API_TOKEN,
     nodeEnv: process.env.NODE_ENV,
   });
@@ -2337,69 +1680,6 @@ export function bootstrap(): Dependencies {
     clock
   );
 
-  const channelMembershipRepository = new DrizzleChannelMembershipRepository(db);
-  const revokeChannelAccess = new RevokeChannelAccess(
-    communityRepository,
-    channelMembershipRepository,
-    new DrizzleActivityLogRepository(db),
-    messaging.gating,
-    // A removal the provider could not perform is enqueued here, and apps/worker
-    // retries it — see OUTBOX_REVOKE_ACCESS. The POOLED client: this use-case is
-    // synchronous and opens no transaction, so an outbox failure must not be able to
-    // undo a revocation the creator has already been told about.
-    new DrizzleOutboxRepository(db)
-  );
-
-  // The other half of revocation, and the half that was missing: without a
-  // recorded platform member id, `revokeChannelAccess` above can only ever report
-  // `no_provider_member_id_recorded`.
-  const recordChannelJoin = new RecordChannelJoin(channelMembershipRepository);
-
-  // Phase 5. Built with the SAME `appBaseUrl` StartCheckout received above, and with
-  // `messaging.notifier` rather than a gating provider: `TelegramBotAdapter.notify`
-  // throws. See the `sendRenewalReminder` field on `Dependencies` for why the API root
-  // builds a use-case the worker dispatches.
-  const sendRenewalReminder = new SendRenewalReminder(
-    subscriptionRepository,
-    memberRepository,
-    new DrizzleActivityLogRepository(db),
-    messaging.notifier,
-    { appBaseUrl }
-  );
-  const telegramWebhookSecret = resolveTelegramWebhookSecret({
-    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
-    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
-    nodeEnv: process.env.NODE_ENV,
-  });
-
-  // Phase 7's AI co-builder. The ONE feature in this codebase that boots
-  // disabled rather than refusing to start — see selectAiProvider.
-  // `sendAiMessage` mirrors `aiProvider`'s undefined-ness exactly, which is
-  // what `GET /ai/status` reports and what `POST /ai/messages` checks.
-  const aiProvider = selectAiProvider({
-    apiKey: process.env.OPENROUTER_API_KEY,
-    model: process.env.OPENROUTER_MODEL,
-    nodeEnv: process.env.NODE_ENV,
-    fakeBehaviour: process.env.AI_FAKE_BEHAVIOUR,
-  });
-  // `resolveAiDailyMessageLimit` is called ONLY inside this branch, not
-  // unconditionally above it — it throws on a malformed
-  // `AI_DAILY_MESSAGE_LIMIT`, and that throw must never be reachable when
-  // `aiProvider` is `undefined`. The co-builder disabled (no OpenRouter key)
-  // plus a fat-fingered limit is exactly the box that must still boot: the
-  // env var is irrelevant to a disabled feature, so it must not be read at
-  // all in that case, matching `selectAiProvider`'s own "boots disabled
-  // rather than refusing to start" rule.
-  const sendAiMessage = aiProvider
-    ? new SendAiMessage(
-        new DrizzleAiConversationRepository(db),
-        new DrizzleAiUsageRepository(db),
-        aiProvider,
-        clock,
-        { dailyLimit: resolveAiDailyMessageLimit({ value: process.env.AI_DAILY_MESSAGE_LIMIT }) }
-      )
-    : undefined;
-
   // Task 2's live-streaming provider. The SECOND feature in this codebase
   // that boots disabled rather than refusing to start — see
   // selectStreamingProvider.
@@ -2412,40 +1692,18 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
-  // Task 3's scheduling endpoints. `eventRepository` is constructed earlier
-  // now (Task 8 needs it for `getSubscriptionStatus` too) and shared, not
-  // itself exposed on `Dependencies` — same rule the tier/channel
-  // repositories follow, since nothing outside this module needs to see it.
-  // `scheduleLiveSession` mirrors `sendAiMessage`'s undefined-ness exactly:
-  // constructed only when `streamingProvider` is, because its constructor
-  // requires a real `StreamingProviderPort` rather than accepting
-  // `| undefined` and checking internally — see `ScheduleLiveSession`'s
-  // docstring for why that decision belongs here and not there.
-  const scheduleLiveSession = streamingProvider
-    ? new ScheduleLiveSession(eventRepository, streamingProvider)
-    : undefined;
-  // `streamingProvider` (possibly `undefined`) passed through, NOT gated the
-  // way `scheduleLiveSession` is above: `ListLiveSessions` takes it as an
-  // OPTIONAL constructor param specifically so listing keeps working with
-  // streaming disabled (see that class's own docstring, Task 2 review
-  // Important #3) — it rebuilds rtmpUrl/whipUrl from each row's persisted
-  // streamKey when a provider is available, and returns them `null`
-  // otherwise, rather than needing a second undefined-ness story here.
-  const listLiveSessions = new ListLiveSessions(eventRepository, streamingProvider);
-
-  // Task 3 of Phase 7 — the NEW, user-scoped world beside the community
-  // `event` one above. `userStreamRepository` is constructed here and shared
-  // by all three use-cases rather than exposed on `Dependencies`, the same
-  // rule `eventRepository` and the tier/channel repositories follow.
+  // Task 3 of Phase 7 — the user-scoped streaming world, and after
+  // retire-telegram Task 3 the only one left. `userStreamRepository` is
+  // constructed here and shared by all of its use-cases rather than exposed on
+  // `Dependencies`, the same rule `eventRepository` above follows.
   const userStreamRepository = new DrizzleUserStreamRepository(db);
-  // Gated on `streamingProvider` for the identical reason
-  // `scheduleLiveSession` is: the constructor requires a real provider, and
+  // Gated on `streamingProvider`: the constructor requires a real provider, and
   // "is streaming configured" is this file's decision, not the use-case's.
   const startUserStream = streamingProvider
     ? new StartUserStream(userStreamRepository, streamingProvider)
     : undefined;
-  // NOT gated, and not even handed a `streamingProvider | undefined` the way
-  // `listLiveSessions` is — see the field docstrings above. The SAME
+  // NOT gated, and not even handed a `streamingProvider | undefined` — see the
+  // field docstrings above. The SAME
   // `userSubscriptionRepository` and the SAME `clock` `isMemberOf` and
   // `listFeed` read, so Siaran's gate and the feed's gate cannot disagree
   // about who is a paying member at a given instant.
@@ -2458,9 +1716,9 @@ export function bootstrap(): Dependencies {
 
   // Task 4's publish/read authorisation. The webhook secret is read directly
   // here rather than re-derived from `streamingProvider`'s truthiness, and
-  // `streamTokenSecret` itself was already resolved earlier (alongside
-  // `getSubscriptionStatus`) — see that declaration for why reading it before
-  // `selectStreamingProvider` runs is still safe. Both secrets rely on the
+  // `streamTokenSecret` itself was already resolved earlier — see that
+  // declaration for why reading it before `selectStreamingProvider` runs is
+  // still safe. Both secrets rely on the
   // SAME invariant `selectStreamingProvider` enforces: by the time execution
   // reaches this line, either both MEDIAMTX_WEBHOOK_SECRET and
   // STREAM_TOKEN_SECRET are set and length-valid (the five-vars-together
@@ -2470,9 +1728,7 @@ export function bootstrap(): Dependencies {
   // selectors agreeing forever about what "configured" means.
   const mediamtxWebhookSecret = presentOrUndefined(process.env.MEDIAMTX_WEBHOOK_SECRET);
   const authoriseStream = streamTokenSecret
-    ? new AuthoriseStream(eventRepository, subscriptionRepository, userStreamRepository, {
-        streamTokenSecret,
-      })
+    ? new AuthoriseStream(userStreamRepository, { streamTokenSecret })
     : undefined;
 
   // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`
@@ -2485,62 +1741,24 @@ export function bootstrap(): Dependencies {
     ? new MintUserWatchToken(userStreamRepository, isMemberOf, clock, { streamTokenSecret })
     : undefined;
 
-  // Task 8's `GET /c/watch/:token`. `undefined` in lockstep with
-  // `authoriseStream` — both need nothing but `STREAM_TOKEN_SECRET`, and
-  // both refuse everything (this route's ONE generic body; that webhook's
-  // `{ allowed: false }`) when it is absent.
+  // `POST /webhooks/mediamtx/lifecycle`'s only remaining decision logic, now that
+  // retire-telegram Task 3 deleted `HandleStreamLifecycle` and the community world
+  // it served. `userStreamRepository` is the SAME pooled instance
+  // `startUserStream`/`listLiveStreams`/`endOwnUserStream` already share — this class
+  // needs no transaction of its own, because `user_stream`'s `endById` is a single
+  // atomic UPDATE with nothing else to commit alongside it (no activity_log row, no
+  // per-member notify).
   //
-  // `hlsBaseUrl` (final whole-branch review fix — see `ResolveWatchToken`'s
-  // own docstring): this class now BUILDS the member-facing HLS URL from
-  // `event.id` rather than trusting the `streamKey`-shaped
-  // `event.hlsPlaybackPath` column, so it needs the same public HLS origin
-  // `MediaMtxAdapter` was configured with. Reading `MEDIAMTX_HLS_BASE_URL`
-  // directly here, rather than threading it through from `streamingProvider`,
-  // relies on the SAME invariant `mediamtxWebhookSecret` above already does:
-  // `selectStreamingProvider` (already run, without throwing, by the time
-  // this line executes) enforces all five streaming env vars together or
-  // none at all, so `streamTokenSecret` present implies
-  // `MEDIAMTX_HLS_BASE_URL` is too.
-  const resolveWatchToken = streamTokenSecret
-    ? new ResolveWatchToken(eventRepository, subscriptionRepository, {
-        streamTokenSecret,
-        hlsBaseUrl: presentOrUndefined(process.env.MEDIAMTX_HLS_BASE_URL) as string,
-      })
-    : undefined;
-
-  // Task 5's `POST /webhooks/mediamtx/lifecycle`. Gated on `mediamtxWebhookSecret`
-  // rather than constructed unconditionally — see the `handleStreamLifecycle`
-  // field's own docstring for why that is a symmetry choice, not a real
-  // dependency of the class. Takes BOTH the pooled `eventRepository` (the
-  // stream-key lookup, kept outside any transaction — review round 2, mirroring
-  // `HandlePaymentWebhook`'s own split) AND the unit-of-work (the transition, its
-  // activity_log row, and every per-member notify_stream_live row, which must
-  // commit or roll back together — see `StreamLifecycleUnitOfWorkPort`'s own
-  // docstring for why).
-  const handleStreamLifecycle = mediamtxWebhookSecret
-    ? new HandleStreamLifecycle(eventRepository, new DrizzleStreamLifecycleUnitOfWork(db))
-    : undefined;
-
-  // Task 6 of Phase 7's `POST /webhooks/mediamtx/lifecycle` for the `u/<key>` world —
-  // see the `endUserStream` field's own docstring for why this is a separate class
-  // rather than a branch inside `HandleStreamLifecycle`, and for why the route
-  // decides which of the two to call. `userStreamRepository` is the SAME pooled
-  // instance `startUserStream`/`listLiveStreams`/`endOwnUserStream` already share —
-  // this class needs no transaction of its own, unlike `handleStreamLifecycle`,
-  // because `user_stream`'s `endById` is a single atomic UPDATE with nothing else to
-  // commit alongside it (no activity_log row, no per-member notify — see the class's
-  // own docstring for why the two worlds' `online` hooks differ this much).
+  // Gated on `mediamtxWebhookSecret` rather than constructed unconditionally — see
+  // the `endUserStream` field's own docstring for why that is a symmetry choice with
+  // the route it serves, not a real dependency of the class.
   const endUserStream = mediamtxWebhookSecret
     ? new EndUserStream(userStreamRepository, clock)
     : undefined;
 
   return {
-    creatorRepository,
-    tokenIssuer,
     payments,
     email,
-    registerCreator,
-    authenticateCreator,
     userRepository,
     userPayoutRepository,
     userTierRepository,
@@ -2560,55 +1778,23 @@ export function bootstrap(): Dependencies {
     listUserPosts,
     requestPasswordReset,
     completePasswordReset,
-    createCommunity,
-    listCommunities,
-    updateCommunity,
-    getCommunity,
-    defineTier,
-    listTiers,
-    updateTier,
-    connectChannel,
-    listChannels,
-    createPaymentAccount,
-    getPaymentAccountStatus,
     connectUserPayout,
     getUserPayoutStatus,
     manageUserTiers,
     startUserSubscription,
     listSubscribers,
-    getPublicCommunity,
-    startCheckout,
-    requestToJoin,
-    getJoinRequestStatus,
-    listJoinRequests,
-    decideJoinRequest,
-    getSubscriptionStatus,
     handlePaymentWebhook,
-    getCommunityMetrics,
-    getCommunityActivity,
-    listCommunityMembers,
-    exportCommunityMembers,
-    revokeChannelAccess,
-    recordChannelJoin,
-    sendRenewalReminder,
     messaging,
-    telegramWebhookSecret,
     xenditCallbackToken,
     appBaseUrl,
     sql,
-    aiProvider,
-    sendAiMessage,
     streamingProvider,
-    scheduleLiveSession,
-    listLiveSessions,
     startUserStream,
     listLiveStreams,
     endOwnUserStream,
     mintUserWatchToken,
     authoriseStream,
-    resolveWatchToken,
     mediamtxWebhookSecret,
-    handleStreamLifecycle,
     endUserStream,
     mediaStorage,
     uploadMedia,

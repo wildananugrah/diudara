@@ -52,9 +52,9 @@ export interface StreamView {
  * and NEVER from its `stream_key`.
  *
  * THIS IS THE OLD WORLD'S CRITICAL FIX, INHERITED RATHER THAN REDISCOVERED.
- * `ResolveWatchToken`'s docstring records it in full: that class used to hand
- * a member `event.hls_playback_path`, a URL built from the event's stream key
- * — the same string that authorises a PUBLISH. Every member's browser was
+ * The community world's watch-link resolver (deleted by retire-telegram Task 3)
+ * used to hand a member `event.hls_playback_path`, a URL built from the event's
+ * stream key — the same string that authorises a PUBLISH. Every member's browser was
  * shown the creator's publish credential, in the network tab and in any
  * forwarded link. The fix was to build the member-facing URL from the row's
  * opaque `id` instead and let nginx rewrite it onto MediaMTX's internal,
@@ -70,10 +70,10 @@ export interface StreamView {
  * "this is a fragment, meant to be pasted inside the real public HTTPS
  * server block" header), so a same-origin path needs no `MEDIAMTX_HLS_BASE_URL`
  * to build and is therefore identical on every box — a configured VPS, a
- * developer's `FakeStreamingAdapter` machine, and CI alike. `ResolveWatchToken`
- * builds an absolute URL from that env var only because it must also survive
- * being pasted into a WhatsApp message; nothing here leaves the browser that
- * asked.
+ * developer's `FakeStreamingAdapter` machine, and CI alike. The old world's
+ * resolver built an ABSOLUTE URL from that env var only because its link also had
+ * to survive being pasted into a WhatsApp message; nothing here leaves the browser
+ * that asked.
  *
  * `u/` is Phase 7's namespace for a person's own stream (design spec §6,
  * `parseStreamPath`'s `NAMESPACES`) — never `live/`, which names the old

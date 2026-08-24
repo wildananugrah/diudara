@@ -6,11 +6,11 @@ import { db, sql } from "../../db/client";
 import { appUsers, posts as postsTable, postMedia } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { DrizzleMediaRepository } from "../../infrastructure/repositories/drizzle-media.repository";
-import { DrizzlePostEditUnitOfWork } from "../../infrastructure/repositories/drizzle-post-edit-unit-of-work";
+import { DrizzlePostWriteUnitOfWork } from "../../infrastructure/repositories/drizzle-post-write-unit-of-work";
 import { DrizzlePostRepository } from "../../infrastructure/repositories/drizzle-post.repository";
 import { ArrivalLatch } from "../../test-support/arrival-latch";
 import type { MediaRepositoryPort, MediaRow } from "../ports/media-repository.port";
-import type { PostEditUnitOfWorkPort } from "../ports/post-edit-unit-of-work.port";
+import type { PostWriteUnitOfWorkPort } from "../ports/post-write-unit-of-work.port";
 import type {
   PostOwnership,
   PostRepositoryPort,
@@ -187,11 +187,11 @@ const FIRST_IMAGE = "cccccccc-0000-4000-8000-000000000000";
 const SECOND_IMAGE = "dddddddd-0000-4000-8000-000000000000";
 
 /**
- * `CreatePost` and `EditPost` both take a `PostEditUnitOfWorkPort` now
+ * `CreatePost` and `EditPost` both take a `PostWriteUnitOfWorkPort` now
  * (Task 5 fix rounds 1 and 2) rather than the two repositories directly.
  * Every existing test in this file constructs one against the SAME fakes it
  * already builds — this just runs `work` inline, exactly as
- * `fakeJoinRequestUnitOfWork` and friends do in `bootstrap.test.ts` — so
+ * `fakeUserPurchaseUnitOfWork` and friends do in `bootstrap.test.ts` — so
  * every assertion already written against `posts.created` / `posts.updated`
  * / `media.claims` keeps meaning what it always meant. Real transactional
  * behaviour (the row lock, the rollback on both paths) is proved separately,
@@ -201,7 +201,7 @@ const SECOND_IMAGE = "dddddddd-0000-4000-8000-000000000000";
 function postWriteUnitOfWorkFor(
   posts: PostRepositoryPort,
   media: MediaRepositoryPort
-): PostEditUnitOfWorkPort {
+): PostWriteUnitOfWorkPort {
   return { run: (work) => work({ posts, media }) };
 }
 
@@ -771,7 +771,7 @@ describe("DeletePost", () => {
  *
  *   1. Two concurrent edits on the same post (`the invariant survives
  *      concurrent edits` below) — proved against the REAL
- *      `DrizzlePostEditUnitOfWork`, exactly as production wires it.
+ *      `DrizzlePostWriteUnitOfWork`, exactly as production wires it.
  *   2. A single edit whose own `claim` fails after `updateBody` already
  *      committed (`a failed claim rolls the visibility write back with it`
  *      below) — no concurrency machinery needed for this one at all. Proved
@@ -781,11 +781,11 @@ describe("DeletePost", () => {
  *      names (a row vanishing between the ownership check and the claim) —
  *      the same technique the fake-based tests above use for the identical
  *      race, now against real rows. That wrapper opens its OWN transaction
- *      rather than going through `DrizzlePostEditUnitOfWork`, so it proves
+ *      rather than going through `DrizzlePostWriteUnitOfWork`, so it proves
  *      `EditPost`'s own ordering (write, then claim, inside one transaction)
- *      rather than that specific class; `drizzle-post-edit-unit-of-work.test.ts`
+ *      rather than that specific class; `drizzle-post-write-unit-of-work.test.ts`
  *      proves the SAME rollback property directly against
- *      `DrizzlePostEditUnitOfWork` itself, which this file's wrapper does
+ *      `DrizzlePostWriteUnitOfWork` itself, which this file's wrapper does
  *      not touch.
  *
  * A FAKE unit of work (used everywhere above) cannot prove either: fakes
@@ -906,7 +906,7 @@ describe("EditPost — real transaction (Task 5 fix round 1)", () => {
    */
   it("a failed claim rolls the visibility write back with it — no invariant left broken", async () => {
     const { authorId, postId, mediaId } = await seedPublicPostWithOneImage();
-    const raceUnitOfWork: PostEditUnitOfWorkPort = {
+    const raceUnitOfWork: PostWriteUnitOfWorkPort = {
       run: (work) => db.transaction((tx) => work({ posts: new DrizzlePostRepository(tx), media: raceDeletingMedia(tx) })),
     };
 
@@ -959,7 +959,7 @@ describe("EditPost — real transaction (Task 5 fix round 1)", () => {
     const { authorId, postId, mediaId } = await seedPublicPostWithOneImage();
     const posts = new DrizzlePostRepository(db);
     const thief = await posts.create(authorId, "kiriman pencuri", "public");
-    const raceUnitOfWork: PostEditUnitOfWorkPort = {
+    const raceUnitOfWork: PostWriteUnitOfWorkPort = {
       run: (work) =>
         db.transaction((tx) =>
           work({ posts: new DrizzlePostRepository(tx), media: raceStealingMedia(tx, thief.id) })
@@ -1026,7 +1026,7 @@ describe("EditPost — real transaction (Task 5 fix round 1)", () => {
     await Promise.all(Array.from({ length: contenders }, () => sql`select 1`));
     const latch = new ArrivalLatch(contenders);
 
-    const editPost = new EditPost(new DrizzlePostEditUnitOfWork(db));
+    const editPost = new EditPost(new DrizzlePostWriteUnitOfWork(db));
     const outcomes = await Promise.all(
       seeded.flatMap(({ authorId, postId }) => [
         (async () => {
@@ -1082,7 +1082,7 @@ describe("EditPost — real transaction (Task 5 fix round 1)", () => {
  * **MAJ-2, the whole-branch review's third way into `visibility = 'members'`
  * with zero images — and it returned 200.**
  *
- * `PostEditUnitOfWorkPort`'s docstring enumerates two paths and says the post
+ * `PostWriteUnitOfWorkPort`'s docstring enumerates two paths and says the post
  * ROW LOCK closes them. It cannot reach this one, and that is the point: the
  * two writers here contend on a **media** row, not a post row. They are two
  * writes by the SAME author on DIFFERENT posts, so `lockForEdit` takes locks on
@@ -1182,7 +1182,7 @@ describe("CreatePost/EditPost — cross-post media race (MAJ-2, real transaction
     await Promise.all(Array.from({ length: contenders }, () => sql`select 1`));
     const latch = new ArrivalLatch(contenders);
 
-    const unitOfWork = new DrizzlePostEditUnitOfWork(db);
+    const unitOfWork = new DrizzlePostWriteUnitOfWork(db);
     const createPost = new CreatePost(unitOfWork);
     const editPost = new EditPost(unitOfWork);
 
@@ -1337,7 +1337,7 @@ describe("CreatePost — real transaction (Task 5 fix round 2)", () => {
     const author = await seedRealUser();
     const media = new DrizzleMediaRepository(db);
     const image = await media.create({ ownerId: author.id, width: 10, height: 10, byteSize: 1 });
-    const raceUnitOfWork: PostEditUnitOfWorkPort = {
+    const raceUnitOfWork: PostWriteUnitOfWorkPort = {
       run: (work) =>
         db.transaction((tx) =>
           work({ posts: new DrizzlePostRepository(tx), media: raceDeletingMedia(tx) })
@@ -1383,7 +1383,7 @@ describe("CreatePost — real transaction (Task 5 fix round 2)", () => {
     const media = new DrizzleMediaRepository(db);
     const image = await media.create({ ownerId: author.id, width: 10, height: 10, byteSize: 1 });
     const thief = await posts.create(author.id, "kiriman pencuri", "public");
-    const raceUnitOfWork: PostEditUnitOfWorkPort = {
+    const raceUnitOfWork: PostWriteUnitOfWorkPort = {
       run: (work) =>
         db.transaction((tx) =>
           work({ posts: new DrizzlePostRepository(tx), media: raceStealingMedia(tx, thief.id) })

@@ -28,12 +28,13 @@ export interface UserPayoutAccount {
 }
 
 /**
- * The claim-first payout column on `app_user`, mirroring
- * `CreatorRepositoryPort`'s three provisioning methods for a different owner
- * table. Read that port's docstrings and `domain/payment-account.ts` for the
- * measured incident all of this exists to prevent: 30 concurrent connects once
- * produced 30 Xendit sub-accounts, 29 of them permanently orphaned, because the
- * only way to claim the row was to already HAVE the id.
+ * The claim-first payout column on `app_user`. Its three provisioning methods
+ * were modelled on `CreatorRepositoryPort`'s, for the `creator` table — a
+ * port retire-telegram Task 7's fix round deleted with the creator payout flow.
+ * Read `domain/payment-account.ts` for the measured incident all of this exists
+ * to prevent: 30 concurrent connects once produced 30 Xendit sub-accounts, 29
+ * of them permanently orphaned, because the only way to claim the row was to
+ * already HAVE the id.
  *
  * `creator.xendit_account_id` is untouched by any of this — a creator and an
  * app_user are different owners, and generalising the creator flow was

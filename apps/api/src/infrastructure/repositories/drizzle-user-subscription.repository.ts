@@ -29,8 +29,8 @@ const subscriberProjection = {
 
 /**
  * Every id that reaches this repository from OUTSIDE is shape-checked against
- * this before it reaches the driver, exactly as `DrizzleSubscriptionRepository`
- * does for the community flow.
+ * this before it reaches the driver, exactly as the retired community
+ * subscription repository did for the community flow.
  *
  * Postgres raises on a malformed uuid, and Task 7's webhook — a PUBLIC endpoint
  * — resolves its transaction id by slicing a prefix off an attacker-chosen
@@ -328,8 +328,9 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
    * because both predicates on it here are ranges. Nothing new was needed.
    *
    * The keyset is a tuple comparison spelled out rather than a row constructor,
-   * exactly as `DrizzleSubscriptionRepository.findDueForRenewal` writes it, and it
-   * sorts in the SAME order it compares in — otherwise the walk can skip rows.
+   * exactly as the retired community repository's `findDueForRenewal` wrote it,
+   * and it sorts in the SAME order it compares in — otherwise the walk can skip
+   * rows.
    */
   async listExpiringActive(input: {
     from: Date;

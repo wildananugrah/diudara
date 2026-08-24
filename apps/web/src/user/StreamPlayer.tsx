@@ -1,18 +1,65 @@
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
-import { withToken } from "../pages/WatchPage";
 import { mintStreamWatchToken, UserApiError, type StreamView, type WatchTokenResult } from "./apiClient";
 
 /**
- * `withToken` is IMPORTED from `pages/WatchPage.tsx`, not re-implemented
- * here — it is a pure, already-hardened function (see its own docstring for
- * the MediaMTX query-propagation history behind it) and reusing it is not
- * the "copy WatchPage wholesale" this task's brief warns against. Nothing
- * else from that file is reused: `WatchPage` solves a different problem
- * (resolving a `/watch/:token` link, six-hour tokens, native-Safari
- * recovery loops) and `/dashboard/*` stays untouched — this file, and
- * `WatchPage.tsx` itself, are not under that path.
+ * Retire-telegram Task 1: `withToken` used to be IMPORTED from
+ * `pages/WatchPage.tsx` (see that file's own history for the MediaMTX
+ * query-propagation reasoning behind it — Phase 8 deleted `WatchPage.tsx`
+ * along with the rest of the old checkout/status/watch surface, so the
+ * function is reproduced here verbatim rather than left dangling. Still
+ * pure — no DOM, no hls.js.
+ *
+ * Fix round 1 (review Major 2): EXPORTED, where it was not before. The
+ * body is byte-identical to `WatchPage.tsx`'s own — `searchParams.set`
+ * still preserves any pre-existing query string like MediaMTX's own
+ * `?session=` — but `WatchPage.test.tsx`'s four-test
+ * `describe("withToken — ...")` block, the only thing that pinned that
+ * property directly, was deleted along with the file and never ported.
+ * The branch where this actually matters (`xhrSetup` below, on segment
+ * requests) is unreachable under happy-dom (`Hls.isSupported()` is false
+ * with no `MediaSource`), so those pure-function tests are the only way
+ * this behaviour is tested at all — hence exporting it, purely for
+ * `StreamPlayer.test.tsx` to import and pin directly. See that file's own
+ * copy of the WatchPage.test.tsx block.
+ *
+ * Re-attaches `?token=<token>` to `url`, overwriting any query string
+ * already there. MediaMTX re-authenticates EVERY playlist request AND every
+ * segment/part request, and rewrites `?token=...` into every sub-manifest
+ * URI it emits — so the one cookie-less first request (the master playlist
+ * load, before MediaMTX has anything to propagate from yet) and the
+ * native-HLS branch (which sets `video.src` directly, with no `xhrSetup`
+ * hook) both still need this re-attachment done explicitly.
  */
+export function withToken(url: string, token: string): string {
+  const parsed = resolveUrl(url);
+  parsed.searchParams.set("token", token);
+  return parsed.toString();
+}
+
+/**
+ * `url` is always absolute in real use — hls.js resolves a playlist's
+ * relative segment references to absolute URLs itself before ever handing
+ * one to `xhrSetup` — so the relative branch below exists only as a safety
+ * net, never the expected path in production.
+ *
+ * `window.location.origin` is deliberately NOT used as the base
+ * unconditionally: under a test DOM (happy-dom's default document is
+ * `about:blank`), `origin` is the literal string `"null"`, which is not a
+ * valid `URL` base and throws — a real browser's location is never in that
+ * state, but this function has to be safe in both.
+ */
+function resolveUrl(url: string): URL {
+  try {
+    return new URL(url);
+  } catch {
+    const origin =
+      typeof window !== "undefined" && window.location.origin !== "null"
+        ? window.location.origin
+        : "http://localhost";
+    return new URL(url, origin);
+  }
+}
 
 /**
  * **Fix round 3 (review). Shrunk from 5 minutes to 1 — the interval turned

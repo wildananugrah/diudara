@@ -1,8 +1,19 @@
 /**
- * The `event_type` of the row a payment activation queues: "give this
- * subscription's member access to their community's channels". Exported so the
- * writer (HandlePaymentWebhook) and the dispatcher (the worker's ProcessOutbox)
- * agree on the string without either importing the other.
+ * The `event_type` of the row a payment activation once queued: "give this
+ * subscription's member access to their community's channels". It was exported
+ * so the writer and the dispatcher (the worker's `ProcessOutbox`) could agree on
+ * the string without either importing the other.
+ *
+ * RETIRE-TELEGRAM TASK 5 DELETED THE WRITER. `HandlePaymentWebhook` no longer
+ * queues anything at all — a user membership grants access by BEING `active`,
+ * which is a single index hit at read time, so there is nothing to send. No
+ * handler is registered for this type either, so a row left behind by an older
+ * deploy fails loudly with "no handler is registered" rather than sitting
+ * `pending` and unread. THE CONSTANT STAYS for the same reason every other
+ * `OUTBOX_*` below does: a row found in a real database still has a name here to
+ * look up, and nothing gets to reuse the string for something else.
+ *
+ * It retires with the `outbox` table — see this interface's own docstring.
  */
 export const OUTBOX_GRANT_ACCESS = "grant_access";
 
@@ -16,6 +27,13 @@ export const OUTBOX_GRANT_ACCESS = "grant_access";
  * `automated: false` was returned, and NOTHING ever retried — which for a creator
  * clicking a button is honest, but for Phase 5's churn job means a churned member
  * stays in the paid group forever with no record that a removal is owed.
+ *
+ * RETIRE-TELEGRAM TASK 2 DELETED BOTH ENDS: `RevokeChannelAccess` wrote these rows
+ * and `RetryChannelAccessRevocation` handled them. Nothing writes this type any
+ * more, and the worker registers no handler for it — a row of it now fails with
+ * "no handler is registered", which `worker-bootstrap.test.ts` pins. The constant
+ * survives because `outbox` rows written before the deletion still carry the
+ * literal, and because that test names it rather than a bare string.
  */
 export const OUTBOX_REVOKE_ACCESS = "revoke_access";
 
@@ -88,11 +106,23 @@ export const OUTBOX_REVOKE_SUBSCRIPTION_ACCESS = "revoke_subscription_access";
  * churn between go-live and delivery). Both are re-read, never trusted from the
  * enqueue-time snapshot the roster was built from.
  *
+ * RETIRE-TELEGRAM TASK 3 DELETED BOTH ENDS, exactly as Task 2 did for
+ * `OUTBOX_REVOKE_ACCESS` and `OUTBOX_NOTIFY_JOIN_REQUEST` below:
+ * `HandleStreamLifecycle` wrote these rows and `NotifyStreamLive` handled them, and
+ * both went with the community broadcast they existed to announce. Nothing writes
+ * this type any more and no handler is registered for it, so a surviving row from
+ * before the deletion fails with "no handler is registered" rather than being
+ * silently dropped. THE CONSTANT STAYS so nothing reuses the string for something
+ * else, and so a row found in a real database still has a name here to look up.
+ *
+ * Everything below describes how it worked while it existed.
+ *
  * A retry of one row can duplicate a "we're live" WhatsApp message to a member already
  * notified successfully — `(eventId, subscriptionId)` would be exactly as natural an
  * idempotency key as `renewal_reminder`'s `(subscription_id, stage)` claim table, and
  * this codebase already ships that shape once. No claim table was added for this event
- * type because a watch token is a stateless HMAC (`domain/watch-token.ts`): re-minting
+ * type because a watch token is a stateless HMAC (the retired
+ * `domain/watch-token.ts`, and `domain/user-watch-token.ts` after it): re-minting
  * one for a retry creates no provider-side artifact, categorically unlike Phase 4's
  * Telegram invite link, where a re-mint produced a second live, unkillable credential.
  * A duplicate message is a nuisance; a duplicate invite link was a security bug.
@@ -115,6 +145,10 @@ export const OUTBOX_NOTIFY_STREAM_LIVE = "notify_stream_live";
  * `OUTBOX_NOTIFY_STREAM_LIVE`'s payload carries ids and not a snapshot: a request
  * can sit queued long enough for the community's slug or the creator's own
  * WhatsApp number to have changed underneath it.
+ *
+ * RETIRE-TELEGRAM TASK 2 DELETED BOTH ENDS, exactly as for `OUTBOX_REVOKE_ACCESS`
+ * above: `RequestToJoin` wrote these rows and `NotifyJoinRequest` handled them.
+ * Nothing writes this type any more and no handler is registered for it.
  */
 export const OUTBOX_NOTIFY_JOIN_REQUEST = "notify_join_request";
 
@@ -135,11 +169,27 @@ export interface ClaimedOutboxRow {
 /**
  * The transactional outbox.
  *
- * `enqueue` is called INSIDE the payment activation transaction (see
- * `PaymentActivationUnitOfWorkPort`), which is the whole point: the intent to
- * invite commits with the payment or not at all. Everything else is called by the
- * worker, outside any transaction — an external HTTP send must never be able to
- * roll back a paid activation.
+ * NO PRODUCTION CALLER WRITES TO IT ANY MORE, and that is the state to know
+ * before reading the rest. `enqueue` was called INSIDE the payment activation
+ * transaction (see `PaymentActivationUnitOfWorkPort`), which was the whole
+ * point: the intent to invite committed with the payment or not at all.
+ * Retire-telegram Task 5 removed that writer with the Telegram invite it
+ * existed for; Tasks 2 and 3 had already removed the others. Everything else
+ * here is called by the worker, outside any transaction — an external HTTP send
+ * must never be able to roll back a paid activation.
+ *
+ * THIS PORT AND `ProcessOutbox` RETIRE WITH THE `outbox` TABLE, IN ONE COMMIT,
+ * AND DELIBERATELY NOT BEFORE IT (retire-telegram Task 7's recorded decision;
+ * `bootstrapWorker` states the same thing at the wiring). Deleting the drainer
+ * while the table survives is strictly worse than leaving it: a row an older
+ * deploy left behind would then sit `pending` and unread forever instead of
+ * failing loudly on the next pass. `enqueueMany` — the multi-row insert the
+ * deleted community go-live fan-out used — did NOT wait, because the argument
+ * above is about DRAINING and cannot be made for a writer: Task 7 deleted it
+ * (uncalled, and its only real-database coverage went with
+ * `drizzle-stream-lifecycle.unit-of-work.test.ts` in Task 3). `enqueue` stays
+ * for now because the repository's own suite and `worker-bootstrap.test.ts`
+ * both need a way to put a row in the table to prove what happens to it.
  *
  * `claimBatch` is the only method with a concurrency requirement: two workers
  * polling the same table must never receive the same row, because one
@@ -150,20 +200,6 @@ export interface ClaimedOutboxRow {
  */
 export interface OutboxRepositoryPort {
   enqueue(input: { eventType: string; payload: unknown }): Promise<{ id: string }>;
-  /**
-   * The same write as `enqueue`, `inputs.length` times, as ONE round trip — review
-   * round 2 on `HandleStreamLifecycle`. A per-member `enqueue` in a loop is
-   * `inputs.length` serial `await`s, each one held open inside the enqueuer's
-   * transaction (which is holding a row lock and one of postgres.js's ten pool
-   * connections for the whole loop) while whatever triggered the write — here,
-   * MediaMTX's fire-and-forget `curl` — waits on the response. `enqueueMany` turns
-   * that into a single multi-row `INSERT ... RETURNING`, with no change to the
-   * atomicity guarantee `enqueue` already has: called from inside a unit of work,
-   * every row it inserts still commits or rolls back with everything else in it.
-   *
-   * Returns `[]` for an empty `inputs` rather than issuing a no-op statement.
-   */
-  enqueueMany(inputs: { eventType: string; payload: unknown }[]): Promise<{ id: string }[]>;
   claimBatch(limit: number): Promise<ClaimedOutboxRow[]>;
   /** Terminal success. The row is never claimed again. */
   /**

@@ -139,10 +139,12 @@ describe("StartUserStream", () => {
   /**
    * The creator's OWN response is the one place a stream key belongs — but
    * the playback path inside it is the string a viewer is handed by
-   * `GET /streams`, so it must not carry the key either. `ResolveWatchToken`
-   * shipped exactly this defect in the old world and had to be fixed as a
-   * CRITICAL: an HLS URL built from the stream key hands every watcher the
-   * publish credential.
+   * `GET /streams`, so it must not carry the key either. The old community
+   * world shipped exactly this defect and had to fix it as a CRITICAL — its
+   * watch-link resolver built the member-facing HLS URL from `event.stream_key`
+   * — and an HLS URL built from a stream key hands every watcher the publish
+   * credential. See `userStreamPlaybackPath` in `stream-views.ts`, which is
+   * where that fix lives for this world.
    */
   it("builds the playback path from the stream ID, never from the publish key", async () => {
     const rina = await createUser("rina");

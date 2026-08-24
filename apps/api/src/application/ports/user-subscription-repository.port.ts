@@ -360,8 +360,8 @@ export interface UserSubscriptionRepositoryPort {
    *
    * False when the transaction does not exist or already carries a reference —
    * the column is written exactly once, and overwriting it would destroy the
-   * anchor. Mirrors `SubscriptionRepositoryPort.attachGatewayReference`, whose
-   * own docstring records why the community webhook fails closed without it.
+   * anchor. Mirrors the retired community port's `attachGatewayReference`,
+   * whose own docstring recorded why that webhook failed closed without it.
    */
   attachGatewayReference(
     transactionId: string,

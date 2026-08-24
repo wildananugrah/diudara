@@ -45,8 +45,8 @@ export class DrizzleUserRepository implements UserRepositoryPort {
   /**
    * `DatabaseExecutor`, not the pooled client specifically — Task 5's
    * `DrizzlePasswordResetUnitOfWork` constructs this against an open
-   * transaction handle (`tx`), exactly the way `DrizzleSubscriptionRepository`
-   * and the rest are constructed inside `DrizzlePaymentActivationUnitOfWork`,
+   * transaction handle (`tx`), exactly the way the repositories inside
+   * `DrizzlePaymentActivationUnitOfWork` are constructed,
    * so that `setPasswordAndBumpEpoch` joins the SAME transaction as the token
    * writes around it. `PgTransaction` satisfies `DatabaseExecutor`, so this
    * needed no cast — see `db/client.ts`'s own docstring on the type.

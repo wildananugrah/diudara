@@ -1,18 +1,11 @@
-import type { ActivityLogRepositoryPort } from "./activity-log-repository.port";
-import type { OutboxRepositoryPort } from "./outbox-repository.port";
-import type { SubscriptionRepositoryPort } from "./subscription-repository.port";
 import type { UserSubscriptionRepositoryPort } from "./user-subscription-repository.port";
 import type { UserTierRepositoryPort } from "./user-tier-repository.port";
 import type { WebhookEventRepositoryPort } from "./webhook-event-repository.port";
 
 /** The repositories that must succeed or fail together when a payment lands. */
 export interface PaymentActivationRepositories {
-  subscriptions: SubscriptionRepositoryPort;
   /**
-   * The Phase 5a flow's own subscriptions — `user_subscription`/`user_transaction`,
-   * which have nothing to do with `subscriptions` above beyond arriving down the
-   * same webhook stream (see `domain/user-payment.ts` for how the two are told
-   * apart).
+   * `user_subscription`/`user_transaction` — the membership the payment buys.
    *
    * In HERE, and not read off the pool, for exactly the reason `webhookEvents` is:
    * the replay claim and the activation it authorises must commit together or not
@@ -29,26 +22,11 @@ export interface PaymentActivationRepositories {
    */
   userTiers: UserTierRepositoryPort;
   webhookEvents: WebhookEventRepositoryPort;
-  activityLog: ActivityLogRepositoryPort;
-  /**
-   * The intent to invite. It belongs in HERE, and not in a second transaction
-   * afterwards, because a paid activation with no queued invite has no recovery
-   * path: the webhook event id is already spent, so every provider retry is
-   * treated as a replay and the member is never invited. Money taken, access
-   * never granted — the same failure `webhookEvents` is in here to prevent.
-   *
-   * The SEND is emphatically not in here (see the plan's Global Constraints): it
-   * is an external HTTP call, and a Telegram outage inside this transaction would
-   * roll back a payment we have already taken. The worker sends, outside any
-   * transaction, from the row this writes.
-   */
-  outbox: OutboxRepositoryPort;
 }
 
 /**
- * Runs the four writes a successful payment triggers — record the event,
- * activate the subscription, write the audit entry, queue the invite — as ONE
- * atomic unit.
+ * Runs the writes a successful payment triggers — record the event, settle the
+ * transaction, activate the subscription — as ONE atomic unit.
  *
  * This exists because of a specific, expensive failure. The idempotency row
  * (`webhook_event.provider_event_id`, UNIQUE) has to be claimed BEFORE the
@@ -63,6 +41,18 @@ export interface PaymentActivationRepositories {
  * successful one commits both together, so a replay still finds the row and
  * no-ops. Concurrency is unaffected: `onConflictDoNothing` still means the
  * database decides which delivery wins.
+ *
+ * RETIRE-TELEGRAM TASK 5 REMOVED THREE MEMBERS of this set — `subscriptions`,
+ * `activityLog` and `outbox` — with the community branch of
+ * `HandlePaymentWebhook` that was the only thing that used them. The `outbox`
+ * one is worth naming: its presence here was the mechanism behind "the intent to
+ * invite is atomic with the payment", and with the invite gone there is no
+ * intent left to make atomic. A membership grants access by BEING active, so
+ * nothing has to be sent for the activation to mean anything, and nothing here
+ * queues work for the worker. Anything added later that must happen *after* a
+ * payment commits belongs in this set for the reason above, and its SEND does
+ * not: an external HTTP call inside this transaction would roll back a payment
+ * we have already taken (plan, Global Constraints).
  *
  * The work function receives repositories already bound to the transaction, so
  * no port method grows a "pass the handle in" parameter and no repository has

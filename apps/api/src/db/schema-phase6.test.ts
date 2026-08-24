@@ -1,6 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { sql } from "./client";
 
 describe("phase 6 indexes", () => {
@@ -62,26 +60,18 @@ describe("phase 6 indexes", () => {
   });
 
   /**
-   * A COMMENT ASSERTION, and it earns its place.
+   * DELETED with its subject, retire-telegram Task 4.
    *
-   * The claim that the feed reads through `activity_log_community_event_created_idx`
-   * was corrected in `schema.ts` and in the spec, and survived for a whole phase in
-   * the file a developer actually opens when they touch this query. A misleading
-   * invariant comment is precisely how the next person drops the index that IS load
-   * bearing, so the correction is pinned here rather than left to review.
+   * A third test lived here — a COMMENT ASSERTION pinning that
+   * `DrizzleAnalyticsRepository.listActivityForCreator`'s docstring names
+   * `activity_log_community_created_idx` and not the wider index migration 0015
+   * dropped. It existed because that wrong claim had survived a whole phase in
+   * the file a developer actually opens when they touch the query.
+   *
+   * Task 4 deleted `drizzle-analytics.repository.ts` with Phase 6's dashboard
+   * reads, so there is no docstring left to guard and the test read a file that
+   * no longer exists. The INDEX itself is untouched — `schema.ts` is untouched
+   * this phase — and the two tests above still pin both halves of what
+   * migration 0015 decided, against live `pg_indexes` rather than against prose.
    */
-  it("does not let the feed's docstring name the wrong index again", () => {
-    const source = readFileSync(
-      join(import.meta.dir, "..", "infrastructure", "repositories", "drizzle-analytics.repository.ts"),
-      "utf8"
-    );
-    const feedDoc = source.slice(
-      source.indexOf("One page of the activity feed"),
-      source.indexOf("async listActivityForCreator")
-    );
-    expect(feedDoc.length).toBeGreaterThan(0);
-    expect(feedDoc).toContain("activity_log_community_created_idx");
-    // The wrong name may appear only while being disclaimed — "NOT the wider …".
-    expect(/READS THROUGH `activity_log_community_event_created_idx`/.test(feedDoc)).toBe(false);
-  });
 });

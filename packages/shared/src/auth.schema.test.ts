@@ -1,62 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import { signupSchema, loginSchema, updateProfileSchema } from "./auth.schema";
+import { updateProfileSchema } from "./auth.schema";
 
-describe("signupSchema", () => {
-  it("accepts a valid signup and lowercases the email", () => {
-    const parsed = signupSchema.parse({
-      name: "Budi",
-      email: "Budi@Example.COM",
-      password: "supersecret123",
-    });
-    expect(parsed.email).toBe("budi@example.com");
-    expect(parsed.name).toBe("Budi");
-  });
-
-  it("rejects a password shorter than 8 characters", () => {
-    const result = signupSchema.safeParse({
-      name: "Budi",
-      email: "budi@example.com",
-      password: "short",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects a malformed email", () => {
-    const result = signupSchema.safeParse({
-      name: "Budi",
-      email: "not-an-email",
-      password: "supersecret123",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects an empty name", () => {
-    const result = signupSchema.safeParse({
-      name: "   ",
-      email: "budi@example.com",
-      password: "supersecret123",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects an email longer than 255 characters", () => {
-    const longEmail = "a".repeat(250) + "@example.com";
-    const result = signupSchema.safeParse({
-      name: "Budi",
-      email: longEmail,
-      password: "supersecret123",
-    });
-    expect(result.success).toBe(false);
-  });
-});
-
-describe("loginSchema", () => {
-  it("accepts valid credentials and lowercases the email", () => {
-    const parsed = loginSchema.parse({ email: "BUDI@example.com", password: "whatever1" });
-    expect(parsed.email).toBe("budi@example.com");
-  });
-});
-
+/*
+ * The `signupSchema` and `loginSchema` blocks that opened this file went
+ * with the schemas themselves in retire-telegram Task 7's fix round — they
+ * were the creator-only pair behind `POST /auth/signup` and
+ * `POST /auth/login`, and nothing calls either route any more. The user
+ * equivalents (`userSignupSchema`, `userLoginSchema`) are exercised through
+ * the routes that use them, in `apps/api/src/routes/users.test.ts`.
+ */
 describe("updateProfileSchema — whatsappNumber", () => {
   it("accepts a tolerant Indonesian number, matching userSignupSchema's own regex", () => {
     const parsed = updateProfileSchema.parse({ whatsappNumber: "081234567890" });

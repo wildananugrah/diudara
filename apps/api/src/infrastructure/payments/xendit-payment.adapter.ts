@@ -55,7 +55,7 @@ export class XenditPaymentAdapter implements PaymentProviderPort {
   }
 
   async createPaymentAccount(input: {
-    creatorId: string;
+    ownerId: string;
     email: string;
     name: string;
   }): Promise<{ accountId: string }> {

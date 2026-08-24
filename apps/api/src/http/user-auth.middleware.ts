@@ -45,9 +45,12 @@ async function verifyBearerToken(
 }
 
 /**
- * Mirrors `requireAuth` (creator sessions), with one addition: it RE-READS
- * the user and compares `sessionEpoch` against the value the token was
- * issued with.
+ * The ONE auth guard this API has. It was written to mirror `requireAuth`
+ * (creator sessions), adding one thing that middleware had no equivalent of:
+ * it RE-READS the user and compares `sessionEpoch` against the value the token
+ * was issued with. Retire-telegram Task 7's fix round deleted `requireAuth`
+ * with the creator login it protected, so the "mirrors" is history and the
+ * epoch re-read below is simply what this middleware does.
  *
  * That comparison is the entire mechanism by which "a password reset ends
  * all sessions" works. A JWT is stateless and cannot otherwise be revoked
