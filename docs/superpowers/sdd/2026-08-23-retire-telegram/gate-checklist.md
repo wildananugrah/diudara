@@ -87,13 +87,32 @@ The smoke tests prove these against a real database; they have never run against
 calls leaves every test in the repository green** — the smoke file, the worker suite, and typecheck.
 That was proven, not guessed.
 
-So this is the only place it can be checked:
+**Do not use the startup log for this.** It is a static template literal — it prints all six names
+whether or not the loops behind them run, so it would tick green against a worker running five. (An
+earlier draft of this checklist said to read it. That check could not have detected the gap it existed
+for, which is a fair illustration of why this section is here at all.)
 
-- [ ] Start the worker and read its startup log. **Six** passes should be named:
-      `outbox`, `membershipReminder`, `membershipSweep`, `stalePendingSweep`, `orphanSweep`,
-      `userStreamSweep`.
-- [ ] Confirm **none** of the deleted ones appear: no `renewals`, no `churn`.
-- [ ] Leave it running for one interval and confirm it neither throws nor logs a handler error.
+**Give each pass something to find, and watch for its own line.** A pass is silent when it finds
+nothing, so silence proves nothing — work is the only signal.
+
+```sql
+-- one row per pass, then wait one WORKER_RENEWAL_INTERVAL_MS
+UPDATE user_subscription SET current_period_end = now() - interval '1 minute'
+  WHERE status = 'active';                                    -- [memberships]
+UPDATE user_subscription SET current_period_end = now() + interval '2 days'
+  WHERE status = 'active';                                    -- [membership-reminders]
+UPDATE user_subscription SET created_at = now() - interval '3 hours'
+  WHERE status = 'pending';                                   -- [pending-checkouts]
+UPDATE user_stream SET started_at = now() - interval '13 hours'
+  WHERE status = 'live';                                      -- [user-streams]
+UPDATE post_media SET created_at = now() - interval '25 hours'
+  WHERE post_id IS NULL;                                      -- [media]
+```
+
+- [ ] Each of those five tags appears in the log within one interval. **A tag that never appears is a
+      loop that is not running** — which is precisely the failure nothing in the repository can catch.
+- [ ] No `[renewals]` and no `[churn]` — both deleted.
+- [ ] Nothing throws, and no handler error is logged.
 
 **`processOutbox` is expected to drain nothing.** Its writer is gone; it stays so that any row an older
 deploy left behind fails *loudly* rather than sitting silent. It retires with the `outbox` table in the
