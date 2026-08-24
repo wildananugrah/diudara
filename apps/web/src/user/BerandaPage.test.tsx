@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   MemoryRouter,
@@ -76,6 +78,20 @@ function tabButton(name: "Untuk Anda" | "Mengikuti"): HTMLButtonElement {
   return screen.getByRole("button", { name }) as HTMLButtonElement;
 }
 
+/** `src/styles.css` with every comment stripped, so a selector named in prose is not mistaken for a rule. */
+function stylesheet(): string {
+  return readFileSync(join(import.meta.dir, "../styles.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+/** The declarations of the first rule whose selector list contains `selector`, as a plain string. */
+function ruleBody(css: string, selector: string): string {
+  const at = css.indexOf(selector);
+  if (at === -1) return "";
+  const open = css.indexOf("{", at);
+  const close = css.indexOf("}", open);
+  return open === -1 || close === -1 ? "" : css.slice(open + 1, close);
+}
+
 /** Gives any effect a queued request would sit in a chance to fire before an absence is asserted. */
 function settle(): Promise<void> {
   return act(async () => {
@@ -104,6 +120,38 @@ describe("BerandaPage — the two tabs", () => {
 
     expect(tabButton("Untuk Anda").getAttribute("aria-current")).toBe("true");
     expect(tabButton("Mengikuti").getAttribute("aria-current")).toBe("false");
+  });
+
+  /**
+   * **The indicator, not just the state.** The two tabs shipped once with no
+   * visual difference at all: the stylesheet's active rule was keyed on
+   * `[aria-selected="true"]` and `.active`, neither of which this component
+   * sets, while the rule that IS keyed on `aria-current` painted a
+   * `border-bottom-color` on a button a later rule had given `border: none` —
+   * and a colour cannot restore a border that does not exist.
+   *
+   * Every existing test here reads `aria-current` and passed throughout, which
+   * is exactly why nobody noticed. So this one reads the attribute the
+   * component really sets AND the rule that has to be keyed on it, and pins the
+   * mechanism to something `border: none` cannot cancel.
+   */
+  it("paints the active tab with a rule keyed on the aria-current it actually sets", async () => {
+    mockFetch(() => jsonResponse({ posts: [], nextCursor: null }));
+
+    renderBeranda();
+    await screen.findByText("Belum ada kiriman untuk ditampilkan.");
+
+    expect(tabButton("Untuk Anda").getAttribute("aria-current")).toBe("true");
+
+    const css = stylesheet();
+    const active = ruleBody(css, '.feed-tabs button[aria-current="true"]');
+    expect(active).toContain("box-shadow: inset 0 -2px 0 var(--green-dark);");
+    // `border: none` on `.feed-tabs button` makes this property inert — it is
+    // how the indicator disappeared the first time.
+    expect(active.includes("border-bottom-color")).toBe(false);
+    // And no rule may key the indicator on a state this component never sets.
+    expect(css.includes("aria-selected")).toBe(false);
+    expect(css.includes(".feed-tabs button.active")).toBe(false);
   });
 
   it("requests tab=untuk-anda by default", async () => {

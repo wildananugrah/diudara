@@ -51,7 +51,11 @@
   --amber-border: #fcd34d;
   --ink: oklch(0.22 0.02 145);
   --ink-soft: oklch(0.45 0.012 145);
-  --ink-faint: oklch(0.55 0.012 145);
+  /* 0.53, not 0.55: at 0.55 this token was 4.24:1 on --canvas — below AA, and
+     `.muted` lands on --canvas across seven components. 0.53 reads 4.61 on
+     --canvas, 5.10 on --surface and 4.89 on --surface-sunk. The one-number
+     edit the oklch move exists for. */
+  --ink-faint: oklch(0.53 0.012 145);
   --line: oklch(0.9 0.008 145);
   --line-soft: oklch(0.93 0.008 145);
   --surface: oklch(0.99 0.004 90);
@@ -64,7 +68,11 @@
   /* Flatter than the 8px it replaces: the redesign's frames are square-ish and
      a large radius fights the hairline rules it leans on. */
   --radius: 4px;
-  --radius-panel: 6px;
+  /* One step up from --radius, for the panels that frame a whole block
+     (both composers, the locked-post panel, the membership offer) rather
+     than a control. Was 6px and unused; it is now the single definition of
+     the 5px those four frames had hardcoded. */
+  --radius-panel: 5px;
   --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
   /* The diagonal hatch that stands in for content a viewer may not see. One
@@ -446,15 +454,10 @@ button:disabled {
   margin: 0 0 1rem;
 }
 
-.landing-list,
-.landing-steps {
+.landing-list {
   margin: 0;
   padding-left: 1.25rem;
   line-height: 1.7;
-}
-
-.landing-steps li + li {
-  margin-top: 0.75rem;
 }
 
 .landing-features {
@@ -907,7 +910,6 @@ button:disabled {
   flex: 1;
   background: none;
   border: none;
-  border-bottom: 2px solid transparent;
   padding: 10px 8px;
   font: inherit;
   color: var(--ink-faint);
@@ -915,17 +917,24 @@ button:disabled {
 }
 
 /* `aria-current` is the state, so it is also the selector — there is no second
-   `.active` class to fall out of step with what a screen reader is told. */
+   `.active` class to fall out of step with what a screen reader is told.
+   The indicator itself is an INSET SHADOW, not a border: the redesign layer
+   below sets `border: none` on these buttons, and a `border-bottom-color`
+   cannot restore a border that no longer exists — which is how the active tab
+   once ended up with no marking at all. A shadow also costs no layout, so
+   switching tabs cannot shift the row by a pixel. */
 .feed-tabs button[aria-current="true"] {
   color: var(--ink);
   font-weight: 600;
-  border-bottom-color: var(--green-dark);
+  box-shadow: inset 0 -2px 0 var(--green-dark);
 }
 
+/* The frame and the padding moved to the redesign layer, which makes this a
+   bordered card; what stays here is the block flow and the vertical rhythm it
+   used to get from `padding: 12px 0`. */
 .post-composer {
   display: block;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line);
+  margin: 12px 0;
 }
 
 .post-composer-body {
@@ -1157,13 +1166,16 @@ button:disabled {
 
 /* --- Display type. The serif is the redesign's whole voice: it appears on
        page titles, the landing hero, and prices, and nowhere else. --------- */
-.user-page > h1,
-.beranda-page > h1,
-.jelajah-page > h1,
-.siaran-page > h1,
+/* `.user-page h1`, not `> h1`: Pengaturan's title is nested in a `.spread`
+   row, and every page under `.user-page` has exactly one h1 — the page title.
+   Beranda / Jelajah / Siaran all carry `.user-page` too, so they need no
+   selector of their own. */
+.user-page h1,
 .profile-name,
 .landing-hero h1,
-.landing-section > h2 {
+.landing-notfound h1,
+.landing-section > h2,
+.landing-closing h2 {
   font-family: var(--font-display);
   font-weight: 400;
   letter-spacing: -0.01em;
@@ -1213,18 +1225,10 @@ button:disabled {
   font-weight: 600;
 }
 
-/* The LIVE marker beside Siaran. Red is reserved for exactly this and for
-   ending a broadcast — it never means "primary". */
-.side-rail a .live-dot,
-.bottom-nav a .live-dot {
-  color: var(--live);
-  font-size: 0.625rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-}
-
-/* --- Feed tabs: the active one is underlined by an inset shadow rather than a
-       border, so switching tabs cannot shift the row by a pixel. ----------- */
+/* --- Feed tabs. Only the resting state is re-tinted here; the ACTIVE state
+       stays where it has always lived, keyed on `aria-current` — the attribute
+       `BerandaPage` actually sets. A second `[aria-selected]`/`.active` rule
+       here matched nothing and left the tabs indistinguishable. --------- */
 .feed-tabs button {
   font-family: inherit;
   font-size: 0.9375rem;
@@ -1236,33 +1240,54 @@ button:disabled {
   cursor: pointer;
 }
 
-.feed-tabs button[aria-selected="true"],
-.feed-tabs button.active {
-  color: var(--ink);
-  font-weight: 600;
-  box-shadow: inset 0 -2px 0 var(--green);
-}
-
 /* --- Composer: a bordered card whose actions sit on their own hairline row. - */
 .post-composer,
 .stream-composer {
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: var(--radius-panel);
   background: var(--surface);
 }
 
-.post-composer-actions {
-  border-top: 1px solid var(--line-soft);
-  padding: 0.75rem 1.125rem;
+/* Sides and top only: the actions row below is full-bleed and closes the
+   bottom edge itself. */
+.post-composer {
+  padding: 1.125rem 1.125rem 0;
 }
 
+/* The live block ends in a plain button, so this one pads all four sides. */
+.stream-composer {
+  padding: 1.125rem;
+}
+
+/* Negative margins pull the hairline out to the card's edges; the padding puts
+   the row's own content back in line with the rest. */
+.post-composer-actions {
+  margin: 0.875rem -1.125rem 0;
+  padding: 0.75rem 1.125rem;
+  border-top: 1px solid var(--line-soft);
+}
+
+/* The pill is the LABEL, not the wrapper: the wrapper also holds the
+   conditional hint `<p>`, which is a full sentence and would be crushed into a
+   26px inline-flex box. */
 .post-composer-members-only {
+  margin: 0 0 0.75rem;
+}
+
+.post-composer-members-only label {
   display: inline-flex;
   align-items: center;
+  gap: 0.375rem;
   height: 26px;
   padding: 0 0.625rem;
   border: 1px solid var(--line);
   border-radius: 13px;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+
+.post-composer-hint {
+  margin: 0.5rem 0 0;
   font-size: 0.8125rem;
   color: var(--ink-soft);
 }
@@ -1277,7 +1302,7 @@ button:disabled {
   gap: 1rem;
   padding: 1.25rem 1.375rem;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: var(--radius-panel);
   background: var(--hatch);
 }
 
@@ -1294,7 +1319,7 @@ button:disabled {
   padding: 0 1.125rem;
   border-radius: var(--radius);
   background: var(--gate);
-  color: oklch(0.99 0.004 90);
+  color: var(--surface);
   font-size: 0.875rem;
   font-weight: 600;
   text-decoration: none;
@@ -1312,15 +1337,13 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 0.625rem;
-  border: none;
 }
 
 /* The comp stacks the frame ABOVE the title, while the DOM puts the header
    first — `order` matches the drawing without moving markup that tests and
    screen readers already read in a sensible sequence. */
 .stream-card > .stream-lock,
-.stream-card > .stream-player,
-.stream-card > .stream-media {
+.stream-card > .stream-player {
   order: -1;
 }
 
@@ -1361,27 +1384,11 @@ button:disabled {
   padding: 0 1.125rem;
   border-radius: var(--radius);
   background: var(--gate);
-  color: oklch(0.99 0.004 90);
+  color: var(--surface);
 }
 
 .stream-lock:hover .stream-lock-cta {
   background: var(--gate-dark);
-}
-
-.badge-live {
-  position: absolute;
-  top: 10px;
-  left: 10px;
-  display: inline-flex;
-  align-items: center;
-  height: 24px;
-  padding: 0 0.625rem;
-  border-radius: 3px;
-  background: var(--live);
-  color: #fff;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
 }
 
 .badge-members {
@@ -1395,7 +1402,7 @@ button:disabled {
   padding: 0 0.625rem;
   border-radius: 3px;
   background: var(--gate);
-  color: #fff;
+  color: var(--surface);
   font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -1415,18 +1422,32 @@ button:disabled {
   background: oklch(0.28 0.012 145);
 }
 
-/* The publish credentials are monospace because they are copied, not read. */
-.stream-obs-details code,
-.stream-obs-details pre {
+/* The frame above is fixed-aspect and clipped, so the video has to be told to
+   fill it — a bare `<video>` keeps its intrinsic size and would otherwise sit
+   at whatever pixel dimensions the stream happens to arrive at. `contain`, not
+   `cover`: letterboxing a broadcast is honest, cropping it is not. */
+.stream-player video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* The publish credentials are monospace because they are copied, not read —
+   which is exactly why they WRAP rather than being clipped to an ellipsis.
+   A truncated stream key cannot be dragged past the clip edge, and there is no
+   copy button to fall back on; `user-select: all` makes one tap or click take
+   the whole value. */
+.stream-obs-details code {
   display: block;
   padding: 0.5625rem 0.6875rem;
   background: oklch(0.965 0.006 145);
   border-radius: 3px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.75rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  user-select: all;
 }
 
 /* Ending a broadcast is destructive-ish and outlined, never filled: it should
@@ -1445,14 +1466,22 @@ button:disabled {
        stop the eye, so it takes the serif. --------------------------------- */
 .membership-offer {
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: var(--radius-panel);
   overflow: hidden;
   background: var(--surface);
 }
 
+/* One frame means no gap between the tiers and no box around each of them —
+   both of which the list still carried from its own rules above. */
+.membership-tiers {
+  gap: 0;
+}
+
 .membership-tier {
   padding: 1.125rem;
+  border: none;
   border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
 }
 
 .membership-tier:last-child {
@@ -1490,10 +1519,15 @@ button:disabled {
   border: 1px solid var(--line);
 }
 
+/* These are `<article class="card landing-feature">`, so the mesh only appears
+   once `.card`'s own border and radius are cleared: six rounded boxes inside a
+   hairline grid is precisely the look the grid replaces. */
 .landing-feature {
   background: var(--surface);
   padding: 1.75rem;
   margin: 0;
+  border: none;
+  border-radius: 0;
 }
 
 .landing-feature h3 {
@@ -1502,20 +1536,32 @@ button:disabled {
   font-weight: 600;
 }
 
+/* An `<ol>`, so `margin`, `padding-left` and the markers all have to be dealt
+   with here: without them the grid is indented by the list's own padding and
+   the step numbers hang outside their cells. `list-style-position: inside`
+   rather than `list-style: none` keeps the numbers — on a page whose heading is
+   "Tiga langkah" they are content — and moves them into the cell. */
 .landing-steps {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1px;
+  background: var(--line-soft);
   border-top: 1px solid var(--line-soft);
   border-bottom: 1px solid var(--line-soft);
+  margin: 0;
+  padding-left: 0;
+  list-style-position: inside;
+  line-height: 1.7;
 }
 
+/* The dividers are 1px GAPS with the container's colour showing through, not a
+   border-right per cell: `auto-fit` reflows to two columns and then to one, and
+   a per-cell border leaves a hairline hanging at the container edge at every
+   width the last cell of a row is not the last cell of the grid — which on a
+   phone-first page is the common case, not the corner one. */
 .landing-steps > * {
   padding: 2.5rem 2.5rem 2.75rem;
-  border-right: 1px solid var(--line-soft);
-}
-
-.landing-steps > *:last-child {
-  border-right: none;
+  background: var(--canvas);
 }
 
 /* --- Buttons. Flatter, and the primary keeps its own hover one step down. -- */
@@ -1525,7 +1571,7 @@ button:disabled {
   font-weight: 600;
 }
 
-.button-primary:hover {
+.button-primary:hover:not(:disabled) {
   background: var(--green-dark);
 }
 
