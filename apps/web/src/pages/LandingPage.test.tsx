@@ -113,6 +113,171 @@ describe("LandingPage", () => {
     expect(source.includes("dangerouslySetInnerHTML")).toBe(false);
   });
 
+
+  /**
+   * MAJ-7's REGRESSION GUARD, AND THE ONE THIS PAGE MOST NEEDED.
+   *
+   * Before Phase 8's final fix wave, step two of "Tiga langkah" told a visitor
+   * to *"Bagikan tautan checkout — setiap komunitas punya halaman pembayaran
+   * sendiri"*, naming `/c/:slug/checkout`. Task 4 had deleted that route four
+   * tasks earlier. Nothing failed: the CTA tests below pin the two links whose
+   * `href` they already know, and prose that merely *describes* a dead route is
+   * invisible to them.
+   *
+   * So this does not compare hrefs against a hand-kept list — a list is exactly
+   * what went stale. It renders every link on the page through the REAL
+   * `AppRoutes` and fails if any of them lands on the 404 page. A route deleted
+   * in some future phase turns its landing-page link red here, in this file,
+   * instead of in a visitor's browser.
+   *
+   * The positive control is not decoration. An "assert nothing 404s" test passes
+   * vacuously if the detector is wrong (`textContent` read at the wrong moment,
+   * the 404 copy reworded, `renderAt` silently rendering nothing), and it would
+   * then certify a page of dead links. The control drives the two shapes that
+   * actually shipped here — the deleted checkout link and the deleted dashboard
+   * login — through the identical code path and requires them to be CAUGHT.
+   */
+  it("points every link at a route this app actually serves", () => {
+    const notFound = (path: string): boolean => {
+      renderAt(path);
+      const text = document.body.textContent ?? "";
+      cleanup();
+      return text.includes("tidak ditemukan");
+    };
+
+    // POSITIVE CONTROL, first: two routes this branch really deleted. If the
+    // detector cannot see these, the sweep below proves nothing.
+    expect(notFound("/c/apa-saja/checkout")).toBe(true);
+    expect(notFound("/dashboard/login")).toBe(true);
+
+    render(
+      <MemoryRouter>
+        <LandingPage />
+      </MemoryRouter>
+    );
+    // Collected as strings and the tree torn down BEFORE anything is asserted:
+    // no DOM node is ever on either side of a matcher here.
+    const hrefs = Array.from(document.querySelectorAll("a")).map(
+      (a) => a.getAttribute("href") ?? ""
+    );
+    cleanup();
+    expect(hrefs.length).toBeGreaterThan(0);
+
+    const dead = hrefs.filter((href) => notFound(href));
+    expect(dead.join(", ")).toBe("");
+  });
+
+  /**
+   * The vocabulary of the world this branch deleted, as a denylist.
+   *
+   * The link sweep above catches a dead `href`; it cannot catch a feature card
+   * headed "Akses Telegram otomatis", "Dashboard dan analitik" or "AI
+   * co-builder" — three of the four cards that were selling deleted machinery,
+   * none of which contained a link at all. Those are pure prose, and prose is
+   * what the last seven phases kept leaving behind.
+   *
+   * Each entry below names something whose implementation is gone: the Telegram
+   * adapter and everything it gated (Task 2), communities and their checkout
+   * (Task 4), the creator dashboard and `routes/analytics.ts` (Tasks 1 and 3),
+   * `infrastructure/ai/` (Task 3), and the renewal/churn passes (Task 5). If one
+   * of these words ever belongs on this page again, the thing it names has to
+   * exist again first — and then this list is the deliberate place to say so.
+   */
+  it("uses none of the deleted world's vocabulary", () => {
+    render(
+      <MemoryRouter>
+        <LandingPage />
+      </MemoryRouter>
+    );
+    const text = document.body.textContent ?? "";
+    cleanup();
+    const banned: Array<[string, RegExp]> = [
+      ["telegram", /telegram/i],
+      ["komunitas", /komunitas/i],
+      // The old H1 was "Ubah GRUP Anda jadi komunitas berbayar". Nothing in the
+      // surviving product is a group.
+      ["grup", /\bgrup\b/i],
+      ["dashboard", /dashboard/i],
+      ["analitik", /analitik/i],
+      ["checkout", /checkout/i],
+      ["undangan", /undangan/i],
+      ["churn", /churn/i],
+      // Case-SENSITIVE and word-bounded: lowercase "ai" is a substring of
+      // ordinary Indonesian ("dipakai", "ramai"), and only the standalone
+      // capitalised form ever named the deleted co-builder.
+      ["AI", /\bAI\b/],
+    ];
+    const found = banned.filter(([, pattern]) => pattern.test(text)).map(([word]) => word);
+    expect(found.join(", ")).toBe("");
+  });
+
+  /**
+   * NOTHING IN THIS SYSTEM RENEWS ANYTHING.
+   *
+   * The Xendit adapter has two operations and no tokenisation, so there is no
+   * stored instrument to charge a second time: `StartUserSubscription`'s own
+   * docstring states that "renew" means the member presses "Jadi anggota" again,
+   * and `RemindExpiringMembership` exists precisely because a membership just
+   * ends. The deleted page promised the opposite twice — a whole "Perpanjangan
+   * otomatis" card and a "perpanjangan otomatis" clause in the lede — which is
+   * the single most expensive thing this page could get wrong: a buyer who
+   * believes access continues finds out by losing it.
+   *
+   * Kept separate from the denylist above because it is a different kind of
+   * claim. "Telegram" is a word that must not appear; this is a PROMISE that
+   * must not be made, and it can be made without any banned word in it.
+   */
+  it("never promises that a membership renews itself", () => {
+    // "otomatis" is fine on its own — a future line like "aksesnya terbuka
+    // otomatis" would be true. What may never be said is that the BILLING or the
+    // MEMBERSHIP repeats by itself.
+    //
+    // NEGATION IS THE WHOLE DIFFICULTY. The page's own honest headline is
+    // "Tanpa tagihan berulang", which is the exact phrase a naive pattern flags
+    // — and a test that forces that headline off the page would push the copy
+    // AWAY from the truth. So a hit is discounted when a negator sits
+    // immediately in front of it, and the controls below drive both directions
+    // through this same function rather than trusting that reasoning.
+    const promisesRenewal = (text: string): string[] => {
+      const patterns = [
+        /perpanjangan otomatis/gi,
+        /(?:diperpanjang|memperpanjang|perpanjang)[^.]{0,30}otomatis/gi,
+        /otomatis[^.]{0,30}(?:diperpanjang|perpanjang)/gi,
+        /(?:langganan|tagihan|pembayaran|penagihan)[^.]{0,20}(?:berulang|otomatis)/gi,
+      ];
+      const hits: string[] = [];
+      for (const pattern of patterns) {
+        for (const match of text.matchAll(pattern)) {
+          const before = text.slice(Math.max(0, (match.index ?? 0) - 25), match.index ?? 0);
+          if (/\b(?:tanpa|tidak|bukan|tak)\b/i.test(before)) continue;
+          hits.push(match[0]);
+        }
+      }
+      return hits;
+    };
+
+    // POSITIVE CONTROLS — the two shapes the deleted page actually shipped, and
+    // one it did not. All three must be caught, or the page assertion below is
+    // certifying nothing.
+    expect(promisesRenewal("Perpanjangan otomatis").length).toBeGreaterThan(0);
+    expect(
+      promisesRenewal("Pengingat sebelum jatuh tempo, lalu langganan diperpanjang otomatis.")
+        .length
+    ).toBeGreaterThan(0);
+    expect(promisesRenewal("Tagihan berulang setiap bulan.").length).toBeGreaterThan(0);
+    // NEGATIVE CONTROL — the denial is not a promise.
+    expect(promisesRenewal("Tanpa tagihan berulang.").join(", ")).toBe("");
+
+    render(
+      <MemoryRouter>
+        <LandingPage />
+      </MemoryRouter>
+    );
+    const text = document.body.textContent ?? "";
+    cleanup();
+    expect(promisesRenewal(text).join(", ")).toBe("");
+  });
+
   it("quotes no price, because the platform fee has never been decided", () => {
     render(
       <MemoryRouter>

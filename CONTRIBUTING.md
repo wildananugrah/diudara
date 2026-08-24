@@ -8,7 +8,7 @@ can follow it from a fresh clone to a working local stack, then a green test sui
 | Workspace | What it is | Needs a `.env`? |
 | --- | --- | --- |
 | `apps/api` | Hono HTTP API, Drizzle, all the use-cases | **Yes** — `apps/api/.env` is the only application `.env` in the repo |
-| `apps/worker` | The outbox worker, plus Phase 5's renewal and churn passes | **No, deliberately** — it reads `apps/api/.env` |
+| `apps/worker` | The five scheduled passes, plus the (writer-less) outbox drain | **No, deliberately** — it reads `apps/api/.env` |
 | `apps/web` | React + Vite public checkout/confirmation pages | No |
 | `packages/shared` | Zod schemas shared by API and web | No |
 
@@ -90,36 +90,46 @@ The worker is still required for the things that happen because TIME has passed 
 membership-expiry reminder above all, since nothing in this system recurs and that pass is
 the only thing that tells a member their access is about to end.
 
-The worker also runs Phase 5's two clock-driven passes:
+The worker runs **five** clock-driven passes, all of them built in
+`apps/worker/src/scheduled-passes.ts`:
 
-- **renewals** — the reminder schedule (`pre_3d`, `due`, `overdue_1d`, `overdue_3d`,
-  `overdue_7d`) and the `active` → `past_due` transition;
-- **churn** — `past_due` past its stored `grace_ends_at` → `churned`, with a queued
-  revocation. The grace period is **10 days** after the due date, deliberately not 7.
+- **the membership reminder** (`RemindExpiringMembership`, in `apps/api`) — warns a member
+  three days before their period ends. Email always, plus WhatsApp when a number is on
+  file;
+- **the expired-membership sweep** (`SweepExpiredMemberships`) — retires an `active` row
+  whose period has passed, so it stops sitting `active` for ever;
+- **the orphan-media sweep** (`SweepOrphanMedia`) — deletes uploaded bytes no post ever
+  claimed, older than `ORPHAN_SWEEP_WINDOW_MS` (24 hours);
+- **the stale-pending-checkout cleanup** (`SweepStalePendingCheckouts`) — expires a
+  checkout nobody paid, older than `STALE_PENDING_CHECKOUT_WINDOW_MS` (2 hours);
+- **the user-stream sweep** (`SweepStaleUserStreams`) — ends a broadcast still marked live
+  after `MAX_USER_STREAM_MS` (12 hours), which is what a publisher that vanished without a
+  lifecycle webhook leaves behind.
 
-That last number is load-bearing and easy to "tidy" back into a bug. `overdue_7d` is the
-final warning, and the grace period must exceed the last reminder offset by enough that
-the warning is always claimable well before churn. When both were 7 the warning opened at
-00:00 WIB on day 7 and the deadline fell at 07:00 WIB the same day — a seven-hour window
-in which the two passes, which run on independent loops, raced. Measured: churn won both
-times a lifecycle was walked in a real worker, so the member was revoked having received
-`overdue_3d` as their last word. `GRACE_DAYS` in `apps/api/src/domain/renewal-schedule.ts`
-has the full account, and `renewal-schedule.test.ts` asserts the *relationship* — the last
-stage's offset against the deadline, with a minimum gap — so changing one number alone
-fails rather than silently reintroducing the race.
+**Phase 5's renewal and churn passes are gone** — retire-telegram Task 4 deleted them,
+along with `apps/api/src/domain/renewal-schedule.ts`, `GRACE_DAYS` and the whole
+`renewal_reminder` per-stage schedule (`pre_3d`, `due`, `overdue_1d`, …). Nothing in this
+system charges anybody twice: the Xendit adapter has two operations and no tokenisation,
+so **a membership does not renew, it ends and is bought again** (`StartUserSubscription`
+retires the lapsed row as part of the new purchase). That is exactly why the reminder pass
+above matters — it is the only thing that tells a member their access is about to stop.
+There is no grace period, deliberately: with nothing to retry, grace is just free access.
 
-They run hourly by default, not every 5 seconds like the outbox, and not daily. See
-`DEFAULT_RENEWAL_INTERVAL_MS` in `apps/worker/src/scheduled-passes.ts` for the reasoning,
-and set `WORKER_RENEWAL_INTERVAL_MS` (milliseconds) to something small when you want to
-watch a lifecycle locally. Reminders are claimed once per `(subscription, stage)` by a
-unique index, so running the pass more often does **not** send more messages.
+The five run hourly by default, not every 5 seconds like the outbox, and not daily. See
+`DEFAULT_RENEWAL_INTERVAL_MS` in `apps/worker/src/scheduled-passes.ts` for the reasoning
+and for why the env var keeps Phase 5's name, and set `WORKER_RENEWAL_INTERVAL_MS`
+(milliseconds) to something small when you want to watch a pass locally. The reminder is
+claimed once per membership by `membership_reminder`'s unique index, so running the pass
+more often does **not** send more messages.
 
 ### Start the worker as the process, not behind a wrapper
 
 `bun run --filter @diudara/worker start` stays in the foreground as a **parent** process
 and does not forward SIGTERM to the child. Signalling it kills only the parent; the worker
-is reparented and keeps polling and claiming outbox rows until it is SIGKILLed, so its
-graceful shutdown never runs and whatever it had claimed sits in `processing` for five
+is reparented and keeps running every pass until it is SIGKILLed, so its graceful
+shutdown never runs. Nothing writes `outbox` rows any more, so in practice the cost is a
+pass interrupted mid-flight rather than a claimed row stranded — but if an older deploy
+did leave a row behind, whatever the drain had claimed sits in `processing` for five
 minutes until `reclaimStaleProcessing` picks it up. Run `bun run src/main.ts` from
 `apps/worker` instead.
 
@@ -734,7 +744,7 @@ To run one workspace or one file:
 
 ```bash
 cd apps/api && bun test
-cd apps/api && bun test src/application/use-cases/process-renewals.test.ts
+cd apps/api && bun test src/application/use-cases/remind-expiring-membership.test.ts
 ```
 
 ### Each run gets its own database
@@ -1045,8 +1055,9 @@ the state `0003` needs.
 - **Ports and adapters.** Use-cases depend on interfaces in
   `apps/api/src/application/ports`; Drizzle and HTTP live in `infrastructure/` and
   `routes/`.
-- **Time is injected**, never `Date.now()` inside a use-case — `ClockPort`. Renewal dates
-  are interpreted in **Asia/Jakarta**, in one place (`domain/renewal-schedule.ts`).
+- **Time is injected**, never `Date.now()` inside a use-case — `ClockPort`. Billing dates
+  are interpreted in **Asia/Jakarta**, in one place (`domain/billing-cycle.ts` —
+  `domain/renewal-schedule.ts` went with the renewal pass in retire-telegram Task 4).
 - **Owner-scoped reads return 404, not 403**, so a stranger cannot confirm that a
   row exists.
 - `NODE_ENV` is an **allowlist**: only exactly `development` or `test` may relax a guard.

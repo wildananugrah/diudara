@@ -132,6 +132,20 @@ export function bootstrapWorker(): WorkerDependencies {
   // — the first version named only the apps/api half, which is a trap for
   // exactly the person the list exists for.
   //
+  // THIS LIST HAS ALREADY GONE STALE ONCE. RE-DERIVE IT BEFORE YOU TRUST IT.
+  // Task 7's fix round 2 completed it against the tree as it then stood; Task 8
+  // then added `src/test/new-world-smoke.test.ts`, which imports the `outbox`
+  // table AND `DrizzleOutboxRepository`, enqueues a row and drives
+  // `processOutbox.execute()` — and nothing re-checked the list, so it named six
+  // of the eight files that import `outbox` until Phase 8's whole-branch review
+  // found the gap. The intended single commit would not have compiled. The list
+  // is a head start, not an inventory: before executing it, run
+  //
+  //   grep -rn "\boutbox\b" apps/api/src apps/worker/src
+  //
+  // and reconcile. The failure mode is structural — a list in a comment cannot
+  // notice a file added after it — so assume it happened again.
+  //
   // ONE COMMIT, in the follow-up that drops the retired tables, retires:
   //
   //   apps/api
@@ -146,6 +160,21 @@ export function bootstrapWorker(): WorkerDependencies {
   //     - `db/test-helpers.ts`'s `outbox` import and its `db.delete(outbox)`
   //     - `db/schema-phase4.test.ts`'s outbox import and its
   //       "defaults an outbox row to pending with no attempts" case
+  //     - `routes/webhooks.test.ts`'s `outbox` import and the
+  //       `expect(await db.select().from(outbox)).toHaveLength(0)` line inside
+  //       "writes NOTHING outside the membership tables — no outbox row, no
+  //       audit row". Delete the ASSERTION and the import, KEEP the test: the
+  //       audit half of what it pins is unrelated to the outbox, and its name
+  //       needs the outbox clause dropped with it
+  //     - `test/new-world-smoke.test.ts` — FLOW 4, "every surviving worker pass
+  //       runs without throwing". Step 1 of that flow IS the outbox: the
+  //       `outbox` and `DrizzleOutboxRepository` imports, the `outboxRepository`
+  //       /`enqueue` block, and the four `outboxResult`/`outboxRow` assertions
+  //       (including `lastError` contains "no handler is registered"). The
+  //       flow's own prose says "All SIX, in the order the process starts them"
+  //       and its docstring header says ALL SIX — both become FIVE. This is the
+  //       phase's flagship net, so read it before cutting rather than deleting
+  //       by grep
   //     - `.env.example`'s `WORKER_POLL_INTERVAL_MS` entry
   //     - the `outbox` table in `db/schema.ts`
   //
@@ -164,10 +193,20 @@ export function bootstrapWorker(): WorkerDependencies {
   //     - `scheduled-passes.ts`: the `"outbox"` member of `formatPassFailure`'s
   //       `pass` union (and the matching case in `scheduled-passes.test.ts`)
   //
-  // Prose that merely MENTIONS the outbox as a comparison — `poll-loop.ts`'s
-  // interval reasoning, `scheduled-passes.ts`'s "why not 5 seconds",
-  // `error-handler.ts`'s "symmetrical with `ProcessOutbox`" — needs rewording,
-  // not deleting, and is not on this list because it is not load-bearing.
+  // Prose that merely MENTIONS the outbox as a comparison needs REWORDING, not
+  // deleting, and is deliberately not itemised above because none of it is
+  // load-bearing — but it is much wider than the three files the first version
+  // of this paragraph named. At the time of writing the same
+  // `grep -rn "\boutbox\b"` also hits `log-safety.ts` (which justifies its
+  // truncation budget by `outbox.last_error` being `varchar(500)`),
+  // `application/errors.ts`, `request-password-reset.ts`,
+  // `payment-activation-unit-of-work.port.ts`, `handle-payment-webhook.ts`,
+  // both messaging adapters, `db/test-database.ts`, `test-env-preload.ts`,
+  // `db/schema-phase5.test.ts`, `log-safety.test.ts`, `error-handler.test.ts`
+  // and — outside `src/` entirely, so no grep of the source tree finds it —
+  // **`CONTRIBUTING.md`**, which describes the whole `apps/worker` workspace
+  // partly in terms of the outbox drain. Sweep the repository, not just
+  // `apps/*/src`.
   //
   // NOT BEFORE the table drops, for the reason above: a drainer deleted while
   // the table survives turns a loud failure into silence. `enqueueMany` was the
