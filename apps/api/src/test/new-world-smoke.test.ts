@@ -318,10 +318,28 @@ test("FLOW: a gated post reaches a member and not a stranger", async () => {
  * concurrent forged deliveries into 12 rejections.
  *
  * AND THE REPLAY. Xendit's callback token authenticates the SENDER, not the
- * message, and carries no nonce — so `webhook_event.provider_event_id` UNIQUE
- * is the entire replay defence. The second, byte-identical delivery must
+ * message, and carries no nonce, so a delivery can arrive any number of times
+ * from anyone holding the token. The second, byte-identical delivery must
  * change NOTHING: not the period the member paid for, not `paid_at`, and not
  * the number of recorded events.
+ *
+ * TWO INDEPENDENT GUARDS STOP IT, AND THIS FLOW ONLY REDDENS WHEN BOTH GO.
+ * Measured in the fix round, all three ways, not assumed:
+ *
+ *   - disable the `provider_event_id` short-circuit alone → 4 pass. The second
+ *     delivery falls through to the transaction's own status, re-read INSIDE
+ *     the unit of work, finds it already `paid`, and settles nothing;
+ *   - disable that status guard alone → 4 pass. The event-id short-circuit
+ *     returned before anything could reach it;
+ *   - disable BOTH → this flow fails, on `current_period_end` moving by the
+ *     milliseconds between the two deliveries. Which is the real cost: a
+ *     replayed webhook silently re-anchoring the period a member paid for.
+ *
+ * So this flow pins the OUTCOME, not either mechanism, and it must not be read
+ * as pinning `webhook_event.provider_event_id` UNIQUE — `routes/webhooks.test.ts`
+ * is where each guard is exercised on its own. Even the `toHaveLength(1)` below
+ * passes with the second guard doing all the work, because a blocked INSERT
+ * leaves the row count right whether or not anything branched on it.
  */
 test("FLOW: a membership can be bought and activates on its webhook", async () => {
   const a = app();
@@ -501,17 +519,21 @@ async function withStreamingConfigured<T>(fn: () => Promise<T>): Promise<T> {
  *  4. `GET /webhooks/mediamtx/auth-request` — nginx's `auth_request`, by
  *     STREAM ID, with the minted token in `X-Watch-Token`. The stream key comes
  *     back in a HEADER and must never appear in the body: the member-facing URL
- *     must not be the publish credential.
+ *     must not be the publish credential. Refused two ways as well as allowed
+ *     one: with NO token (the missing-header guard, which never parses
+ *     anything) and with a token whose SIGNATURE has been tampered with (the
+ *     HMAC itself). Those are different lines of code and only the second one
+ *     is the credential check — see the comment at that step.
  *  5. `POST /webhooks/mediamtx/lifecycle` — `runOnOffline`, with the
  *     `$MTX_PATH` MediaMTX actually hands the hook.
  *
- * TWO REFUSALS ARE PART OF THE FLOW, not extras. After the stream ends, the
- * same publish that was authorised in step 2 must now be refused — nothing else
- * stops somebody who captured the RTMP URL from restarting the broadcast. And a
- * `live/<key>` hook from a stale deployment must 404 rather than be treated as
- * the one world left: that is the allow-list staying an allow-list, and it is
- * the half of `parseStreamPath` that a LOOSENED parser would break while every
- * `u/<key>` step above went on passing.
+ * TWO REFUSALS AT THE END ARE PART OF THE FLOW, not extras. After the stream
+ * ends, the same publish that was authorised in step 2 must now be refused —
+ * nothing else stops somebody who captured the RTMP URL from restarting the
+ * broadcast. And a `live/<key>` hook from a stale deployment must 404 rather
+ * than be treated as the one world left: that is the allow-list staying an
+ * allow-list, and it is the half of `parseStreamPath` that a LOOSENED parser
+ * would break while every `u/<key>` step above went on passing.
  */
 test("FLOW: a creator goes live, a member watches, the stream ends", async () => {
   await withStreamingConfigured(async () => {
@@ -593,6 +615,30 @@ test("FLOW: a creator goes live, a member watches, the stream ends", async () =>
     expect(unwatched.status).toBe(403);
     expect(unwatched.headers.get("X-Stream-Key")).toBeNull();
 
+    // AND A FORGED SIGNATURE, which is a different refusal entirely and the
+    // only one on this path that reaches the HMAC. The request above is turned
+    // away for a MISSING header, before any token is parsed, so it would go on
+    // passing against a `verifyUserWatchToken` whose signature comparison had
+    // been removed — the fix round's own mutant proved exactly that. This one
+    // sends a real minted token with one character of its signature changed:
+    // the payload half still decodes, still names this stream, and is still
+    // inside its ten-minute window, so the signature is the only thing left
+    // that can refuse it. Same BYTE length as the genuine signature (both are
+    // ASCII base64url), so it lands on the constant-time comparison rather
+    // than on the length guard in front of it.
+    const [tokenPayload, tokenSignature] = (minted.token as string).split(".");
+    const forged = `${tokenPayload}.${tokenSignature!.slice(0, -1)}${
+      tokenSignature!.endsWith("A") ? "B" : "A"
+    }`;
+    expect(forged).not.toBe(minted.token);
+    expect(forged.length).toBe((minted.token as string).length);
+    const tampered = await authRequest({
+      "X-Mtx-Stream-Id": stream.id,
+      "X-Watch-Token": forged,
+    });
+    expect(tampered.status).toBe(403);
+    expect(tampered.headers.get("X-Stream-Key")).toBeNull();
+
     // 5. The broadcast ends, through the hook MediaMTX actually fires.
     const lifecycle = await mediamtx("lifecycle", {
       hook: "offline",
@@ -655,8 +701,26 @@ test("FLOW: a creator goes live, a member watches, the stream ends", async () =>
  * rows with `status = 'active'`. `listExpiringActive` takes a window starting
  * at `now`, and `listExpiredActive` takes everything at or before it — so a
  * membership ending in two days belongs to exactly one of them and a
- * membership that ended an hour ago belongs to the other, and the exact counts
- * below are what would catch either query drifting across that line.
+ * membership that ended an hour ago belongs to the other.
+ *
+ * THE ORDER OF THOSE TWO CALLS BELOW IS LOAD-BEARING, and the fix round
+ * measured it rather than reasoning about it. The reminder pass runs FIRST.
+ * Run them the other way round and one whole direction of drift becomes
+ * invisible: widening `listExpiringActive` BACKWARD, so it claims the
+ * already-expired row, is masked entirely, because the sweep has by then
+ * retired that row out of `active` and there is nothing left for the reminder
+ * pass to be caught claiming — 4 pass, 0 fail, against a genuinely broken
+ * query. With the reminder pass first, both directions redden:
+ * `listExpiringActive` drifting backward reports `considered: 2`, and
+ * `listExpiredActive` drifting forward does the same for the sweep.
+ *
+ * SO THE ORDER HERE IS A PROPERTY OF THE TEST, NOT A CLAIM ABOUT PRODUCTION.
+ * `main.ts` runs all six as independent `PollLoop`s under one `Promise.all`, so
+ * which of these two sees a row first is a race out there, not a sequence.
+ * Nothing below depends on the production ordering; it depends only on there
+ * being SOME order in which each pass's window can be observed on its own, and
+ * this is one. A reader must not take the reverse reading either — that these
+ * passes are somehow sequenced in the worker. They are not.
  */
 test("FLOW: every surviving worker pass runs without throwing", async () => {
   const a = app();
@@ -781,11 +845,10 @@ test("FLOW: every surviving worker pass runs without throwing", async () => {
   expect(orphanResult.failed).toBe(0);
   expect(await db.select().from(postMedia).where(eq(postMedia.id, orphanId))).toHaveLength(0);
 
-  const membershipSweepResult = await processMembershipSweep.execute();
-  expect(membershipSweepResult.considered).toBe(1);
-  expect(membershipSweepResult.retired).toBe(1);
-  expect(membershipSweepResult.failed).toBe(0);
-
+  // THE REMINDER PASS RUNS BEFORE THE MEMBERSHIP SWEEP, and the order is
+  // load-bearing for these two assertions — see this test's docstring. Both
+  // walk `active` rows, and running the sweep first retires the expired one out
+  // of `active` before the reminder pass can be caught claiming it.
   const reminderResult = await worker.remindExpiringMemberships.execute();
   expect(reminderResult.considered).toBe(1);
   expect(reminderResult.reminded).toBe(1);
@@ -794,6 +857,11 @@ test("FLOW: every surviving worker pass runs without throwing", async () => {
   expect((worker.email as FakeEmailAdapter).sent).toHaveLength(1);
   expect(worker.messaging.notifier).toBeInstanceOf(FakeMessagingAdapter);
   expect((worker.messaging.notifier as FakeMessagingAdapter).notifications).toHaveLength(1);
+
+  const membershipSweepResult = await processMembershipSweep.execute();
+  expect(membershipSweepResult.considered).toBe(1);
+  expect(membershipSweepResult.retired).toBe(1);
+  expect(membershipSweepResult.failed).toBe(0);
 
   const stalePendingResult = await processStalePendingSweep.execute();
   expect(stalePendingResult.considered).toBe(1);
