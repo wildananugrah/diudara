@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import {
-  clearUserToken,
+  signOut,
   getOwnProfile,
   getUserToken,
   subscribeToUserAuth,
@@ -147,12 +147,13 @@ function SettingsForm() {
           without this button /pengaturan was the one place a signed-in user
           could reach and the one place they could never leave their session
           from. Mirrors dashboard/DashboardLayout.tsx's own "Keluar" exactly:
-          clearUserToken() only clears and notifies — it does not navigate.
+          signOut() tells the server to clear the HttpOnly media session
+          cookie, then clears and notifies — it does not navigate.
           SettingsPage's own guard above is already SUBSCRIBED to the token,
           so the resulting re-render (token now null) is what sends this
           page to /masuk, the same single code path an expired session takes.
         */}
-        <button type="button" className="button-quiet" onClick={() => clearUserToken()}>
+        <button type="button" className="button-quiet" onClick={() => signOut()}>
           Keluar
         </button>
       </div>

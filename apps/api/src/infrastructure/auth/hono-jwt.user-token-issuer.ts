@@ -5,7 +5,14 @@ import type {
 } from "../../application/ports/user-token-issuer.port";
 
 const ALGORITHM = "HS256";
-const DEFAULT_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
+/**
+ * Exported because the media session cookie's `Max-Age` is this same number:
+ * a cookie that outlived the token inside it would be a credential the server
+ * rejects and the browser keeps re-sending. One constant, one lifetime.
+ */
+export const USER_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
+
+const DEFAULT_TTL_SECONDS = USER_TOKEN_TTL_SECONDS;
 
 /**
  * Token type discriminator, stamped on issue and REQUIRED on verify.

@@ -1,4 +1,6 @@
 import type { Context, Next } from "hono";
+import { getCookie } from "hono/cookie";
+import { MEDIA_SESSION_COOKIE } from "./media-session";
 import { UnauthorizedError } from "../application/errors";
 import type { UserRecord, UserRepositoryPort } from "../application/ports/user-repository.port";
 import type { UserTokenIssuerPort } from "../application/ports/user-token-issuer.port";
@@ -31,8 +33,22 @@ async function verifyBearerToken(
   if (!header || !header.startsWith(BEARER_PREFIX)) {
     return null;
   }
+  return verifyRawToken(header.slice(BEARER_PREFIX.length), tokens, users);
+}
 
-  const payload = await tokens.verify(header.slice(BEARER_PREFIX.length));
+/**
+ * The verification itself, with the transport removed — extracted so the media
+ * session cookie is checked by exactly the same rules as an `Authorization`
+ * header, INCLUDING the `sessionEpoch` re-read. That re-read is how "a password
+ * reset ends all sessions" works; a cookie path that skipped it would be a
+ * second session type that a password reset could not revoke.
+ */
+async function verifyRawToken(
+  raw: string,
+  tokens: UserTokenIssuerPort,
+  users: UserRepositoryPort
+): Promise<UserRecord | null> {
+  const payload = await tokens.verify(raw);
   if (!payload) {
     return null;
   }
@@ -82,6 +98,38 @@ export function requireUserAuth(tokens: UserTokenIssuerPort, users: UserReposito
  * header at all would — never a 401 from a route that never required a
  * session in the first place.
  */
+/**
+ * `resolveViewerId`, plus the one credential a browser can attach to an `<img>`.
+ *
+ * ONLY the two media GET handlers call this, and it is the ONLY reader of
+ * `MEDIA_SESSION_COOKIE` in the codebase. Both facts are load-bearing: the
+ * cookie exists because an image request cannot carry a header, and it stays
+ * harmless because nothing else will accept it. Widening its use is not a
+ * refactor — it turns a media credential into an ambient session, and
+ * `media.test.ts` asserts that `/users/me` and `POST /users/posts` still refuse
+ * it.
+ *
+ * The header is tried FIRST so an explicitly-authenticated request never has
+ * its identity silently replaced by a stale cookie left in the browser.
+ */
+export async function resolveMediaViewerId(
+  c: Context,
+  tokens: UserTokenIssuerPort,
+  users: UserRepositoryPort
+): Promise<string | null> {
+  const fromHeader = await verifyBearerToken(c, tokens, users);
+  if (fromHeader) {
+    return fromHeader.id;
+  }
+
+  const raw = getCookie(c, MEDIA_SESSION_COOKIE);
+  if (raw === undefined || raw === "") {
+    return null;
+  }
+  const user = await verifyRawToken(raw, tokens, users);
+  return user?.id ?? null;
+}
+
 export async function resolveViewerId(
   c: Context,
   tokens: UserTokenIssuerPort,

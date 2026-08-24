@@ -39,6 +39,11 @@ export const RESERVED_HANDLES: ReadonlySet<string> = new Set([
   "feed",
   "limits",
   "login",
+  // Added with POST /users/logout (the media session cookie). The guard test
+  // derives this list from the route table, so a new literal /users/<segment>
+  // route that nobody reserved is caught there rather than by a user who
+  // registers the handle and shadows the route.
+  "logout",
   "media",
   "posts",
   "signup",

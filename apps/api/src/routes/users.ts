@@ -15,6 +15,7 @@ import {
   type UserSignupInput,
 } from "@diudara/shared";
 import { uuidParam, validate, validateParams } from "../http/validate";
+import { clearMediaSessionCookie, setMediaSessionCookie } from "../http/media-session";
 import {
   requireUserAuth,
   resolveViewerId,
@@ -267,7 +268,33 @@ export function userRoutes(
   app.post("/login", validate(userLoginSchema), async (c) => {
     const input = c.get("validated") as UserLoginInput;
     const result = await deps.authenticateUser.execute(input);
+    // The SAME token, a second time, in the one form a browser will attach to
+    // an `<img>` by itself. The response body keeps carrying it for the web
+    // app's `Authorization` headers; this cookie exists only for the requests
+    // that cannot use those — see `http/media-session.ts` for why it is scoped
+    // to `/users/media` and refused everywhere else.
+    setMediaSessionCookie(c, result.token);
     return c.json(result, 200);
+  });
+
+  /**
+   * PUBLIC, and it always succeeds.
+   *
+   * There was no logout endpoint before the media session cookie existed —
+   * signing out cleared localStorage in the browser and the server was never
+   * told. That is fine for a token the client holds and can simply forget, and
+   * not fine for a cookie the server set: unclear, it would keep loading gated
+   * images for the token's full 7-day life after "Keluar", which on a shared
+   * computer is exactly the wrong outcome.
+   *
+   * No auth guard on purpose. Shedding a credential must never require
+   * presenting a valid one — a cookie whose token has expired or been revoked
+   * by a password reset is precisely the cookie most in need of clearing, and
+   * `requireUserAuth` would 401 it and leave it in place.
+   */
+  app.post("/logout", async (c) => {
+    clearMediaSessionCookie(c);
+    return c.json({ ok: true }, 200);
   });
 
   // Task 5. Public, like signup/login — there is no session yet. Always

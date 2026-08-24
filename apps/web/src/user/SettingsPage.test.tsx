@@ -193,6 +193,35 @@ describe("SettingsPage", () => {
     expect(getUserToken()).toBeNull();
   });
 
+  /**
+   * The server half of signing out, added with the media session cookie.
+   *
+   * Clearing localStorage ends the session the CLIENT holds. It cannot touch
+   * the `diudara_media_session` cookie, which is HttpOnly by design — only the
+   * server can clear that, and until it does the browser keeps sending it and
+   * gated images keep loading for the token's full 7-day life. On a shared
+   * computer that is the whole problem, so "Keluar" has to tell the server.
+   *
+   * Asserts the REQUEST, not just the local state: the test above already
+   * proves the token is gone and would stay green with this call deleted.
+   */
+  it("tells the server to clear the media session cookie when signing out", async () => {
+    setUserSession("jwt-abc", USER);
+    const calls: Array<{ url: string; method: string | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method });
+      return jsonResponse(OWN_PROFILE);
+    }) as unknown as typeof fetch;
+
+    renderSettings();
+    await screen.findByDisplayValue("Wildan");
+
+    fireEvent.click(screen.getByRole("button", { name: "Keluar" }));
+
+    await screen.findByText("login page reached");
+    expect(calls.filter((call) => call.url === "/users/logout" && call.method === "POST").length).toBe(1);
+  });
+
   it("prefills the caller's own WhatsApp number, blank when none is set", async () => {
     setUserSession("jwt-abc", USER);
     global.fetch = mock(async () => jsonResponse({ ...OWN_PROFILE, whatsappNumber: "+6281234567890" })) as unknown as typeof fetch;

@@ -95,6 +95,7 @@ describe("the app's routing table", () => {
       "POST /users/:handle/follow",
       "POST /users/:handle/subscribe",
       "POST /users/login",
+      "POST /users/logout",
       "POST /users/me/payout",
       "POST /users/me/tiers",
       "POST /users/media",

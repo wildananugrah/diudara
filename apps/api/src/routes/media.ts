@@ -7,7 +7,7 @@ import { ImageRejectedError } from "../domain/image";
 import { uuidParam, validateParams } from "../http/validate";
 import {
   requireUserAuth,
-  resolveViewerId,
+  resolveMediaViewerId,
   type UserAuthVariables,
 } from "../http/user-auth.middleware";
 import type { Dependencies } from "../bootstrap";
@@ -178,7 +178,7 @@ export function mediaRoutes(
     // Give the gate the ID, never a row this handler looked up: a barrier that
     // trusts its caller's row is opened by any later refactor that passes the
     // wrong one.
-    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    const viewerId = await resolveMediaViewerId(c, deps.userTokenIssuer, deps.userRepository);
     const gate = await deps.mediaEntitlement.decide({ mediaId: id, viewerId });
     // 404 rather than 403: media ids are stripped from the projection, so they
     // are not public knowledge, and a 403 would confirm which ids exist. It is
@@ -225,7 +225,7 @@ export function mediaRoutes(
     // into one place that only one handler remembered to call is precisely the
     // "gated halfway" failure this split exists to make impossible. Every test
     // for `/media/:id` has a twin for this route.
-    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    const viewerId = await resolveMediaViewerId(c, deps.userTokenIssuer, deps.userRepository);
     const gate = await deps.mediaEntitlement.decide({ mediaId: id, viewerId });
     // 404, not 403 — see the full route above.
     if (!gate.allowed) throw new NotFoundError(NOT_FOUND_MESSAGE);
