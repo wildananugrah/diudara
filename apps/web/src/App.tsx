@@ -10,6 +10,7 @@ import ResetCompletePage from "./user/ResetCompletePage";
 import ProfilePage from "./user/ProfilePage";
 import FollowListPage from "./user/FollowListPage";
 import AppShell from "./user/AppShell";
+import RedirectIfSignedIn from "./user/RedirectIfSignedIn";
 import BerandaPage from "./user/BerandaPage";
 import SiaranPage from "./user/SiaranPage";
 import JelajahPage from "./user/JelajahPage";
@@ -26,8 +27,31 @@ export function AppRoutes() {
         public, rendered OUTSIDE the shell below: no session, so no
         navigation.
       */}
-      <Route path="/signup" element={<UserSignupPage />} />
-      <Route path="/masuk" element={<UserLoginPage />} />
+      <Route
+        path="/signup"
+        element={
+          <RedirectIfSignedIn>
+            <UserSignupPage />
+          </RedirectIfSignedIn>
+        }
+      />
+      <Route
+        path="/masuk"
+        element={
+          <RedirectIfSignedIn>
+            <UserLoginPage />
+          </RedirectIfSignedIn>
+        }
+      />
+      {/*
+        The two below are deliberately NOT wrapped. `SettingsPage` has no
+        password change, so these are the only route to a new password, and
+        forgetting a password does not end an existing browser session — a
+        signed-in visitor is exactly who follows the emailed link. Guarding
+        them would lock a signed-in user out of recovery; guarding both would
+        make it impossible. `App.test.tsx` asserts this absence rather than
+        leaving it to be "tidied up" later.
+      */}
       <Route path="/lupa-sandi" element={<ResetRequestPage />} />
       <Route path="/reset/:token" element={<ResetCompletePage />} />
 

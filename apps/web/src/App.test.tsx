@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { Children, isValidElement, type ReactNode } from "react";
 import App, { AppRoutes } from "./App";
 import AppShell from "./user/AppShell";
+import RedirectIfSignedIn from "./user/RedirectIfSignedIn";
 import { USER_TOKEN_STORAGE_KEY } from "./user/apiClient";
 
 /**
@@ -526,12 +527,85 @@ describe("App — repairs a split session once, above the router (Task 7)", () =
 });
 
 /**
+ * "Signed in, but standing on a page meant for people who are not."
+ *
+ * `/masuk` answered this on its own and answered it wrong for months
+ * (redirecting to the marketing landing page); `/signup` did not answer it at
+ * all and offered a signed-in visitor an account they already have. The rule
+ * now lives in ONE component, `RedirectIfSignedIn`, applied at the route
+ * table — so these tests exercise the real wiring, not each page's private
+ * copy of a guard.
+ */
+describe("routing — pages that turn a signed-in visitor away", () => {
+  function signIn() {
+    localStorage.setItem(USER_TOKEN_STORAGE_KEY, "jwt-existing");
+  }
+
+  function mockFeed() {
+    global.fetch = mock(async () =>
+      jsonResponse({ posts: [], nextCursor: null })
+    ) as unknown as typeof fetch;
+  }
+
+  it("sends a signed-in visitor from /signup to the feed", async () => {
+    signIn();
+    mockFeed();
+
+    renderAt("/signup");
+
+    expect(await screen.findByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
+    expect(screen.queryAllByRole("heading", { name: "Buat akun" }).length).toBe(0);
+  });
+
+  it("sends a signed-in visitor from /masuk to the feed", async () => {
+    signIn();
+    mockFeed();
+
+    renderAt("/masuk");
+
+    expect(await screen.findByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
+    expect(screen.queryAllByRole("heading", { name: "Masuk" }).length).toBe(0);
+  });
+
+  /**
+   * DELIBERATELY NOT GUARDED, and this test is the reason it stays that way.
+   *
+   * `SettingsPage` offers no password change — checked, not assumed — so
+   * `/lupa-sandi` is the ONLY route to a new password, and `/reset/:token` is
+   * where the emailed link lands. Forgetting a password does not end an
+   * existing browser session, so a signed-in visitor is exactly who arrives
+   * here. Turning them away would lock them out of password recovery with no
+   * alternative; guarding both would make it impossible outright.
+   *
+   * If a password change is ever added to Settings, these two assertions are
+   * the ones to revisit — not to delete quietly.
+   */
+  it("lets a signed-in visitor reach /lupa-sandi — it is the only way to a new password", () => {
+    signIn();
+
+    renderAt("/lupa-sandi");
+
+    expect(screen.getByRole("heading", { name: "Lupa sandi" })).toBeTruthy();
+  });
+
+  it("lets a signed-in visitor reach /reset/:token — the emailed link must still work", () => {
+    signIn();
+
+    renderAt("/reset/some-token");
+
+    expect(screen.getByRole("heading", { name: "Atur ulang sandi" })).toBeTruthy();
+  });
+});
+
+/**
  * One `<Route>` in the real table, flattened: its `path` and whether it sits
  * under the path-less `<Route element={<AppShell />}>` layout route.
  */
 interface FlatRoute {
   path: string;
   insideShell: boolean;
+  /** Wrapped in `RedirectIfSignedIn` — i.e. closed to a signed-in visitor. */
+  guarded: boolean;
 }
 
 /**
@@ -558,7 +632,9 @@ function flattenRouteTable(): FlatRoute[] {
     if (!isValidElement(child)) return;
     const props = child.props as { path?: string; element?: ReactNode; children?: ReactNode };
     if (typeof props.path === "string") {
-      flat.push({ path: props.path, insideShell: false });
+      const guarded =
+        isValidElement(props.element) && props.element.type === RedirectIfSignedIn;
+      flat.push({ path: props.path, insideShell: false, guarded });
       return;
     }
     // A path-less layout route. `AppShell` is the only one this app has; any
@@ -570,7 +646,9 @@ function flattenRouteTable(): FlatRoute[] {
       if (!isValidElement(grandchild)) return;
       const grandchildProps = grandchild.props as { path?: string };
       if (typeof grandchildProps.path === "string") {
-        flat.push({ path: grandchildProps.path, insideShell: isShell });
+        // Shell children are never wrapped: everything behind the shell is
+        // reachable signed in by definition.
+        flat.push({ path: grandchildProps.path, insideShell: isShell, guarded: false });
       }
     });
   });
@@ -602,6 +680,47 @@ function flattenRouteTable(): FlatRoute[] {
  * renders "Masuk" rather than "Profil" when there is no session and so cannot
  * offer a signed-out visitor a door that is not there.
  */
+/**
+ * The same shape as the shell partition below, for the other boundary a page
+ * can sit on: closed to a signed-in visitor, or open to one.
+ *
+ * This asserts the whole set, not a sample, because the failure it exists to
+ * catch is a route ARRIVING — `/signup` sat unguarded from the day it was
+ * written, offering a signed-in visitor an account they already had, and no
+ * per-page test could have caught a page nobody thought to write a test for.
+ *
+ * It is meant to fail when the set changes. Adding a page here must be a
+ * deliberate edit to one of these two lists.
+ */
+describe("routing — which pages turn a signed-in visitor away", () => {
+  it("guards EXACTLY /signup and /masuk", () => {
+    const guarded = flattenRouteTable()
+      .filter((route) => route.guarded)
+      .map((route) => route.path)
+      .sort();
+
+    expect(guarded).toEqual(["/masuk", "/signup"]);
+  });
+
+  /**
+   * The password-recovery pair, named here so that leaving them open reads as
+   * a decision rather than an omission. `SettingsPage` has no password
+   * change, so these two are the ONLY route to a new password, and a
+   * forgotten password does not end an existing browser session. Guarding
+   * them would lock a signed-in user out of recovery.
+   *
+   * Revisit if a password change is ever added to Settings.
+   */
+  it("leaves the two password-recovery pages open to a signed-in visitor", () => {
+    const open = flattenRouteTable()
+      .filter((route) => !route.insideShell && !route.guarded)
+      .map((route) => route.path)
+      .sort();
+
+    expect(open).toEqual(["*", "/", "/lupa-sandi", "/reset/:token"]);
+  });
+});
+
 describe("routing — the shell partition of the real route table", () => {
   it("renders EXACTLY these seven paths inside the AppShell layout route", () => {
     const inside = flattenRouteTable()

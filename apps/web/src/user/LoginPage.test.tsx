@@ -128,26 +128,19 @@ describe("LoginPage", () => {
     expect(screen.getByText("Akun dibuat. Silakan masuk.")).toBeTruthy();
   });
 
-  /**
-   * Named for the DESTINATION, and asserting it — which is the whole lesson
-   * here. The version of this test that shipped the bug was called "redirects
-   * an already-signed-in visitor away from the login form" and asserted only
-   * that the "Masuk" heading was gone. That is true of EVERY destination,
-   * including "/" — the marketing landing page, which is exactly where this
-   * sent people. A signed-in user opening /masuk was dumped there with no way
-   * into the app except typing /beranda into the address bar by hand.
+  /*
+   * The "already signed in -> /beranda" test used to live here, rendering
+   * LoginPage directly. That check is no longer LoginPage's: it moved to
+   * `RedirectIfSignedIn`, applied to this route in App.tsx, and its test
+   * moved with it to App.test.tsx's "pages that turn a signed-in visitor
+   * away" block — where it runs against the real route table rather than a
+   * component in isolation, and so also proves the wiring.
    *
-   * No `fetch` mock: the guard returns before the form can be submitted, so
-   * the mock the old test carried was never reached.
+   * Worth remembering what the old version of that test looked like: it was
+   * called "redirects an already-signed-in visitor away from the login form"
+   * and asserted only that the "Masuk" heading was absent. That is true of
+   * every destination, including the landing page it actually sent people to.
    */
-  it("sends an already-signed-in visitor to /beranda, not the landing page", () => {
-    localStorage.setItem("diudara.user.token", "jwt-existing");
-
-    renderLogin();
-
-    expect(screen.getByText("beranda reached")).toBeTruthy();
-    expect(screen.queryAllByRole("heading", { name: "Masuk" }).length).toBe(0);
-  });
 
   /**
    * `state.from` still outranks the /beranda default: a visitor bounced off a

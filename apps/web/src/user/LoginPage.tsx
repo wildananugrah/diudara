@@ -1,13 +1,13 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
-  getUserToken,
   login,
   SESSION_NOT_STORED_MESSAGE,
   SessionStorageError,
   UserApiError,
 } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
+import { SIGNED_IN_HOME } from "./RedirectIfSignedIn";
 
 /**
  * THE GENERIC 401, and the reason it is a constant rather than the API's
@@ -28,19 +28,6 @@ export default function LoginPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
-  /**
-   * Already signed in: nothing here to do.
-   *
-   * `/beranda`, NOT `/`. This sent people to the marketing landing page — a
-   * signed-in user who opened /masuk (from a bookmark, a stale tab, or the
-   * browser's own autocomplete) was dropped somewhere with no route into the
-   * app, and had to type /beranda by hand. The feed is where a session
-   * belongs, and it is the same answer `destination` defaults to below, so
-   * there is ONE rule here rather than two.
-   */
-  if (getUserToken() !== null) {
-    return <Navigate to="/beranda" replace />;
-  }
 
   // Carried by SignupPage after a successful signup ("Akun dibuat. Silakan
   // masuk.") — Task 2: signup never logs the caller in, on purpose. Also the
@@ -53,8 +40,13 @@ export default function LoginPage() {
    * (SettingsPage) names the page it took them from, and that always wins —
    * being returned to what you were doing beats any default. With no such
    * state, the feed.
+   *
+   * The "already signed in, go away" check that used to live at the top of
+   * this component is gone: it is now `RedirectIfSignedIn`, applied to this
+   * route in `App.tsx`. `SIGNED_IN_HOME` is imported from there so the two
+   * cannot answer the same question differently again.
    */
-  const destination = typeof state?.from === "string" ? state.from : "/beranda";
+  const destination = typeof state?.from === "string" ? state.from : SIGNED_IN_HOME;
 
   function describe(err: unknown): { message: string; fieldErrors: Record<string, string> } {
     if (err instanceof UserApiError) {
