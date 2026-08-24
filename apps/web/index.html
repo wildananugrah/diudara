@@ -4,6 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DIUDARA</title>
+    <!--
+      The redesign's two faces: Instrument Sans for everything, Instrument Serif
+      for display headings and prices. Preconnect to both hosts because the CSS
+      lives on fonts.googleapis.com and the font files on fonts.gstatic.com — one
+      preconnect only warms the first of the two round trips.
+
+      Every rule that asks for them names a real fallback, so a blocked or slow
+      font request costs typography, never legibility.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400&family=Instrument+Serif:ital@0;1&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
     <div id="root"></div>

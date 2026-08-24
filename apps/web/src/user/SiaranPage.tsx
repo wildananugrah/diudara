@@ -111,6 +111,16 @@ export default function SiaranPage({
 
       {streams.map((stream) => (
         <article key={stream.id} className="stream-card" data-testid="stream-card">
+          {stream.locked ? (
+            // Overlays the gated frame, and lives OUTSIDE the link on purpose:
+            // `stream-lock`'s copy is pinned exactly by a named test, because
+            // this is a conversion surface and text appended to it must not
+            // slip past. aria-hidden because it repeats what the link says.
+            <span className="badge-members" aria-hidden="true">
+              KHUSUS ANGGOTA
+            </span>
+          ) : null}
+
           <header className="stream-card-header">
             <h2>{stream.title}</h2>
             <Link to={`/@${stream.owner.handle}`} className="stream-card-owner">
@@ -131,7 +141,11 @@ export default function SiaranPage({
               className="stream-lock"
               data-testid="stream-lock"
             >
-              Jadi anggota untuk menonton
+              {/* The badge that labels this frame is a SIBLING, not a child —
+                  see below. The link's text is its accessible name, and it must
+                  stay exactly the sentence a member reads; a decorative label
+                  inside it would be announced as part of the destination. */}
+              <span className="stream-lock-cta">Jadi anggota untuk menonton</span>
             </Link>
           ) : (
             <StreamPlayer stream={stream} attachHls={attachHls} mintToken={mintToken} />

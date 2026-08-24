@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   MemoryRouter,
@@ -76,6 +78,42 @@ function tabButton(name: "Untuk Anda" | "Mengikuti"): HTMLButtonElement {
   return screen.getByRole("button", { name }) as HTMLButtonElement;
 }
 
+/**
+ * `src/styles.css`, normalised: comments stripped first (so a selector NAMED in
+ * prose is never mistaken for a rule), then quotes removed and whitespace
+ * collapsed — `[aria-current="true"]` and `[aria-current=true]` are the same
+ * selector and must not read differently here.
+ */
+function stylesheet(): string {
+  return readFileSync(join(import.meta.dir, "../styles.css"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/["']/g, "")
+    .replace(/\s+/g, " ");
+}
+
+/**
+ * Every rule in the sheet as `{ selector, body }`. The pattern matches INNERMOST
+ * braces, so a rule nested in an `@media` block is returned on its own and the
+ * at-rule's prelude is skipped — which also means the media condition is lost.
+ * See the docstring below for what that costs.
+ */
+function rules(css: string): { selector: string; body: string }[] {
+  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({
+    selector: match[1]!.trim(),
+    body: match[2]!.trim(),
+  }));
+}
+
+/** Every rule that can apply to the feed tabs, in source order. */
+function feedTabRules(css: string): { selector: string; body: string }[] {
+  return rules(css).filter((rule) => rule.selector.includes(".feed-tabs"));
+}
+
+/** Selectors as one readable string, so a failure names the offender instead of printing a count. */
+function selectors(matched: { selector: string }[]): string {
+  return matched.map((rule) => rule.selector).join(" | ");
+}
+
 /** Gives any effect a queued request would sit in a chance to fire before an absence is asserted. */
 function settle(): Promise<void> {
   return act(async () => {
@@ -104,6 +142,64 @@ describe("BerandaPage — the two tabs", () => {
 
     expect(tabButton("Untuk Anda").getAttribute("aria-current")).toBe("true");
     expect(tabButton("Mengikuti").getAttribute("aria-current")).toBe("false");
+  });
+
+  /**
+   * **The indicator, not just the state.** The two tabs shipped once with no
+   * visual difference at all: the stylesheet's active rule was keyed on
+   * `[aria-selected="true"]` and `.active`, neither of which this component
+   * sets, while the rule that IS keyed on `aria-current` painted a
+   * `border-bottom-color` on a button a later rule had given `border: none` —
+   * and a colour cannot restore a border that does not exist. Every existing
+   * test in this file reads `aria-current` and passed throughout, which is
+   * exactly why nobody noticed.
+   *
+   * **What this test CANNOT do, stated plainly: it does not resolve the
+   * cascade.** It reads rule text. It cannot weigh specificity, see
+   * `!important`, know which `@media` block a rule sits in, or account for an
+   * inline style or a second stylesheet. A first version of it checked only
+   * that the intended rule existed, and appending
+   * `.beranda-page .feed-tabs button { box-shadow: none }` — equal specificity,
+   * later in the file — reproduced the original bug with the suite still green.
+   *
+   * So it does not try to simulate the cascade; it pins a property that makes
+   * the cascade unable to go wrong: **exactly one rule in the whole stylesheet
+   * declares `box-shadow` for a feed tab, and it is the one keyed on the
+   * attribute this component really sets.** With no second declaration there is
+   * nothing to cancel the indicator, in any order and at any specificity. A
+   * canceller has to add one, and adding one fails here.
+   *
+   * The bans are scoped to `.feed-tabs` rather than to the file: an unrelated,
+   * correct `role="tab"` / `aria-selected` rule elsewhere is none of this test's
+   * business. Converting THESE tabs to a real tablist is a change to both halves
+   * of the contract below, and is meant to redden it.
+   */
+  it("paints the active tab with the sheet's only feed-tab shadow, keyed on the aria-current it sets", async () => {
+    mockFetch(() => jsonResponse({ posts: [], nextCursor: null }));
+
+    renderBeranda();
+    await screen.findByText("Belum ada kiriman untuk ditampilkan.");
+
+    // Half one: the attribute the component really renders.
+    expect(tabButton("Untuk Anda").getAttribute("aria-current")).toBe("true");
+    expect(tabButton("Mengikuti").getAttribute("aria-current")).toBe("false");
+
+    // Half two: the rule that has to be keyed on it.
+    const tabRules = feedTabRules(stylesheet());
+    const active = tabRules.filter((rule) => rule.selector.includes("[aria-current=true]"));
+    expect(selectors(active)).toBe(".feed-tabs button[aria-current=true]");
+    expect(active[0]!.body).toContain("box-shadow: inset 0 -2px 0 var(--green-dark);");
+    // `border: none` on `.feed-tabs button` makes this property inert — it is
+    // how the indicator disappeared the first time.
+    expect(active[0]!.body.includes("border-bottom-color")).toBe(false);
+
+    // Nothing else may declare the indicator property, in either direction.
+    const shadowed = tabRules.filter((rule) => rule.body.includes("box-shadow"));
+    expect(selectors(shadowed)).toBe(".feed-tabs button[aria-current=true]");
+
+    // And no feed-tab rule may key on a state this component never sets.
+    const wrongState = tabRules.filter((rule) => /aria-selected|button\.active/.test(rule.selector));
+    expect(selectors(wrongState)).toBe("");
   });
 
   it("requests tab=untuk-anda by default", async () => {
