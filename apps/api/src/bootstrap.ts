@@ -8,6 +8,7 @@ import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { IsMemberOf } from "./application/use-cases/is-member-of";
 import { ListSubscribers } from "./application/use-cases/list-subscribers";
+import { MembershipRequests } from "./application/use-cases/membership-requests";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -287,6 +288,15 @@ export interface Dependencies {
    * Task 4 of "free memberships".
    */
   listSubscribers: ListSubscribers;
+  /**
+   * Task 5 of "free memberships": `GET /users/me/membership-requests` and
+   * the `/approve`/`/reject` pair beside it — an owner's queue of pending
+   * free-membership requests, and the only way one is ever decided.
+   * Constructed unconditionally, same reasoning as `listSubscribers` and
+   * `startUserSubscription` since Task 4 — nothing here touches
+   * `PaymentProviderPort`.
+   */
+  membershipRequests: MembershipRequests;
   handlePaymentWebhook: HandlePaymentWebhook;
   /**
    * The messaging adapters THIS process selected. Exposed for the same reason
@@ -1437,6 +1447,10 @@ export function bootstrap(): Dependencies {
   // per-owner LIST and `isMemberOf` answers a per-pair question. See
   // `ListSubscribers`'s own docstring.
   const listSubscribers = new ListSubscribers(userSubscriptionRepository, clock);
+  // Task 5 of "free memberships": the SAME `userSubscriptionRepository`
+  // `isMemberOf` and `listSubscribers` read — no separate repository, no
+  // separate clock (approving/rejecting never compares against `now`).
+  const membershipRequests = new MembershipRequests(userSubscriptionRepository);
   // Task 5 of memberships-5a: `userTierRepository` (constructed above, Task 1)
   // is now GetUserProfile's third dependency too — the public profile's
   // `membership.tiers` read. Task 10 adds the fourth, `isMemberOf`, for the
@@ -1796,6 +1810,7 @@ export function bootstrap(): Dependencies {
     manageUserTiers,
     startUserSubscription,
     listSubscribers,
+    membershipRequests,
     handlePaymentWebhook,
     messaging,
     xenditCallbackToken,

@@ -86,6 +86,31 @@ export interface PendingUserCheckout {
   invoiceUrl: string;
 }
 
+/**
+ * One row of an owner's pending free-membership queue — Task 5 of
+ * "free memberships", `GET /users/me/membership-requests`. The wire's CLOSED
+ * public projection, same discipline `SubscriberRow` above documents: only
+ * what the owner needs to recognise the request and decide on it, never
+ * `subscriberId` (an internal id the owner has no use for and which would let
+ * a client correlate this list against other endpoints that DO take an id)
+ * and never an email or a `whatsapp_number` — the same two columns
+ * `SubscriberRow`'s docstring excludes from the subscriber list, for the same
+ * reason.
+ *
+ * `id` IS a `user_subscription` row id, not excluded like `subscriberId`
+ * above — it is what the owner sends straight back on
+ * `POST /me/membership-requests/:id/approve` and `/reject`, so withholding it
+ * would make the list useless for the one thing it exists to drive.
+ */
+export interface PendingRequestRow {
+  id: string;
+  subscriberHandle: string;
+  subscriberDisplayName: string;
+  /** The free tier this request is for — an owner may run more than one. */
+  tierName: string;
+  createdAt: Date;
+}
+
 export interface UserSubscriptionRepositoryPort {
   /**
    * Raw INSERT. Rejects — it does not return null — when the pair already holds
@@ -420,4 +445,67 @@ export interface UserSubscriptionRepositoryPort {
   findPendingCheckout(subscriberId: string, ownerId: string): Promise<PendingUserCheckout | null>;
   /** Flips a transaction to `paid` and records when. */
   markTransactionPaid(id: string, paidAt: Date): Promise<UserTransactionRow | null>;
+  /**
+   * Task 5 of "free memberships": an owner's queue of free-membership
+   * requests awaiting a decision — `status = 'pending'` AND `kind = 'free'`
+   * for this owner. A PAID pending checkout (an open Xendit invoice) is
+   * deliberately excluded by the `kind` predicate: it belongs to
+   * `findPendingCheckout`'s world, not this queue, and an owner approving it
+   * here would activate a membership nobody has paid for yet.
+   *
+   * Returns the CLOSED projection (`PendingRequestRow`) — see that type's own
+   * docstring for exactly what may and may not cross this boundary.
+   *
+   * Oldest first (`created_at` asc, `id` asc tiebreak): a queue, worked in the
+   * order people asked.
+   */
+  listPendingRequests(ownerId: string): Promise<PendingRequestRow[]>;
+  /**
+   * THE CONDITIONAL UPDATE that approves one free-membership request —
+   * flips `status` to `active` and leaves `current_period_end` NULL (a free
+   * row's permanent shape, spec §3; see `MembershipStanding`'s own docstring
+   * on `kind = 'free'`).
+   *
+   * THE ARBITER is the WHERE clause, never a read followed by a write: this
+   * row's id, THIS owner, still `status = 'pending'` AND `kind = 'free'`.
+   * Two concurrent approvals of the same request race to one winner —
+   * Postgres serialises the two UPDATEs on the row's own lock, and by the
+   * time the loser's UPDATE re-evaluates its WHERE the winner has already
+   * moved the row off `pending`, so the loser matches zero rows and this
+   * answers `null`. The SAME predicate is why a second approval after the
+   * first has already landed also answers `null` — nothing here is a special
+   * case, both are just "no longer pending".
+   *
+   * `ownerId` in the WHERE, not a separate ownership check afterwards, is
+   * what makes a foreign owner's attempt answer `null` exactly like a missing
+   * id — the same "gated and absent look identical from outside" the media
+   * routes already follow, and what lets the use case throw one
+   * `NotFoundError` for both without this method ever having to distinguish
+   * them.
+   *
+   * Can raise a unique-violation on `user_subscription_one_active` when the
+   * subscriber already holds a DIFFERENT active row for this owner (a
+   * pending free request survives alongside an existing active membership —
+   * nothing stops both existing at once, since they are different rows).
+   * Implementations MUST translate that into `UniqueViolationError` (via
+   * `rethrowUniqueViolation`) rather than let the raw driver error escape —
+   * this codebase never lets a driver error reach a route.
+   */
+  approveFreeRequest(id: string, ownerId: string): Promise<UserSubscriptionRow | null>;
+  /**
+   * Rejects one free-membership request by DELETING the row — not a status
+   * flip, unlike every other terminal transition on this table
+   * (`cancel`/`retireExpired`/`expireStalePending`). A rejected request keeps
+   * no record on purpose: rejecting it must free the person to ask again, and
+   * a soft-deleted `rejected` row sitting where a fresh pending request wants
+   * to go would either need its own carve-out in `user_subscription_one_pending`
+   * or would permanently block a second ask — worse than simply not existing.
+   *
+   * Same WHERE-clause arbitration as `approveFreeRequest`: this row's id,
+   * THIS owner, `status = 'pending'` AND `kind = 'free'`. Returns whether a
+   * row actually moved — `false` for a missing id, a foreign owner's id, or a
+   * request already decided, all indistinguishable to the caller for the same
+   * "gated and absent look identical" reason `approveFreeRequest` documents.
+   */
+  rejectRequest(id: string, ownerId: string): Promise<boolean>;
 }

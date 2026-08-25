@@ -178,6 +178,15 @@ function parseSubscribeBody(raw: unknown): { tierId: string } {
 }
 
 /**
+ * `:id` on `POST /me/membership-requests/:id/approve` and `/reject` — Task 5
+ * of "free memberships". A malformed id is a 400 from `validateParams`,
+ * never a raw uuid-syntax 500 from the driver — the same rule
+ * `routes/posts.ts` and `routes/media.ts` already follow, and `me/tiers/:tierId`
+ * above follows with `z.object({ tierId: uuidParam })`.
+ */
+const requestIdParams = z.object({ id: uuidParam });
+
+/**
  * The caller's IP, recorded (hashed) against every password-reset request
  * for forensic/audit value — see `RequestPasswordReset`'s own docstring for
  * why it is NO LONGER used to enforce a rate limit (review finding F4).
@@ -252,6 +261,7 @@ export function userRoutes(
     | "manageUserTiers"
     | "startUserSubscription"
     | "listSubscribers"
+    | "membershipRequests"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -490,6 +500,72 @@ export function userRoutes(
     const result = await deps.listSubscribers.execute(c.get("userId"));
     return c.json(result);
   });
+
+  /**
+   * Task 5 of "free memberships" — an owner's queue of pending free
+   * membership requests (spec §2.4): what Task 4's `StartUserSubscription`
+   * free path writes via `claimPending({ ..., kind: "free" })`, waiting on a
+   * decision.
+   *
+   * **THIS IS PRIVATE DATA, OWNER-ONLY BY CONSTRUCTION**, same shape as
+   * `me/subscribers` above: `requireAuth` and `c.get("userId")`, no handle
+   * parameter anywhere on this route, so the only queue a caller can ever ask
+   * for is their own.
+   *
+   * Static (`me/membership-requests`), registered with the other STATIC
+   * `me/*` routes above, before `/:handle` — `me` is 2 characters, already
+   * unregisterable under `HANDLE_PATTERN` before this route existed, but
+   * `"membership-requests"` is added to `RESERVED_HANDLES` regardless (see
+   * that constant's own docstring: reserving more than a route strictly
+   * requires is safe). See `app.test.ts`'s route table for the guard that
+   * keeps these three paths pinned.
+   */
+  app.get<"/me/membership-requests">("/me/membership-requests", requireAuth, async (c) => {
+    const result = await deps.membershipRequests.list(c.get("userId"));
+    return c.json(result);
+  });
+
+  /**
+   * Approves ONE pending free request — flips it to `active`, `kind` already
+   * `free`, `current_period_end` left `null` (spec §3's permanent shape for a
+   * free membership). `MembershipRequests.approve` throws `NotFoundError` for
+   * a missing id, a foreign owner's id, or a request no longer pending — the
+   * SAME answer for all three, so this owner cannot probe which request ids
+   * exist for somebody else. A collision with `user_subscription_one_active`
+   * (this subscriber already holds a different active row for this owner)
+   * surfaces as `ConflictError`, never a raw driver error — see
+   * `DrizzleUserSubscriptionRepository.approveFreeRequest`'s own docstring.
+   */
+  app.post<"/me/membership-requests/:id/approve">(
+    "/me/membership-requests/:id/approve",
+    requireAuth,
+    validateParams(requestIdParams),
+    async (c) => {
+      const { id } = c.get("validatedParams") as { id: string };
+      const row = await deps.membershipRequests.approve({
+        ownerId: c.get("userId"),
+        requestId: id,
+      });
+      return c.json(row, 200);
+    }
+  );
+
+  /**
+   * Rejects ONE pending free request — DELETES the row (never a status flip;
+   * see `UserSubscriptionRepositoryPort.rejectRequest`'s own docstring for
+   * why), so the same person is free to ask again. Same `NotFoundError`
+   * treatment as approve above.
+   */
+  app.post<"/me/membership-requests/:id/reject">(
+    "/me/membership-requests/:id/reject",
+    requireAuth,
+    validateParams(requestIdParams),
+    async (c) => {
+      const { id } = c.get("validatedParams") as { id: string };
+      await deps.membershipRequests.reject({ ownerId: c.get("userId"), requestId: id });
+      return c.json({ ok: true }, 200);
+    }
+  );
 
   /**
    * Task 7 of images (design spec §6). Public and cheap — no auth, no

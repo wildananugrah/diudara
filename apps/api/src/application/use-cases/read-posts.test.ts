@@ -305,6 +305,15 @@ class FakeSubscriptions implements UserSubscriptionRepositoryPort {
   async markTransactionPaid(): Promise<never> {
     return this.unused();
   }
+  async listPendingRequests(): Promise<never> {
+    return this.unused();
+  }
+  async approveFreeRequest(): Promise<never> {
+    return this.unused();
+  }
+  async rejectRequest(): Promise<never> {
+    return this.unused();
+  }
 }
 
 /** RINA's gated post, with two images behind the lock. */

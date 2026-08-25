@@ -45,6 +45,14 @@ export const RESERVED_HANDLES: ReadonlySet<string> = new Set([
   // registers the handle and shadows the route.
   "logout",
   "media",
+  // Task 5 of "free memberships": `/me/membership-requests` and its
+  // `/:id/approve`, `/:id/reject` siblings. Contains a hyphen, so
+  // `HANDLE_PATTERN` already makes it unregisterable and its own segment
+  // sits under `/me/` (2 characters, itself already unregisterable) rather
+  // than directly under `/users/` — reserved anyway, same reasoning
+  // `RESERVED_HANDLES`'s own docstring gives for reserving more than a route
+  // strictly requires.
+  "membership-requests",
   "posts",
   "signup",
 ]);

@@ -1,9 +1,12 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { appUsers, userSubscriptions, userTransactions } from "../../db/schema";
+import { appUsers, userSubscriptions, userTiers, userTransactions } from "../../db/schema";
 import { isConnectedPaymentAccount } from "../../domain/payment-account";
+import { UniqueRule } from "../../application/errors";
+import { rethrowUniqueViolation } from "./pg-errors";
 import type {
   ExpirableInvoiceRef,
+  PendingRequestRow,
   PendingSubscriptionClaim,
   PendingUserCheckout,
   SubscriberRow,
@@ -25,6 +28,20 @@ const subscriberProjection = {
   handle: appUsers.handle,
   displayName: appUsers.displayName,
   since: userSubscriptions.createdAt,
+} as const;
+
+/**
+ * The CLOSED wire projection for `listPendingRequests` — see
+ * `PendingRequestRow`'s own docstring for exactly why these columns and no
+ * others (`subscriberId`, an email, a `whatsapp_number` are never selected,
+ * not merely stripped afterwards).
+ */
+const pendingRequestProjection = {
+  id: userSubscriptions.id,
+  subscriberHandle: appUsers.handle,
+  subscriberDisplayName: appUsers.displayName,
+  tierName: userTiers.name,
+  createdAt: userSubscriptions.createdAt,
 } as const;
 
 /**
@@ -611,5 +628,99 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
       .where(eq(userTransactions.id, id))
       .returning();
     return row ?? null;
+  }
+
+  /**
+   * See the port's own docstring for the full contract. Selects
+   * `pendingRequestProjection` ONLY, never `userSubscriptions.*` or
+   * `appUsers.*` — the closed shape enforced at the query, same discipline
+   * `listActiveSubscribers` above follows for `subscriberProjection`.
+   *
+   * `kind = 'free'` excludes a PAID pending checkout (an open Xendit
+   * invoice) — that belongs to `findPendingCheckout`'s world, not this
+   * queue. Oldest first: a queue, worked in the order people asked.
+   */
+  async listPendingRequests(ownerId: string): Promise<PendingRequestRow[]> {
+    if (!UUID_PATTERN.test(ownerId)) {
+      return [];
+    }
+    return this.db
+      .select(pendingRequestProjection)
+      .from(userSubscriptions)
+      .innerJoin(appUsers, eq(userSubscriptions.subscriberId, appUsers.id))
+      .innerJoin(userTiers, eq(userSubscriptions.tierId, userTiers.id))
+      .where(
+        and(
+          eq(userSubscriptions.ownerId, ownerId),
+          eq(userSubscriptions.status, "pending"),
+          eq(userSubscriptions.kind, "free")
+        )
+      )
+      .orderBy(asc(userSubscriptions.createdAt), asc(userSubscriptions.id));
+  }
+
+  /**
+   * THE CONDITIONAL UPDATE — see the port's own docstring for why the WHERE
+   * clause (this row's id, THIS owner, still `pending` AND `free`) is the
+   * whole arbiter, never a read followed by a write, and why a foreign
+   * owner's attempt and an already-decided request both simply match zero
+   * rows and answer `null`.
+   *
+   * Wrapped in try/catch, unlike `activate` above: `activate` never collides
+   * with `user_subscription_one_active` because Task 2's purchase flow
+   * retires a lapsed row inside the SAME transaction before claiming a fresh
+   * pending one, so nothing else can be active for the pair by the time
+   * `activate` runs. This method has no such guarantee — a pending free
+   * request can sit alongside an ALREADY active row for the same
+   * (subscriber, owner) pair, since they are different rows and nothing
+   * before this UPDATE ever checked. A raw driver error must never reach the
+   * route, so the violation is translated to `UniqueViolationError` (a
+   * `ConflictError`) here, at the repository boundary, exactly as
+   * `startLive` does for `user_stream_one_live`.
+   */
+  async approveFreeRequest(id: string, ownerId: string): Promise<UserSubscriptionRow | null> {
+    try {
+      const [row] = await this.db
+        .update(userSubscriptions)
+        .set({ status: "active", currentPeriodEnd: null })
+        .where(
+          and(
+            eq(userSubscriptions.id, id),
+            eq(userSubscriptions.ownerId, ownerId),
+            eq(userSubscriptions.status, "pending"),
+            eq(userSubscriptions.kind, "free")
+          )
+        )
+        .returning();
+      return row ?? null;
+    } catch (err) {
+      rethrowUniqueViolation(err, {
+        user_subscription_one_active: {
+          rule: UniqueRule.userSubscriptionOneActive,
+          message: "orang ini sudah menjadi anggota aktif Anda",
+        },
+      });
+    }
+  }
+
+  /**
+   * DELETES the row rather than flipping a status — see the port's own
+   * docstring for why a rejected request keeps no record, unlike every other
+   * terminal transition on this table. Same WHERE-clause arbitration as
+   * `approveFreeRequest`.
+   */
+  async rejectRequest(id: string, ownerId: string): Promise<boolean> {
+    const rows = await this.db
+      .delete(userSubscriptions)
+      .where(
+        and(
+          eq(userSubscriptions.id, id),
+          eq(userSubscriptions.ownerId, ownerId),
+          eq(userSubscriptions.status, "pending"),
+          eq(userSubscriptions.kind, "free")
+        )
+      )
+      .returning({ id: userSubscriptions.id });
+    return rows.length > 0;
   }
 }

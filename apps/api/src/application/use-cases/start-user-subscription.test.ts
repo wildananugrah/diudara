@@ -376,6 +376,15 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
     async listActiveSubscribers() {
       throw new Error("StartUserSubscription must never read the subscriber list — Task 6 of 5b does");
     },
+    async listPendingRequests() {
+      throw new Error("StartUserSubscription must never read the membership-requests queue — Task 5 does");
+    },
+    async approveFreeRequest() {
+      throw new Error("StartUserSubscription must never approve a request — Task 5's MembershipRequests does");
+    },
+    async rejectRequest() {
+      throw new Error("StartUserSubscription must never reject a request — Task 5's MembershipRequests does");
+    },
   };
   return { repository, subscriptions, transactions, retireExpiredCalls };
 }

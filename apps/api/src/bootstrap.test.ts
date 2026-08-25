@@ -39,6 +39,7 @@ import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { IsMemberOf } from "./application/use-cases/is-member-of";
 import { ListSubscribers } from "./application/use-cases/list-subscribers";
+import { MembershipRequests } from "./application/use-cases/membership-requests";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -268,6 +269,15 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   },
   async markTransactionPaid() {
     return null;
+  },
+  async listPendingRequests() {
+    return [];
+  },
+  async approveFreeRequest() {
+    return null;
+  },
+  async rejectRequest() {
+    return false;
   },
 };
 
@@ -584,6 +594,7 @@ describe("Dependencies (composition root contract)", () => {
         { appBaseUrl: "https://app.diudara.test" }
       ),
       listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
+      membershipRequests: new MembershipRequests(fakeUserSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
