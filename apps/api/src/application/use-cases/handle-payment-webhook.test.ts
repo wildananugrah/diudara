@@ -117,6 +117,7 @@ function userSubscriptionRow(overrides: Partial<UserSubscriptionRow> = {}): User
     tierId: USER_TIER_ID,
     ownerId: OWNER_ID,
     status: "pending",
+    kind: "paid",
     currentPeriodEnd: null,
     createdAt: new Date("2026-08-09T09:00:00Z"),
     ...overrides,

@@ -5,6 +5,8 @@ export interface UserSubscriptionRow {
   tierId: string;
   ownerId: string;
   status: string;
+  /** 'paid' | 'free'. See spec §3: this is what keeps a NULL period reading as a bug. */
+  kind: string;
   currentPeriodEnd: Date | null;
   createdAt: Date;
 }

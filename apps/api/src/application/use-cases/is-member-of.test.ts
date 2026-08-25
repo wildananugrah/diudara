@@ -6,7 +6,7 @@ import { resetDatabase } from "../../db/test-helpers";
 import { FixedClock } from "../../infrastructure/clock/fixed.clock";
 import { DrizzleUserTierRepository } from "../../infrastructure/repositories/drizzle-user-tier.repository";
 import { DrizzleUserSubscriptionRepository } from "../../infrastructure/repositories/drizzle-user-subscription.repository";
-import { IsMemberOf } from "./is-member-of";
+import { IsMemberOf, membershipStanding } from "./is-member-of";
 
 beforeEach(resetDatabase);
 
@@ -53,6 +53,54 @@ async function seedActiveSubscription(subscriberId: string, ownerId: string, per
   await subs.activate(created.id, periodEnd);
   return created;
 }
+
+/**
+ * Pure-function tests for `membershipStanding` itself — no database, no
+ * clock injection, just the predicate. The brief that added `kind` calls
+ * this "the existing membershipStanding describe"; no such describe existed
+ * before this task (every prior test here goes through `IsMemberOf` and a
+ * real database row), so this block is new. Kept separate from `IsMemberOf`
+ * below because these cases are about the free/paid disjunct in the
+ * predicate itself, not about the repository query that feeds it.
+ */
+describe("membershipStanding", () => {
+  const PAID = {
+    id: "s1",
+    subscriberId: "u1",
+    tierId: "t1",
+    ownerId: "o1",
+    status: "active",
+    kind: "paid",
+    createdAt: new Date(0),
+  };
+
+  it("a free membership is a member with no period at all", () => {
+    expect(membershipStanding({ ...PAID, kind: "free", currentPeriodEnd: null }, new Date())).toBe(
+      "member"
+    );
+  });
+
+  it("a PAID row with no period is still lapsed — the bug guard survives", () => {
+    expect(membershipStanding({ ...PAID, currentPeriodEnd: null }, new Date())).toBe("lapsed");
+  });
+
+  it("a paid row whose period has passed is lapsed", () => {
+    const now = new Date("2026-08-25T00:00:00Z");
+    expect(
+      membershipStanding({ ...PAID, currentPeriodEnd: new Date("2026-08-24T00:00:00Z") }, now)
+    ).toBe("lapsed");
+  });
+
+  it("a free row is a member even with a period in the past — kind wins", () => {
+    const now = new Date("2026-08-25T00:00:00Z");
+    expect(
+      membershipStanding(
+        { ...PAID, kind: "free", currentPeriodEnd: new Date("2026-01-01T00:00:00Z") },
+        now
+      )
+    ).toBe("member");
+  });
+});
 
 describe("IsMemberOf", () => {
   it("is true for an active subscription whose period has not ended", async () => {

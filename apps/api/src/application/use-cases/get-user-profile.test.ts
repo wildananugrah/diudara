@@ -193,6 +193,9 @@ function fakeSubscriptions(
         // `drizzle-user-subscription.repository.test.ts`), trusted here the
         // same way `fakeUserTierRepository` trusts `listActiveByOwner`.
         status: "active",
+        // This fake only ever produces PAID rows — the `kind` disjunct is
+        // Task 1's own predicate test, not this profile-read fake's concern.
+        kind: "paid",
         currentPeriodEnd: row.currentPeriodEnd,
         createdAt: new Date("2026-08-01T00:00:00.000Z"),
       };

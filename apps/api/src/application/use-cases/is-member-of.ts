@@ -40,19 +40,36 @@ export type MembershipStanding = "member" | "lapsed" | "none";
  * second query and neither one re-derives the comparison. A second copy of
  * `current_period_end > now` is exactly what would drift.
  *
- * A `null` `currentPeriodEnd` on an `active` row counts as **lapsed**, not as
- * member. It is unreachable today — `activate(id, periodEnd)` is the only
- * writer of that status and it always sets one — but if it ever happened the
- * row would be granting nothing while still blocking a purchase, which is
- * precisely what `lapsed` means. Calling it `member` would be the one answer
- * that is definitely wrong: nothing in this app would show that person any
- * member content.
+ * A `null` `currentPeriodEnd` on an `active` row is no longer one single
+ * fact — `kind` is what tells apart the two different reasons it can occur
+ * (spec §3):
+ *
+ *  - `kind = 'free'` — a free membership, granted by the owner approving a
+ *    request (see the free-memberships design). It has no period BY DESIGN:
+ *    nothing ever writes one, and nothing ever will, so `null` here is the
+ *    normal, permanent shape of "never expires until cancelled or revoked".
+ *  - `kind = 'paid'` — still unreachable today, for the reason this
+ *    docstring gave before `kind` existed: `activate(id, periodEnd)` is the
+ *    only writer of `active` status for a paid row and it always sets a
+ *    period. If a paid row's period were ever `null` it would be a BUG, and
+ *    it must keep reading as **lapsed** — granting nothing while still
+ *    blocking a purchase — because calling it `member` would grant
+ *    permanent access to gated content on the strength of that bug. That is
+ *    the whole reason `kind` exists rather than overloading `null` to mean
+ *    "free forever": a future bug leaving a paid row `null` must not
+ *    silently look identical to an intentional free membership.
+ *
+ * So `kind` is checked FIRST, before the null test, and decides the answer
+ * on its own for a free row without ever looking at `currentPeriodEnd`.
  */
 export function membershipStanding(
   active: UserSubscriptionRow | null,
   now: Date
 ): MembershipStanding {
   if (!active) return "none";
+  // A free membership has no period by design (spec §3). Checked BEFORE the null
+  // test below, which is the guard that keeps a PAID row's null reading as lapsed.
+  if (active.kind === "free") return "member";
   if (active.currentPeriodEnd === null) return "lapsed";
   return active.currentPeriodEnd.getTime() > now.getTime() ? "member" : "lapsed";
 }
