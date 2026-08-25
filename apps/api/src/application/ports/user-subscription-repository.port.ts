@@ -91,13 +91,27 @@ export interface UserSubscriptionRepositoryPort {
    * Raw INSERT. Rejects — it does not return null — when the pair already holds
    * a pending subscription, because `user_subscription_one_pending` is a
    * database constraint and not an application rule. `claimPending` below is
-   * what production code calls; this stays for fixtures that want the row and
-   * nothing else.
+   * what production code calls for a PAID purchase; `StartUserSubscription`'s
+   * free path (Task 4 of "free memberships") calls THIS one directly instead
+   * — a free request never risks a second live invoice (there is no invoice
+   * at all), so the pending-slot claim dance `claimPending` exists for buys
+   * nothing here, and a plain INSERT is the honest shape.
+   *
+   * `kind` is OPTIONAL and defaults to `'paid'` — the same default
+   * `db/schema.ts` gives the column itself (Task 1), so an omitted `kind`
+   * here and an omitted `kind` at the driver agree. This keeps every
+   * pre-existing caller of this method (there are dozens, across fixtures
+   * this task does not otherwise touch) creating exactly the paid row it
+   * always created, with nothing to update. `StartUserSubscription`'s free
+   * branch is the one caller that passes `kind: "free"` explicitly, because
+   * that is the one call site where the value is NOT the default.
    */
   create(input: {
     subscriberId: string;
     tierId: string;
     ownerId: string;
+    /** 'paid' | 'free', defaults to 'paid'. See `UserSubscriptionRow.kind`'s own docstring. */
+    kind?: string;
   }): Promise<UserSubscriptionRow>;
   /**
    * CLAIMS this pair's one pending subscription slot, and reports whether this
@@ -138,6 +152,14 @@ export interface UserSubscriptionRepositoryPort {
     subscriberId: string;
     tierId: string;
     ownerId: string;
+    /**
+     * 'paid' | 'free', defaulting to 'paid' via the column's own DEFAULT.
+     * A FREE request takes the pending slot through THIS method, not through
+     * `create`, for the reason this method exists: the slot is arbitrated by
+     * `user_subscription_one_pending`, and a plain insert turns a second tap of
+     * "Minta jadi anggota" into a 23505 and a 500.
+     */
+    kind?: string;
   }): Promise<PendingSubscriptionClaim>;
   findById(id: string): Promise<UserSubscriptionRow | null>;
   /**

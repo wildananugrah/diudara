@@ -541,7 +541,8 @@ export function userRoutes(
 
   /**
    * Task 6 of Phase 5a (spec §6) — buying a membership from a person, and the
-   * moment money actually moves.
+   * moment money actually moves for a PAID tier; for a FREE one, the moment a
+   * pending membership is created with nothing owed at all.
    *
    * Behind `requireAuth`: buying is signed-in only, so a signed-out visitor
    * pressing "Jadi anggota" gets a 401 and is sent to Masuk first. The buyer is
@@ -552,21 +553,22 @@ export function userRoutes(
    * shadow, and cannot be shadowed by, any of this router's static paths, since
    * Hono ranks static segments above dynamic ones.
    *
-   * 201, not 200: this call CREATES a pending subscription and a pending
-   * transaction, which outlive the response whether or not the buyer ever pays
-   * the invoice. Same status the dashboard's `POST /c/:slug/checkout` returns
-   * for the same reason.
+   * 201, not 200: this call CREATES a pending subscription — and, for a PAID
+   * tier, a pending transaction too — which outlive the response whether or
+   * not the buyer ever pays the invoice. Same status the dashboard's
+   * `POST /c/:slug/checkout` returns for the same reason.
+   *
+   * NO LONGER 503s AN ENTIRE PAYMENTS-DISABLED BOX (Task 4 of "free
+   * memberships"). `deps.startUserSubscription` is never `undefined` now —
+   * `bootstrap.ts` constructs it unconditionally, because a FREE tier needs
+   * no `PaymentProviderPort` at all — so this route no longer has an
+   * `if (!deps.startUserSubscription)` guard of its own. A PAID tier on a box
+   * with no provider is still refused with a 503, but that refusal now comes
+   * from INSIDE `StartUserSubscription.execute` (`ServiceUnavailableError`,
+   * thrown only once the tier's price is known), not from this route
+   * refusing every request regardless of what was being bought.
    */
   app.post<"/:handle/subscribe">("/:handle/subscribe", requireAuth, async (c) => {
-    // `undefined` EXACTLY when this box has no payment provider at all — same
-    // 503 and the same wording as `POST /users/me/payout` above. The route stays
-    // registered either way, so a buyer is told WHY rather than getting the 404
-    // of a path that does not exist. (The community checkout made the opposite
-    // choice — `/c/:slug/checkout` was not registered at all on such a box — and
-    // retire-telegram Task 4 deleted it, so this shape is now the only one.)
-    if (!deps.startUserSubscription) {
-      throw new ServiceUnavailableError("pembayaran belum dikonfigurasi di server ini.");
-    }
     let raw: unknown;
     try {
       raw = await c.req.json();

@@ -47,6 +47,8 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     subscriberId: string;
     tierId: string;
     ownerId: string;
+    /** 'paid' | 'free', defaults to 'paid'. See the port's own docstring on this method. */
+    kind?: string;
   }): Promise<UserSubscriptionRow> {
     const [row] = await this.db
       .insert(userSubscriptions)
@@ -54,6 +56,11 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         subscriberId: input.subscriberId,
         tierId: input.tierId,
         ownerId: input.ownerId,
+        // Omitted entirely rather than passed as `input.kind ?? "paid"` when
+        // absent: the schema's own `DEFAULT 'paid'` (Task 1) is then what
+        // fires, so there is exactly one place `"paid"` is spelled as the
+        // default, not two that could drift apart.
+        ...(input.kind === undefined ? {} : { kind: input.kind }),
       })
       .returning();
     return row!;
@@ -94,6 +101,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     subscriberId: string;
     tierId: string;
     ownerId: string;
+    kind?: string;
   }): Promise<PendingSubscriptionClaim> {
     const [row] = await this.db
       .insert(userSubscriptions)
@@ -101,6 +109,9 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         subscriberId: input.subscriberId,
         tierId: input.tierId,
         ownerId: input.ownerId,
+        // Omitted when absent so the column's own DEFAULT 'paid' fires — one
+        // place spells the default, not two that could drift.
+        ...(input.kind === undefined ? {} : { kind: input.kind }),
       })
       .onConflictDoNothing({
         target: [userSubscriptions.subscriberId, userSubscriptions.ownerId],

@@ -1243,14 +1243,31 @@ describe("bootstrap() payment provider selection", () => {
             }).not.toThrow();
             expect(deps!.payments).toBeNull();
             expect(deps!.payments).not.toBeInstanceOf(FakePaymentAdapter);
-            // The two money use cases this root still builds. There were four:
-            // retire-telegram Task 4 deleted `startCheckout` with the community
-            // checkout it opened, and Task 7's fix round deleted
-            // `createPaymentAccount` with `POST /payment-account`. Both of the
-            // survivors must be UNCONSTRUCTED, not merely unreachable — see
-            // each field's own docstring on `Dependencies`.
-            expect(deps!.startUserSubscription).toBeUndefined();
+            // `connectUserPayout` must be UNCONSTRUCTED, not merely
+            // unreachable — see its docstring on `Dependencies`. Connecting a
+            // payout account is meaningless without a provider to connect to.
             expect(deps!.connectUserPayout).toBeUndefined();
+
+            // `startUserSubscription` USED TO BE undefined here too, under the
+            // same rule, and the free-memberships plan (Task 4) deliberately
+            // reversed that for this one field.
+            //
+            // The rule existed so a box with no provider could not construct
+            // something that takes money. That reasoning holds only while every
+            // subscription costs money. A FREE tier charges nothing and touches
+            // no provider, so gating the whole use case on `payments` made
+            // `POST /users/:handle/subscribe` answer 503 for a free request too
+            // — which made the entire membership feature unreachable on exactly
+            // the box this test describes.
+            //
+            // The refusal did not disappear; it moved from BOOT TIME to the
+            // TIER. The use case now holds `payments: PaymentProviderPort |
+            // null` and throws `ServiceUnavailableError` itself when a PAID
+            // tier is requested with no provider — asserted by
+            // `start-user-subscription.test.ts`'s "a PAID tier with no payment
+            // provider is refused, not silently freed". Deleting that test
+            // would restore the hazard this line used to guard.
+            expect(deps!.startUserSubscription).toBeDefined();
             expect(deps!.xenditCallbackToken).toBeUndefined();
           });
         }

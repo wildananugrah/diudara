@@ -660,6 +660,7 @@ describe("GET /users/by-handle/:handle — viewerIsMember (Task 10)", () => {
       subscriberId,
       tierId: owner.tierId,
       ownerId: owner.userId,
+      kind: "paid",
     });
     await subscriptions.activate(created.id, periodEnd);
     return created;
@@ -2376,6 +2377,7 @@ describe("GET/POST /users/me/tiers and PATCH /users/me/tiers/:tierId", () => {
       subscriberId: subscriberRow!.id,
       tierId: created.id,
       ownerId,
+      kind: "paid",
     });
     const periodEnd = new Date("2099-01-01T00:00:00Z");
     await subscriptions.activate(subscription.id, periodEnd);
@@ -2800,19 +2802,83 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
     expect([...invoiceUrls][0]).toBe("https://fake-checkout.local/fake-inv-1");
   });
 
-  it("503s in Bahasa on a box with no payment provider at all", async () => {
-    // The route stays REGISTERED on such a box — unlike `/c/:slug/checkout`,
-    // which is simply not mounted — so a buyer is told why instead of getting
-    // the 404 of a path that does not exist. Same choice, and the same wording,
-    // as `POST /users/me/payout` above.
+  /**
+   * Task 4 of "free memberships". This used to be
+   * `"503s in Bahasa on a box with no payment provider at all"`, wired by
+   * setting `startUserSubscription: undefined` on `deps` — the whole use case
+   * used to be gated on `payments`, so EVERY subscribe request 503'd on such a
+   * box regardless of the tier's price. `deps.startUserSubscription` is never
+   * `undefined` now (`bootstrap.ts` builds it unconditionally), so that no
+   * longer typechecks, and it would be testing a route shape that no longer
+   * exists anyway: the 503 now comes from the tier, not the boot.
+   *
+   * `deps.payments` in this test process is always the `FakePaymentAdapter`
+   * (`NODE_ENV=test`) with no env knob to turn off, so a genuinely `null`
+   * provider is wired directly here — the same `wired`-instance pattern the
+   * concurrency tests above use — rather than found anywhere in `bootstrap()`.
+   */
+  it("REFUSES a PAID tier with 503 in Bahasa when this box has no payment provider", async () => {
     const deps = bootstrap();
-    const a = createApp({ ...deps, startUserSubscription: undefined });
+    const a = createApp(deps);
     const { buyer, tier } = await seedOffer(a);
+    const wired = createApp({
+      ...deps,
+      startUserSubscription: new StartUserSubscription(
+        deps.userRepository,
+        deps.userTierRepository,
+        deps.userPayoutRepository,
+        new DrizzleUserSubscriptionRepository(db),
+        new DrizzleUserPurchaseUnitOfWork(db),
+        null,
+        new SystemClock(),
+        { appBaseUrl: "https://diudara.test" }
+      ),
+    });
 
-    const res = await subscribe(a, buyer.token, "wildan", { tierId: tier.id });
+    const res = await subscribe(wired, buyer.token, "wildan", { tierId: tier.id });
 
     expect(res.status).toBe(503);
-    expect((await res.json()).error).toBe("pembayaran belum dikonfigurasi di server ini.");
+    expect((await res.json()).error).toBe("pembayaran belum tersedia di server ini");
+  });
+
+  /**
+   * The other half of the same story: on that identical `payments: null`
+   * wiring, a FREE tier is entirely unaffected — this is the whole point of
+   * Task 4. No invoice, no transaction, no provider call, and a 201 with no
+   * `invoiceUrl` at all.
+   */
+  it("a FREE tier still succeeds through the route on a box with no payment provider at all", async () => {
+    const deps = bootstrap();
+    const a = createApp(deps);
+    const owner = await account(a);
+    const freeTier = await (
+      await postTier(a, owner.token, { name: "Gratis", priceAmount: 0 })
+    ).json();
+    const buyer = await account(a, RINA);
+    const wired = createApp({
+      ...deps,
+      startUserSubscription: new StartUserSubscription(
+        deps.userRepository,
+        deps.userTierRepository,
+        deps.userPayoutRepository,
+        new DrizzleUserSubscriptionRepository(db),
+        new DrizzleUserPurchaseUnitOfWork(db),
+        null,
+        new SystemClock(),
+        { appBaseUrl: "https://diudara.test" }
+      ),
+    });
+
+    const res = await subscribe(wired, buyer.token, "wildan", { tierId: freeTier.id });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.invoiceUrl).toBeUndefined();
+    expect(typeof body.subscriptionId).toBe("string");
+    const rows = await db.select().from(userSubscriptions);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "pending", kind: "free" });
+    expect(await db.select().from(userTransactions)).toEqual([]);
   });
 
   it("THE ROW EXISTS BEFORE THE PROVIDER IS CALLED: a failed invoice leaves a pending subscription behind", async () => {
@@ -3378,6 +3444,7 @@ describe("GET /users/me/subscribers (Task 6 of Phase 5b)", () => {
       subscriberId,
       tierId: owner.tierId,
       ownerId: owner.userId,
+      kind: "paid",
     });
     await subscriptions.activate(created.id, periodEnd);
     return created;
@@ -3453,7 +3520,12 @@ describe("GET /users/me/subscribers (Task 6 of Phase 5b)", () => {
     const owner = await sellingOwner(a);
     const bob = await account(a, { handle: "bob", email: "bob@example.com", displayName: "Bob" });
     const subscriptions = new DrizzleUserSubscriptionRepository(db);
-    await subscriptions.create({ subscriberId: bob.userId, tierId: owner.tierId, ownerId: owner.userId });
+    await subscriptions.create({
+      subscriberId: bob.userId,
+      tierId: owner.tierId,
+      ownerId: owner.userId,
+      kind: "paid",
+    });
 
     const res = await getSubscribers(a, owner.token);
     const body = await res.json();
@@ -3547,5 +3619,78 @@ describe("GET /users/me/subscribers (Task 6 of Phase 5b)", () => {
 
     const since = body.subscribers[0].since as string;
     expect(new Date(since).toISOString()).toBe(since);
+  });
+});
+
+/**
+ * Task 4 of "free memberships", at the ROUTE, against the real database.
+ *
+ * The use-case tests for the free path run against in-memory fakes, so the
+ * partial unique index `user_subscription_one_pending` — which exists only in
+ * Postgres — never runs in them. Spec §5.1 says a second request is refused by
+ * that index rather than by a read-then-write check, and "the database
+ * arbitrates" is the project's rule. But arbitrating is not the same as
+ * crashing: a raw 23505 reaching the route is a 500 with a server error in it,
+ * and this codebase has a guard test dedicated to that never happening.
+ */
+describe("POST /users/:handle/subscribe — a FREE tier, against the real index", () => {
+  function authedH(token: string) {
+    return { Authorization: `Bearer ${token}` };
+  }
+  async function acct(a: ReturnType<typeof app>, over: { handle: string; email: string }) {
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...over, password: "supersecret123", displayName: over.handle }),
+    });
+    const res = await a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: over.email, password: "supersecret123" }),
+    });
+    return (await res.json()) as { token: string };
+  }
+
+  async function seedFreeOffer() {
+    const a = createApp(bootstrap());
+    const owner = await acct(a, { handle: "rina", email: "rina@example.com" });
+    const tier = await (
+      await a.request("/users/me/tiers", {
+        method: "POST",
+        headers: { ...authedH(owner.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Gratis", priceAmount: 0 }),
+      })
+    ).json();
+    const buyer = await acct(a, { handle: "andi", email: "andi@example.com" });
+    return { a, owner, buyer, tier };
+  }
+
+  it("creates a pending free request with no payout account anywhere", async () => {
+    const { a, buyer, tier } = await seedFreeOffer();
+
+    const res = await a.request("/users/rina/subscribe", {
+      method: "POST",
+      headers: { ...authedH(buyer.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ tierId: tier.id }),
+    });
+
+    expect(res.status).toBe(201);
+  });
+
+  /**
+   * THE ONE THE FAKES CANNOT SEE. Tapping "Minta jadi anggota" twice is the
+   * most ordinary thing a user does on a slow connection.
+   */
+  it("refuses a SECOND request cleanly — never a 500 from the unique index", async () => {
+    const { a, buyer, tier } = await seedFreeOffer();
+    const body = JSON.stringify({ tierId: tier.id });
+    const headers = { ...authedH(buyer.token), "Content-Type": "application/json" };
+
+    const first = await a.request("/users/rina/subscribe", { method: "POST", headers, body });
+    expect(first.status).toBe(201);
+
+    const second = await a.request("/users/rina/subscribe", { method: "POST", headers, body });
+
+    expect(second.status).toBeLessThan(500);
   });
 });

@@ -1,4 +1,4 @@
-import { ConflictError, NotFoundError } from "../errors";
+import { ConflictError, NotFoundError, ServiceUnavailableError } from "../errors";
 import { normalizeHandle } from "../../domain/handle";
 import { isConnectedPaymentAccount } from "../../domain/payment-account";
 import { userSubscriptionExternalId } from "../../domain/user-payment";
@@ -7,23 +7,31 @@ import type { ClockPort } from "../ports/clock.port";
 import type { UserRepositoryPort } from "../ports/user-repository.port";
 import type { UserTierRepositoryPort } from "../ports/user-tier-repository.port";
 import type { UserPayoutRepositoryPort } from "../ports/user-payout-repository.port";
-import type { UserSubscriptionRepositoryPort } from "../ports/user-subscription-repository.port";
+import type {
+  UserSubscriptionRepositoryPort,
+  UserSubscriptionRow,
+} from "../ports/user-subscription-repository.port";
 import type { UserPurchaseUnitOfWorkPort } from "../ports/user-purchase-unit-of-work.port";
 import type { PaymentProviderPort } from "../ports/payment-provider.port";
 
 export interface StartUserSubscriptionResult {
-  /** Where the browser is sent to pay. */
-  invoiceUrl: string;
+  /**
+   * Where the browser is sent to pay. Absent for a FREE tier ONLY — no
+   * invoice is ever opened for one, because nothing is owed (spec §2.4).
+   * Present, and required to be a string, for every paid result.
+   */
+  invoiceUrl?: string;
   subscriptionId: string;
-  transactionId: string;
+  /** Absent for a FREE tier — see `invoiceUrl`: no transaction row is created for one either. */
+  transactionId?: string;
   /**
    * The namespaced id this invoice carries at the provider, returned so a
    * caller (and this suite) can see the shape Task 7's webhook routes on
    * without reading the provider's dashboard. It is derived from
    * `transactionId`, which is already in this response — it discloses nothing
-   * new.
+   * new. Absent exactly when `transactionId` is.
    */
-  externalId: string;
+  externalId?: string;
 }
 
 /**
@@ -44,17 +52,43 @@ export interface StartUserSubscriptionResult {
  * a claim that then failed would leave that person with neither an active
  * membership nor a pending checkout.
  *
- * **THE PAYOUT GATE IS `isConnectedPaymentAccount`, NEVER TRUTHINESS.**
- * `app_user.xendit_account_id` has three states — NULL, the
- * `XENDIT_ACCOUNT_PROVISIONING` sentinel, and a real account id — and the
- * sentinel is TRUTHY. `if (owner.xenditAccountId)` therefore passes for a
- * half-finished, KYC-pending connection, and this use case would then send
- * `for_account_id: "provisioning:in-progress"` — a literal English phrase where
- * a 24-character Xendit object id belongs — on a live payment request, charging
- * a buyer against an account that does not exist at the provider. `StartCheckout`
- * shipped exactly that bug for the creator flow and it was found by a mutation
- * sweep, not by a test; `ConnectUserPayout` and `ManageUserTiers` share this same
- * predicate rather than re-deriving it.
+ * **FREE IS DECIDED BY `tier.priceAmount`, NEVER A SECOND FLAG** (spec §2.4,
+ * Phase "free memberships" Task 4). `user_subscription.kind` is written from
+ * the tier's own price at the moment this executes — there is deliberately no
+ * `isFree` input a caller could send that disagrees with it. A free request
+ * takes a SEPARATE, shorter path: no payout account is required (no money
+ * moves — the same rule Task 3 drew for *creating* a free tier), no
+ * `retireExpired`, no `PaymentProviderPort` call, no transaction row, no
+ * invoice. It still runs the SAME status-only "already a member" guard the
+ * paid path uses (`findActiveFor` below), worded by the same
+ * `membershipStanding`-driven sentence — see that guard's own comment for why
+ * a LAPSED paid row is refused here too, rather than quietly handed a free
+ * membership: nothing in this phase renews one INTO a free tier, so the
+ * refusal is spec §9's accepted limitation, but the SENTENCE must say the
+ * membership ended, never "you are already an active member".
+ *
+ * **A PAID TIER WITH NO PAYMENT PROVIDER IS REFUSED, NOT SILENTLY FREED.**
+ * `payments` is `PaymentProviderPort | null` — `null` on a box with no
+ * provider configured at all — and `bootstrap.ts` now constructs this use
+ * case UNCONDITIONALLY, because a free request needs no provider to exist.
+ * The decision that used to be made at BOOT time (build this class, or
+ * don't) is now made per REQUEST, at the tier: a free tier proceeds
+ * regardless of `payments`, and only a paid tier with `payments === null`
+ * throws `ServiceUnavailableError`. `routes/users.ts` no longer 503s every
+ * subscribe request on such a box — only a paid one now reaches that answer.
+ *
+ * **THE PAYOUT GATE IS `isConnectedPaymentAccount`, NEVER TRUTHINESS —
+ * AND ONLY FOR A PAID TIER.** `app_user.xendit_account_id` has three states —
+ * NULL, the `XENDIT_ACCOUNT_PROVISIONING` sentinel, and a real account id —
+ * and the sentinel is TRUTHY. `if (owner.xenditAccountId)` therefore passes
+ * for a half-finished, KYC-pending connection, and this use case would then
+ * send `for_account_id: "provisioning:in-progress"` — a literal English
+ * phrase where a 24-character Xendit object id belongs — on a live payment
+ * request, charging a buyer against an account that does not exist at the
+ * provider. `StartCheckout` shipped exactly that bug for the creator flow
+ * and it was found by a mutation sweep, not by a test; `ConnectUserPayout`
+ * and `ManageUserTiers` share this same predicate rather than re-deriving
+ * it.
  *
  * **THE ROWS ARE CREATED BEFORE THE PROVIDER IS CALLED.** A failed provider call
  * then leaves a `pending` subscription and a `pending` transaction — recoverable,
@@ -103,7 +137,16 @@ export class StartUserSubscription {
      * Retirement + claim, atomically. See `UserPurchaseUnitOfWorkPort`.
      */
     private readonly purchase: UserPurchaseUnitOfWorkPort,
-    private readonly payments: PaymentProviderPort,
+    /**
+     * `null` EXACTLY when this box has no payment provider configured at all
+     * — see `Dependencies.payments`'s own docstring in `bootstrap.ts`. No
+     * longer gates whether this class can be CONSTRUCTED (Task 4 of "free
+     * memberships"): `bootstrap.ts` builds it unconditionally now, because a
+     * free tier never touches this field, and only a PAID tier's `execute`
+     * call throws `ServiceUnavailableError` when it is `null`. See this
+     * class's own docstring for the full reasoning.
+     */
+    private readonly payments: PaymentProviderPort | null,
     /**
      * Only to word the refusal below, never to decide one. A lapsed
      * subscription and a live one are refused identically — see the
@@ -163,29 +206,9 @@ export class StartUserSubscription {
       );
     }
 
-    const payout = await this.payouts.findPayoutAccount(owner.id);
-    if (!payout) {
-      // Unreachable while `user_tier.owner_id` references `app_user` — the
-      // owner was just read above — but not assumed away. English, like every
-      // other `NotFoundError` call site in this codebase.
-      throw new NotFoundError("user not found");
-    }
-    // Bound to a local rather than tested in place, so the type predicate
-    // actually narrows it to `string` for `forAccountId` below — narrowing does
-    // not follow a property access back through the object.
-    const forAccountId = payout.xenditAccountId;
-    if (!isConnectedPaymentAccount(forAccountId)) {
-      // NOT `if (forAccountId)`. See this class's docstring: the sentinel is
-      // truthy, and a truthy read here is what would put
-      // `for_account_id: "provisioning:in-progress"` on the wire.
-      throw new ConflictError(
-        "Kreator ini belum siap menerima pembayaran. Minta mereka menghubungkan akun " +
-          "pembayaran di Pengaturan terlebih dahulu."
-      );
-    }
-
-    // Read BEFORE the unit of work opens, and this position is load-bearing
-    // twice over.
+    // Read BEFORE either branch below, and BEFORE the unit of work opens —
+    // this position is load-bearing twice over, for the free path exactly as
+    // much as the paid one.
     //
     // FIRST, IT IS WHAT MAKES THE IDS SAFE. `retireExpired` skips uuid-shape
     // validation, matching `activate`/`cancel`'s precedent for internal callers
@@ -208,6 +231,94 @@ export class StartUserSubscription {
       // defensive rather than expected.
       throw new NotFoundError("user not found");
     }
+
+    // Free is decided by the PRICE, not by a second flag that could disagree
+    // with it (spec §2.4) — `user_subscription.kind` is derived here, never
+    // taken from client input.
+    if (tier.priceAmount === 0) {
+      // A FREE tier needs no payout account — no money moves, so there is
+      // nothing to route to a sub-account. Task 3 drew the identical line for
+      // *creating* a free tier; this is the same rule at request time. The
+      // payout check and the `payments === null` refusal below are therefore
+      // never reached on this branch.
+      //
+      // DELIBERATELY NO `retireExpired` HERE. Retirement is what turns a
+      // lapsed PAID row into a fresh purchase — 5b's "renewal is buy again" —
+      // but a free request has nothing to buy again INTO: this phase gives a
+      // free membership no renewal path of its own (spec §9), so a lapsed
+      // paid row is left exactly as `retireExpired` would have found it,
+      // still `status = 'active'`, and the guard right below still SEES it.
+      //
+      // THE GUARD ITSELF IS UNCHANGED — `findActiveFor` is the same
+      // status-only read the paid path's transaction uses below, and
+      // `refuseExistingMembership` is the same two-sentence refusal. A
+      // former paying member whose row sits active-but-expired is refused a
+      // free request too; that is spec §9's accepted limitation, not a new
+      // one. What is NOT acceptable is the SENTENCE — see that method's own
+      // docstring for why it must say the membership ended, never "you are
+      // already an active member".
+      const existing = await this.subscriptions.findActiveFor(subscriber.id, owner.id);
+      if (existing) {
+        this.refuseExistingMembership(existing);
+      }
+      // `claimPending`, NOT `create` — the SAME mechanism the paid path below
+      // uses, for the same reason. The pending slot is arbitrated by the partial
+      // unique index `user_subscription_one_pending`, so a plain insert makes a
+      // SECOND request raise 23505 and reach the route as a 500. Tapping "Minta
+      // jadi anggota" twice on a slow connection is the most ordinary thing a
+      // user does — and the in-memory fakes these use-case tests run against
+      // have no unique index, so nothing here could ever have noticed. It was
+      // caught by a route-level test against the real database.
+      //
+      // `created: false` means this pair already holds the pending slot. The
+      // honest answer is the request they already have, so a second tap is
+      // idempotent rather than an error.
+      const claim = await this.subscriptions.claimPending({
+        subscriberId: subscriber.id,
+        tierId: tier.id,
+        // DENORMALISED from the TIER's own owner, exactly as the paid path's
+        // `claimPending` call below takes it — see that call site's comment
+        // for why this keeps the two equal by construction.
+        ownerId: tier.ownerId,
+        kind: "free",
+      });
+      // No invoice, no transaction row, no provider call: nothing is owed for
+      // a free membership, so none of the paid machinery below this branch
+      // ever runs for one.
+      return { subscriptionId: claim.subscription.id };
+    }
+
+    if (this.payments === null) {
+      // The decision moved from BOOT time to the TIER (Task 4 of "free
+      // memberships"): `bootstrap.ts` now constructs this class
+      // unconditionally, since a free tier needs no provider at all. Only a
+      // PAID tier reaches this line, and only a PAID tier is refused here.
+      throw new ServiceUnavailableError("pembayaran belum tersedia di server ini");
+    }
+
+    const payout = await this.payouts.findPayoutAccount(owner.id);
+    if (!payout) {
+      // Unreachable while `user_tier.owner_id` references `app_user` — the
+      // owner was just read above — but not assumed away. English, like every
+      // other `NotFoundError` call site in this codebase.
+      throw new NotFoundError("user not found");
+    }
+    // Bound to a local rather than tested in place, so the type predicate
+    // actually narrows it to `string` for `forAccountId` below — narrowing does
+    // not follow a property access back through the object.
+    const forAccountId = payout.xenditAccountId;
+    if (!isConnectedPaymentAccount(forAccountId)) {
+      // NOT `if (forAccountId)`. See this class's docstring: the sentinel is
+      // truthy, and a truthy read here is what would put
+      // `for_account_id: "provisioning:in-progress"` on the wire.
+      throw new ConflictError(
+        "Kreator ini belum siap menerima pembayaran. Minta mereka menghubungkan akun " +
+          "pembayaran di Pengaturan terlebih dahulu."
+      );
+    }
+
+    // `subscriber` was already read above, before the free/paid branch — see
+    // that read's own comment for why its position is load-bearing.
 
     // ---- RETIRE, THEN GUARD, THEN CLAIM — ONE TRANSACTION.
     //
@@ -256,43 +367,22 @@ export class StartUserSubscription {
       // SEES one. The guard kept its predicate; the row stopped matching it.
       const existing = await subscriptions.findActiveFor(subscriber.id, owner.id);
       if (existing) {
-        // **ONE REFUSAL, TWO DIFFERENT PIECES OF NEWS**, and the row itself is
-        // what says which. Both are a 409 and neither creates anything; the
-        // guard above is untouched. Only the sentence differs, because only the
-        // sentence was wrong.
+        // See `refuseExistingMembership`'s own docstring for the full
+        // "one refusal, two different pieces of news" reasoning — shared with
+        // the free path above, which reaches this same method without ever
+        // calling `retireExpired` first.
         //
-        // Measured by the final whole-branch review: one billing cycle after
-        // EVERY purchase, `IsMemberOf` (period-aware) answers `false` while this
-        // guard (status-only) answers "refused" — so the profile rendered the
-        // offer, this route answered "Anda sudah menjadi anggota aktif", which
-        // is FALSE for that person, and the web advised a reload that
-        // re-rendered the very same button. `MembershipView.viewerMembershipEnded`
-        // is what stops the button being offered at all; this is what the route
-        // says when one is pressed anyway, from a page that predates the answer.
-        //
-        // WHICH BRANCH IS STILL REACHABLE, AFTER 5b. The "member" one, for
-        // anybody still inside their paid period — the ordinary refusal. The
-        // "ended" one now only for an `active` row with a NULL
-        // `current_period_end` AND `kind = 'paid'` — a FREE row with a NULL
-        // period takes the "member" branch instead, because for a free
-        // membership that shape is not a bug but the whole point (spec §3), and
-        // telling a free member their membership has ended would be false.
-        // `retireExpired`'s predicate is
-        // `current_period_end <= now`, and `NULL <= now` is not true, so such a
-        // row survives the retirement and lands here. It is unreachable through
-        // `activate`, which always writes a period end, but it is the one shape
-        // that grants nothing while still holding the unique-index slot — and
-        // telling that person they are an active member would be the one answer
-        // that is definitely false. NEITHER sentence invites a retry that cannot
-        // work, which is the loop `describeUploadFailure`'s own rewrite forbids.
-        throw new ConflictError(
-          membershipStanding(existing, this.clock.now()) === "member"
-            ? "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah " +
-              "masa aktif — jika Anda belum bisa melihat kontennya, hubungi kreator tersebut."
-            : "Keanggotaan Anda untuk kreator ini sudah berakhir, dan perpanjangan belum " +
-              "tersedia — jadi keanggotaan baru pun belum bisa dibeli. Hubungi kreator " +
-              "tersebut jika Anda masih memerlukan akses."
-        );
+        // WHICH BRANCH IS STILL REACHABLE HERE, ON THIS (PAID, POST-RETIRE)
+        // PATH. The "member" one, for anybody still inside their paid period —
+        // the ordinary refusal. The "ended" one now only for an `active` row
+        // with a NULL `current_period_end` AND `kind = 'paid'`: `retireExpired`
+        // just ran, and its predicate is `current_period_end <= now`, which
+        // `NULL <= now` never satisfies — so that one shape survives the
+        // retirement and lands here. It is unreachable through `activate`,
+        // which always writes a period end, but it is the one shape that
+        // grants nothing while still holding the unique-index slot, and
+        // telling that person they are an active member would be false.
+        this.refuseExistingMembership(existing);
       }
 
       // ---- Everything from here changes state. Rows FIRST, provider last.
@@ -413,6 +503,48 @@ export class StartUserSubscription {
       await this.releaseClaim(subscription.id);
       throw err;
     }
+  }
+
+  /**
+   * ONE refusal, worded from TWO different pieces of news, and the row itself
+   * is what says which — never a flag this call site chooses. Both are a 409
+   * and neither creates anything; the guard that found `existing` is
+   * untouched, only the sentence differs, because only the sentence used to
+   * be wrong.
+   *
+   * Shared by the FREE path (Task 4 of "free memberships" — reached directly
+   * off `findActiveFor`, no `retireExpired` in front of it) and the PAID
+   * path's transaction (reached AFTER `retireExpired` has already run). Both
+   * call sites hand this the same status-only row; only which shapes of row
+   * can still be `existing` by the time either call site reaches it differs
+   * — see each call site's own comment for that.
+   *
+   * Measured by Phase 5b's final whole-branch review: one billing cycle after
+   * EVERY purchase, `IsMemberOf` (period-aware) answers `false` while this
+   * guard (status-only) answers "refused" — so the profile rendered the
+   * offer, this route answered "Anda sudah menjadi anggota aktif", which is
+   * FALSE for that person, and the web advised a reload that re-rendered the
+   * very same button. `MembershipView.viewerMembershipEnded` is what stops
+   * the button being offered at all; this is what the route says when one is
+   * pressed anyway, from a page that predates the answer.
+   *
+   * A FREE row with a NULL period takes the "member" branch, never "ended" —
+   * `membershipStanding` checks `kind === "free"` before it ever looks at
+   * `currentPeriodEnd`, because for a free membership a NULL period is not a
+   * bug but the whole point (spec §3), and telling a free member their
+   * membership has ended would be false. NEITHER sentence invites a retry
+   * that cannot work, which is the loop `describeUploadFailure`'s own rewrite
+   * forbids.
+   */
+  private refuseExistingMembership(existing: UserSubscriptionRow): never {
+    throw new ConflictError(
+      membershipStanding(existing, this.clock.now()) === "member"
+        ? "Anda sudah menjadi anggota aktif kreator ini. Membayar lagi tidak menambah " +
+          "masa aktif — jika Anda belum bisa melihat kontennya, hubungi kreator tersebut."
+        : "Keanggotaan Anda untuk kreator ini sudah berakhir, dan perpanjangan belum " +
+          "tersedia — jadi keanggotaan baru pun belum bisa dibeli. Hubungi kreator " +
+          "tersebut jika Anda masih memerlukan akses."
+    );
   }
 
   /**
