@@ -66,6 +66,30 @@ export default function PostCard({ post, isOwn, now, onEdit, onDeleteRequested }
   const lockedCount = post.lockedMediaCount ?? 0;
   const locked = lockedCount > 0;
 
+  /**
+   * **Task 8 — the bug the user actually reported.** The lock CTA used to be
+   * unconditionally `<Link to="/@handle">`. On the author's OWN profile that
+   * link target IS the page already on screen, so the click did nothing at
+   * all — no navigation, no error, nothing for the reader to even suspect
+   * went wrong. It read fine in review because nobody clicked it while
+   * standing on that exact profile.
+   *
+   * The fix: when the offer this CTA is promising is ALREADY on the page —
+   * `ProfilePage` gives `MembershipOffer`'s section `id="membership-offer"`
+   * — scroll there instead of "navigating" nowhere. Checked once per render
+   * rather than in the click handler, because the CHOICE between rendering a
+   * real link (role "link", a genuine `href` for a screen reader, a new tab,
+   * copy-link — everything a link affords) and a scroll button is a
+   * rendering decision, not a click-time one: `PostCard.test.tsx` proves
+   * both shapes actually exist in the DOM, not merely that a handler runs.
+   * `document` is always defined here — this app has no SSR path (a Vite SPA
+   * mounted with `createRoot`) — so there is no guard to write.
+   *
+   * Feed pages (Beranda, `PostFeed` reused there) never render
+   * `MembershipOffer` at all, so this is `false` there by construction and
+   * the fallback link — to the author's profile, where the offer DOES live —
+   * is exactly right.
+   */
   return (
     <article className="post-card" data-testid="post-card">
       <header className="post-card-header">
@@ -119,7 +143,56 @@ export default function PostCard({ post, isOwn, now, onEdit, onDeleteRequested }
         // (spec §6); this is deliberately not a second payment surface.
         <div className="post-card-locked">
           <p className="post-card-locked-count">{lockedCount} foto terkunci</p>
-          <Link to={`/@${post.author.handle}`} className="post-card-locked-link">
+          {/*
+            Task 8's judgement call, recorded here because this is exactly
+            where the next reader meets its absence: the brief's third test
+            wanted this CTA to say nothing when the author offers NO tier at
+            all (a withdrawn or never-published offer), rather than promise a
+            membership door that does not exist. Proving that needs a signal
+            THIS post cannot carry — `PostView.author` has no
+            "does this author sell anything" field, and never could without
+            widening `apps/api`'s author projection (`post-views.ts`) and its
+            own closed-shape assertion, which six prior tasks deliberately
+            closed. Task 8 is WEB ONLY. Rather than add an API field to chase
+            one test, the CTA below says only what it can already prove from
+            `PostView` alone: "this photo is gated", never "there is a
+            membership to buy" — it names the fact (locked), not the
+            (unverifiable) remedy. The scroll-vs-link fix right below is
+            unaffected: it changes WHERE the same sentence points, not
+            whether the sentence is true.
+          */}
+          {/*
+            ALWAYS a <Link>, and the scroll-vs-navigate decision is made AT CLICK
+            TIME, not at render time.
+
+            Deciding at render meant reading `document.getElementById` during
+            React's render phase, before siblings mounting in the same pass have
+            been committed to the DOM. On a profile page's FIRST pass the offer
+            does not exist yet, so the check answered "not on this page" and the
+            CTA silently became a plain link back to the page you are already
+            standing on — the exact bug this task exists to fix, returning
+            whenever posts and the offer happen to render in one pass. It works
+            by accident today only because posts arrive asynchronously, in a
+            LATER pass than the offer. No test could catch it either: a test
+            that appends the offer element before rendering controls the very
+            ordering the browser does not.
+
+            At click time the DOM is settled and the question has a real answer.
+            Kept as a link rather than a button so middle-click, copy-link and
+            open-in-new-tab still work on the feed, where navigating IS the
+            right behaviour; `preventDefault` only fires when there is somewhere
+            better to go.
+          */}
+          <Link
+            to={`/@${post.author.handle}`}
+            className="post-card-locked-link"
+            onClick={(event) => {
+              const offer = document.getElementById("membership-offer");
+              if (offer === null) return; // not on this page — let it navigate
+              event.preventDefault();
+              offer.scrollIntoView({ block: "center" });
+            }}
+          >
             Jadi anggota untuk melihat
           </Link>
         </div>

@@ -1340,6 +1340,13 @@ button:disabled {
   font-size: 0.875rem;
   font-weight: 600;
   text-decoration: none;
+  /* Task 8: this class now also dresses a <button> — the scroll-to-offer
+     case, when the offer is already on the page — alongside the <a> it has
+     always dressed. A bare <button> carries UA border/background that an <a>
+     never did; reset both so the two render identically. */
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
 }
 
 .post-card-locked-link:hover {

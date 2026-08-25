@@ -1,9 +1,8 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { formatRupiah } from "../api";
 import { isOwnHandle, startSubscription, UserApiError, isUserSignedIn, type TierView } from "./apiClient";
 import { describeSubscribeFailure } from "./errorCopy";
-import { billingCycleLabel } from "./tierCopy";
+import { billingCycleLabel, formatTierPrice } from "./tierCopy";
 
 export interface MembershipOfferProps {
   /** The profile being viewed — the SELLER's handle, already server-normalised. */
@@ -35,6 +34,28 @@ export interface MembershipOfferProps {
    * `MembershipStanding` server-side.
    */
   viewerMembershipEnded: boolean;
+  /**
+   * `PublicUserProfile.membership.viewerRequestPending` — Task 6 of "free
+   * memberships" on the server, consumed here for the first time in Task 8.
+   * `true` when this viewer already has a FREE request sitting with this
+   * creator, awaiting Setuju/Tolak on the owner's side (`MembershipSettings`'
+   * "Permintaan keanggotaan"). `false`, never `null`, for a signed-out
+   * visitor and on your own profile — identical construction to
+   * `viewerIsMember` above, and the same reasoning: this is a claim about the
+   * CALLER, and the only honest answer for somebody the server cannot
+   * identify is "no".
+   *
+   * The reason this gates the BUTTON rather than merely captioning it: a
+   * second free request for the same pair is refused at the database by
+   * `user_subscription_one_pending` (one row per `(subscriber, owner)`,
+   * regardless of tier — see that index's own comment in `schema.ts`), so a
+   * button that could only collect that refusal does not belong on screen.
+   * Also why it withholds every tier's button, not only the free one this
+   * viewer actually pressed: the index is scoped to the PAIR, not the tier,
+   * so a pending free request blocks a paid purchase from the same creator
+   * too.
+   */
+  viewerRequestPending: boolean;
 }
 
 /**
@@ -108,9 +129,20 @@ export default function MembershipOffer({
   tiers,
   viewerIsMember,
   viewerMembershipEnded,
+  viewerRequestPending,
 }: MembershipOfferProps) {
-  /** The tier whose purchase is in flight, or `null`. Also what disables every button. */
+  /** The tier whose purchase (or free request) is in flight, or `null`. Also what disables every button. */
   const [pendingTierId, setPendingTierId] = useState<string | null>(null);
+  /**
+   * The free tier THIS SCREEN just requested successfully, mid-session. The
+   * server prop `viewerRequestPending` only reflects what `GetUserProfile`
+   * knew when THIS page load fetched the profile — it does not update itself
+   * the moment `buy()` below gets a free-tier response back with no
+   * `invoiceUrl` to follow. Set right there, so "Menunggu persetujuan"
+   * appears the instant the request lands rather than waiting on a reload
+   * this screen has no reason to force.
+   */
+  const [justRequestedTierId, setJustRequestedTierId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Declared before the early returns below, with the rest: hooks cannot sit
   // behind a conditional return.
@@ -138,7 +170,7 @@ export default function MembershipOffer({
   // a signed-out stranger that they hold somebody's membership.
   if (viewerIsMember && signedIn) {
     return (
-      <section className="card stack membership-offer" aria-labelledby="membership-offer-heading">
+      <section id="membership-offer" className="card stack membership-offer" aria-labelledby="membership-offer-heading">
         <h2 id="membership-offer-heading">Keanggotaan</h2>
         <p data-testid="membership-member">Anda sudah menjadi anggota @{handle}.</p>
       </section>
@@ -156,6 +188,20 @@ export default function MembershipOffer({
   // is telling a signed-out stranger that a membership of theirs ended.
   const membershipEnded = viewerMembershipEnded && signedIn;
 
+  /**
+   * `true` when a free request from this viewer to this creator is already
+   * pending — either because the SERVER said so on load (`viewerRequestPending`)
+   * or because `buy()` below just landed one THIS session
+   * (`justRequestedTierId`). Gated on `signedIn` for the identical
+   * belt-and-braces reason as `membershipEnded` above.
+   *
+   * Read by EVERY tier's row below, not only the one that was actually
+   * requested — see `viewerRequestPending`'s own docstring on
+   * `MembershipOfferProps`: the pending slot is scoped to the `(viewer,
+   * creator)` pair, not to a tier, so no tier here is currently purchasable.
+   */
+  const requestPending = signedIn && (viewerRequestPending || justRequestedTierId !== null);
+
   // The one case that still has nothing to press, and it comes BEFORE the plain
   // empty-tiers return for the same reason the member branch does: a creator can
   // withdraw every tier while people still hold (and have held) memberships
@@ -166,7 +212,7 @@ export default function MembershipOffer({
   if (tiers.length === 0) {
     if (!membershipEnded) return null;
     return (
-      <section className="card stack membership-offer" aria-labelledby="membership-offer-heading">
+      <section id="membership-offer" className="card stack membership-offer" aria-labelledby="membership-offer-heading">
         <h2 id="membership-offer-heading">Keanggotaan</h2>
         <p data-testid="membership-ended">
           Keanggotaan Anda di @{handle} sudah berakhir. Kreator ini sedang tidak menawarkan
@@ -181,6 +227,17 @@ export default function MembershipOffer({
     setPendingTierId(tierId);
     try {
       const started = await startSubscription(handle, tierId);
+      // `invoiceUrl` is absent for exactly one reason: a FREE tier, where
+      // `StartUserSubscription` opens no invoice because nothing is owed
+      // (see `StartSubscriptionResult`'s own docstring in `apiClient.ts`).
+      // That request is already DONE — the pending row exists, the owner now
+      // has to act on it — so there is nowhere to navigate. The paid path
+      // below is unchanged.
+      if (started.invoiceUrl === undefined) {
+        setJustRequestedTierId(tierId);
+        setPendingTierId(null);
+        return;
+      }
       // Xendit's hosted invoice. A full-page navigation, not a router one:
       // this leaves the app entirely, and the provider brings the payer back
       // to this same profile afterwards (`StartUserSubscription.profileUrl`).
@@ -210,7 +267,7 @@ export default function MembershipOffer({
   }
 
   return (
-    <section className="card stack membership-offer" aria-labelledby="membership-offer-heading">
+    <section id="membership-offer" className="card stack membership-offer" aria-labelledby="membership-offer-heading">
       <h2 id="membership-offer-heading">Keanggotaan</h2>
       {membershipEnded ? (
         // ABOVE the list, and it replaces the "dukung" line rather than joining
@@ -224,47 +281,85 @@ export default function MembershipOffer({
         <p className="muted">Dukung @{handle} dengan menjadi anggota berbayar.</p>
       )}
       <ul className="membership-tiers">
-        {tiers.map((tier) => (
-          <li key={tier.id} className="membership-tier" data-testid={`membership-tier-${tier.id}`}>
-            <div>
-              <strong>{tier.name}</strong>
-              <p className="muted">
-                {/* The price is the one number on this card that should stop the
-                    eye, so the redesign gives it the display serif. */}
-                <span className="price">{formatRupiah(tier.priceAmount)}</span>{" "}
-                {billingCycleLabel(tier.billingCycle)}
-              </p>
-            </div>
-            {signedIn ? (
-              <button
-                type="button"
-                className="button-primary"
-                // The tier's name is in the accessible name, not only beside
-                // it: a profile may offer several tiers, and "Jadi anggota"
-                // repeated three times tells a screen-reader user nothing
-                // about which membership they are about to buy.
-                aria-label={`${
-                  pendingTierId === tier.id ? "Menyiapkan pembayaran" : "Jadi anggota"
-                } — ${tier.name}`}
-                disabled={pendingTierId !== null}
-                onClick={() => void buy(tier.id)}
-              >
-                {pendingTierId === tier.id ? "Menyiapkan pembayaran..." : "Jadi anggota"}
-              </button>
-            ) : (
-              <Link
-                className="button-secondary"
-                to="/masuk"
-                // The profile they were standing on, so signing in returns
-                // them to the offer instead of dropping them on Beranda —
-                // `LoginPage` reads `location.state.from`.
-                state={{ from: backHere }}
-              >
-                Masuk untuk jadi anggota
-              </Link>
-            )}
-          </li>
-        ))}
+        {tiers.map((tier) => {
+          // `priceAmount === 0` IS the definition of a free tier, all the way
+          // out to `user_subscription.kind` on the server — see
+          // `tierCopy.ts`'s `formatTierPrice` docstring. No second flag here
+          // either.
+          const isFree = tier.priceAmount === 0;
+          return (
+            <li key={tier.id} className="membership-tier" data-testid={`membership-tier-${tier.id}`}>
+              <div>
+                <strong>{tier.name}</strong>
+                <p className="muted">
+                  {/* The price is the one number on this card that should stop the
+                      eye, so the redesign gives it the display serif. "Gratis",
+                      never "Rp 0" — `formatTierPrice`'s own docstring. */}
+                  <span className="price">{formatTierPrice(tier.priceAmount)}</span>{" "}
+                  {billingCycleLabel(tier.billingCycle)}
+                </p>
+              </div>
+              {requestPending ? (
+                // No button at all, for EVERY tier — see `requestPending`'s own
+                // comment above: `user_subscription_one_pending` is scoped to
+                // the (viewer, creator) PAIR, not the tier, so nothing here is
+                // currently purchasable and a button could only collect a
+                // refusal the unique index would throw.
+                <p className="muted" data-testid={`membership-tier-pending-${tier.id}`}>
+                  Menunggu persetujuan
+                </p>
+              ) : signedIn ? (
+                isFree ? (
+                  <button
+                    type="button"
+                    className="button-primary"
+                    // Deliberately NO " — {tier.name}" suffix, unlike the paid
+                    // button below: this exact string, "Minta jadi anggota", is
+                    // the accessible name Task 8's brief pins. A creator who
+                    // published a SECOND free tier would reopen the ambiguity
+                    // the paid button's suffix exists to avoid — the honest fix
+                    // then is the identical suffix pattern, not a new one; it is
+                    // not built here because nothing in this codebase creates
+                    // that situation today (`ManageUserTiers` places no limit on
+                    // tier count, so this is a real gap, just not one anything
+                    // exercises yet).
+                    disabled={pendingTierId !== null}
+                    onClick={() => void buy(tier.id)}
+                  >
+                    {pendingTierId === tier.id ? "Mengirim permintaan..." : "Minta jadi anggota"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="button-primary"
+                    // The tier's name is in the accessible name, not only beside
+                    // it: a profile may offer several tiers, and "Jadi anggota"
+                    // repeated three times tells a screen-reader user nothing
+                    // about which membership they are about to buy.
+                    aria-label={`${
+                      pendingTierId === tier.id ? "Menyiapkan pembayaran" : "Jadi anggota"
+                    } — ${tier.name}`}
+                    disabled={pendingTierId !== null}
+                    onClick={() => void buy(tier.id)}
+                  >
+                    {pendingTierId === tier.id ? "Menyiapkan pembayaran..." : "Jadi anggota"}
+                  </button>
+                )
+              ) : (
+                <Link
+                  className="button-secondary"
+                  to="/masuk"
+                  // The profile they were standing on, so signing in returns
+                  // them to the offer instead of dropping them on Beranda —
+                  // `LoginPage` reads `location.state.from`.
+                  state={{ from: backHere }}
+                >
+                  Masuk untuk jadi anggota
+                </Link>
+              )}
+            </li>
+          );
+        })}
       </ul>
       {error !== null ? (
         <p className="form-error" role="alert">

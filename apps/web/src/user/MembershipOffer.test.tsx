@@ -45,7 +45,8 @@ function renderOffer(
   tiers: TierView[],
   handle = "budi",
   viewerIsMember = false,
-  viewerMembershipEnded = false
+  viewerMembershipEnded = false,
+  viewerRequestPending = false
 ) {
   return render(
     <MemoryRouter initialEntries={[`/@${handle}`]}>
@@ -58,6 +59,7 @@ function renderOffer(
               tiers={tiers}
               viewerIsMember={viewerIsMember}
               viewerMembershipEnded={viewerMembershipEnded}
+              viewerRequestPending={viewerRequestPending}
             />
           }
         />
@@ -65,6 +67,11 @@ function renderOffer(
       </Routes>
     </MemoryRouter>
   );
+}
+
+/** A tier priced at zero — `priceAmount === 0` IS the definition of "free". */
+function freeTier(overrides: Partial<TierView> = {}): TierView {
+  return tier({ id: "tier-free", name: "Gratis", priceAmount: 0, ...overrides });
 }
 
 let originalFetch: typeof fetch;
@@ -577,5 +584,115 @@ describe("MembershipOffer — somebody whose membership has ENDED", () => {
 
     expect(screen.getByRole("link", { name: "Masuk untuk jadi anggota" })).toBeTruthy();
     expect(screen.queryAllByTestId("membership-ended").length).toBe(0);
+  });
+});
+
+/**
+ * **Task 8 of "free memberships".** A tier priced at zero gets a REQUEST, not
+ * a purchase — spec §2.4's `priceAmount === 0` boundary, consumed here for
+ * the first time. Its own describe block, mirroring how the paid path above
+ * is already covered end to end, so the paid path's behaviour can be PINNED
+ * unchanged rather than merely left alone.
+ */
+describe("MembershipOffer — a free tier requests membership instead of buying it (Task 8, spec §2.4)", () => {
+  it("shows 'Gratis', never 'Rp 0', for a free tier's price", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([freeTier()]);
+
+    const row = screen.getByTestId("membership-tier-tier-free");
+    expect(row.textContent).toContain("Gratis");
+    expect(row.textContent).not.toContain("Rp 0");
+  });
+
+  it("offers 'Minta jadi anggota' for a free tier, never the paid 'Jadi anggota — <tier>' CTA", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([freeTier()]);
+
+    expect(screen.getByRole("button", { name: "Minta jadi anggota" })).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: /Jadi anggota —/ }).length).toBe(0);
+  });
+
+  /**
+   * **The paid tier's behaviour, PINNED unchanged** — the brief's own
+   * requirement, now that a free tier's CTA and price both render
+   * differently from the same component. A regression that made every tier
+   * free-shaped would still pass every OTHER test in this file (they use the
+   * default `tier()`, priced at 50000, so they already exercise this path —
+   * but none of them assert the ABSENCE of the free CTA beside it, which is
+   * the actual risk this task introduces).
+   */
+  it("a paid tier still shows its Rupiah price and the ordinary 'Jadi anggota' CTA — never 'Minta jadi anggota'", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([tier()]);
+
+    const row = screen.getByTestId("membership-tier-tier-1");
+    expect(row.textContent).toContain("Rp 50.000");
+    expect(screen.getByRole("button", { name: "Jadi anggota — Anggota" })).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: "Minta jadi anggota" }).length).toBe(0);
+  });
+
+  it("POSTs the free tier and, on a response with no invoiceUrl, shows 'Menunggu persetujuan' without navigating anywhere", async () => {
+    setUserSession("jwt-abc", VIEWER);
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      // The free path's own wire shape (`StartSubscriptionResult`'s
+      // docstring): no invoiceUrl, no transactionId, no externalId — the
+      // request itself is the whole outcome.
+      return jsonResponse({ subscriptionId: "sub-free-1" }, 201);
+    }) as unknown as typeof fetch;
+
+    renderOffer([freeTier()]);
+    fireEvent.click(screen.getByRole("button", { name: "Minta jadi anggota" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Menunggu persetujuan")).toBeTruthy();
+    });
+    expect(calls[0]!.url).toBe("/users/budi/subscribe");
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ tierId: "tier-free" });
+    // Nothing to follow — a free request opens no invoice, so the browser
+    // never leaves this page.
+    expect(followed.length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: "Minta jadi anggota" }).length).toBe(0);
+  });
+
+  /**
+   * The server's OWN answer, from a fresh page load — `viewerRequestPending`,
+   * not the mid-session state the test above pins. The absence of the button
+   * is the point: `user_subscription_one_pending` refuses a second row for
+   * this (viewer, creator) pair outright, so offering a second tap would only
+   * ever collect that refusal.
+   */
+  it("shows 'Menunggu persetujuan' and offers no button when the server already reports a pending request", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([freeTier()], "budi", false, false, true);
+
+    expect(screen.getByText("Menunggu persetujuan")).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: "Minta jadi anggota" }).length).toBe(0);
+    expect(screen.queryAllByRole("button").length).toBe(0);
+  });
+
+  /**
+   * The pending slot is scoped to the (viewer, creator) PAIR, not to a tier
+   * (`user_subscription_one_pending`'s own index is `(subscriber_id,
+   * owner_id)` — see `MembershipOfferProps.viewerRequestPending`'s
+   * docstring). A viewer with a pending free request cannot open a PAID
+   * checkout with the same creator either, so the paid tier's button must be
+   * withheld too, not only the free one they actually requested.
+   */
+  it("withholds the PAID tier's button too, while a free request from the same viewer is pending", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([freeTier(), tier({ id: "tier-paid", name: "Pendukung" })], "budi", false, false, true);
+
+    expect(screen.queryAllByRole("button").length).toBe(0);
+    expect(screen.getAllByText("Menunggu persetujuan").length).toBe(2);
+  });
+
+  it("still shows the ordinary buy button for a paid tier when nothing is pending — presence control", () => {
+    setUserSession("jwt-abc", VIEWER);
+    renderOffer([tier()], "budi", false, false, false);
+
+    expect(screen.getByRole("button", { name: "Jadi anggota — Anggota" })).toBeTruthy();
+    expect(screen.queryAllByText("Menunggu persetujuan").length).toBe(0);
   });
 });
