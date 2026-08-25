@@ -453,8 +453,15 @@ git add -A && git commit -m "feat(api): request a free membership, with or witho
 - Test: `apps/api/src/routes/users.test.ts`, `apps/api/src/app.test.ts`
 
 **Interfaces:**
-- Produces: `listPendingRequests(ownerId)`, `approveFreeRequest(id, ownerId)`,
-  `rejectRequest(id, ownerId)`.
+- Consumes: `kind` (Task 1), the pending row `StartUserSubscription` writes (Task 4).
+- Produces, on `UserSubscriptionRepositoryPort`: `listPendingRequests(ownerId):
+  Promise<PendingRequestRow[]>`, `approveFreeRequest(id: string, ownerId: string):
+  Promise<UserSubscriptionRow | null>`, `rejectRequest(id: string, ownerId: string):
+  Promise<boolean>`.
+- Produces, on the `MembershipRequests` use case (what routes and tests call):
+  `list(ownerId)`, `approve({ ownerId, requestId })`, `reject({ ownerId, requestId })`.
+  The two shapes differ on purpose — the repository takes positional ids, the use case
+  takes a named object, matching each layer's existing convention in this codebase.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -527,13 +534,33 @@ into a `ConflictError` — a raw driver error must never reach the route.
     c.json(await deps.membershipRequests.list(c.get("userId"))));
 
   app.post<"/me/membership-requests/:id/approve">("/me/membership-requests/:id/approve",
-    requireAuth, validateParams(uuidParam), async (c) => { /* ... */ });
+    requireAuth, validateParams(requestIdParams), async (c) => {
+      const { id } = c.get("validatedParams") as { id: string };
+      const row = await deps.membershipRequests.approve({ ownerId: c.get("userId"), requestId: id });
+      return c.json(row, 200);
+    });
 
   app.post<"/me/membership-requests/:id/reject">("/me/membership-requests/:id/reject",
-    requireAuth, validateParams(uuidParam), async (c) => { /* ... */ });
+    requireAuth, validateParams(requestIdParams), async (c) => {
+      const { id } = c.get("validatedParams") as { id: string };
+      await deps.membershipRequests.reject({ ownerId: c.get("userId"), requestId: id });
+      return c.json({ ok: true }, 200);
+    });
 ```
 
-Registered with the other STATIC `me/*` routes, before `/:handle`.
+with, beside the other param schemas in this file:
+
+```ts
+const requestIdParams = z.object({ id: uuidParam });
+```
+
+Registered with the other STATIC `me/*` routes, before `/:handle`. A malformed `:id` is a
+400 from `validateParams`, never a raw uuid-syntax 500 from the driver — the same rule
+`routes/posts.ts` and `routes/media.ts` already follow.
+
+The use case throws `NotFoundError` when the row is missing or belongs to someone else —
+the same answer for both, so an owner cannot probe which request ids exist. This mirrors
+the media routes' "gated and absent look identical from outside".
 
 - [ ] **Step 5: Reserve the handle and register the routes**
 
@@ -602,12 +629,78 @@ git add -A && git commit -m "feat(api): the profile reports a pending membership
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-it("lets a creator with no payout account create a free tier", async () => { /* ... */ });
-it("lists a pending request with the requester's handle", async () => { /* ... */ });
-it("approves a request and removes it from the list", async () => { /* ... */ });
-it("rejects a request and removes it from the list", async () => { /* ... */ });
-it("says so plainly when there are no pending requests", async () => { /* ... */ });
+const REQUESTS = [{ id: "req-1", handle: "andi", displayName: "Andi", tierName: "Gratis" }];
+
+it("lists a pending request with the requester's handle", async () => {
+  setUserSession("jwt-abc", USER);
+  global.fetch = mock(async (url: string) =>
+    url === "/users/me/membership-requests" ? jsonResponse(REQUESTS) : jsonResponse(OWN_PROFILE)
+  ) as unknown as typeof fetch;
+
+  renderSettings();
+
+  expect(await screen.findByText("@andi")).toBeTruthy();
+});
+
+it("approves a request and removes it from the list", async () => {
+  setUserSession("jwt-abc", USER);
+  const calls: Array<{ url: string; method: string | undefined }> = [];
+  let remaining = REQUESTS;
+  global.fetch = mock(async (url: string, init?: RequestInit) => {
+    calls.push({ url, method: init?.method });
+    if (url === "/users/me/membership-requests") return jsonResponse(remaining);
+    if (url.endsWith("/approve")) { remaining = []; return jsonResponse({ ok: true }); }
+    return jsonResponse(OWN_PROFILE);
+  }) as unknown as typeof fetch;
+
+  renderSettings();
+  fireEvent.click(await screen.findByRole("button", { name: "Setujui" }));
+
+  await waitFor(() => expect(screen.queryByText("@andi")).toBeNull());
+  expect(calls.some((c) => c.url === "/users/me/membership-requests/req-1/approve" && c.method === "POST")).toBe(true);
+});
+
+it("rejects a request and removes it from the list", async () => {
+  // Same shape as the approve test above, with "Tolak" and /reject. Written out
+  // rather than shared: these are two different endpoints and a helper that
+  // takes the verb as a parameter would pass with either one wired to both.
+});
+
+it("says so plainly when there are no pending requests", async () => {
+  setUserSession("jwt-abc", USER);
+  global.fetch = mock(async (url: string) =>
+    url === "/users/me/membership-requests" ? jsonResponse([]) : jsonResponse(OWN_PROFILE)
+  ) as unknown as typeof fetch;
+
+  renderSettings();
+
+  expect(await screen.findByText("Belum ada permintaan.")).toBeTruthy();
+});
+
+it("lets a creator with no payout account create a free tier", async () => {
+  setUserSession("jwt-abc", USER);
+  const posted: unknown[] = [];
+  global.fetch = mock(async (url: string, init?: RequestInit) => {
+    if (url === "/users/me/tiers" && init?.method === "POST") {
+      posted.push(JSON.parse(init.body as string));
+      return jsonResponse({ id: "t-1", name: "Gratis", priceAmount: 0, billingCycle: "monthly", isActive: true }, 201);
+    }
+    if (url === "/users/me/membership-requests") return jsonResponse([]);
+    return jsonResponse({ ...OWN_PROFILE, payout: { connected: false, available: false } });
+  }) as unknown as typeof fetch;
+
+  renderSettings();
+  fireEvent.change(await screen.findByLabelText("Nama tingkatan"), { target: { value: "Gratis" } });
+  fireEvent.change(screen.getByLabelText("Harga"), { target: { value: "0" } });
+  fireEvent.click(screen.getByRole("button", { name: "Buat tingkatan" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect((posted[0] as { priceAmount: number }).priceAmount).toBe(0);
+});
 ```
+
+Field labels above are the ones the form must carry; if the existing form uses different
+Indonesian labels, keep the form's and change these — do not add a second label.
 
 - [ ] **Step 2: Run and watch fail** — Run: `cd apps/web && bun test src/user/SettingsPage.test.tsx`
 
@@ -636,15 +729,74 @@ git add -A && git commit -m "feat(web): create a free tier, and act on membershi
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-it("offers 'Minta jadi anggota' for a free tier", () => { /* ... */ });
-it("shows 'Menunggu persetujuan' once a request is pending, and offers no button", () => { /* ... */ });
-it("shows the paid CTA unchanged for a priced tier", () => { /* ... */ });
+const FREE_TIER = { id: "t-free", name: "Gratis", priceAmount: 0, billingCycle: "monthly" };
+const PAID_TIER = { id: "t-paid", name: "Pendukung", priceAmount: 50000, billingCycle: "monthly" };
 
-// PostCard — the reported bug
-it("the lock CTA scrolls to the offer when the offer is on this page", () => { /* ... */ });
-it("the lock CTA still links to the profile when it is not", () => { /* ... */ });
-it("does not promise membership when the author offers no tier at all", () => { /* ... */ });
+it("offers 'Minta jadi anggota' for a free tier", () => {
+  render(<MembershipOffer handle="rina" tiers={[FREE_TIER]} viewerIsMember={false}
+    viewerMembershipEnded={false} viewerRequestPending={false} />, { wrapper: Router });
+
+  expect(screen.getByRole("button", { name: "Minta jadi anggota" })).toBeTruthy();
+});
+
+it("shows 'Menunggu persetujuan' once a request is pending, and offers no button", () => {
+  render(<MembershipOffer handle="rina" tiers={[FREE_TIER]} viewerIsMember={false}
+    viewerMembershipEnded={false} viewerRequestPending={true} />, { wrapper: Router });
+
+  expect(screen.getByText("Menunggu persetujuan")).toBeTruthy();
+  // The ABSENCE is the point: a second request would be refused by
+  // user_subscription_one_pending, so the UI must not invite one.
+  expect(screen.queryByRole("button", { name: "Minta jadi anggota" })).toBeNull();
+});
+
+it("shows the paid CTA unchanged for a priced tier", () => {
+  render(<MembershipOffer handle="rina" tiers={[PAID_TIER]} viewerIsMember={false}
+    viewerMembershipEnded={false} viewerRequestPending={false} />, { wrapper: Router });
+
+  expect(screen.getByText("Rp50.000")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Minta jadi anggota" })).toBeNull();
+});
 ```
+
+```ts
+// PostCard — the reported bug. `post` is the existing fixture in this file with
+// `locked: true` and `lockedMediaCount: 1`.
+it("the lock CTA scrolls to the offer when the offer is on this page", () => {
+  const scrolled: string[] = [];
+  const offer = document.createElement("div");
+  offer.id = "membership-offer";
+  offer.scrollIntoView = () => scrolled.push("membership-offer");
+  document.body.appendChild(offer);
+
+  render(<PostCard post={lockedPost} />, { wrapper: Router });
+  fireEvent.click(screen.getByRole("button", { name: "Jadi anggota untuk melihat" }));
+
+  expect(scrolled).toEqual(["membership-offer"]);
+});
+
+it("the lock CTA still links to the profile when the offer is not on this page", () => {
+  render(<PostCard post={lockedPost} />, { wrapper: Router });
+
+  // No #membership-offer in the document: the feed, not a profile.
+  const cta = screen.getByRole("link", { name: "Jadi anggota untuk melihat" });
+  expect(cta.getAttribute("href")).toBe("/@rina");
+});
+
+it("does not promise membership when the author offers no tier at all", () => {
+  render(<PostCard post={{ ...lockedPost, author: { ...lockedPost.author, offersMembership: false } }} />,
+    { wrapper: Router });
+
+  expect(screen.getByText("1 foto khusus anggota")).toBeTruthy();
+  expect(screen.queryByText("Jadi anggota untuk melihat")).toBeNull();
+});
+```
+
+**The third test needs a field that does not exist yet.** `PostView.author` carries no
+"does this person offer membership" flag, and `PostCard` cannot ask the network. Adding
+`offersMembership: boolean` to the author projection is part of THIS task — including its
+closed-shape assertion — or the test cannot be written. If that turns out to cost more
+than the task is worth, the honest fallback is to drop this third test and the behaviour
+with it, and say so, rather than shipping a CTA that lies on a profile with no tiers.
 
 - [ ] **Step 2: Run and watch fail** — Run: `cd apps/web && bun test src/user/MembershipOffer.test.tsx src/user/PostCard.test.tsx`
 
