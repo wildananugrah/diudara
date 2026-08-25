@@ -34,7 +34,7 @@ export type FeedTab = "untuk-anda" | "mengikuti";
  *    product.
  *
  * A post is LOCKED when `visibility = 'members'` and the viewer is neither its
- * author nor a currently-paying member. The set starts as every gated author
+ * author nor a current member (paying, or free and approved). The set starts as every gated author
  * on the page and memberships are REMOVED from it, so the failure direction of
  * a bug here — a missing row, a query that answers nothing — is locked out,
  * never let in.

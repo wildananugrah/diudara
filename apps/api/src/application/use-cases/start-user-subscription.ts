@@ -282,6 +282,23 @@ export class StartUserSubscription {
         ownerId: tier.ownerId,
         kind: "free",
       });
+      // WHOLE-BRANCH REVIEW, M-1. `user_subscription_one_pending` is scoped to
+      // (subscriber, owner) and says NOTHING about `kind`, so this claim can
+      // conflict with a PENDING PAID CHECKOUT and hand that row back. Returning
+      // it as though a free request had been made was silent, total failure:
+      // the caller got 201, the profile rendered "Menunggu persetujuan", the
+      // owner's queue (`kind = 'free'`) stayed empty, and the requester waited
+      // for an approval nobody had been asked for — while their real, unpaid
+      // invoice sat behind it.
+      //
+      // The honest answer names the open invoice. `created === false` with a
+      // free row is the idempotent second tap Task 4 built and is still fine.
+      if (!claim.created && claim.subscription.kind !== "free") {
+        throw new ConflictError(
+          "Anda punya pembayaran yang belum selesai untuk kreator ini. Selesaikan atau " +
+            "batalkan dulu sebelum meminta keanggotaan gratis."
+        );
+      }
       // No invoice, no transaction row, no provider call: nothing is owed for
       // a free membership, so none of the paid machinery below this branch
       // ever runs for one.

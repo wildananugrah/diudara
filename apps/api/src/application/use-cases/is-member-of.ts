@@ -79,7 +79,9 @@ export function membershipStanding(
  * gated post: is `viewerId` a paying member of `ownerId`. Spec §8.
  *
  * TRUE only when there is a subscription with `status = 'active'` AND
- * `current_period_end > now()`. Both halves matter, and the second is the
+ * (`kind = 'free'` OR `current_period_end > now()`). A FREE membership has no
+ * period at all by design (spec §3); a PAID row with none is a bug and still
+ * reads lapsed. Both halves of the paid case matter, and the second is the
  * one that is easy to drop by accident.
  *
  * §9's honest limitation: 5a has no renewal pass, so nothing ever moves a

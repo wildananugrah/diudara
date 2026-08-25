@@ -286,7 +286,29 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     return this.db
       .select()
       .from(userSubscriptions)
-      .where(and(eq(userSubscriptions.status, "pending"), lte(userSubscriptions.createdAt, cutoff)))
+      // `kind = 'paid'`, and this filter is the whole difference between an
+      // abandoned cart and a request waiting on a human.
+      //
+      // This sweep exists so an unpaid invoice cannot hold the pair's single
+      // pending slot for ever — the buyer walked away, and the slot should
+      // return. A FREE request is the opposite situation: nobody abandoned it,
+      // it is waiting for the OWNER to press Setujui, and there are no
+      // notifications yet (spec §8) so an owner finds out by looking. Expiring
+      // it after two hours deleted the request from the owner's queue, flipped
+      // the requester's profile back to "Minta jadi anggota" as though they had
+      // never asked, and made "Setujui" answer 404 on a row still on screen.
+      //
+      // Whole-branch review, H-1. Spec §3.1 enumerated every site comparing
+      // `current_period_end` and correctly cleared the expiry sweep and the
+      // reminder — this one compares `created_at`, so it was never in that
+      // table, and no task in the plan touched `apps/worker` at all.
+      .where(
+        and(
+          eq(userSubscriptions.status, "pending"),
+          eq(userSubscriptions.kind, "paid"),
+          lte(userSubscriptions.createdAt, cutoff)
+        )
+      )
       .orderBy(userSubscriptions.createdAt)
       .limit(limit);
   }

@@ -74,21 +74,26 @@ export default function PostCard({ post, isOwn, now, onEdit, onDeleteRequested }
    * went wrong. It read fine in review because nobody clicked it while
    * standing on that exact profile.
    *
-   * The fix: when the offer this CTA is promising is ALREADY on the page —
-   * `ProfilePage` gives `MembershipOffer`'s section `id="membership-offer"`
-   * — scroll there instead of "navigating" nowhere. Checked once per render
-   * rather than in the click handler, because the CHOICE between rendering a
-   * real link (role "link", a genuine `href` for a screen reader, a new tab,
-   * copy-link — everything a link affords) and a scroll button is a
-   * rendering decision, not a click-time one: `PostCard.test.tsx` proves
-   * both shapes actually exist in the DOM, not merely that a handler runs.
-   * `document` is always defined here — this app has no SSR path (a Vite SPA
-   * mounted with `createRoot`) — so there is no guard to write.
+   * The fix is in the CTA's own `onClick`, fifty lines below, and that
+   * comment is the one to read. This block previously described a RENDER-time
+   * check (`membershipOfferOnPage`, computed here from
+   * `document.getElementById`) which was replaced before this branch shipped,
+   * because reading the DOM during React's render phase answers "no offer
+   * here" for any sibling mounting in the same pass — reintroducing the exact
+   * dead link above. The variable it described no longer exists.
    *
-   * Feed pages (Beranda, `PostFeed` reused there) never render
-   * `MembershipOffer` at all, so this is `false` there by construction and
-   * the fallback link — to the author's profile, where the offer DOES live —
-   * is exactly right.
+   * Left as a pointer rather than deleted outright: whole-branch review M-3
+   * found the stale version still sitting here, contradicting the live comment
+   * below in capitals, and inviting the next reader to "restore" the bug.
+   *
+   * KNOWN GAP (spec §7, review M-4): the CTA still reads "Jadi anggota untuk
+   * melihat" — it PROMISES a membership. `PostView.author` carries no signal
+   * about whether that person offers one, so a creator who withdraws every
+   * tier while keeping gated posts leaves this CTA pointing at a profile with
+   * no offer on it, where the click is a no-op again. Task 8 dropped the
+   * `offersMembership` field and its test together rather than half-build it;
+   * what it did NOT do — and what was wrongly reported as done — is soften
+   * this sentence to something `PostView` can prove.
    */
   return (
     <article className="post-card" data-testid="post-card">

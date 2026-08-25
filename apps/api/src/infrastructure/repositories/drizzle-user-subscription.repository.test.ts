@@ -784,6 +784,58 @@ describe("DrizzleUserSubscriptionRepository", () => {
 
     expect(await subs.listExpiredActive(NOW, 100)).toEqual([]);
   });
+
+  /**
+   * WHOLE-BRANCH REVIEW, H-1 — and the sibling above is exactly why this one
+   * was missing. Spec §3.1 enumerated every site comparing
+   * `current_period_end`, cleared the expiry sweep and the reminder, and got
+   * both asserted. `listStalePending` compares `created_at`, so it was never
+   * on that list, and no task in the plan touched `apps/worker` at all.
+   *
+   * The sweep is an abandoned-cart collector: an unpaid invoice must not hold
+   * the pair's single pending slot for ever. A FREE request is the opposite —
+   * nobody abandoned it, it is waiting on the owner, and with no notifications
+   * yet (spec §8) an owner finds out by looking. Two hours later the request
+   * vanished from the queue, the requester's profile offered "Minta jadi
+   * anggota" again as though nothing had happened, and "Setujui" answered 404
+   * on a row still on the owner's screen.
+   */
+  it("the stale-pending sweep leaves a free REQUEST alone — it waits on a human, not on a payment", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Gratis",
+      priceAmount: 0,
+      billingCycle: "monthly",
+    });
+    await subs.claimPending({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id, kind: "free" });
+    // Well past STALE_PENDING_CHECKOUT_WINDOW_MS (2h) — a PAID row this old is
+    // exactly what the sweep is for.
+    const cutoff = new Date(Date.now() + 24 * 60 * 60_000);
+
+    expect(await subs.listStalePending(cutoff, 100)).toEqual([]);
+  });
+
+  /**
+   * The control. Without it the test above passes against a sweep that
+   * collects nothing at all, which would break abandoned-cart cleanup while
+   * looking like a fix.
+   */
+  it("the stale-pending sweep still collects an abandoned PAID checkout", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const claim = await subs.claimPending({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+    const cutoff = new Date(Date.now() + 24 * 60 * 60_000);
+
+    expect((await subs.listStalePending(cutoff, 100)).map((r) => r.id)).toEqual([claim.subscription.id]);
+  });
 });
 
 /**

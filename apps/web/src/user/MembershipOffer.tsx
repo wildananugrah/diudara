@@ -46,10 +46,13 @@ export interface MembershipOfferProps {
    * identify is "no".
    *
    * The reason this gates the BUTTON rather than merely captioning it: a
-   * second free request for the same pair is refused at the database by
-   * `user_subscription_one_pending` (one row per `(subscriber, owner)`,
-   * regardless of tier — see that index's own comment in `schema.ts`), so a
-   * button that could only collect that refusal does not belong on screen.
+   * second free request for the same pair resolves to the request already on
+   * file rather than creating a second one — `user_subscription_one_pending`
+   * holds one row per `(subscriber, owner)` regardless of tier, and the server
+   * claims that slot with `ON CONFLICT DO NOTHING`. So the button would not
+   * error; it would silently do nothing, which is worse than absent. (This
+   * comment said the second request was "refused at the database" until the
+   * whole-branch review — true before Task 4, not after.)
    * Also why it withholds every tier's button, not only the free one this
    * viewer actually pressed: the index is scoped to the PAIR, not the tier,
    * so a pending free request blocks a paid purchase from the same creator
@@ -278,7 +281,13 @@ export default function MembershipOffer({
           memperpanjang.
         </p>
       ) : (
-        <p className="muted">Dukung @{handle} dengan menjadi anggota berbayar.</p>
+        <p className="muted">
+          {/* NOT "anggota berbayar" unconditionally — this line sat above a tier
+              rendering "Gratis" with a "Minta jadi anggota" button, calling it a
+              PAYING membership. Whole-branch review, L-4. */}
+          Dukung @{handle} dengan menjadi anggota
+          {tiers.every((tier) => tier.priceAmount === 0) ? "" : " berbayar"}.
+        </p>
       )}
       <ul className="membership-tiers">
         {tiers.map((tier) => {

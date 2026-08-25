@@ -485,7 +485,8 @@ export function userRoutes(
    *
    * The wire projection is CLOSED — `{ handle, displayName, since }`, and
    * only CURRENTLY subscribed members: `status = 'active'` AND
-   * `current_period_end > now`, the same definition `IsMemberOf` uses. See
+   * (`kind = 'free'` OR `current_period_end > now`), the same definition
+   * `IsMemberOf` uses — so an approved FREE member is listed here too. See
    * `ListSubscribers`'s own docstring and
    * `UserSubscriptionRepositoryPort.listActiveSubscribers`'s for the full
    * reasoning — neither `isMemberOf` nor `IsMemberOf` itself is touched by
@@ -542,11 +543,19 @@ export function userRoutes(
     validateParams(requestIdParams),
     async (c) => {
       const { id } = c.get("validatedParams") as { id: string };
-      const row = await deps.membershipRequests.approve({
+      await deps.membershipRequests.approve({
         ownerId: c.get("userId"),
         requestId: id,
       });
-      return c.json(row, 200);
+      // `{ ok: true }`, NOT the row. Returning the `UserSubscriptionRow` put
+      // `subscriberId`, `tierId`, `ownerId`, `status`, `kind`,
+      // `currentPeriodEnd` and `createdAt` on a client payload with no closed
+      // projection and no shape assertion anywhere — so the next column added
+      // to `user_subscription` would have shipped to a browser with nothing
+      // failing. Every other membership surface here is a closed projection
+      // (spec §6), `reject` already answers this shape, and `apiClient`'s
+      // caller reads nothing from the body. Whole-branch review, M-6.
+      return c.json({ ok: true }, 200);
     }
   );
 

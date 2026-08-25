@@ -273,7 +273,8 @@ export interface MintedWatchToken {
  * check on every HLS segment; see its docstring.
  *
  * `IsMemberOf` is REUSED, never re-implemented and never edited — the same
- * single indexed read (`status = 'active'` AND `current_period_end > now`)
+ * single indexed read (`status = 'active'` AND (`kind = 'free'` OR
+ * `current_period_end > now`))
  * Phases 5a, 5b and 6 all rest on, and the reason a LAPSED member is refused
  * here: 5a has no renewal pass, so a status-only check would mint for a row
  * whose paid period ended months ago. That case is `streams.test.ts`'s "a

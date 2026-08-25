@@ -1338,8 +1338,13 @@ export function rejectMembershipRequest(requestId: string): Promise<{ ok: true }
  * (`StartUserSubscription` claims the pending slot with an INSERT, so even two
  * concurrent taps resolve to one invoice). That is the backstop, not the plan
  * — the button disables itself while a request is in flight. The free path's
- * backstop is the same claim, and its second call is refused outright by
- * `user_subscription_one_pending` rather than resolved to anything to follow.
+ * backstop is the same claim — and its second call is NOT refused: the free
+ * path claims the pending slot with `ON CONFLICT DO NOTHING` on purpose, so a
+ * second tap is idempotent and answers the request already on file. (This
+ * docstring said "refused outright" until the whole-branch review; that was
+ * the behaviour BEFORE Task 4 replaced a plain insert whose second call
+ * returned a 500.) A second request naming a tier while a PAID checkout is
+ * still open IS refused, with a 409 naming the unfinished payment.
  */
 export interface StartSubscriptionResult {
   /** Where the browser is sent to pay. Absent for a FREE tier — see the docstring above. */

@@ -3880,6 +3880,57 @@ describe("POST /users/:handle/subscribe — a FREE tier, against the real index"
    * THE ONE THE FAKES CANNOT SEE. Tapping "Minta jadi anggota" twice is the
    * most ordinary thing a user does on a slow connection.
    */
+  /**
+   * WHOLE-BRANCH REVIEW, M-1. `user_subscription_one_pending` is scoped to
+   * (subscriber, owner) and ignores `kind`, so a free request can conflict with
+   * an ABANDONED PAID CHECKOUT. Before the fix `claimPending` handed that paid
+   * row back, the route answered 201, and the profile showed "Menunggu
+   * persetujuan" for a request that did not exist — the owner's queue filters
+   * `kind = 'free'` and stayed empty. The requester waited for an approval
+   * nobody had been asked for.
+   *
+   * At the route and against the real index, because that is the only place
+   * the conflict happens: in-memory fakes have no unique index at all.
+   */
+  it("refuses a free request while a PAID checkout is still open, instead of reporting success", async () => {
+    const a = createApp(bootstrap());
+    const owner = await acct(a, { handle: "rina", email: "rina@example.com" });
+    await a.request("/users/me/payout", { method: "POST", headers: authedH(owner.token) });
+    const paid = await (
+      await a.request("/users/me/tiers", {
+        method: "POST",
+        headers: { ...authedH(owner.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Anggota", priceAmount: 50_000 }),
+      })
+    ).json();
+    const free = await (
+      await a.request("/users/me/tiers", {
+        method: "POST",
+        headers: { ...authedH(owner.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Gratis", priceAmount: 0 }),
+      })
+    ).json();
+    const buyer = await acct(a, { handle: "andi", email: "andi@example.com" });
+    const headers = { ...authedH(buyer.token), "Content-Type": "application/json" };
+
+    // Opens a paid checkout and walks away.
+    const started = await a.request("/users/rina/subscribe", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ tierId: paid.id }),
+    });
+    expect(started.status).toBe(201);
+
+    const requested = await a.request("/users/rina/subscribe", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ tierId: free.id }),
+    });
+
+    // Refused, not 201, and not a 500 either.
+    expect(requested.status).toBe(409);
+  });
+
   it("refuses a SECOND request cleanly — never a 500 from the unique index", async () => {
     const { a, buyer, tier } = await seedFreeOffer();
     const body = JSON.stringify({ tierId: tier.id });
