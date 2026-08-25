@@ -289,8 +289,8 @@ export interface UserSubscriptionRepositoryPort {
   findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null>;
   /**
    * A creator's OWN subscriber list — Task 6 of Phase 5b, spec §8. Only
-   * CURRENTLY subscribed members: `status = 'active'` AND
-   * `current_period_end > now`, strict — the exact same "currently
+   * CURRENTLY subscribed members: `status = 'active'` AND (`kind = 'free'`
+   * OR `current_period_end > now`, strict) — the exact same "currently
    * subscribed" definition `is-member-of.ts`'s `membershipStanding` uses,
    * mirrored here rather than composed from it: `IsMemberOf` answers a
    * per-pair question off `findActiveFor`'s single row, and this answers a
@@ -298,14 +298,17 @@ export interface UserSubscriptionRepositoryPort {
    * subscriber. `isMemberOf` itself is untouched — see that class's own
    * docstring on why it stays exactly as reviewed and mutation-pinned in 5a.
    *
-   * A membership whose period has lapsed is a PAST subscriber, not a current
-   * one — it still holds `status = 'active'` until Task 3's sweep retires
-   * it (§9's honest limitation, and the sweep may not have run yet), so a
-   * status-only filter would list somebody the paywall has already stopped
-   * admitting. `now` is a parameter, never read inside this method, for the
-   * same `ClockPort` reason every time-sensitive read in this codebase takes
-   * one: the boundary — the exact instant `current_period_end` passes — is
-   * what a caller needs to place deliberately in a test.
+   * A PAID membership whose period has lapsed is a PAST subscriber, not a
+   * current one — it still holds `status = 'active'` until Task 3's sweep
+   * retires it (§9's honest limitation, and the sweep may not have run yet),
+   * so a status-only filter would list somebody the paywall has already
+   * stopped admitting. A FREE membership (`kind = 'free'`) has no period at
+   * all by design (spec §3) and is admitted on `kind` alone, the same order
+   * `membershipStanding` checks it in. `now` is a parameter, never read
+   * inside this method, for the same `ClockPort` reason every time-sensitive
+   * read in this codebase takes one: the boundary — the exact instant
+   * `current_period_end` passes — is what a caller needs to place
+   * deliberately in a test.
    *
    * NEWEST FIRST (`created_at` desc, `id` desc tiebreak) — mirrors
    * `DrizzleFollowRepository.listFollowers`'s own ordering, and its own
@@ -313,53 +316,39 @@ export interface UserSubscriptionRepositoryPort {
    *
    * Returns the CLOSED projection (`SubscriberRow`) — see that type's own
    * docstring for exactly what may and may not cross this boundary.
-   *
-   * **DIVERGED AS OF 2680dda, AND ONLY UNTIL TASK 2 LANDS.** `membershipStanding`
-   * now also answers `member` for `kind = 'free'`, which has no period at all;
-   * this query does not yet. That is deliberate sequencing, not an oversight —
-   * the WHERE clauses here are Task 2's, because this is the read that gates
-   * photos in a feed. Until Task 2 adds `OR kind = 'free'`, the sentence above
-   * is aspirational rather than true, and a free member is a member on their
-   * profile and a stranger in the feed. Do not delete this note without
-   * checking the query.
    */
   listActiveSubscribers(ownerId: string, now: Date): Promise<SubscriberRow[]>;
   /**
    * Phase 6's paywall question, asked once for a whole feed page: which of
    * `ownerIds` is `subscriberId` CURRENTLY a member of. Same "currently
    * subscribed" definition as `listActiveSubscribers` and `is-member-of.ts`'s
-   * `membershipStanding` — `status = 'active'` AND `current_period_end >
-   * now`, strict — mirrored here rather than composed from either, for the
-   * same reason `listActiveSubscribers`'s own docstring gives: a feed holds
-   * posts from many authors, and answering this per-owner would be an N+1
-   * query on the page that matters most. `is-member-of.ts` stays untouched —
-   * see its own docstring on why it is pinned exactly as reviewed in 5a.
+   * `membershipStanding` — `status = 'active'` AND (`kind = 'free'` OR
+   * `current_period_end > now`, strict) — mirrored here rather than composed
+   * from either, for the same reason `listActiveSubscribers`'s own docstring
+   * gives: a feed holds posts from many authors, and answering this
+   * per-owner would be an N+1 query on the page that matters most.
+   * `is-member-of.ts` stays untouched — see its own docstring on why it is
+   * pinned exactly as reviewed in 5a.
    *
-   * A lapsed membership — `status` still `active` but its period already
-   * over, because Task 3 of 5b's sweep has not yet retired it (§9's honest
-   * limitation) — is excluded, not merely a past subscriber: a status-only
-   * filter would let a lapsed member keep seeing gated images they no longer
-   * pay for.
+   * A lapsed PAID membership — `status` still `active` but its period
+   * already over, because Task 3 of 5b's sweep has not yet retired it (§9's
+   * honest limitation) — is excluded, not merely a past subscriber: a
+   * status-only filter would let a lapsed member keep seeing gated images
+   * they no longer pay for. A FREE membership (`kind = 'free'`) is admitted
+   * on `kind` alone, regardless of `current_period_end` — which is always
+   * `NULL` for a free row by design (spec §3), never a period to compare.
    *
    * `now` is a parameter, never read inside this method, for the same
    * `ClockPort` reason every time-sensitive read in this codebase takes one.
    *
-   * Returns only the ids from `ownerIds` that are currently paid for — never
-   * the whole membership row, and never an id outside `ownerIds`. Order is
-   * unspecified; a caller building a per-post gate turns this into a Set.
+   * Returns only the ids from `ownerIds` that are currently paid-or-free
+   * members for — never the whole membership row, and never an id outside
+   * `ownerIds`. Order is unspecified; a caller building a per-post gate turns
+   * this into a Set.
    *
    * An empty `ownerIds` answers `[]` without touching the database — an
    * empty `IN ()` is a SQL error in some drivers and a pointless round trip
    * in all of them.
-   *
-   * **DIVERGED AS OF 2680dda, AND ONLY UNTIL TASK 2 LANDS.** `membershipStanding`
-   * now also answers `member` for `kind = 'free'`, which has no period at all;
-   * this query does not yet. That is deliberate sequencing, not an oversight —
-   * the WHERE clauses here are Task 2's, because this is the read that gates
-   * photos in a feed. Until Task 2 adds `OR kind = 'free'`, the sentence above
-   * is aspirational rather than true, and a free member is a member on their
-   * profile and a stranger in the feed. Do not delete this note without
-   * checking the query.
    */
   listActiveOwnersAmong(subscriberId: string, ownerIds: string[], now: Date): Promise<string[]>;
   createTransaction(input: {

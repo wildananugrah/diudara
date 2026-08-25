@@ -143,19 +143,13 @@ export class StartUserStream {
  * toward locked, never toward open.
  *
  * ONE query for the whole listing, not one per row: `listActiveOwnersAmong`
- * is `is-member-of.ts`'s definition ("`status = 'active'` AND
- * `current_period_end > now`", strict) answered for many owners at once, and
- * its own docstring says so. `IsMemberOf` itself is deliberately NOT called
- * here — it is a per-pair question and this is a page — and it is not edited
- * either; the two agree by construction because the repository method mirrors
- * `membershipStanding`, which is the arrangement Phase 5b shipped and Phase 6
- * already relies on for the feed.
- *
- * **THAT AGREEMENT IS SUSPENDED between 2680dda and Task 2 of the free-membership
- * plan.** `membershipStanding` answers `member` for `kind = 'free'` and
- * `listActiveOwnersAmong` does not yet, so during that window the two disagree
- * for exactly one input: a free membership. Task 2 restores the agreement by
- * adding the same disjunct to the query.
+ * is `is-member-of.ts`'s definition ("`status = 'active'` AND (`kind = 'free'`
+ * OR `current_period_end > now`), strict") answered for many owners at once,
+ * and its own docstring says so. `IsMemberOf` itself is deliberately NOT
+ * called here — it is a per-pair question and this is a page — and it is not
+ * edited either; the two agree by construction because the repository method
+ * mirrors `membershipStanding`, which is the arrangement Phase 5b shipped and
+ * Phase 6 already relies on for the feed.
  *
  * A signed-out viewer (`viewerId === null`) skips the query entirely: there
  * is no subscriber id to ask about, and the only answer such a query could

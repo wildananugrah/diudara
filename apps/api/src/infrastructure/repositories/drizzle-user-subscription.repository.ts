@@ -384,6 +384,23 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
    * Not part of `UserSubscriptionRepositoryPort` — this is an implementation
    * detail `findActiveFor` composes, not a capability the application layer
    * is meant to reach for.
+   *
+   * DELIBERATELY STATUS-ONLY — no `current_period_end` disjunct was added
+   * here for the free-memberships plan's Task 2, unlike `listActiveSubscribers`
+   * and `listActiveOwnersAmong` below. Those two ARE the period comparison —
+   * they decide membership themselves and hand back only a projection or an
+   * id, so `kind = 'free' OR current_period_end > now` has to live in their
+   * WHERE clause. `findActiveFor` hands back the WHOLE row (including `kind`)
+   * to `IsMemberOf`, which asks `membershipStanding` — the one pure function
+   * both `IsMemberOf` and `StartUserSubscription`'s refusal share — to decide
+   * "member" vs "lapsed" vs "none" off that row, `kind` included. Adding a
+   * period filter here would make this query silently omit a PAID lapsed row
+   * that `StartUserSubscription` still needs to see (its refusal is
+   * deliberately status-only — see the port's own docstring on `retireExpired`
+   * for why: a lapsed row must still block a second purchase until the sweep
+   * retires it). So this WHERE clause is untouched, and it already returns a
+   * free row's `kind` correctly — `.select()` with no column list was never
+   * narrower than the schema, and Task 1 added `kind` to that schema.
    */
   activeMembershipQuery(subscriberId: string, ownerId: string) {
     return this.db
@@ -408,10 +425,14 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
   }
 
   /**
-   * See the port's own docstring for the full contract. `gt` on
-   * `current_period_end` is the SAME strict comparison
-   * `IsMemberOf.membershipStanding` uses (`> now`, not `>=`) — a period
-   * ending at exactly `now` has ended, not one tick from ending.
+   * See the port's own docstring for the full contract. Same disjunct as
+   * `listActiveOwnersAmong` below and the SAME definition `is-member-of.ts`'s
+   * `membershipStanding` answers in pure code: `status = 'active'` AND
+   * (`kind = 'free'` OR `current_period_end > now`, strict). A free row has
+   * no period BY DESIGN (spec §3) — nothing ever writes one — so `kind` is
+   * checked FIRST, the same order `membershipStanding` uses, and a paid row
+   * still needs its period strictly in the future: `> now`, not `>=` — a
+   * period ending at exactly `now` has ended, not one tick from ending.
    *
    * Selects `subscriberProjection` ONLY — never `userSubscriptions.*` or
    * `appUsers.*` — so the closed shape is enforced at the query, the same
@@ -430,17 +451,21 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         and(
           eq(userSubscriptions.ownerId, ownerId),
           eq(userSubscriptions.status, "active"),
-          gt(userSubscriptions.currentPeriodEnd, now)
+          or(eq(userSubscriptions.kind, "free"), gt(userSubscriptions.currentPeriodEnd, now))
         )
       )
       .orderBy(desc(userSubscriptions.createdAt), desc(userSubscriptions.id));
   }
 
   /**
-   * See the port's own docstring for the full contract. Same strict `gt` on
-   * `current_period_end` as `listActiveSubscribers` and `findActiveFor` —
-   * `is-member-of.ts`'s `> now`, not `>=` — a period ending at exactly `now`
-   * has ended, not one tick from ending.
+   * See the port's own docstring for the full contract. Same disjunct as
+   * `listActiveSubscribers` above and `findActiveFor`'s `membershipStanding` —
+   * `status = 'active'` AND (`kind = 'free'` OR `current_period_end > now`,
+   * strict). THIS IS THE QUERY THAT CAN LEAK PHOTOS: it is Phase 6's paywall
+   * read for a whole feed page, so a wrong disjunct here serves every gated
+   * photo of every creator to everyone. `kind = 'free'` grants regardless of
+   * `current_period_end` (a free row's period is always `NULL` by design, spec
+   * §3) and a paid row still needs its period strictly in the future.
    *
    * An empty `ownerIds` short-circuits before the query: an empty `IN ()` is
    * a SQL error in some drivers and a pointless round trip in all of them.
@@ -459,7 +484,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
           eq(userSubscriptions.subscriberId, subscriberId),
           inArray(userSubscriptions.ownerId, ownerIds),
           eq(userSubscriptions.status, "active"),
-          gt(userSubscriptions.currentPeriodEnd, now)
+          or(eq(userSubscriptions.kind, "free"), gt(userSubscriptions.currentPeriodEnd, now))
         )
       );
     return rows.map((row) => row.ownerId);

@@ -102,6 +102,35 @@ async function backdate(id: string, createdAt: Date) {
   await db.update(userSubscriptions).set({ createdAt }).where(eq(userSubscriptions.id, id));
 }
 
+/**
+ * A fresh (subscriber, owner) pair with one ACTIVE, FREE subscription —
+ * `status = 'active'`, `kind = 'free'`, `current_period_end` left `NULL`,
+ * exactly the shape spec §3 and `is-member-of.ts`'s own docstring describe:
+ * a free membership has no period BY DESIGN, because nothing in the grant
+ * path ever writes one. `activate()` cannot produce this shape by itself —
+ * it always sets a period, the one thing a paid activation always does — so
+ * `kind` is flipped and the period cleared directly via drizzle afterwards,
+ * the same direct-column-write discipline `backdate` above already uses and
+ * `seedCancelledSubscription`'s own comment explains the need for.
+ */
+async function seedFreeSubscription() {
+  const alice = await createUser("alice");
+  const bob = await createUser("bob");
+  const tier = await tiers.create({
+    ownerId: alice.id,
+    name: "Anggota",
+    priceAmount: 50_000,
+    billingCycle: "monthly",
+  });
+  const created = await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
+  await subs.activate(created.id, new Date("2099-01-01T00:00:00.000Z"));
+  await db
+    .update(userSubscriptions)
+    .set({ kind: "free", currentPeriodEnd: null })
+    .where(eq(userSubscriptions.id, created.id));
+  return { subscriberId: bob.id, ownerId: alice.id, tierId: tier.id, id: created.id };
+}
+
 // Literal, not derived from the implementation — PAST and FUTURE straddle NOW
 // on either side of the `<=` boundary `retireExpired` and `listExpiredActive`
 // both use.
@@ -211,6 +240,28 @@ describe("DrizzleUserSubscriptionRepository", () => {
     await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
 
     expect(await subs.findActiveFor(bob.id, alice.id)).toBe(null);
+  });
+
+  /**
+   * Task 2 of the free-memberships plan. `findActiveFor`'s own query
+   * (`activeMembershipQuery`) was ALREADY status-only — no `current_period_end`
+   * comparison in its WHERE clause at all, unlike `listActiveSubscribers` and
+   * `listActiveOwnersAmong` — because the period comparison lives in
+   * `membershipStanding`, the pure function `is-member-of.ts` applies to the
+   * one row this returns. So this row was never filtered out by a free
+   * membership's `NULL` period; what Task 1 left undone was `kind` reaching
+   * this test at all (it needed the column to exist) and `membershipStanding`
+   * reading it correctly, which `membership-standing.test.ts` already pins.
+   * This test exists to ASSERT that fact rather than assume it: `kind` must
+   * come back on the row, not be silently dropped by a narrower `.select()`.
+   */
+  it("findActiveFor returns the free row, and reports kind", async () => {
+    const { subscriberId, ownerId } = await seedFreeSubscription();
+
+    const row = await subs.findActiveFor(subscriberId, ownerId);
+
+    expect(row?.kind).toBe("free");
+    expect(row?.currentPeriodEnd).toBe(null);
   });
 
   it("creates a transaction against a subscription and finds it by id", async () => {
@@ -718,6 +769,21 @@ describe("DrizzleUserSubscriptionRepository", () => {
 
     expect(await subs.listExpiredActive(NOW, 10)).toEqual([]);
   });
+
+  /**
+   * Task 2 of the free-memberships plan, Step 4. In SQL `NULL <= now` is
+   * `NULL`, never true, so a free row's WHERE clause `current_period_end <=
+   * now` was never going to match it — but that is a claim about Postgres'
+   * three-valued logic, not this repository's code, and the brief is explicit
+   * that it must be ASSERTED here rather than assumed. If this ever goes red,
+   * that is a design problem (the sweep would try to retire a membership that
+   * was never supposed to expire), not a test to loosen.
+   */
+  it("the expiry sweep leaves a free membership alone", async () => {
+    await seedFreeSubscription();
+
+    expect(await subs.listExpiredActive(NOW, 100)).toEqual([]);
+  });
 });
 
 /**
@@ -1032,6 +1098,23 @@ describe("DrizzleUserSubscriptionRepository.listExpiringActive", () => {
     });
     expect(third.length).toBe(0);
   });
+
+  /**
+   * Task 2 of the free-memberships plan, Step 4. Same reasoning as the expiry
+   * sweep's own free-row test: `NULL` compared against either end of the
+   * window reads as `NULL`, never true, in Postgres — so a free row should
+   * already be invisible to this query without any code change here. Asserted
+   * rather than assumed, and specifically with a `to` far enough out that a
+   * bug making a free row visible could not hide behind a narrow window.
+   */
+  it("a free member is never reminded that their membership is expiring", async () => {
+    await seedFreeSubscription();
+    const farFuture = new Date("2099-01-01T00:00:00.000Z");
+
+    const due = await subs.listExpiringActive({ from: NOW, to: farFuture, limit: 100 });
+
+    expect(due.map((r) => r.id)).toEqual([]);
+  });
 });
 
 /**
@@ -1212,6 +1295,33 @@ describe("listActiveSubscribers (Task 6 of Phase 5b)", () => {
 
     expect(rows.map((r) => r.handle)).toEqual([rina.handle, bob.handle]);
   });
+
+  /**
+   * Task 2 of the free-memberships plan. Paired with "EXCLUDES a subscription
+   * whose current_period_end has already passed" above, which is this test's
+   * PAID, LAPSED control: that row must stay refused while this free one is
+   * newly admitted, or the fix has gone further than intended.
+   */
+  it("INCLUDES a free member — active, kind='free', current_period_end NULL", async () => {
+    const alice = await createUser("alice"); // owner
+    const andi = await createUser("andi"); // subscriber, joined for free
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const created = await subs.create({ subscriberId: andi.id, tierId: tier.id, ownerId: alice.id });
+    await subs.activate(created.id, FUTURE_PERIOD_END);
+    await db
+      .update(userSubscriptions)
+      .set({ kind: "free", currentPeriodEnd: null })
+      .where(eq(userSubscriptions.id, created.id));
+
+    const rows = await subs.listActiveSubscribers(alice.id, NOW);
+
+    expect(rows.map((r) => r.handle)).toEqual([andi.handle]);
+  });
 });
 
 /**
@@ -1251,14 +1361,33 @@ describe("listActiveOwnersAmong (Task 2 of Phase 6)", () => {
     expect(found.sort()).toEqual([rina.id, sari.id].sort());
   });
 
-  it("EXCLUDES an owner whose period has already passed — status alone is not membership", async () => {
+  /**
+   * Task 2 fix round 1 — mutation-check finding. Originally this test seeded
+   * ONLY the lapsed paid owner and asserted an empty result, which sounds
+   * like it pins the period check but does not: replace the query's
+   * `or(eq(kind, "free"), gt(currentPeriodEnd, now))` with `eq(kind, "free")`
+   * alone (Step 6's mutation) and this row is STILL excluded — not because
+   * its period was checked, but because `kind` is `"paid"`, which fails
+   * `eq(kind, "free")` on its own regardless of any period. The two
+   * mutations are indistinguishable from a lapsed-only assertion, so a
+   * single-owner "excludes the lapsed one" test cannot tell them apart.
+   *
+   * Fixed here into a DIFFERENTIAL test: a CURRENTLY active paid owner is
+   * seeded alongside the lapsed one and both are asked about in the SAME
+   * call. The mutated query above admits neither (both are `kind = "paid"`),
+   * so `active` disappearing from the result is what now catches it — the
+   * lapsed owner's exclusion alone never could.
+   */
+  it("EXCLUDES an owner whose period has already passed, while STILL including a currently active paid owner — status alone is not membership", async () => {
     const buyer = await createUser("buyer");
+    const active = await createUser("active");
     const lapsed = await createUser("lapsed");
+    await seedMembership(buyer.id, active.id, PERIOD_END);
     await seedMembership(buyer.id, lapsed.id, new Date(NOW.getTime() - 60_000));
 
-    const found = await subs.listActiveOwnersAmong(buyer.id, [lapsed.id], NOW);
+    const found = await subs.listActiveOwnersAmong(buyer.id, [active.id, lapsed.id], NOW);
 
-    expect(found).toEqual([]);
+    expect(found).toEqual([active.id]);
   });
 
   it("excludes an owner whose period end EQUALS now exactly (strict >, not >=)", async () => {
@@ -1275,5 +1404,34 @@ describe("listActiveOwnersAmong (Task 2 of Phase 6)", () => {
     const buyer = await createUser("buyer");
 
     expect(await subs.listActiveOwnersAmong(buyer.id, [], NOW)).toEqual([]);
+  });
+
+  /**
+   * Task 2 of the free-memberships plan. THIS is the paywall's bulk read —
+   * see the port's own docstring on why a wrong disjunct here serves every
+   * gated photo of every creator to everyone. Paired with "EXCLUDES an owner
+   * whose period has already passed" above, which is this test's PAID,
+   * LAPSED control: that row must stay refused while a free one is newly
+   * admitted, or the fix has reached further than a free membership.
+   */
+  it("includes an owner the viewer joined for free — active, kind='free', current_period_end NULL", async () => {
+    const buyer = await createUser("buyer");
+    const owner = await createUser("owner");
+    const tier = await tiers.create({
+      ownerId: owner.id,
+      name: "Anggota",
+      priceAmount: 50_000,
+      billingCycle: "monthly",
+    });
+    const created = await subs.create({ subscriberId: buyer.id, tierId: tier.id, ownerId: owner.id });
+    await subs.activate(created.id, PERIOD_END);
+    await db
+      .update(userSubscriptions)
+      .set({ kind: "free", currentPeriodEnd: null })
+      .where(eq(userSubscriptions.id, created.id));
+
+    const found = await subs.listActiveOwnersAmong(buyer.id, [owner.id], NOW);
+
+    expect(found).toEqual([owner.id]);
   });
 });
