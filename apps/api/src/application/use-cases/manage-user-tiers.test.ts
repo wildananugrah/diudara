@@ -149,19 +149,65 @@ describe("ManageUserTiers.create", () => {
     expect(tierRows).toEqual([]);
   });
 
-  it("REFUSES a non-positive price, in Bahasa", async () => {
+  it("REFUSES a negative price, in Bahasa", async () => {
     const { repository: tiers, rows: tierRows } = fakeTierRepository();
     const { repository: payouts } = fakePayoutRepository([connectedPayoutUser()]);
     const useCase = new ManageUserTiers(tiers, payouts);
 
-    for (const priceAmount of [0, -1, -50_000]) {
+    for (const priceAmount of [-1, -50_000]) {
       const error = await useCase
         .create({ ownerId: "owner-1", name: "Anggota", priceAmount })
         .catch((err: unknown) => err);
       expect(error).toBeInstanceOf(ValidationError);
-      expect((error as ValidationError).message).toBe("Harga tingkatan harus lebih dari nol.");
+      expect((error as ValidationError).message).toBe("Harga tingkatan tidak boleh negatif.");
     }
     expect(tierRows).toEqual([]);
+  });
+
+  it("creates a free tier with no payout account connected", async () => {
+    const { repository: tiers } = fakeTierRepository();
+    // No payout row seeded at all for "owner-1" — `findPayoutAccount` would
+    // return null. A free tier must never even ask, let alone refuse.
+    const { repository: payouts } = fakePayoutRepository([]);
+
+    const tier = await new ManageUserTiers(tiers, payouts).create({
+      ownerId: "owner-1",
+      name: "Gratis",
+      priceAmount: 0,
+      billingCycle: "monthly",
+    });
+
+    expect(tier.priceAmount).toBe(0);
+  });
+
+  it("still refuses a PAID tier with no payout account", async () => {
+    const { repository: tiers } = fakeTierRepository();
+    const { repository: payouts } = fakePayoutRepository([]);
+    const manageTiers = new ManageUserTiers(tiers, payouts);
+
+    await expect(
+      manageTiers.create({
+        ownerId: "owner-1",
+        name: "Pendukung",
+        priceAmount: 50000,
+        billingCycle: "monthly",
+      })
+    ).rejects.toThrow();
+  });
+
+  it("refuses a negative price even with a connected payout account", async () => {
+    const { repository: tiers } = fakeTierRepository();
+    const { repository: payouts } = fakePayoutRepository([connectedPayoutUser()]);
+    const manageTiers = new ManageUserTiers(tiers, payouts);
+
+    await expect(
+      manageTiers.create({
+        ownerId: "owner-1",
+        name: "Salah",
+        priceAmount: -1,
+        billingCycle: "monthly",
+      })
+    ).rejects.toThrow();
   });
 
   it("refuses a non-integer price", async () => {

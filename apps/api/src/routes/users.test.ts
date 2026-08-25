@@ -2279,17 +2279,42 @@ describe("GET/POST /users/me/tiers and PATCH /users/me/tiers/:tierId", () => {
     });
   });
 
-  it("rejects a non-positive price with 400, and creates nothing", async () => {
+  it("rejects a NEGATIVE price with 400, and creates nothing", async () => {
     const a = app();
     const { token } = await tierUser(a);
     await connectPayout(a, token);
 
-    for (const priceAmount of [0, -10_000]) {
+    // `0` left this list when a price of zero became a FREE tier. It is not
+    // merely no longer refused — it is asserted as CREATED by the test below,
+    // so removing it from here cannot quietly drop the case.
+    for (const priceAmount of [-1, -10_000]) {
       const res = await postTier(a, token, { name: "Anggota", priceAmount });
       expect(res.status).toBe(400);
     }
 
     expect(await (await getTiers(a, token)).json()).toEqual([]);
+  });
+
+  /**
+   * THE ROUTE-LEVEL PROOF, and the reason the use-case test alone was not
+   * enough: a price of `0` has to survive every layer between the HTTP body and
+   * the use case — the zod body schema, the route handler, and the use case's
+   * own guard. A validator anywhere on that path that still demanded a positive
+   * price would leave `manage-user-tiers.test.ts` green while the endpoint a
+   * creator actually posts to went on refusing free tiers.
+   *
+   * Deliberately WITHOUT `connectPayout`: this asserts the whole point of the
+   * change, which is that a free tier needs no payout account at all.
+   */
+  it("creates a FREE tier (price 0) with 201, through the route, with no payout account", async () => {
+    const a = app();
+    const { token } = await tierUser(a);
+
+    const res = await postTier(a, token, { name: "Gratis", priceAmount: 0 });
+
+    expect(res.status).toBe(201);
+    expect((await res.json()).priceAmount).toBe(0);
+    expect((await (await getTiers(a, token)).json()).length).toBe(1);
   });
 
   it("400s a malformed JSON body", async () => {
