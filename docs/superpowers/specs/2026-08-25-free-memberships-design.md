@@ -151,15 +151,33 @@ state is explicitly **not** built; there is no block list in this design.
 
 `TierView` gains nothing — `priceAmount: 0` already tells the client a tier is free.
 
-`ProfileView`'s membership block gains the viewer's own standing so the profile can render
-the right control:
+`PublicUserProfile.membership` ALREADY EXISTS and already carries three fields:
 
 ```
-membership: { standing: "none" | "pending" | "member" | "lapsed" }
+membership: { tiers: TierView[], viewerIsMember: boolean, viewerMembershipEnded: boolean }
 ```
 
-`pending` is new and is the state a free requester sits in. Every projection stays a
-closed wire shape asserted with `Object.keys(...).sort()` against a literal, as elsewhere.
+It gains ONE field, additively:
+
+```
+viewerRequestPending: boolean
+```
+
+**Additive, not a rewrite.** Replacing those two booleans with a single
+`standing: "none" | "pending" | "member" | "lapsed"` enum reads better and is the wrong
+choice here: it is a breaking wire change, and `ProfilePage.tsx` already defends against
+deploy skew explicitly (`profile.membership?.tiers ?? []`, with a comment naming a
+response that predates Task 5). A new boolean defaults to `false` on an old response,
+which is the truthful answer for a client that cannot request anything yet.
+
+`membershipStanding`'s four-state vocabulary stays SERVER-SIDE, where it already lives.
+It gains no `pending` member: that function answers over the one row `findActiveFor`
+returns, which is an ACTIVE row by definition. A pending request is a different question
+against a different row, answered separately and projected as the boolean above.
+
+Every projection stays a closed wire shape asserted with `Object.keys(...).sort()` against
+a literal, as elsewhere — so this field must be added to that literal in the same commit,
+or the projection test fails, which is the intended behaviour.
 
 ## 7. Web surfaces
 
@@ -200,3 +218,19 @@ meaning of every existing subscription row pointing at it.
 **Approval racing activation.** Covered by the conditional UPDATE and the existing
 `user_subscription_one_active` index, and must be tested by concurrent approval, not by
 reading the code.
+
+**A LAPSED PAID MEMBER CANNOT REQUEST A FREE TIER, and this is not obvious.**
+`StartUserSubscription`'s existing refusal is deliberately STATUS-ONLY — a lapsed row is
+still `status = 'active'`, and the guard must stay status-only because a lapsed row let
+past it collides with `user_subscription_one_active` at activation time, turning a broken
+button into *charged and not activated*. So a creator's former paying member, whose row
+sits active-but-expired forever (5a has no renewal pass), is refused a free request with
+"you are already a member" — which is exactly the false statement `lapsed` was introduced
+to stop the app making.
+
+This design does NOT resolve it, and must not pretend to: the fix is a way to retire a
+lapsed row, which is the cancellation/revocation work §8 defers. What the implementation
+MUST do is make the refusal say something true — the requester is told their previous
+membership has ended and cannot currently be replaced — rather than "you are already a
+member". A test names this case explicitly so the next person meets it as a decision
+rather than as a bug report.
