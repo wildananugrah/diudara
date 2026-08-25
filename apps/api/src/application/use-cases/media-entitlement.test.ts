@@ -139,6 +139,7 @@ function subscriptionRow(overrides: Partial<UserSubscriptionRow> = {}): UserSubs
     tierId: "77777777-0000-4000-8000-000000000000",
     ownerId: RINA,
     status: "active",
+    kind: "paid",
     currentPeriodEnd: new Date("2026-09-21T09:00:00.000Z"),
     createdAt: new Date("2026-08-01T09:00:00.000Z"),
     ...overrides,
@@ -147,6 +148,16 @@ function subscriptionRow(overrides: Partial<UserSubscriptionRow> = {}): UserSubs
 
 /**
  * **The one fake here a wrong implementation could hide behind.**
+ *
+ * UPDATED BY THE WHOLE-BRANCH REVIEW (M-5). The predicate is now
+ * `status = 'active'` AND (`kind = 'free'` OR `current_period_end > now`,
+ * strict) — the same disjunct the real query gained for free memberships. It
+ * had been left behind: the branch added `kind: "paid"` to the row factory and
+ * the new port stubs but not here, so these fakes answered "locked" for a free
+ * member, and deleting the `kind = 'free'` disjunct from the real
+ * `listActiveOwnersAmong` would have left BOTH of these files green. The drift
+ * detector these docstrings advertise had quietly stopped detecting drift, in
+ * the two files that decide whether a photo is served.
  *
  * `listActiveOwnersAmong` mirrors the real query's predicate EXACTLY —
  * `status = 'active'` AND `current_period_end > now`, strict — because that
@@ -172,8 +183,7 @@ class FakeSubscriptions implements UserSubscriptionRepositoryPort {
           r.subscriberId === subscriberId &&
           wanted.has(r.ownerId) &&
           r.status === "active" &&
-          r.currentPeriodEnd !== null &&
-          r.currentPeriodEnd > now
+          (r.kind === "free" || (r.currentPeriodEnd !== null && r.currentPeriodEnd > now))
       )
       .map((r) => r.ownerId);
   }
@@ -217,6 +227,9 @@ class FakeSubscriptions implements UserSubscriptionRepositoryPort {
   async findActiveFor(): Promise<never> {
     return this.unused();
   }
+  async findPendingFor(): Promise<never> {
+    return this.unused();
+  }
   async listActiveSubscribers(): Promise<never> {
     return this.unused();
   }
@@ -233,6 +246,15 @@ class FakeSubscriptions implements UserSubscriptionRepositoryPort {
     return this.unused();
   }
   async markTransactionPaid(): Promise<never> {
+    return this.unused();
+  }
+  async listPendingRequests(): Promise<never> {
+    return this.unused();
+  }
+  async approveFreeRequest(): Promise<never> {
+    return this.unused();
+  }
+  async rejectRequest(): Promise<never> {
     return this.unused();
   }
 }
@@ -280,6 +302,44 @@ describe("MediaEntitlement — barrier two", () => {
     subscriptions.rows = [
       subscriptionRow({ status: "active", currentPeriodEnd: new Date("2026-08-20T09:00:00.000Z") }),
     ];
+
+    expect(await gate.decide({ mediaId: MEDIA_ID, viewerId: BUYER })).toEqual({
+      allowed: false,
+      gated: true,
+    });
+  });
+
+  /**
+   * WHOLE-BRANCH REVIEW, M-5 — the coverage this layer was missing entirely.
+   *
+   * The free-membership branch changed `listActiveOwnersAmong` to
+   * `status='active' AND (kind='free' OR current_period_end > now)`, but no
+   * test at the MEDIA GATE proved a free member actually receives gated bytes.
+   * The whole feature is "a gated photo reaches somebody who paid nothing", and
+   * this is the closest a test in this repo gets to asserting it.
+   *
+   * A free row is `kind='free'` with NO period at all — the shape a PAID row
+   * would only reach through a bug, which is why `kind` and not a NULL check
+   * decides it.
+   */
+  it("allows a FREE member — no period at all, and the photo is still served", async () => {
+    const { gate, subscriptions } = build();
+    subscriptions.rows = [subscriptionRow({ status: "active", kind: "free", currentPeriodEnd: null })];
+
+    expect(await gate.decide({ mediaId: MEDIA_ID, viewerId: BUYER })).toEqual({
+      allowed: true,
+      gated: true,
+    });
+  });
+
+  /**
+   * The control that keeps the test above from passing for the wrong reason: a
+   * PAID row in that same shape is a bug, not a membership, and must still be
+   * refused. If both of these ever agree, `kind` has stopped deciding anything.
+   */
+  it("still refuses a PAID row with no period — same shape, opposite answer", async () => {
+    const { gate, subscriptions } = build();
+    subscriptions.rows = [subscriptionRow({ status: "active", kind: "paid", currentPeriodEnd: null })];
 
     expect(await gate.decide({ mediaId: MEDIA_ID, viewerId: BUYER })).toEqual({
       allowed: false,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { StartUserSubscription } from "./start-user-subscription";
-import { ConflictError, NotFoundError } from "../errors";
+import { ConflictError, NotFoundError, ServiceUnavailableError } from "../errors";
 import { FakePaymentAdapter } from "../../infrastructure/payments/fake-payment.adapter";
 import { FixedClock } from "../../infrastructure/clock/fixed.clock";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
@@ -208,6 +208,10 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
         tierId: input.tierId,
         ownerId: input.ownerId,
         status: "pending",
+        // Mirrors the real repository's own default: an omitted `kind` here
+        // is `"paid"`, exactly as an omitted `kind` at the driver falls back
+        // to the schema's own `DEFAULT 'paid'` (Task 1).
+        kind: input.kind ?? "paid",
         currentPeriodEnd: null,
         createdAt: new Date("2026-08-20T00:00:00Z"),
       };
@@ -300,6 +304,9 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
       );
       return row ? { ...row } : null;
     },
+    async findPendingFor() {
+      throw new Error("StartUserSubscription must never read the pending-request flag — GetUserProfile does");
+    },
     /**
      * Task 2 of Phase 6. Mirrors the real query's predicate exactly — `status
      * = 'active'` AND `current_period_end > now`, strict — not merely
@@ -372,6 +379,15 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
     async listActiveSubscribers() {
       throw new Error("StartUserSubscription must never read the subscriber list — Task 6 of 5b does");
     },
+    async listPendingRequests() {
+      throw new Error("StartUserSubscription must never read the membership-requests queue — Task 5 does");
+    },
+    async approveFreeRequest() {
+      throw new Error("StartUserSubscription must never approve a request — Task 5's MembershipRequests does");
+    },
+    async rejectRequest() {
+      throw new Error("StartUserSubscription must never reject a request — Task 5's MembershipRequests does");
+    },
   };
   return { repository, subscriptions, transactions, retireExpiredCalls };
 }
@@ -438,6 +454,45 @@ function build(
   const store = fakeSubscriptionRepository(options.subscriptions ?? []);
   if (options.failOnce) failOnce(store.repository, options.failOnce);
   const payments = new FakePaymentAdapter();
+  const clock = new FixedClock(NOW);
+  const unitOfWork = new FakeUserPurchaseUnitOfWork({ subscriptions: store.repository });
+  const useCase = new StartUserSubscription(
+    fakeUserRepository(users),
+    fakeTierRepository(tiers),
+    fakePayoutRepository(payouts),
+    store.repository,
+    unitOfWork,
+    payments,
+    clock,
+    { appBaseUrl: APP_BASE_URL }
+  );
+  return { useCase, payments, clock, unitOfWork, ...store };
+}
+
+/**
+ * The SAME wiring as `build`, except `payments` is whatever is passed —
+ * `null` included — rather than always a fresh `FakePaymentAdapter`. A
+ * separate function rather than an option on `build` itself: `build`'s
+ * return type has `payments: FakePaymentAdapter` (never `null`) everywhere
+ * else in this file, and dozens of existing tests read `.invoices` off it
+ * unnarrowed — widening that return type would force a null-check onto every
+ * one of them for a case only Task 4's own tests need. Used exclusively by
+ * `describe("StartUserSubscription — requesting a FREE tier (Task 4)")`
+ * below.
+ */
+function buildWithProvider(
+  payments: FakePaymentAdapter | null,
+  options: {
+    users?: UserRecord[];
+    tiers?: UserTierRow[];
+    payouts?: UserPayoutAccount[];
+    subscriptions?: UserSubscriptionRow[];
+  } = {}
+) {
+  const users = options.users ?? [userRecord(), subscriberRecord()];
+  const tiers = options.tiers ?? [tierRow()];
+  const payouts = options.payouts ?? [payoutAccount()];
+  const store = fakeSubscriptionRepository(options.subscriptions ?? []);
   const clock = new FixedClock(NOW);
   const unitOfWork = new FakeUserPurchaseUnitOfWork({ subscriptions: store.repository });
   const useCase = new StartUserSubscription(
@@ -650,6 +705,7 @@ describe("StartUserSubscription — the refusals", () => {
           tierId: "tier-1",
           ownerId: OWNER_ID,
           status: "active",
+          kind: "paid",
           currentPeriodEnd: new Date("2099-01-01T00:00:00Z"),
           createdAt: new Date("2026-08-20T00:00:00Z"),
         },
@@ -676,6 +732,7 @@ describe("StartUserSubscription — the refusals", () => {
           tierId: "tier-1",
           ownerId: OWNER_ID,
           status: "cancelled",
+          kind: "paid",
           currentPeriodEnd: new Date("2026-01-01T00:00:00Z"),
           createdAt: new Date("2025-12-01T00:00:00Z"),
         },
@@ -697,6 +754,7 @@ describe("StartUserSubscription — the refusals", () => {
           tierId: "tier-other",
           ownerId: "another-owner",
           status: "active",
+          kind: "paid",
           currentPeriodEnd: new Date("2099-01-01T00:00:00Z"),
           createdAt: new Date("2026-08-20T00:00:00Z"),
         },
@@ -776,6 +834,7 @@ describe("StartUserSubscription — a second tap must not mint a second invoice"
           tierId: "tier-1",
           ownerId: OWNER_ID,
           status: "pending",
+          kind: "paid",
           currentPeriodEnd: null,
           createdAt: new Date("2026-08-20T00:00:00Z"),
         },
@@ -933,6 +992,7 @@ describe("StartUserSubscription — a LAPSED membership is retired, and the purc
       tierId: "tier-1",
       ownerId: OWNER_ID,
       status: "active",
+      kind: "paid",
       currentPeriodEnd: new Date("2026-08-19T12:00:00.000Z"),
       createdAt: new Date("2026-07-19T12:00:00.000Z"),
     };
@@ -1098,6 +1158,7 @@ describe("StartUserSubscription — an `active` row with no period end", () => {
       tierId: "tier-1",
       ownerId: OWNER_ID,
       status: "active",
+      kind: "paid",
       currentPeriodEnd: null,
       createdAt: new Date("2026-07-19T12:00:00.000Z"),
     };
@@ -1303,5 +1364,118 @@ describe("StartUserSubscription — every statement between the claim and the in
 
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("could not release the pending claim");
+  });
+});
+
+/**
+ * Task 4 of "free memberships" (spec §5.2, §9). `tier.priceAmount === 0` is
+ * what makes a tier FREE — never a second `kind` flag a caller could send
+ * that disagrees with it — and this use case now takes
+ * `payments: PaymentProviderPort | null` rather than requiring a real
+ * provider, because a free request never touches one at all. See the class's
+ * own docstring for the full design; these are the tests the brief
+ * specified, translated onto this file's real fixtures (`build`,
+ * `buildWithProvider`, `buy`) rather than the brief's shorthand
+ * `startSubscription`/`freeTierId`/`paidTierId`.
+ */
+describe("StartUserSubscription — requesting a FREE tier (Task 4)", () => {
+  function freeTierRow(overrides: Partial<UserTierRow> = {}): UserTierRow {
+    return tierRow({ id: "tier-free", name: "Gratis", priceAmount: 0, ...overrides });
+  }
+
+  it("creates a pending row with kind 'free' and no invoice — touching neither a payout account nor the provider", async () => {
+    const { useCase, payments, subscriptions, transactions, repository } = build({
+      tiers: [tierRow(), freeTierRow()],
+      // NO connected payout account at all — Task 3 drew this same line for
+      // *creating* a free tier, and this proves the free REQUEST path never
+      // even reads one: `findPayoutAccount` would answer null and this use
+      // case would 404 with "user not found" if this branch reached it.
+      payouts: [],
+    });
+
+    const result = await buy(useCase, { tierId: "tier-free" });
+
+    expect(result.invoiceUrl).toBeUndefined();
+    expect(result.transactionId).toBeUndefined();
+    expect(result.externalId).toBeUndefined();
+    const row = await repository.findById(result.subscriptionId);
+    expect([row!.status, row!.kind]).toEqual(["pending", "free"]);
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]).toMatchObject({
+      subscriberId: SUBSCRIBER_ID,
+      ownerId: OWNER_ID,
+      tierId: "tier-free",
+      status: "pending",
+      kind: "free",
+      currentPeriodEnd: null,
+    });
+    // THE POINT OF THE TASK, asserted rather than assumed: nothing is ever
+    // owed for a free membership, so nothing past the pending row itself is
+    // ever created or called.
+    expect(transactions).toEqual([]);
+    expect(payments.invoices).toEqual([]);
+  });
+
+  it("works with NO payment provider at all", async () => {
+    const { useCase, subscriptions } = buildWithProvider(null, {
+      tiers: [tierRow(), freeTierRow()],
+      payouts: [],
+    });
+
+    const result = await buy(useCase, { tierId: "tier-free" });
+
+    expect(result.invoiceUrl).toBeUndefined();
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]!.kind).toBe("free");
+  });
+
+  it("a PAID tier with no payment provider is refused, not silently freed", async () => {
+    const { useCase, subscriptions } = buildWithProvider(null, {
+      tiers: [tierRow(), freeTierRow()],
+    });
+
+    await expect(buy(useCase, { tierId: "tier-1" })).rejects.toThrow(
+      new ServiceUnavailableError("pembayaran belum tersedia di server ini")
+    );
+    expect(subscriptions).toEqual([]);
+  });
+
+  /**
+   * Spec §9 — the case the spec forbids lying about. The free path never
+   * calls `retireExpired` (see the use case's own comment on why: this phase
+   * gives a free membership no renewal path to hand a lapsed PAID member
+   * into), so a row that is `active` but past its period is left exactly as
+   * it is, and the SAME status-only guard the paid path uses still sees it
+   * and refuses. That refusal is spec §9's accepted limitation; the SENTENCE
+   * must say the membership ended, never "you are already an active member",
+   * which would be false for someone who cannot see anything right now.
+   */
+  it("tells a LAPSED paid member their membership ended, rather than 'you are already a member'", async () => {
+    const lapsedPaidRow: UserSubscriptionRow = {
+      id: "sub-lapsed-paid",
+      subscriberId: SUBSCRIBER_ID,
+      tierId: "tier-1",
+      ownerId: OWNER_ID,
+      status: "active",
+      kind: "paid",
+      currentPeriodEnd: new Date("2026-08-19T12:00:00.000Z"),
+      createdAt: new Date("2026-07-19T12:00:00.000Z"),
+    };
+    const { useCase, subscriptions, retireExpiredCalls } = build({
+      tiers: [tierRow(), freeTierRow()],
+      subscriptions: [lapsedPaidRow],
+    });
+
+    const err = (await buy(useCase, { tierId: "tier-free" }).catch((e: unknown) => e)) as Error;
+
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err.message).toMatch(/berakhir/);
+    // NOT the "you are already a member" sentence — false for a lapsed row.
+    expect(err.message).not.toMatch(/sudah menjadi anggota aktif/);
+    // Deliberately NOT retired: the free path never calls `retireExpired`, so
+    // the row this test seeded is exactly what it was seeded as.
+    expect(retireExpiredCalls).toEqual([]);
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]!.status).toBe("active");
   });
 });

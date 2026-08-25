@@ -10,6 +10,7 @@ import {
   type OwnUserProfile,
 } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
+import MembershipRequests from "./MembershipRequests";
 import MembershipSettings from "./MembershipSettings";
 import SubscriberList from "./SubscriberList";
 
@@ -233,6 +234,14 @@ function SettingsForm() {
         cannot be read must not be able to take the profile form down with it.
       */}
       <MembershipSettings />
+
+      {/*
+        Task 7 of "free memberships" (spec §2.4): the owner's queue of
+        pending free-tier requests, waiting on an approve/reject from this
+        creator. A separate component for the same reason `SubscriberList`
+        is — see `MembershipRequests`'s own docstring.
+      */}
+      <MembershipRequests />
 
       {/*
         Task 6 of Phase 5b (spec §8): who currently subscribes to YOU. A

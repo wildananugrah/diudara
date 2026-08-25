@@ -1,3 +1,5 @@
+import { formatRupiah } from "../api";
+
 /**
  * How a membership tier reads in Bahasa — the words shared by the two screens
  * that render `user_tier` rows: the owner's editor in Pengaturan
@@ -24,4 +26,18 @@
  */
 export function billingCycleLabel(cycle: string): string {
   return cycle === "monthly" ? "per bulan" : cycle;
+}
+
+/**
+ * A tier's price, the way a person should read it — "Gratis" for a free tier
+ * rather than "Rp 0". `priceAmount === 0` IS the definition of a free tier,
+ * all the way out to `user_subscription.kind` on the API side (see
+ * `ManageUserTiers.create`'s own docstring for why there is no separate
+ * flag) — "Rp 0" is technically correct and reads like a broken price tag,
+ * not like an offer. Takes the raw amount rather than a `UserTier`, so it
+ * can be reused wherever a price needs to render without importing the
+ * whole tier shape — currently `MembershipSettings`'s own editor.
+ */
+export function formatTierPrice(amount: number): string {
+  return amount === 0 ? "Gratis" : formatRupiah(amount);
 }

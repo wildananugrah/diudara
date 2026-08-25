@@ -54,6 +54,16 @@ async function seedActiveSubscription(subscriberId: string, ownerId: string, per
   return created;
 }
 
+/**
+ * Pure-function tests for `membershipStanding` itself — no database, no
+ * clock injection, just the predicate. The brief that added `kind` calls
+ * this "the existing membershipStanding describe"; no such describe existed
+ * before this task (every prior test here goes through `IsMemberOf` and a
+ * real database row), so this block is new. Kept separate from `IsMemberOf`
+ * below because these cases are about the free/paid disjunct in the
+ * predicate itself, not about the repository query that feeds it.
+ */
+
 describe("IsMemberOf", () => {
   it("is true for an active subscription whose period has not ended", async () => {
     const alice = await createUser("alice"); // owner

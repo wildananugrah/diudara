@@ -76,7 +76,7 @@ const ENTITLED: MediaGateDecision = Object.freeze({ allowed: true, gated: true }
  * was answered inconsistently. One request, one instant.
  *
  * The membership lookup is `listActiveOwnersAmong` — the same `status =
- * 'active' AND current_period_end > now` predicate, against the same partial
+ * 'active' AND (kind = 'free' OR current_period_end > now)` predicate, against the same partial
  * unique index, that barrier one asks for a whole feed page. A lapsed
  * membership (still `active`, period already over, because 5b's sweep has not
  * retired it yet) is excluded by that second half; a status-only check would

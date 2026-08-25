@@ -39,6 +39,7 @@ import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { IsMemberOf } from "./application/use-cases/is-member-of";
 import { ListSubscribers } from "./application/use-cases/list-subscribers";
+import { MembershipRequests } from "./application/use-cases/membership-requests";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -248,6 +249,9 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   async findActiveFor() {
     return null;
   },
+  async findPendingFor() {
+    return null;
+  },
   async listActiveSubscribers() {
     return [];
   },
@@ -268,6 +272,15 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   },
   async markTransactionPaid() {
     return null;
+  },
+  async listPendingRequests() {
+    return [];
+  },
+  async approveFreeRequest() {
+    return null;
+  },
+  async rejectRequest() {
+    return false;
   },
 };
 
@@ -533,7 +546,10 @@ describe("Dependencies (composition root contract)", () => {
         fakeUserTierRepository,
         // Task 10's fourth dependency: the REAL `IsMemberOf` over the two
         // fakes already in this file, never a stub of its own.
-        new IsMemberOf(fakeUserSubscriptionRepository, fakeClock)
+        new IsMemberOf(fakeUserSubscriptionRepository, fakeClock),
+        // Task 6 of "free memberships": the fifth dependency, the same fake
+        // `IsMemberOf` above reads.
+        fakeUserSubscriptionRepository
       ),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
@@ -584,6 +600,7 @@ describe("Dependencies (composition root contract)", () => {
         { appBaseUrl: "https://app.diudara.test" }
       ),
       listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
+      membershipRequests: new MembershipRequests(fakeUserSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,
@@ -1243,14 +1260,31 @@ describe("bootstrap() payment provider selection", () => {
             }).not.toThrow();
             expect(deps!.payments).toBeNull();
             expect(deps!.payments).not.toBeInstanceOf(FakePaymentAdapter);
-            // The two money use cases this root still builds. There were four:
-            // retire-telegram Task 4 deleted `startCheckout` with the community
-            // checkout it opened, and Task 7's fix round deleted
-            // `createPaymentAccount` with `POST /payment-account`. Both of the
-            // survivors must be UNCONSTRUCTED, not merely unreachable — see
-            // each field's own docstring on `Dependencies`.
-            expect(deps!.startUserSubscription).toBeUndefined();
+            // `connectUserPayout` must be UNCONSTRUCTED, not merely
+            // unreachable — see its docstring on `Dependencies`. Connecting a
+            // payout account is meaningless without a provider to connect to.
             expect(deps!.connectUserPayout).toBeUndefined();
+
+            // `startUserSubscription` USED TO BE undefined here too, under the
+            // same rule, and the free-memberships plan (Task 4) deliberately
+            // reversed that for this one field.
+            //
+            // The rule existed so a box with no provider could not construct
+            // something that takes money. That reasoning holds only while every
+            // subscription costs money. A FREE tier charges nothing and touches
+            // no provider, so gating the whole use case on `payments` made
+            // `POST /users/:handle/subscribe` answer 503 for a free request too
+            // — which made the entire membership feature unreachable on exactly
+            // the box this test describes.
+            //
+            // The refusal did not disappear; it moved from BOOT TIME to the
+            // TIER. The use case now holds `payments: PaymentProviderPort |
+            // null` and throws `ServiceUnavailableError` itself when a PAID
+            // tier is requested with no provider — asserted by
+            // `start-user-subscription.test.ts`'s "a PAID tier with no payment
+            // provider is refused, not silently freed". Deleting that test
+            // would restore the hazard this line used to guard.
+            expect(deps!.startUserSubscription).toBeDefined();
             expect(deps!.xenditCallbackToken).toBeUndefined();
           });
         }

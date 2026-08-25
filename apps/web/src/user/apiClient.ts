@@ -595,6 +595,16 @@ export interface MembershipView {
   tiers: TierView[];
   viewerIsMember: boolean;
   viewerMembershipEnded: boolean;
+  /**
+   * Task 6 of "free memberships": is a FREE request from this viewer, to
+   * this creator, awaiting the owner's decision — mirrors the API's own
+   * `MembershipView.viewerRequestPending` in `tier-views.ts` (see that
+   * docstring for why it is narrowed to `kind === "free"` and not any
+   * pending row). `false`, never absent, for a signed-out visitor and on the
+   * viewer's own profile — same construction as `viewerIsMember` above.
+   * Consumed for the first time in Task 8, by `MembershipOffer`.
+   */
+  viewerRequestPending: boolean;
 }
 
 /**
@@ -1252,6 +1262,58 @@ export function deactivateOwnTier(tierId: string): Promise<UserTier> {
 }
 
 /**
+ * One pending free-membership request on the wire — mirrors the API's own
+ * `MembershipRequestEntry` (`application/use-cases/membership-requests.ts`)
+ * field for field, a CLOSED projection never widened here. `createdAt` is a
+ * STRING here and a `Date` server-side, the same JSON-has-no-date-type
+ * convention `UserTier.createdAt` and `SubscriberEntry.since` already use.
+ */
+export interface MembershipRequestEntry {
+  id: string;
+  subscriberHandle: string;
+  subscriberDisplayName: string;
+  tierName: string;
+  createdAt: string;
+}
+
+/**
+ * `GET /users/me/membership-requests` — Task 5 of "free memberships": the
+ * owner's own queue of pending free-tier requests, waiting on a decision
+ * only they can make (spec §2.4). Owner-only server-side, same as
+ * `listOwnTiers`/`listSubscribers` above: there is no handle to pass, because
+ * the server answers only for the session's own id.
+ */
+export function listMembershipRequests(): Promise<{ requests: MembershipRequestEntry[] }> {
+  return apiFetch<{ requests: MembershipRequestEntry[] }>("/users/me/membership-requests");
+}
+
+/**
+ * `POST /users/me/membership-requests/:id/approve` — admits one pending
+ * requester, flipping their row to an active, permanent (no
+ * `currentPeriodEnd`) free membership. The response is the resulting
+ * subscription row; nothing on this side reads it — the caller only needs to
+ * know the call succeeded so it can drop the request from its own list.
+ */
+export function approveMembershipRequest(requestId: string): Promise<unknown> {
+  return apiFetch<unknown>(
+    `/users/me/membership-requests/${encodeURIComponent(requestId)}/approve`,
+    { method: "POST" }
+  );
+}
+
+/**
+ * `POST /users/me/membership-requests/:id/reject` — DELETES the pending row
+ * (never a status flip; see the API's own `UserSubscriptionRepositoryPort
+ * .rejectRequest` docstring), so the same person is free to ask again later.
+ */
+export function rejectMembershipRequest(requestId: string): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>(
+    `/users/me/membership-requests/${encodeURIComponent(requestId)}/reject`,
+    { method: "POST" }
+  );
+}
+
+/**
  * **`POST /users/:handle/subscribe` — the moment money moves** (spec §6).
  *
  * The body carries the tier and NOTHING else: the buyer is the session, read
@@ -1259,22 +1321,39 @@ export function deactivateOwnTier(tierId: string): Promise<UserTier> {
  * because this creates a pending subscription and a pending transaction that
  * outlive the response whether or not the buyer ever pays.
  *
- * `invoiceUrl` is where the browser goes next. The other three fields are
- * returned by the route and typed here because they exist on the wire, not
- * because a screen needs them — `MembershipOffer` reads only the url.
+ * `invoiceUrl` is where the browser goes next — for a PAID tier. **Absent for
+ * a FREE tier, and that is Task 8's own change to this type**: mirrors the
+ * API's own `StartUserSubscriptionResult.invoiceUrl` exactly, which
+ * `StartUserSubscription` never sets for a free request because no invoice is
+ * ever opened for one (spec §2.4 — nothing is owed). `transactionId` and
+ * `externalId` are absent for the identical reason: no transaction row is
+ * created for a free request either. `MembershipOffer.buy` is the one caller,
+ * and its branch on `invoiceUrl === undefined` is the whole reason this went
+ * from three required fields to three optional ones — a `string` type here
+ * that disagreed with the wire would have let a free response's `undefined`
+ * reach `window.location.href = undefined` unchecked.
  *
- * A SECOND CALL FOR THE SAME PAIR DOES NOT MINT A SECOND INVOICE: the server
- * hands back the pending checkout it already opened (`StartUserSubscription`
- * claims the pending slot with an INSERT, so even two concurrent taps resolve
- * to one invoice). That is the backstop, not the plan — the button disables
- * itself while a request is in flight.
+ * A SECOND CALL FOR THE SAME PAIR DOES NOT MINT A SECOND INVOICE (paid path):
+ * the server hands back the pending checkout it already opened
+ * (`StartUserSubscription` claims the pending slot with an INSERT, so even two
+ * concurrent taps resolve to one invoice). That is the backstop, not the plan
+ * — the button disables itself while a request is in flight. The free path's
+ * backstop is the same claim — and its second call is NOT refused: the free
+ * path claims the pending slot with `ON CONFLICT DO NOTHING` on purpose, so a
+ * second tap is idempotent and answers the request already on file. (This
+ * docstring said "refused outright" until the whole-branch review; that was
+ * the behaviour BEFORE Task 4 replaced a plain insert whose second call
+ * returned a 500.) A second request naming a tier while a PAID checkout is
+ * still open IS refused, with a 409 naming the unfinished payment.
  */
 export interface StartSubscriptionResult {
-  /** Where the browser is sent to pay. */
-  invoiceUrl: string;
+  /** Where the browser is sent to pay. Absent for a FREE tier — see the docstring above. */
+  invoiceUrl?: string;
   subscriptionId: string;
-  transactionId: string;
-  externalId: string;
+  /** Absent for a FREE tier — no transaction row is created for one. */
+  transactionId?: string;
+  /** Absent exactly when `transactionId` is. */
+  externalId?: string;
 }
 
 export function startSubscription(handle: string, tierId: string): Promise<StartSubscriptionResult> {

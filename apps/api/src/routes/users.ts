@@ -178,6 +178,15 @@ function parseSubscribeBody(raw: unknown): { tierId: string } {
 }
 
 /**
+ * `:id` on `POST /me/membership-requests/:id/approve` and `/reject` — Task 5
+ * of "free memberships". A malformed id is a 400 from `validateParams`,
+ * never a raw uuid-syntax 500 from the driver — the same rule
+ * `routes/posts.ts` and `routes/media.ts` already follow, and `me/tiers/:tierId`
+ * above follows with `z.object({ tierId: uuidParam })`.
+ */
+const requestIdParams = z.object({ id: uuidParam });
+
+/**
  * The caller's IP, recorded (hashed) against every password-reset request
  * for forensic/audit value — see `RequestPasswordReset`'s own docstring for
  * why it is NO LONGER used to enforce a rate limit (review finding F4).
@@ -252,6 +261,7 @@ export function userRoutes(
     | "manageUserTiers"
     | "startUserSubscription"
     | "listSubscribers"
+    | "membershipRequests"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -475,7 +485,8 @@ export function userRoutes(
    *
    * The wire projection is CLOSED — `{ handle, displayName, since }`, and
    * only CURRENTLY subscribed members: `status = 'active'` AND
-   * `current_period_end > now`, the same definition `IsMemberOf` uses. See
+   * (`kind = 'free'` OR `current_period_end > now`), the same definition
+   * `IsMemberOf` uses — so an approved FREE member is listed here too. See
    * `ListSubscribers`'s own docstring and
    * `UserSubscriptionRepositoryPort.listActiveSubscribers`'s for the full
    * reasoning — neither `isMemberOf` nor `IsMemberOf` itself is touched by
@@ -490,6 +501,80 @@ export function userRoutes(
     const result = await deps.listSubscribers.execute(c.get("userId"));
     return c.json(result);
   });
+
+  /**
+   * Task 5 of "free memberships" — an owner's queue of pending free
+   * membership requests (spec §2.4): what Task 4's `StartUserSubscription`
+   * free path writes via `claimPending({ ..., kind: "free" })`, waiting on a
+   * decision.
+   *
+   * **THIS IS PRIVATE DATA, OWNER-ONLY BY CONSTRUCTION**, same shape as
+   * `me/subscribers` above: `requireAuth` and `c.get("userId")`, no handle
+   * parameter anywhere on this route, so the only queue a caller can ever ask
+   * for is their own.
+   *
+   * Static (`me/membership-requests`), registered with the other STATIC
+   * `me/*` routes above, before `/:handle` — `me` is 2 characters, already
+   * unregisterable under `HANDLE_PATTERN` before this route existed, but
+   * `"membership-requests"` is added to `RESERVED_HANDLES` regardless (see
+   * that constant's own docstring: reserving more than a route strictly
+   * requires is safe). See `app.test.ts`'s route table for the guard that
+   * keeps these three paths pinned.
+   */
+  app.get<"/me/membership-requests">("/me/membership-requests", requireAuth, async (c) => {
+    const result = await deps.membershipRequests.list(c.get("userId"));
+    return c.json(result);
+  });
+
+  /**
+   * Approves ONE pending free request — flips it to `active`, `kind` already
+   * `free`, `current_period_end` left `null` (spec §3's permanent shape for a
+   * free membership). `MembershipRequests.approve` throws `NotFoundError` for
+   * a missing id, a foreign owner's id, or a request no longer pending — the
+   * SAME answer for all three, so this owner cannot probe which request ids
+   * exist for somebody else. A collision with `user_subscription_one_active`
+   * (this subscriber already holds a different active row for this owner)
+   * surfaces as `ConflictError`, never a raw driver error — see
+   * `DrizzleUserSubscriptionRepository.approveFreeRequest`'s own docstring.
+   */
+  app.post<"/me/membership-requests/:id/approve">(
+    "/me/membership-requests/:id/approve",
+    requireAuth,
+    validateParams(requestIdParams),
+    async (c) => {
+      const { id } = c.get("validatedParams") as { id: string };
+      await deps.membershipRequests.approve({
+        ownerId: c.get("userId"),
+        requestId: id,
+      });
+      // `{ ok: true }`, NOT the row. Returning the `UserSubscriptionRow` put
+      // `subscriberId`, `tierId`, `ownerId`, `status`, `kind`,
+      // `currentPeriodEnd` and `createdAt` on a client payload with no closed
+      // projection and no shape assertion anywhere — so the next column added
+      // to `user_subscription` would have shipped to a browser with nothing
+      // failing. Every other membership surface here is a closed projection
+      // (spec §6), `reject` already answers this shape, and `apiClient`'s
+      // caller reads nothing from the body. Whole-branch review, M-6.
+      return c.json({ ok: true }, 200);
+    }
+  );
+
+  /**
+   * Rejects ONE pending free request — DELETES the row (never a status flip;
+   * see `UserSubscriptionRepositoryPort.rejectRequest`'s own docstring for
+   * why), so the same person is free to ask again. Same `NotFoundError`
+   * treatment as approve above.
+   */
+  app.post<"/me/membership-requests/:id/reject">(
+    "/me/membership-requests/:id/reject",
+    requireAuth,
+    validateParams(requestIdParams),
+    async (c) => {
+      const { id } = c.get("validatedParams") as { id: string };
+      await deps.membershipRequests.reject({ ownerId: c.get("userId"), requestId: id });
+      return c.json({ ok: true }, 200);
+    }
+  );
 
   /**
    * Task 7 of images (design spec §6). Public and cheap — no auth, no
@@ -541,7 +626,8 @@ export function userRoutes(
 
   /**
    * Task 6 of Phase 5a (spec §6) — buying a membership from a person, and the
-   * moment money actually moves.
+   * moment money actually moves for a PAID tier; for a FREE one, the moment a
+   * pending membership is created with nothing owed at all.
    *
    * Behind `requireAuth`: buying is signed-in only, so a signed-out visitor
    * pressing "Jadi anggota" gets a 401 and is sent to Masuk first. The buyer is
@@ -552,21 +638,22 @@ export function userRoutes(
    * shadow, and cannot be shadowed by, any of this router's static paths, since
    * Hono ranks static segments above dynamic ones.
    *
-   * 201, not 200: this call CREATES a pending subscription and a pending
-   * transaction, which outlive the response whether or not the buyer ever pays
-   * the invoice. Same status the dashboard's `POST /c/:slug/checkout` returns
-   * for the same reason.
+   * 201, not 200: this call CREATES a pending subscription — and, for a PAID
+   * tier, a pending transaction too — which outlive the response whether or
+   * not the buyer ever pays the invoice. Same status the dashboard's
+   * `POST /c/:slug/checkout` returns for the same reason.
+   *
+   * NO LONGER 503s AN ENTIRE PAYMENTS-DISABLED BOX (Task 4 of "free
+   * memberships"). `deps.startUserSubscription` is never `undefined` now —
+   * `bootstrap.ts` constructs it unconditionally, because a FREE tier needs
+   * no `PaymentProviderPort` at all — so this route no longer has an
+   * `if (!deps.startUserSubscription)` guard of its own. A PAID tier on a box
+   * with no provider is still refused with a 503, but that refusal now comes
+   * from INSIDE `StartUserSubscription.execute` (`ServiceUnavailableError`,
+   * thrown only once the tier's price is known), not from this route
+   * refusing every request regardless of what was being bought.
    */
   app.post<"/:handle/subscribe">("/:handle/subscribe", requireAuth, async (c) => {
-    // `undefined` EXACTLY when this box has no payment provider at all — same
-    // 503 and the same wording as `POST /users/me/payout` above. The route stays
-    // registered either way, so a buyer is told WHY rather than getting the 404
-    // of a path that does not exist. (The community checkout made the opposite
-    // choice — `/c/:slug/checkout` was not registered at all on such a box — and
-    // retire-telegram Task 4 deleted it, so this shape is now the only one.)
-    if (!deps.startUserSubscription) {
-      throw new ServiceUnavailableError("pembayaran belum dikonfigurasi di server ini.");
-    }
     let raw: unknown;
     try {
       raw = await c.req.json();

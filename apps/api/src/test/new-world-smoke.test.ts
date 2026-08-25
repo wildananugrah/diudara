@@ -54,7 +54,8 @@ import {
  *
  * WHAT EACH ONE CROSSES, and what breaking that seam would cost:
  *
- *  1. THE MEMBERSHIP GATE — `status = 'active' AND current_period_end > now`.
+ *  1. THE MEMBERSHIP GATE — `status = 'active' AND (kind = 'free' OR
+ *     current_period_end > now)`.
  *     Break it and either every stranger sees paid content or no member does.
  *
  *     THERE ARE TWO IMPLEMENTATIONS OF THAT PREDICATE AND THEY ARE REACHED BY
@@ -214,7 +215,7 @@ async function profilePosts(a: ReturnType<typeof app>, handle: string, token?: s
  *
  *  - the OWNER never asks it at all — the author always gets their own media;
  *  - the PAYING MEMBER passes both halves — `status = 'active'` AND
- *    `current_period_end > now`;
+ *    `kind = 'free' OR current_period_end > now`;
  *  - the LAPSED member passes only the first: an `active` row whose paid
  *    period has passed, the state spec §9 guarantees every member reaches
  *    since nothing renews, and the one a status-only check would read as a

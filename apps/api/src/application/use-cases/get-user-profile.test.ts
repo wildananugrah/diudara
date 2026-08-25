@@ -193,6 +193,9 @@ function fakeSubscriptions(
         // `drizzle-user-subscription.repository.test.ts`), trusted here the
         // same way `fakeUserTierRepository` trusts `listActiveByOwner`.
         status: "active",
+        // This fake only ever produces PAID rows — the `kind` disjunct is
+        // Task 1's own predicate test, not this profile-read fake's concern.
+        kind: "paid",
         currentPeriodEnd: row.currentPeriodEnd,
         createdAt: new Date("2026-08-01T00:00:00.000Z"),
       };
@@ -202,7 +205,25 @@ function fakeSubscriptions(
     attachGatewayReference: notUsed,
     findPendingCheckout: notUsed,
     markTransactionPaid: notUsed,
+    // Task 6 of "free memberships": `null` by default. The tests in THIS
+    // file are `IsMemberOf`'s own concern (Task 10) and never assert on
+    // `viewerRequestPending` — that field's own coverage lives in
+    // `tier-views.test.ts` (the pure projection) and `routes/users.test.ts`
+    // (the real pending row, per this task's brief: "not in-memory fakes").
+    async findPendingFor() {
+      return null;
+    },
   } as unknown as UserSubscriptionRepositoryPort;
+}
+
+/**
+ * The `GetUserProfile` constructor's fifth dependency for every test in this
+ * file — none of them exercise `viewerRequestPending`, so a fresh
+ * always-`null` fake is all any of them need. See `fakeSubscriptions`'s own
+ * comment on where the real coverage for that field lives.
+ */
+function noPendingRequest(): UserSubscriptionRepositoryPort {
+  return fakeSubscriptions([]);
 }
 
 /**
@@ -234,7 +255,8 @@ describe("GetUserProfile.execute (public, by handle)", () => {
       fakeFollowRepository({ counts: { followers: 3, following: 5 } }),
       fakeUserTierRepository([tierRow()])
     ,
-      noMembership()
+      noMembership(),
+      noPendingRequest()
     );
     const profile = await useCase.execute("wildan", null);
 
@@ -262,6 +284,7 @@ describe("GetUserProfile.execute (public, by handle)", () => {
         ],
         viewerIsMember: false,
         viewerMembershipEnded: false,
+        viewerRequestPending: false,
       },
     });
   });
@@ -272,7 +295,8 @@ describe("GetUserProfile.execute (public, by handle)", () => {
       fakeFollowRepository({}),
       fakeUserTierRepository([])
     ,
-      noMembership()
+      noMembership(),
+      noPendingRequest()
     );
     const profile = await useCase.execute("wildan", null);
     expect(profile.viewerFollows).toBeNull();
@@ -284,7 +308,8 @@ describe("GetUserProfile.execute (public, by handle)", () => {
       fakeFollowRepository({ followingPairs: [["viewer-1", "user-1"]] }),
       fakeUserTierRepository([])
     ,
-      noMembership()
+      noMembership(),
+      noPendingRequest()
     );
     const profile = await useCase.execute("wildan", "viewer-1");
     expect(profile.viewerFollows).toBe(true);
@@ -296,7 +321,8 @@ describe("GetUserProfile.execute (public, by handle)", () => {
       fakeFollowRepository({}),
       fakeUserTierRepository([])
     ,
-      noMembership()
+      noMembership(),
+      noPendingRequest()
     );
     const profile = await useCase.execute("wildan", "viewer-1");
     expect(profile.viewerFollows).toBe(false);
@@ -308,7 +334,8 @@ describe("GetUserProfile.execute (public, by handle)", () => {
       fakeFollowRepository({}),
       fakeUserTierRepository([])
     ,
-      noMembership()
+      noMembership(),
+      noPendingRequest()
     );
     const profile = await useCase.execute("@wildan", null);
     expect(profile.handle).toBe("wildan");
@@ -320,7 +347,8 @@ describe("GetUserProfile.execute (public, by handle)", () => {
       fakeFollowRepository({}),
       fakeUserTierRepository([])
     ,
-      noMembership()
+      noMembership(),
+      noPendingRequest()
     );
     await expect(useCase.execute("nobody", null)).rejects.toBeInstanceOf(NotFoundError);
   });
@@ -331,7 +359,8 @@ describe("GetUserProfile.execute (public, by handle)", () => {
       fakeFollowRepository({}),
       fakeUserTierRepository([])
     ,
-      noMembership()
+      noMembership(),
+      noPendingRequest()
     );
     const profile = await useCase.execute("wildan", null);
     expect(profile.bio).toBeNull();
@@ -356,7 +385,8 @@ describe("GetUserProfile.execute — membership (Task 5)", () => {
       fakeFollowRepository({}),
       fakeUserTierRepository([tierRow()])
     ,
-      noMembership()
+      noMembership(),
+      noPendingRequest()
     );
     const profile = await useCase.execute("wildan", null);
 
@@ -375,7 +405,8 @@ describe("GetUserProfile.execute — membership (Task 5)", () => {
       fakeFollowRepository({}),
       fakeUserTierRepository([])
     ,
-      noMembership()
+      noMembership(),
+      noPendingRequest()
     );
     const profile = await useCase.execute("wildan", null);
 
@@ -384,12 +415,15 @@ describe("GetUserProfile.execute — membership (Task 5)", () => {
       tiers: [],
       viewerIsMember: false,
       viewerMembershipEnded: false,
+      viewerRequestPending: false,
     });
   });
 
   it("fetches this owner's tiers in a SINGLE listActiveByOwner call, scoped to the profile's own id", async () => {
     const tiers = fakeUserTierRepository([tierRow(), tierRow({ id: "tier-2" })]);
-    const useCase = new GetUserProfile(fakeRepository([record()]), fakeFollowRepository({}), tiers, noMembership());
+    const useCase = new GetUserProfile(fakeRepository([record()]), fakeFollowRepository({}), tiers, noMembership(),
+      noPendingRequest()
+    );
 
     await useCase.execute("wildan", null);
 
@@ -415,7 +449,8 @@ describe("GetUserProfile.execute — viewerIsMember (Task 10)", () => {
       fakeUserTierRepository([tierRow()]),
       // A membership that WOULD match if this viewer were signed in: the
       // anonymous answer must not depend on what is in the table.
-      membershipCheck([{ subscriberId: "viewer-1", ownerId: "user-1", currentPeriodEnd: FUTURE }])
+      membershipCheck([{ subscriberId: "viewer-1", ownerId: "user-1", currentPeriodEnd: FUTURE }]),
+      noPendingRequest()
     );
 
     const profile = await useCase.execute("wildan", null);
@@ -434,7 +469,8 @@ describe("GetUserProfile.execute — viewerIsMember (Task 10)", () => {
       fakeRepository([record()]),
       fakeFollowRepository({}),
       fakeUserTierRepository([tierRow()]),
-      membershipCheck([{ subscriberId: "viewer-1", ownerId: "user-1", currentPeriodEnd: FUTURE }])
+      membershipCheck([{ subscriberId: "viewer-1", ownerId: "user-1", currentPeriodEnd: FUTURE }]),
+      noPendingRequest()
     );
 
     const profile = await useCase.execute("wildan", "viewer-1");
@@ -450,7 +486,8 @@ describe("GetUserProfile.execute — viewerIsMember (Task 10)", () => {
       fakeRepository([record()]),
       fakeFollowRepository({}),
       fakeUserTierRepository([tierRow()]),
-      membershipCheck([{ subscriberId: "somebody-else", ownerId: "user-1", currentPeriodEnd: FUTURE }])
+      membershipCheck([{ subscriberId: "somebody-else", ownerId: "user-1", currentPeriodEnd: FUTURE }]),
+      noPendingRequest()
     );
 
     const profile = await useCase.execute("wildan", "viewer-1");
@@ -471,7 +508,8 @@ describe("GetUserProfile.execute — viewerIsMember (Task 10)", () => {
       fakeRepository([record()]),
       fakeFollowRepository({}),
       fakeUserTierRepository([tierRow()]),
-      membershipCheck([{ subscriberId: "viewer-1", ownerId: "user-1", currentPeriodEnd: PAST }])
+      membershipCheck([{ subscriberId: "viewer-1", ownerId: "user-1", currentPeriodEnd: PAST }]),
+      noPendingRequest()
     );
 
     const profile = await useCase.execute("wildan", "viewer-1");
@@ -503,8 +541,9 @@ describe("GetUserProfile.execute — viewerIsMember (Task 10)", () => {
         fakeRepository([record()]),
         fakeFollowRepository({}),
         fakeUserTierRepository([tierRow()]),
-        membershipCheck(table)
-      );
+        membershipCheck(table),
+      noPendingRequest()
+    );
 
     const stranger = await build().execute("wildan", "stranger-1");
     const lapsed = await build().execute("wildan", "lapsed-1");
@@ -531,12 +570,168 @@ describe("GetUserProfile.execute — viewerIsMember (Task 10)", () => {
       fakeRepository([record()]),
       fakeFollowRepository({}),
       fakeUserTierRepository([tierRow()]),
-      membershipCheck([{ subscriberId: "user-1", ownerId: "user-1", currentPeriodEnd: FUTURE }])
+      membershipCheck([{ subscriberId: "user-1", ownerId: "user-1", currentPeriodEnd: FUTURE }]),
+      noPendingRequest()
     );
 
     const profile = await useCase.execute("wildan", "user-1");
 
     expect(profile.membership.viewerIsMember).toBe(false);
+  });
+});
+
+/**
+ * Task 6 of "free memberships": `membership.viewerRequestPending`. This
+ * describe block is the WIRING — does `GetUserProfile` call
+ * `subscriptions.findPendingFor` with the right arguments, thread whatever
+ * comes back into `toMembershipView`, and skip the call entirely for an
+ * anonymous or self-viewing caller. It deliberately does NOT prove that
+ * `findPendingFor` itself finds a genuine free row against Postgres, or that
+ * a PAID pending checkout reads `false` — that is `toMembershipView`'s own
+ * free-vs-paid judgement (`tier-views.test.ts`, a pure function, exactly the
+ * right place for it) and the real end-to-end HTTP path
+ * (`routes/users.test.ts`, "not in-memory fakes" per this task's brief).
+ */
+describe("GetUserProfile.execute — viewerRequestPending wiring (Task 6)", () => {
+  /**
+   * Records every call and answers whatever `row` says — `undefined` means
+   * "must not be called at all", which is exactly what the anonymous and
+   * self-view tests below need to prove: not merely `false`, but NO QUERY.
+   */
+  function trackingSubscriptions(row: UserSubscriptionRow | null | undefined): UserSubscriptionRepositoryPort & {
+    calls: Array<{ subscriberId: string; ownerId: string }>;
+  } {
+    const calls: Array<{ subscriberId: string; ownerId: string }> = [];
+    const notUsed = () => {
+      throw new Error("not used in these tests");
+    };
+    return {
+      calls,
+      create: notUsed,
+      claimPending: notUsed,
+      findById: notUsed,
+      activate: notUsed,
+      cancel: notUsed,
+      retireExpired: notUsed,
+      listExpiredActive: notUsed,
+      listStalePending: notUsed,
+      expireStalePending: notUsed,
+      findExpirableInvoice: notUsed,
+      listExpiringActive: notUsed,
+      async findActiveFor() {
+        return null;
+      },
+      listActiveSubscribers: notUsed,
+      listActiveOwnersAmong: notUsed,
+      createTransaction: notUsed,
+      findTransactionById: notUsed,
+      attachGatewayReference: notUsed,
+      findPendingCheckout: notUsed,
+      markTransactionPaid: notUsed,
+      listPendingRequests: notUsed,
+      approveFreeRequest: notUsed,
+      rejectRequest: notUsed,
+      async findPendingFor(subscriberId: string, ownerId: string) {
+        calls.push({ subscriberId, ownerId });
+        if (row === undefined) {
+          throw new Error("findPendingFor must not be called for this viewer");
+        }
+        return row;
+      },
+    } as unknown as UserSubscriptionRepositoryPort & {
+      calls: Array<{ subscriberId: string; ownerId: string }>;
+    };
+  }
+
+  function freeRequestRow(): UserSubscriptionRow {
+    return {
+      id: "sub-pending-1",
+      subscriberId: "viewer-1",
+      tierId: "tier-1",
+      ownerId: "user-1",
+      status: "pending",
+      kind: "free",
+      currentPeriodEnd: null,
+      createdAt: new Date("2026-08-19T00:00:00.000Z"),
+    };
+  }
+
+  it("does NOT call findPendingFor for a signed-out visitor, and answers false", async () => {
+    const subscriptions = trackingSubscriptions(undefined);
+    const useCase = new GetUserProfile(
+      fakeRepository([record()]),
+      fakeFollowRepository({}),
+      fakeUserTierRepository([]),
+      noMembership(),
+      subscriptions
+    );
+
+    const profile = await useCase.execute("wildan", null);
+
+    expect(profile.membership.viewerRequestPending).toBe(false);
+    expect(subscriptions.calls).toEqual([]);
+  });
+
+  it("does NOT call findPendingFor on the viewer's OWN profile, and answers false", async () => {
+    const subscriptions = trackingSubscriptions(undefined);
+    const useCase = new GetUserProfile(
+      fakeRepository([record()]),
+      fakeFollowRepository({}),
+      fakeUserTierRepository([]),
+      noMembership(),
+      subscriptions
+    );
+
+    const profile = await useCase.execute("wildan", "user-1");
+
+    expect(profile.membership.viewerRequestPending).toBe(false);
+    expect(subscriptions.calls).toEqual([]);
+  });
+
+  it("calls findPendingFor(viewerId, ownerId) for a signed-in visitor, and answers false when there is no row", async () => {
+    const subscriptions = trackingSubscriptions(null);
+    const useCase = new GetUserProfile(
+      fakeRepository([record()]),
+      fakeFollowRepository({}),
+      fakeUserTierRepository([]),
+      noMembership(),
+      subscriptions
+    );
+
+    const profile = await useCase.execute("wildan", "viewer-1");
+
+    expect(profile.membership.viewerRequestPending).toBe(false);
+    expect(subscriptions.calls).toEqual([{ subscriberId: "viewer-1", ownerId: "user-1" }]);
+  });
+
+  it("threads a free pending row through to viewerRequestPending: true", async () => {
+    const subscriptions = trackingSubscriptions(freeRequestRow());
+    const useCase = new GetUserProfile(
+      fakeRepository([record()]),
+      fakeFollowRepository({}),
+      fakeUserTierRepository([]),
+      noMembership(),
+      subscriptions
+    );
+
+    const profile = await useCase.execute("wildan", "viewer-1");
+
+    expect(profile.membership.viewerRequestPending).toBe(true);
+  });
+
+  it("threads a PAID pending row through to viewerRequestPending: false — the ruling this task's brief spells out", async () => {
+    const subscriptions = trackingSubscriptions({ ...freeRequestRow(), kind: "paid" });
+    const useCase = new GetUserProfile(
+      fakeRepository([record()]),
+      fakeFollowRepository({}),
+      fakeUserTierRepository([]),
+      noMembership(),
+      subscriptions
+    );
+
+    const profile = await useCase.execute("wildan", "viewer-1");
+
+    expect(profile.membership.viewerRequestPending).toBe(false);
   });
 });
 
@@ -547,7 +742,8 @@ describe("GetUserProfile.executeOwn (authenticated, by id)", () => {
       fakeFollowRepository({}),
       fakeUserTierRepository([])
     ,
-      noMembership()
+      noMembership(),
+      noPendingRequest()
     );
     const profile = await useCase.executeOwn("user-1");
 
@@ -581,7 +777,9 @@ describe("GetUserProfile.executeOwn (authenticated, by id)", () => {
         throw new Error("must not be called");
       },
     };
-    const useCase = new GetUserProfile(fakeRepository([record()]), fakeFollowRepository({}), tiers, noMembership());
+    const useCase = new GetUserProfile(fakeRepository([record()]), fakeFollowRepository({}), tiers, noMembership(),
+      noPendingRequest()
+    );
 
     await expect(useCase.executeOwn("user-1")).resolves.toBeDefined();
   });
@@ -592,7 +790,8 @@ describe("GetUserProfile.executeOwn (authenticated, by id)", () => {
       fakeFollowRepository({}),
       fakeUserTierRepository([])
     ,
-      noMembership()
+      noMembership(),
+      noPendingRequest()
     );
     await expect(useCase.executeOwn("ghost")).rejects.toBeInstanceOf(NotFoundError);
   });

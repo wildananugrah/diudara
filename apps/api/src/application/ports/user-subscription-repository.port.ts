@@ -5,6 +5,8 @@ export interface UserSubscriptionRow {
   tierId: string;
   ownerId: string;
   status: string;
+  /** 'paid' | 'free'. See spec §3: this is what keeps a PAID row's NULL period reading as a bug, while a free row's NULL is the intended shape. */
+  kind: string;
   currentPeriodEnd: Date | null;
   createdAt: Date;
 }
@@ -84,18 +86,57 @@ export interface PendingUserCheckout {
   invoiceUrl: string;
 }
 
+/**
+ * One row of an owner's pending free-membership queue — Task 5 of
+ * "free memberships", `GET /users/me/membership-requests`. The wire's CLOSED
+ * public projection, same discipline `SubscriberRow` above documents: only
+ * what the owner needs to recognise the request and decide on it, never
+ * `subscriberId` (an internal id the owner has no use for and which would let
+ * a client correlate this list against other endpoints that DO take an id)
+ * and never an email or a `whatsapp_number` — the same two columns
+ * `SubscriberRow`'s docstring excludes from the subscriber list, for the same
+ * reason.
+ *
+ * `id` IS a `user_subscription` row id, not excluded like `subscriberId`
+ * above — it is what the owner sends straight back on
+ * `POST /me/membership-requests/:id/approve` and `/reject`, so withholding it
+ * would make the list useless for the one thing it exists to drive.
+ */
+export interface PendingRequestRow {
+  id: string;
+  subscriberHandle: string;
+  subscriberDisplayName: string;
+  /** The free tier this request is for — an owner may run more than one. */
+  tierName: string;
+  createdAt: Date;
+}
+
 export interface UserSubscriptionRepositoryPort {
   /**
    * Raw INSERT. Rejects — it does not return null — when the pair already holds
    * a pending subscription, because `user_subscription_one_pending` is a
    * database constraint and not an application rule. `claimPending` below is
-   * what production code calls; this stays for fixtures that want the row and
-   * nothing else.
+   * what production code calls for a PAID purchase; `StartUserSubscription`'s
+   * free path (Task 4 of "free memberships") calls THIS one directly instead
+   * — a free request never risks a second live invoice (there is no invoice
+   * at all), so the pending-slot claim dance `claimPending` exists for buys
+   * nothing here, and a plain INSERT is the honest shape.
+   *
+   * `kind` is OPTIONAL and defaults to `'paid'` — the same default
+   * `db/schema.ts` gives the column itself (Task 1), so an omitted `kind`
+   * here and an omitted `kind` at the driver agree. This keeps every
+   * pre-existing caller of this method (there are dozens, across fixtures
+   * this task does not otherwise touch) creating exactly the paid row it
+   * always created, with nothing to update. `StartUserSubscription`'s free
+   * branch is the one caller that passes `kind: "free"` explicitly, because
+   * that is the one call site where the value is NOT the default.
    */
   create(input: {
     subscriberId: string;
     tierId: string;
     ownerId: string;
+    /** 'paid' | 'free', defaults to 'paid'. See `UserSubscriptionRow.kind`'s own docstring. */
+    kind?: string;
   }): Promise<UserSubscriptionRow>;
   /**
    * CLAIMS this pair's one pending subscription slot, and reports whether this
@@ -136,6 +177,14 @@ export interface UserSubscriptionRepositoryPort {
     subscriberId: string;
     tierId: string;
     ownerId: string;
+    /**
+     * 'paid' | 'free', defaulting to 'paid' via the column's own DEFAULT.
+     * A FREE request takes the pending slot through THIS method, not through
+     * `create`, for the reason this method exists: the slot is arbitrated by
+     * `user_subscription_one_pending`, and a plain insert turns a second tap of
+     * "Minta jadi anggota" into a 23505 and a 500.
+     */
+    kind?: string;
   }): Promise<PendingSubscriptionClaim>;
   findById(id: string): Promise<UserSubscriptionRow | null>;
   /**
@@ -286,9 +335,30 @@ export interface UserSubscriptionRepositoryPort {
   /** Task 8's membership check: is this subscriber an active member of this owner. */
   findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null>;
   /**
+   * Task 6 of "free memberships": is there a `status = 'pending'` row for
+   * this (subscriber, owner) pair, whatever put it there — a PAID checkout
+   * with an open invoice (`StartUserSubscription`'s paid path) or a FREE
+   * request awaiting the owner's decision (`claimPending({ ..., kind: "free"
+   * })`). `status = 'pending'` alone, nothing else — deliberately NOT
+   * `findPendingCheckout`'s three-way predicate (subscription pending,
+   * transaction pending, transaction has an invoice url): that method exists
+   * to dedupe a SECOND paid checkout tap and a free request has no
+   * transaction at all, so it would never be found through it. This read
+   * stays a truthful, general-purpose "is there a pending row for this
+   * pair" — a caller that only cares about ONE kind (the public profile
+   * cares about free only, so it is not left mid-payment being told "awaiting
+   * approval") decides that in its own projection, off the `kind` this
+   * method hands back, rather than this query silently narrowing to one kind
+   * and becoming useless for the other caller.
+   *
+   * The most recent such row, when a pair somehow has more than one (it
+   * should not: `user_subscription_one_pending` allows only one).
+   */
+  findPendingFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null>;
+  /**
    * A creator's OWN subscriber list — Task 6 of Phase 5b, spec §8. Only
-   * CURRENTLY subscribed members: `status = 'active'` AND
-   * `current_period_end > now`, strict — the exact same "currently
+   * CURRENTLY subscribed members: `status = 'active'` AND (`kind = 'free'`
+   * OR `current_period_end > now`, strict) — the exact same "currently
    * subscribed" definition `is-member-of.ts`'s `membershipStanding` uses,
    * mirrored here rather than composed from it: `IsMemberOf` answers a
    * per-pair question off `findActiveFor`'s single row, and this answers a
@@ -296,14 +366,17 @@ export interface UserSubscriptionRepositoryPort {
    * subscriber. `isMemberOf` itself is untouched — see that class's own
    * docstring on why it stays exactly as reviewed and mutation-pinned in 5a.
    *
-   * A membership whose period has lapsed is a PAST subscriber, not a current
-   * one — it still holds `status = 'active'` until Task 3's sweep retires
-   * it (§9's honest limitation, and the sweep may not have run yet), so a
-   * status-only filter would list somebody the paywall has already stopped
-   * admitting. `now` is a parameter, never read inside this method, for the
-   * same `ClockPort` reason every time-sensitive read in this codebase takes
-   * one: the boundary — the exact instant `current_period_end` passes — is
-   * what a caller needs to place deliberately in a test.
+   * A PAID membership whose period has lapsed is a PAST subscriber, not a
+   * current one — it still holds `status = 'active'` until Task 3's sweep
+   * retires it (§9's honest limitation, and the sweep may not have run yet),
+   * so a status-only filter would list somebody the paywall has already
+   * stopped admitting. A FREE membership (`kind = 'free'`) has no period at
+   * all by design (spec §3) and is admitted on `kind` alone, the same order
+   * `membershipStanding` checks it in. `now` is a parameter, never read
+   * inside this method, for the same `ClockPort` reason every time-sensitive
+   * read in this codebase takes one: the boundary — the exact instant
+   * `current_period_end` passes — is what a caller needs to place
+   * deliberately in a test.
    *
    * NEWEST FIRST (`created_at` desc, `id` desc tiebreak) — mirrors
    * `DrizzleFollowRepository.listFollowers`'s own ordering, and its own
@@ -317,25 +390,29 @@ export interface UserSubscriptionRepositoryPort {
    * Phase 6's paywall question, asked once for a whole feed page: which of
    * `ownerIds` is `subscriberId` CURRENTLY a member of. Same "currently
    * subscribed" definition as `listActiveSubscribers` and `is-member-of.ts`'s
-   * `membershipStanding` — `status = 'active'` AND `current_period_end >
-   * now`, strict — mirrored here rather than composed from either, for the
-   * same reason `listActiveSubscribers`'s own docstring gives: a feed holds
-   * posts from many authors, and answering this per-owner would be an N+1
-   * query on the page that matters most. `is-member-of.ts` stays untouched —
-   * see its own docstring on why it is pinned exactly as reviewed in 5a.
+   * `membershipStanding` — `status = 'active'` AND (`kind = 'free'` OR
+   * `current_period_end > now`, strict) — mirrored here rather than composed
+   * from either, for the same reason `listActiveSubscribers`'s own docstring
+   * gives: a feed holds posts from many authors, and answering this
+   * per-owner would be an N+1 query on the page that matters most.
+   * `is-member-of.ts` stays untouched — see its own docstring on why it is
+   * pinned exactly as reviewed in 5a.
    *
-   * A lapsed membership — `status` still `active` but its period already
-   * over, because Task 3 of 5b's sweep has not yet retired it (§9's honest
-   * limitation) — is excluded, not merely a past subscriber: a status-only
-   * filter would let a lapsed member keep seeing gated images they no longer
-   * pay for.
+   * A lapsed PAID membership — `status` still `active` but its period
+   * already over, because Task 3 of 5b's sweep has not yet retired it (§9's
+   * honest limitation) — is excluded, not merely a past subscriber: a
+   * status-only filter would let a lapsed member keep seeing gated images
+   * they no longer pay for. A FREE membership (`kind = 'free'`) is admitted
+   * on `kind` alone, regardless of `current_period_end` — which is always
+   * `NULL` for a free row by design (spec §3), never a period to compare.
    *
    * `now` is a parameter, never read inside this method, for the same
    * `ClockPort` reason every time-sensitive read in this codebase takes one.
    *
-   * Returns only the ids from `ownerIds` that are currently paid for — never
-   * the whole membership row, and never an id outside `ownerIds`. Order is
-   * unspecified; a caller building a per-post gate turns this into a Set.
+   * Returns only the ids from `ownerIds` that are currently paid-or-free
+   * members for — never the whole membership row, and never an id outside
+   * `ownerIds`. Order is unspecified; a caller building a per-post gate turns
+   * this into a Set.
    *
    * An empty `ownerIds` answers `[]` without touching the database — an
    * empty `IN ()` is a SQL error in some drivers and a pointless round trip
@@ -389,4 +466,67 @@ export interface UserSubscriptionRepositoryPort {
   findPendingCheckout(subscriberId: string, ownerId: string): Promise<PendingUserCheckout | null>;
   /** Flips a transaction to `paid` and records when. */
   markTransactionPaid(id: string, paidAt: Date): Promise<UserTransactionRow | null>;
+  /**
+   * Task 5 of "free memberships": an owner's queue of free-membership
+   * requests awaiting a decision — `status = 'pending'` AND `kind = 'free'`
+   * for this owner. A PAID pending checkout (an open Xendit invoice) is
+   * deliberately excluded by the `kind` predicate: it belongs to
+   * `findPendingCheckout`'s world, not this queue, and an owner approving it
+   * here would activate a membership nobody has paid for yet.
+   *
+   * Returns the CLOSED projection (`PendingRequestRow`) — see that type's own
+   * docstring for exactly what may and may not cross this boundary.
+   *
+   * Oldest first (`created_at` asc, `id` asc tiebreak): a queue, worked in the
+   * order people asked.
+   */
+  listPendingRequests(ownerId: string): Promise<PendingRequestRow[]>;
+  /**
+   * THE CONDITIONAL UPDATE that approves one free-membership request —
+   * flips `status` to `active` and leaves `current_period_end` NULL (a free
+   * row's permanent shape, spec §3; see `MembershipStanding`'s own docstring
+   * on `kind = 'free'`).
+   *
+   * THE ARBITER is the WHERE clause, never a read followed by a write: this
+   * row's id, THIS owner, still `status = 'pending'` AND `kind = 'free'`.
+   * Two concurrent approvals of the same request race to one winner —
+   * Postgres serialises the two UPDATEs on the row's own lock, and by the
+   * time the loser's UPDATE re-evaluates its WHERE the winner has already
+   * moved the row off `pending`, so the loser matches zero rows and this
+   * answers `null`. The SAME predicate is why a second approval after the
+   * first has already landed also answers `null` — nothing here is a special
+   * case, both are just "no longer pending".
+   *
+   * `ownerId` in the WHERE, not a separate ownership check afterwards, is
+   * what makes a foreign owner's attempt answer `null` exactly like a missing
+   * id — the same "gated and absent look identical from outside" the media
+   * routes already follow, and what lets the use case throw one
+   * `NotFoundError` for both without this method ever having to distinguish
+   * them.
+   *
+   * Can raise a unique-violation on `user_subscription_one_active` when the
+   * subscriber already holds a DIFFERENT active row for this owner (a
+   * pending free request survives alongside an existing active membership —
+   * nothing stops both existing at once, since they are different rows).
+   * Implementations MUST translate that into `UniqueViolationError` (via
+   * `rethrowUniqueViolation`) rather than let the raw driver error escape —
+   * this codebase never lets a driver error reach a route.
+   */
+  approveFreeRequest(id: string, ownerId: string): Promise<UserSubscriptionRow | null>;
+  /**
+   * Rejects one free-membership request by DELETING the row — not a status
+   * flip, unlike every other terminal transition on this table
+   * (`cancel`/`retireExpired`/`expireStalePending`). A rejected request keeps
+   * no record on purpose: rejecting it must free the person to ask again, and
+   * a soft-deleted `rejected` row sitting where a fresh pending request wants
+   * to go would either need its own carve-out in `user_subscription_one_pending`
+   * or would permanently block a second ask — worse than simply not existing.
+   *
+   * Same WHERE-clause arbitration as `approveFreeRequest`: this row's id,
+   * THIS owner, `status = 'pending'` AND `kind = 'free'`. Returns whether a
+   * row actually moved — `false` for a missing id, a foreign owner's id, or a
+   * request already decided, all indistinguishable to the caller for the same
+   * "gated and absent look identical" reason `approveFreeRequest` documents.
+   */
+  rejectRequest(id: string, ownerId: string): Promise<boolean>;
 }

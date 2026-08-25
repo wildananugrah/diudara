@@ -177,39 +177,65 @@ describe("MembershipSettings — connecting", () => {
   });
 });
 
-describe("MembershipSettings — the tier editor is gated on a CONNECTED account", () => {
-  it("refuses to open the editor, in Bahasa, when no payout account exists", async () => {
+describe("MembershipSettings — the tier editor, since Task 7 of free memberships", () => {
+  /**
+   * THE POINT OF TASK 7. A `priceAmount === 0` tier needs no payout account
+   * at all (`ManageUserTiers.create` skips its payout check entirely for
+   * one) — before this task the editor stayed CLOSED for exactly this
+   * account state, which made a free tier just as unreachable as a paid one
+   * for a creator who had never connected payment. Asserts the request that
+   * was actually sent, not only that a success message appeared — a form
+   * that silently dropped the submission would leave the same rendered text
+   * behind.
+   */
+  it("lets a creator with NO payout account create a free tier", async () => {
+    const created = { ...TIER, id: "tier-free", name: "Gratis", priceAmount: 0 };
+    const calls = mockApi((url, init) => {
+      if (url === "/users/me/payout") return jsonResponse(NOT_CONNECTED);
+      if (url === "/users/me/tiers" && methodOf(init) === "POST") return jsonResponse(created, 201);
+      if (url === "/users/me/tiers") return jsonResponse([]);
+      return jsonResponse({ error: "unexpected" }, 500);
+    });
+
+    render(<MembershipSettings />);
+    fireEvent.change(await screen.findByLabelText("Nama tingkatan"), {
+      target: { value: "Gratis" },
+    });
+    fireEvent.change(screen.getByLabelText("Harga per bulan (Rp)"), { target: { value: "0" } });
+    fireEvent.click(screen.getByRole("button", { name: "Terbitkan tingkatan" }));
+
+    await screen.findByText("Tingkatan diterbitkan.");
+    const post = calls.filter((c) => c.url === "/users/me/tiers" && methodOf(c.init) === "POST");
+    expect(post.length).toBe(1);
+    expect(JSON.parse(post[0]!.init!.body as string)).toEqual({ name: "Gratis", priceAmount: 0 });
+
+    const offer = screen.getByTestId("tier-offer");
+    expect(within(offer).queryAllByText("Gratis").length).toBeGreaterThan(0);
+  });
+
+  it("opens the editor when no payout account exists at all, not only once connected", async () => {
     serverWith(NOT_CONNECTED);
 
     render(<MembershipSettings />);
-    const reason = await screen.findByTestId("tier-editor-unavailable");
 
-    expect(reason.textContent).toContain("Hubungkan akun pembayaran Anda terlebih dahulu");
-    expect(reason.textContent).toContain("belum punya tempat tujuan");
-    expect(screen.queryAllByRole("button", { name: "Terbitkan tingkatan" }).length).toBe(0);
-    expect(screen.queryAllByLabelText("Nama tingkatan").length).toBe(0);
+    await screen.findByLabelText("Nama tingkatan");
+    expect(screen.getAllByRole("button", { name: "Terbitkan tingkatan" }).length).toBe(1);
+    expect(screen.queryAllByTestId("tier-editor-unavailable").length).toBe(0);
+    // Said up front, not only discovered as a 409 after pressing submit.
+    expect(screen.getByText(/Tingkatan gratis \(harga 0\) bisa diterbitkan sekarang/)).toBeTruthy();
   });
 
-  /**
-   * THE DISTINCTION THIS WHOLE GATE EXISTS FOR. A truthy `xendit_account_id`
-   * holding the sentinel is NOT a payout account: `ManageUserTiers.create`
-   * refuses it with a 409, so an editor that opened here would collect a name
-   * and a price and then fail. The explanation must say *waiting*, not
-   * *connect* — the person has already connected.
-   */
-  it("keeps the editor shut while the account is mid-provisioning, and says WHY it is waiting", async () => {
+  it("opens the editor while the account is mid-provisioning too", async () => {
     serverWith(PROVISIONING);
 
     render(<MembershipSettings />);
-    const reason = await screen.findByTestId("tier-editor-unavailable");
 
-    expect(reason.textContent).toContain("menunggu verifikasi");
-    expect(reason.textContent).toContain("belum punya tempat tujuan");
-    expect(reason.textContent).not.toContain("Hubungkan akun pembayaran Anda terlebih dahulu");
-    expect(screen.queryAllByRole("button", { name: "Terbitkan tingkatan" }).length).toBe(0);
+    await screen.findByLabelText("Nama tingkatan");
+    expect(screen.getAllByRole("button", { name: "Terbitkan tingkatan" }).length).toBe(1);
+    expect(screen.queryAllByTestId("tier-editor-unavailable").length).toBe(0);
   });
 
-  it("opens the editor once the account is genuinely connected", async () => {
+  it("opens the editor once the account is genuinely connected, with no payout hint shown", async () => {
     serverWith(CONNECTED);
 
     render(<MembershipSettings />);
@@ -217,6 +243,38 @@ describe("MembershipSettings — the tier editor is gated on a CONNECTED account
     await screen.findByLabelText("Nama tingkatan");
     expect(screen.getAllByRole("button", { name: "Terbitkan tingkatan" }).length).toBe(1);
     expect(screen.queryAllByTestId("tier-editor-unavailable").length).toBe(0);
+    expect(screen.queryAllByText(/Tingkatan gratis \(harga 0\) bisa diterbitkan sekarang/).length).toBe(0);
+  });
+
+  /**
+   * The gate is not gone — it moved from "the whole form" to "a paid
+   * submission specifically". `ManageUserTiers.create` still 409s a paid
+   * tier without a connected account, and the screen still turns that into
+   * its own Bahasa sentence rather than the server's (see the "never the
+   * server's own string" describe block below for the exact wording check);
+   * this only pins that the REQUEST for a paid tier still goes out when no
+   * account is connected — the client no longer second-guesses the server.
+   */
+  it("still lets a paid submission round-trip to the server when no payout account is connected", async () => {
+    const calls = mockApi((url, init) => {
+      if (url === "/users/me/payout") return jsonResponse(NOT_CONNECTED);
+      if (url === "/users/me/tiers" && methodOf(init) === "POST") {
+        return jsonResponse({ error: "Hubungkan akun pembayaran Anda terlebih dahulu..." }, 409);
+      }
+      if (url === "/users/me/tiers") return jsonResponse([]);
+      return jsonResponse({ error: "unexpected" }, 500);
+    });
+
+    render(<MembershipSettings />);
+    fireEvent.change(await screen.findByLabelText("Nama tingkatan"), {
+      target: { value: "Anggota" },
+    });
+    fireEvent.change(screen.getByLabelText("Harga per bulan (Rp)"), { target: { value: "50000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Terbitkan tingkatan" }));
+
+    await screen.findByRole("alert");
+    const post = calls.filter((c) => c.url === "/users/me/tiers" && methodOf(c.init) === "POST");
+    expect(post.length).toBe(1);
   });
 });
 
@@ -269,17 +327,68 @@ describe("MembershipSettings — creating and withdrawing a tier", () => {
     expect((screen.getByLabelText("Harga per bulan (Rp)") as HTMLInputElement).value).toBe("");
   });
 
-  it("refuses a price of zero without sending anything, naming the rule in Bahasa", async () => {
+  /**
+   * THE BLOCKER Task 7 exists to remove. `parsePriceAmount` used to fold
+   * "empty" and "not positive" into one `null`, so this test used to assert
+   * that a price of 0 was REFUSED — the exact defect that made a free tier
+   * unreachable even though `ManageUserTiers.create` has accepted `0` since
+   * Task 3. Now it asserts the opposite: 0 is sent, verbatim.
+   */
+  it("sends a price of zero rather than refusing it — 0 is a legal, free price now", async () => {
+    const calls = mockApi((url, init) => {
+      if (url === "/users/me/payout") return jsonResponse(CONNECTED);
+      if (url === "/users/me/tiers" && methodOf(init) === "POST") {
+        return jsonResponse({ ...TIER, id: "tier-free", name: "Gratis", priceAmount: 0 }, 201);
+      }
+      if (url === "/users/me/tiers") return jsonResponse([]);
+      return jsonResponse({ error: "unexpected" }, 500);
+    });
+
+    render(<MembershipSettings />);
+    fireEvent.change(await screen.findByLabelText("Nama tingkatan"), {
+      target: { value: "Gratis" },
+    });
+    fireEvent.change(screen.getByLabelText("Harga per bulan (Rp)"), { target: { value: "0" } });
+    fireEvent.click(screen.getByRole("button", { name: "Terbitkan tingkatan" }));
+
+    await screen.findByText("Tingkatan diterbitkan.");
+    const post = calls.filter((c) => c.url === "/users/me/tiers" && methodOf(c.init) === "POST");
+    expect(post.length).toBe(1);
+    expect(JSON.parse(post[0]!.init!.body as string)).toEqual({ name: "Gratis", priceAmount: 0 });
+  });
+
+  it("refuses an empty price without sending anything", async () => {
     const calls = serverWith(CONNECTED);
 
     render(<MembershipSettings />);
     fireEvent.change(await screen.findByLabelText("Nama tingkatan"), {
       target: { value: "Anggota" },
     });
-    fireEvent.change(screen.getByLabelText("Harga per bulan (Rp)"), { target: { value: "0" } });
     fireEvent.click(screen.getByRole("button", { name: "Terbitkan tingkatan" }));
 
-    await screen.findByText("Harga tingkatan harus lebih dari nol.");
+    await screen.findByText("Harga tingkatan wajib diisi. Isi 0 untuk tingkatan gratis.");
+    expect(calls.filter((c) => methodOf(c.init) === "POST").length).toBe(0);
+  });
+
+  /**
+   * The web's own refusal now matches `ManageUserTiers.create`'s exact
+   * wording for a genuinely invalid price — the API's `-1`/`-10_000` refusal
+   * from `users.test.ts` answered in the same words, so the two surfaces
+   * never disagree about why. `parsePriceAmount` detects the sign on the RAW
+   * string, since digit-extraction alone would silently strip a leading `-`
+   * and turn a negative price into its positive magnitude.
+   */
+  it("refuses a negative price without sending anything, in the API's own words", async () => {
+    const calls = serverWith(CONNECTED);
+
+    render(<MembershipSettings />);
+    fireEvent.change(await screen.findByLabelText("Nama tingkatan"), {
+      target: { value: "Anggota" },
+    });
+    fireEvent.change(screen.getByLabelText("Harga per bulan (Rp)"), { target: { value: "-50000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Terbitkan tingkatan" }));
+
+    await screen.findByText("Harga tingkatan tidak boleh negatif.");
     expect(calls.filter((c) => methodOf(c.init) === "POST").length).toBe(0);
   });
 

@@ -200,6 +200,18 @@ export const UniqueRule = {
    * `live` row before attempting it.
    */
   userStreamOneLive: "user_stream_one_live",
+  /**
+   * `user_subscription_one_active` — at most one active `user_subscription`
+   * per (subscriber, owner). Task 5 of "free memberships":
+   * `DrizzleUserSubscriptionRepository.approveFreeRequest` is an UPDATE that
+   * flips a PENDING free request to `active`, and nothing upstream can see in
+   * advance whether the same subscriber already holds a DIFFERENT active row
+   * for this owner (a pending free request survives alongside an existing
+   * active membership, since they are different rows) — same shape as
+   * `userStreamOneLive` above, an INSERT-shaped race turned into a
+   * conditional write that can still collide with a partial unique index.
+   */
+  userSubscriptionOneActive: "user_subscription_one_active",
 } as const;
 
 export type UniqueRuleName = (typeof UniqueRule)[keyof typeof UniqueRule];

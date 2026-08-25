@@ -1,9 +1,12 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { appUsers, userSubscriptions, userTransactions } from "../../db/schema";
+import { appUsers, userSubscriptions, userTiers, userTransactions } from "../../db/schema";
 import { isConnectedPaymentAccount } from "../../domain/payment-account";
+import { UniqueRule } from "../../application/errors";
+import { rethrowUniqueViolation } from "./pg-errors";
 import type {
   ExpirableInvoiceRef,
+  PendingRequestRow,
   PendingSubscriptionClaim,
   PendingUserCheckout,
   SubscriberRow,
@@ -28,6 +31,20 @@ const subscriberProjection = {
 } as const;
 
 /**
+ * The CLOSED wire projection for `listPendingRequests` — see
+ * `PendingRequestRow`'s own docstring for exactly why these columns and no
+ * others (`subscriberId`, an email, a `whatsapp_number` are never selected,
+ * not merely stripped afterwards).
+ */
+const pendingRequestProjection = {
+  id: userSubscriptions.id,
+  subscriberHandle: appUsers.handle,
+  subscriberDisplayName: appUsers.displayName,
+  tierName: userTiers.name,
+  createdAt: userSubscriptions.createdAt,
+} as const;
+
+/**
  * Every id that reaches this repository from OUTSIDE is shape-checked against
  * this before it reaches the driver, exactly as the retired community
  * subscription repository did for the community flow.
@@ -47,6 +64,8 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     subscriberId: string;
     tierId: string;
     ownerId: string;
+    /** 'paid' | 'free', defaults to 'paid'. See the port's own docstring on this method. */
+    kind?: string;
   }): Promise<UserSubscriptionRow> {
     const [row] = await this.db
       .insert(userSubscriptions)
@@ -54,6 +73,11 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         subscriberId: input.subscriberId,
         tierId: input.tierId,
         ownerId: input.ownerId,
+        // Omitted entirely rather than passed as `input.kind ?? "paid"` when
+        // absent: the schema's own `DEFAULT 'paid'` (Task 1) is then what
+        // fires, so there is exactly one place `"paid"` is spelled as the
+        // default, not two that could drift apart.
+        ...(input.kind === undefined ? {} : { kind: input.kind }),
       })
       .returning();
     return row!;
@@ -66,7 +90,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
    *
    * **A CAUGHT UNIQUE VIOLATION IS ONLY CLEAN WHEN IT IS THE LAST STATEMENT OF
    * ITS TRANSACTION.** Postgres aborts the transaction the moment the violation
-   * is raised, so everything after the catch — starting with `findPending`
+   * is raised, so everything after the catch — starting with `findPendingFor`
    * below, which the catch itself needs — fails with `25P02`, "current
    * transaction is aborted, commands ignored until end of transaction block".
    * On the pool that never showed, because the implicit transaction was one
@@ -94,6 +118,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     subscriberId: string;
     tierId: string;
     ownerId: string;
+    kind?: string;
   }): Promise<PendingSubscriptionClaim> {
     const [row] = await this.db
       .insert(userSubscriptions)
@@ -101,6 +126,9 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         subscriberId: input.subscriberId,
         tierId: input.tierId,
         ownerId: input.ownerId,
+        // Omitted when absent so the column's own DEFAULT 'paid' fires — one
+        // place spells the default, not two that could drift.
+        ...(input.kind === undefined ? {} : { kind: input.kind }),
       })
       .onConflictDoNothing({
         target: [userSubscriptions.subscriberId, userSubscriptions.ownerId],
@@ -110,7 +138,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     if (row) {
       return { subscription: row, created: true };
     }
-    const existing = await this.findPending(input.subscriberId, input.ownerId);
+    const existing = await this.findPendingFor(input.subscriberId, input.ownerId);
     if (!existing) {
       // The holder settled or released between the conflict and this read.
       // Failing is the honest answer — the caller retries and claims it —
@@ -124,11 +152,21 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     return { subscription: existing, created: false };
   }
 
-  /** The pair's pending subscription, whatever its tier. Private: `claimPending` is the contract. */
-  private async findPending(
-    subscriberId: string,
-    ownerId: string
-  ): Promise<UserSubscriptionRow | null> {
+  /**
+   * See the port's own docstring for the full contract. `claimPending`'s
+   * loser-reads-the-winner path is the other caller — same query, no
+   * `kind` filter either way, because the loser needs to see a PAID pending
+   * row exactly as readily as a FREE one.
+   *
+   * Newest first (`created_at` desc): mirrors `findPendingCheckout`'s own
+   * "most recent such row" tie-break, for the same reason — a pair should
+   * never actually have more than one (`user_subscription_one_pending`), but
+   * if it somehow did, the freshest one is the honest answer.
+   */
+  async findPendingFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null> {
+    if (!UUID_PATTERN.test(subscriberId) || !UUID_PATTERN.test(ownerId)) {
+      return null;
+    }
     const [row] = await this.db
       .select()
       .from(userSubscriptions)
@@ -139,6 +177,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
           eq(userSubscriptions.status, "pending")
         )
       )
+      .orderBy(desc(userSubscriptions.createdAt), desc(userSubscriptions.id))
       .limit(1);
     return row ?? null;
   }
@@ -247,7 +286,29 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     return this.db
       .select()
       .from(userSubscriptions)
-      .where(and(eq(userSubscriptions.status, "pending"), lte(userSubscriptions.createdAt, cutoff)))
+      // `kind = 'paid'`, and this filter is the whole difference between an
+      // abandoned cart and a request waiting on a human.
+      //
+      // This sweep exists so an unpaid invoice cannot hold the pair's single
+      // pending slot for ever — the buyer walked away, and the slot should
+      // return. A FREE request is the opposite situation: nobody abandoned it,
+      // it is waiting for the OWNER to press Setujui, and there are no
+      // notifications yet (spec §8) so an owner finds out by looking. Expiring
+      // it after two hours deleted the request from the owner's queue, flipped
+      // the requester's profile back to "Minta jadi anggota" as though they had
+      // never asked, and made "Setujui" answer 404 on a row still on screen.
+      //
+      // Whole-branch review, H-1. Spec §3.1 enumerated every site comparing
+      // `current_period_end` and correctly cleared the expiry sweep and the
+      // reminder — this one compares `created_at`, so it was never in that
+      // table, and no task in the plan touched `apps/worker` at all.
+      .where(
+        and(
+          eq(userSubscriptions.status, "pending"),
+          eq(userSubscriptions.kind, "paid"),
+          lte(userSubscriptions.createdAt, cutoff)
+        )
+      )
       .orderBy(userSubscriptions.createdAt)
       .limit(limit);
   }
@@ -384,6 +445,23 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
    * Not part of `UserSubscriptionRepositoryPort` — this is an implementation
    * detail `findActiveFor` composes, not a capability the application layer
    * is meant to reach for.
+   *
+   * DELIBERATELY STATUS-ONLY — no `current_period_end` disjunct was added
+   * here for the free-memberships plan's Task 2, unlike `listActiveSubscribers`
+   * and `listActiveOwnersAmong` below. Those two ARE the period comparison —
+   * they decide membership themselves and hand back only a projection or an
+   * id, so `kind = 'free' OR current_period_end > now` has to live in their
+   * WHERE clause. `findActiveFor` hands back the WHOLE row (including `kind`)
+   * to `IsMemberOf`, which asks `membershipStanding` — the one pure function
+   * both `IsMemberOf` and `StartUserSubscription`'s refusal share — to decide
+   * "member" vs "lapsed" vs "none" off that row, `kind` included. Adding a
+   * period filter here would make this query silently omit a PAID lapsed row
+   * that `StartUserSubscription` still needs to see (its refusal is
+   * deliberately status-only — see the port's own docstring on `retireExpired`
+   * for why: a lapsed row must still block a second purchase until the sweep
+   * retires it). So this WHERE clause is untouched, and it already returns a
+   * free row's `kind` correctly — `.select()` with no column list was never
+   * narrower than the schema, and Task 1 added `kind` to that schema.
    */
   activeMembershipQuery(subscriberId: string, ownerId: string) {
     return this.db
@@ -408,10 +486,14 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
   }
 
   /**
-   * See the port's own docstring for the full contract. `gt` on
-   * `current_period_end` is the SAME strict comparison
-   * `IsMemberOf.membershipStanding` uses (`> now`, not `>=`) — a period
-   * ending at exactly `now` has ended, not one tick from ending.
+   * See the port's own docstring for the full contract. Same disjunct as
+   * `listActiveOwnersAmong` below and the SAME definition `is-member-of.ts`'s
+   * `membershipStanding` answers in pure code: `status = 'active'` AND
+   * (`kind = 'free'` OR `current_period_end > now`, strict). A free row has
+   * no period BY DESIGN (spec §3) — nothing ever writes one — so `kind` is
+   * checked FIRST, the same order `membershipStanding` uses, and a paid row
+   * still needs its period strictly in the future: `> now`, not `>=` — a
+   * period ending at exactly `now` has ended, not one tick from ending.
    *
    * Selects `subscriberProjection` ONLY — never `userSubscriptions.*` or
    * `appUsers.*` — so the closed shape is enforced at the query, the same
@@ -430,17 +512,21 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         and(
           eq(userSubscriptions.ownerId, ownerId),
           eq(userSubscriptions.status, "active"),
-          gt(userSubscriptions.currentPeriodEnd, now)
+          or(eq(userSubscriptions.kind, "free"), gt(userSubscriptions.currentPeriodEnd, now))
         )
       )
       .orderBy(desc(userSubscriptions.createdAt), desc(userSubscriptions.id));
   }
 
   /**
-   * See the port's own docstring for the full contract. Same strict `gt` on
-   * `current_period_end` as `listActiveSubscribers` and `findActiveFor` —
-   * `is-member-of.ts`'s `> now`, not `>=` — a period ending at exactly `now`
-   * has ended, not one tick from ending.
+   * See the port's own docstring for the full contract. Same disjunct as
+   * `listActiveSubscribers` above and `findActiveFor`'s `membershipStanding` —
+   * `status = 'active'` AND (`kind = 'free'` OR `current_period_end > now`,
+   * strict). THIS IS THE QUERY THAT CAN LEAK PHOTOS: it is Phase 6's paywall
+   * read for a whole feed page, so a wrong disjunct here serves every gated
+   * photo of every creator to everyone. `kind = 'free'` grants regardless of
+   * `current_period_end` (a free row's period is always `NULL` by design, spec
+   * §3) and a paid row still needs its period strictly in the future.
    *
    * An empty `ownerIds` short-circuits before the query: an empty `IN ()` is
    * a SQL error in some drivers and a pointless round trip in all of them.
@@ -459,7 +545,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
           eq(userSubscriptions.subscriberId, subscriberId),
           inArray(userSubscriptions.ownerId, ownerIds),
           eq(userSubscriptions.status, "active"),
-          gt(userSubscriptions.currentPeriodEnd, now)
+          or(eq(userSubscriptions.kind, "free"), gt(userSubscriptions.currentPeriodEnd, now))
         )
       );
     return rows.map((row) => row.ownerId);
@@ -575,5 +661,99 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
       .where(eq(userTransactions.id, id))
       .returning();
     return row ?? null;
+  }
+
+  /**
+   * See the port's own docstring for the full contract. Selects
+   * `pendingRequestProjection` ONLY, never `userSubscriptions.*` or
+   * `appUsers.*` — the closed shape enforced at the query, same discipline
+   * `listActiveSubscribers` above follows for `subscriberProjection`.
+   *
+   * `kind = 'free'` excludes a PAID pending checkout (an open Xendit
+   * invoice) — that belongs to `findPendingCheckout`'s world, not this
+   * queue. Oldest first: a queue, worked in the order people asked.
+   */
+  async listPendingRequests(ownerId: string): Promise<PendingRequestRow[]> {
+    if (!UUID_PATTERN.test(ownerId)) {
+      return [];
+    }
+    return this.db
+      .select(pendingRequestProjection)
+      .from(userSubscriptions)
+      .innerJoin(appUsers, eq(userSubscriptions.subscriberId, appUsers.id))
+      .innerJoin(userTiers, eq(userSubscriptions.tierId, userTiers.id))
+      .where(
+        and(
+          eq(userSubscriptions.ownerId, ownerId),
+          eq(userSubscriptions.status, "pending"),
+          eq(userSubscriptions.kind, "free")
+        )
+      )
+      .orderBy(asc(userSubscriptions.createdAt), asc(userSubscriptions.id));
+  }
+
+  /**
+   * THE CONDITIONAL UPDATE — see the port's own docstring for why the WHERE
+   * clause (this row's id, THIS owner, still `pending` AND `free`) is the
+   * whole arbiter, never a read followed by a write, and why a foreign
+   * owner's attempt and an already-decided request both simply match zero
+   * rows and answer `null`.
+   *
+   * Wrapped in try/catch, unlike `activate` above: `activate` never collides
+   * with `user_subscription_one_active` because Task 2's purchase flow
+   * retires a lapsed row inside the SAME transaction before claiming a fresh
+   * pending one, so nothing else can be active for the pair by the time
+   * `activate` runs. This method has no such guarantee — a pending free
+   * request can sit alongside an ALREADY active row for the same
+   * (subscriber, owner) pair, since they are different rows and nothing
+   * before this UPDATE ever checked. A raw driver error must never reach the
+   * route, so the violation is translated to `UniqueViolationError` (a
+   * `ConflictError`) here, at the repository boundary, exactly as
+   * `startLive` does for `user_stream_one_live`.
+   */
+  async approveFreeRequest(id: string, ownerId: string): Promise<UserSubscriptionRow | null> {
+    try {
+      const [row] = await this.db
+        .update(userSubscriptions)
+        .set({ status: "active", currentPeriodEnd: null })
+        .where(
+          and(
+            eq(userSubscriptions.id, id),
+            eq(userSubscriptions.ownerId, ownerId),
+            eq(userSubscriptions.status, "pending"),
+            eq(userSubscriptions.kind, "free")
+          )
+        )
+        .returning();
+      return row ?? null;
+    } catch (err) {
+      rethrowUniqueViolation(err, {
+        user_subscription_one_active: {
+          rule: UniqueRule.userSubscriptionOneActive,
+          message: "orang ini sudah menjadi anggota aktif Anda",
+        },
+      });
+    }
+  }
+
+  /**
+   * DELETES the row rather than flipping a status — see the port's own
+   * docstring for why a rejected request keeps no record, unlike every other
+   * terminal transition on this table. Same WHERE-clause arbitration as
+   * `approveFreeRequest`.
+   */
+  async rejectRequest(id: string, ownerId: string): Promise<boolean> {
+    const rows = await this.db
+      .delete(userSubscriptions)
+      .where(
+        and(
+          eq(userSubscriptions.id, id),
+          eq(userSubscriptions.ownerId, ownerId),
+          eq(userSubscriptions.status, "pending"),
+          eq(userSubscriptions.kind, "free")
+        )
+      )
+      .returning({ id: userSubscriptions.id });
+    return rows.length > 0;
   }
 }

@@ -32,9 +32,14 @@ export class ManageUserTiers {
   ) {}
 
   /**
-   * THE GATE THIS TASK EXISTS FOR: a tier cannot be published without a
-   * *connected* payout account — a membership whose money has nowhere to go
-   * is a trap for buyer and seller both (spec §5).
+   * THE GATE THIS TASK EXISTS FOR: a PAID tier (`priceAmount > 0`) cannot be
+   * published without a *connected* payout account — a membership whose
+   * money has nowhere to go is a trap for buyer and seller both (spec §5). A
+   * FREE tier (`priceAmount === 0`) skips this gate entirely: no money ever
+   * moves for it, so there is nothing for a payout account to receive, and
+   * requiring one anyway would make a free tier just as unreachable as a paid
+   * one on a deployment with payments disabled. See the `priceAmount > 0`
+   * guard below for the actual branch.
    *
    * Read through `isConnectedPaymentAccount`, never a truthiness check.
    * `xendit_account_id` has three states — NULL, the
@@ -56,30 +61,52 @@ export class ManageUserTiers {
     if (name.length === 0) {
       throw new ValidationError("Nama tingkatan tidak boleh kosong.");
     }
-    // Strictly positive, not merely non-negative — a free tier is not a
-    // membership anyone needs to pay to hold, and `0` would sail through the
-    // dashboard's own `assertValidTier` (which only rejects negative prices)
-    // if this use case borrowed it. It deliberately does not.
-    if (!Number.isInteger(input.priceAmount) || input.priceAmount <= 0) {
-      throw new ValidationError("Harga tingkatan harus lebih dari nol.");
+    // Non-negative, not strictly positive — `0` is now a legal price and
+    // means a FREE tier (no separate flag anywhere: `price_amount === 0` IS
+    // the definition of free, all the way out to `user_subscription.kind`,
+    // deliberately so the price stays the single source of truth). Only a
+    // genuinely negative price is nonsense here; the dashboard's own
+    // `assertValidTier` already drew that same negative-only line for the
+    // OTHER tier table (`membership_tier`), and this use case now agrees
+    // with it rather than being stricter for no reason.
+    if (!Number.isInteger(input.priceAmount) || input.priceAmount < 0) {
+      // "must not be negative", NOT "must be more than zero" — zero is a FREE
+      // tier now, so the old wording stated a rule that no longer exists and
+      // would have been read by a creator typing -1 as "the minimum is 1".
+      // The web form still carries the old sentence for its own client-side
+      // refusal of 0; that refusal, and this copy alongside it, are Task 7's.
+      throw new ValidationError("Harga tingkatan tidak boleh negatif.");
     }
     const billingCycle = input.billingCycle ?? DEFAULT_BILLING_CYCLE;
     if (!ALLOWED_BILLING_CYCLES.has(billingCycle)) {
       throw new ValidationError("Siklus tagihan yang didukung saat ini hanya bulanan.");
     }
 
-    const payout = await this.payouts.findPayoutAccount(input.ownerId);
-    if (!payout) {
-      // Cannot happen for a caller who just authenticated as this user — kept
-      // as a defensive NotFoundError, English like every other NotFoundError
-      // call site in this codebase, rather than assumed away.
-      throw new NotFoundError("user not found");
-    }
-    if (!isConnectedPaymentAccount(payout.xenditAccountId)) {
-      throw new ConflictError(
-        "Hubungkan akun pembayaran Anda terlebih dahulu sebelum menerbitkan tingkatan " +
-          "keanggotaan — uang dari tingkatan ini belum punya tempat tujuan."
-      );
+    // A FREE tier (priceAmount === 0) skips both payout checks below: no
+    // money ever moves for it, so there is nothing for a payout account to
+    // receive, and demanding a connected Xendit account to publish a tier
+    // that will never charge anyone is exactly the reachability trap this
+    // whole task exists to remove. `billingCycle` is still stored for a free
+    // tier — the column is NOT NULL — but it means nothing for one: nothing
+    // downstream reads a free tier's cycle to renew or re-charge it, so do
+    // not "fix" it into a renewal later. A PAID tier (priceAmount > 0) still
+    // needs a CONNECTED payout account — see this method's class-level
+    // docstring for why a truthiness check on `xenditAccountId` is not
+    // enough.
+    if (input.priceAmount > 0) {
+      const payout = await this.payouts.findPayoutAccount(input.ownerId);
+      if (!payout) {
+        // Cannot happen for a caller who just authenticated as this user —
+        // kept as a defensive NotFoundError, English like every other
+        // NotFoundError call site in this codebase, rather than assumed away.
+        throw new NotFoundError("user not found");
+      }
+      if (!isConnectedPaymentAccount(payout.xenditAccountId)) {
+        throw new ConflictError(
+          "Hubungkan akun pembayaran Anda terlebih dahulu sebelum menerbitkan tingkatan " +
+            "keanggotaan — uang dari tingkatan ini belum punya tempat tujuan."
+        );
+      }
     }
 
     return this.tiers.create({

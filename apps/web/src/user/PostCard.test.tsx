@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, mock } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import PostCard from "./PostCard";
 import type { PostView } from "./apiClient";
 
@@ -24,6 +24,35 @@ function renderCard(props: Partial<Parameters<typeof PostCard>[0]> = {}) {
   return render(
     <MemoryRouter>
       <PostCard post={POST} isOwn={false} now={NOW} {...props} />
+    </MemoryRouter>
+  );
+}
+
+/**
+ * Renders the card beside a probe that prints the router's current path, so a
+ * test can see whether a click NAVIGATED.
+ *
+ * Needed because the obvious assertion is a decoration: `fireEvent.click`
+ * returns false only when the NATIVE event was cancelled, and React's synthetic
+ * `preventDefault` does not cancel it. Measured — a mutation deleting
+ * `event.preventDefault()` from PostCard left that assertion green. The router's
+ * own location is the only thing here that actually changes when navigation
+ * happens.
+ */
+function renderCardWithLocation(props: Partial<Parameters<typeof PostCard>[0]> = {}) {
+  function Where() {
+    return <span data-testid="where">{useLocation().pathname}</span>;
+  }
+  // STARTS SOMEWHERE ELSE, on purpose. The CTA's href is the author's profile,
+  // and in production the offer is present precisely when you are ALREADY on
+  // that profile — so an un-prevented navigation goes from /@rina to /@rina and
+  // changes no observable state at all. Starting at /beranda separates the two
+  // so a failure to intercept is visible. It exercises the same branch: the
+  // handler asks only whether #membership-offer is in the document.
+  return render(
+    <MemoryRouter initialEntries={["/beranda"]}>
+      <PostCard post={POST} isOwn={false} now={NOW} {...props} />
+      <Where />
     </MemoryRouter>
   );
 }
@@ -450,3 +479,109 @@ describe("PostCard — the lock panel (Task 7, spec §5, §5.1)", () => {
     expect(screen.getByTestId("post-card").textContent ?? "").toContain("Halo semua!");
   });
 });
+
+/**
+ * **Task 8 — the bug the user actually reported.** `<Link to="/@handle">` on
+ * the author's OWN profile is a link to the page already on screen: clicking
+ * it does nothing at all, silently. `PostCard` cannot know by itself whether
+ * it is being rendered on that profile — it only knows the author's handle,
+ * never the current route — so the fix does not ask "is this the author's
+ * profile", it asks "is the offer this CTA is promising ALREADY on this
+ * page", by checking for `document.getElementById("membership-offer")`
+ * (`ProfilePage` gives `MembershipOffer`'s section that id). That is `true`
+ * on exactly the page where the old link was a no-op, and `false` on the
+ * feed (Beranda), where the old link still does something real.
+ *
+ * `document.body.innerHTML` is used directly to plant and remove the stand-in
+ * offer element — `renderCard`'s own `<MemoryRouter>` wraps only the card, and
+ * `MembershipOffer` genuinely lives OUTSIDE that subtree on a real profile
+ * page, so the fixture has to plant its id on `document.body` the same way.
+ * Removed again in `afterEach` so it cannot leak into a later test in this
+ * file — `cleanup()` unmounts React trees, not elements appended by hand.
+ */
+describe("PostCard — the lock CTA goes somewhere real (Task 8, the reported bug)", () => {
+  const lockedPost: PostView = {
+    ...POST,
+    body: "Behind the scenes",
+    media: [],
+    membersOnly: true,
+    lockedMediaCount: 1,
+    author: { handle: "rina", displayName: "Rina" },
+  };
+
+  afterEach(() => {
+    document.getElementById("membership-offer")?.remove();
+  });
+
+  /**
+   * A click handler existing proves nothing by itself — a handler that
+   * scrolled the wrong element, or nothing, would still "have an onClick".
+   * This asserts the ACTUAL DOM call the fix depends on: `scrollIntoView`
+   * fired, on the specific node whose id the CTA is supposed to find.
+   */
+  it("scrolls to the offer, by calling scrollIntoView on the actual #membership-offer node, when the offer is present on this page", () => {
+    const scrolled: string[] = [];
+    const offer = document.createElement("div");
+    offer.id = "membership-offer";
+    offer.scrollIntoView = () => scrolled.push("membership-offer");
+    document.body.appendChild(offer);
+
+    renderCardWithLocation({ post: lockedPost });
+    const cta = screen.getByRole("link", { name: "Jadi anggota untuk melihat" });
+    fireEvent.click(cta);
+
+    expect(scrolled).toEqual(["membership-offer"]);
+    // AND IT DID NOT NAVIGATE — asserted on the router's own location, which is
+    // the only thing in this harness that actually moves. Mutation-verified:
+    // deleting `event.preventDefault()` from PostCard reddens this line.
+    // The obvious version (`expect(fireEvent.click(cta)).toBe(false)`) does NOT
+    // redden under that mutation, because React's synthetic preventDefault
+    // leaves the native event uncancelled. It was tried first and thrown away.
+    expect(screen.getByTestId("where").textContent).toBe("/beranda");
+    // It stays a real link on purpose — middle-click, copy-link and
+    // open-in-new-tab keep working, and on the feed navigating IS correct.
+    // What makes it "go somewhere real" is not the element type but the
+    // prevented default asserted above: the href is still the profile, and
+    // that is the right destination from anywhere except the profile itself.
+    expect(cta.getAttribute("href")).toBe("/@rina");
+  });
+
+  /**
+   * Presence control, and the case `PostFeed` actually exercises on Beranda:
+   * no `#membership-offer` anywhere in the document (a feed never renders
+   * `MembershipOffer` at all), so the CTA keeps being a real link to the
+   * author's profile — where the offer genuinely does live.
+   */
+  it("still links to the author's profile when the offer is not present on this page", () => {
+    renderCard({ post: lockedPost });
+
+    const cta = screen.getByRole("link", { name: "Jadi anggota untuk melihat" });
+    expect(cta.getAttribute("href")).toBe("/@rina");
+    expect(screen.queryAllByRole("button", { name: "Jadi anggota untuk melihat" }).length).toBe(0);
+  });
+});
+
+/**
+ * **The judgement call the task brief asked to be made honestly, and the
+ * behaviour this file deliberately does NOT test.**
+ *
+ * The brief's third scenario: a lock CTA should say nothing that promises a
+ * membership when the author offers no tier at all. Proving that needs a
+ * field `PostView.author` does not carry — there is no
+ * "does this author sell any membership" signal on a post at all, and
+ * `PostCard` has no network access to ask for one. Building it means
+ * widening `apps/api`'s author projection (`post-views.ts`'s `PostView`) and
+ * its own closed-shape assertion (`Object.keys(view.author).sort()` in
+ * `post-views.test.ts`), which every one of the six prior tasks in this
+ * phase deliberately left shut — and Task 8's own brief says, at the top,
+ * "WEB ONLY".
+ *
+ * So this task took the brief's own honest fallback: the test AND the
+ * behaviour were dropped together, not just the test. `PostCard`'s lock CTA
+ * still says only what `PostView` can already prove — "this post is
+ * gated" — and never claims there is a membership to buy; it just no longer
+ * tries to prove the STRONGER claim ("...and this author is selling one")
+ * that would need the API to widen. See `PostCard.tsx`'s own comment beside
+ * the CTA for the identical reasoning at the point a future reader will
+ * actually meet it.
+ */

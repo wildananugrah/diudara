@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { UserTierRow } from "../ports/user-tier-repository.port";
+import type { UserSubscriptionRow } from "../ports/user-subscription-repository.port";
 import { toMembershipView, toTierView } from "./tier-views";
 
 function tierRow(overrides: Partial<UserTierRow> = {}): UserTierRow {
@@ -10,6 +11,21 @@ function tierRow(overrides: Partial<UserTierRow> = {}): UserTierRow {
     priceAmount: 50_000,
     billingCycle: "monthly",
     isActive: true,
+    createdAt: new Date("2026-08-18T02:00:00.000Z"),
+    ...overrides,
+  };
+}
+
+/** A `status = 'pending'` row, exactly the shape `findPendingFor` hands back. */
+function pendingRow(overrides: Partial<UserSubscriptionRow> = {}): UserSubscriptionRow {
+  return {
+    id: "sub-pending-1",
+    subscriberId: "viewer-1",
+    tierId: "aaaaaaaa-0000-4000-8000-000000000000",
+    ownerId: "eeeeeeee-0000-4000-8000-000000000000",
+    status: "pending",
+    kind: "free",
+    currentPeriodEnd: null,
     createdAt: new Date("2026-08-18T02:00:00.000Z"),
     ...overrides,
   };
@@ -42,13 +58,15 @@ describe("toMembershipView", () => {
   it("wraps tiers under `tiers`, mapped through toTierView, in the given order", () => {
     const view = toMembershipView(
       [tierRow({ id: "tier-1", name: "Perak" }), tierRow({ id: "tier-2", name: "Emas" })],
-      "none"
+      "none",
+      null
     );
 
     expect(Object.keys(view).sort()).toEqual([
       "tiers",
       "viewerIsMember",
       "viewerMembershipEnded",
+      "viewerRequestPending",
     ]);
     expect(view.tiers).toEqual([
       { id: "tier-1", name: "Perak", priceAmount: 50_000, billingCycle: "monthly" },
@@ -62,7 +80,7 @@ describe("toMembershipView", () => {
    * white-screen incident, referenced in Task 5's brief).
    */
   it("an owner with no active tiers gets an EMPTY array, not an omitted or undefined field", () => {
-    const view = toMembershipView([], "none");
+    const view = toMembershipView([], "none", null);
 
     expect("tiers" in view).toBe(true);
     expect(view.tiers).toEqual([]);
@@ -71,21 +89,23 @@ describe("toMembershipView", () => {
   /**
    * Task 10 (spec §6): "an already-active member sees that they are a member
    * rather than a buy button", which the web can only do if the profile says
-   * so. The projection stays CLOSED — exactly `tiers`, `viewerIsMember` and
-   * `viewerMembershipEnded`, nothing else: this endpoint is public, and both
-   * booleans are about the caller, not about the creator being viewed.
+   * so. The projection stays CLOSED — exactly `tiers`, `viewerIsMember`,
+   * `viewerMembershipEnded` and `viewerRequestPending`, nothing else: this
+   * endpoint is public, and all three booleans are about the caller, not
+   * about the creator being viewed.
    */
   it("carries the standing through as two booleans, and adds nothing else to the projection", () => {
-    const member = toMembershipView([tierRow()], "member");
+    const member = toMembershipView([tierRow()], "member", null);
     expect(member.viewerIsMember).toBe(true);
     expect(member.viewerMembershipEnded).toBe(false);
     expect(Object.keys(member).sort()).toEqual([
       "tiers",
       "viewerIsMember",
       "viewerMembershipEnded",
+      "viewerRequestPending",
     ]);
 
-    const stranger = toMembershipView([tierRow()], "none");
+    const stranger = toMembershipView([tierRow()], "none", null);
     expect(stranger.viewerIsMember).toBe(false);
     expect(stranger.viewerMembershipEnded).toBe(false);
     expect("viewerIsMember" in stranger).toBe(true);
@@ -99,12 +119,12 @@ describe("toMembershipView", () => {
    * claim both things about the same person on the same page.
    */
   it("a LAPSED standing is not a member, and is not the same as a stranger", () => {
-    const lapsed = toMembershipView([tierRow()], "lapsed");
+    const lapsed = toMembershipView([tierRow()], "lapsed", null);
 
     expect(lapsed.viewerIsMember).toBe(false);
     expect(lapsed.viewerMembershipEnded).toBe(true);
 
-    const stranger = toMembershipView([tierRow()], "none");
+    const stranger = toMembershipView([tierRow()], "none", null);
     expect(stranger.viewerMembershipEnded).toBe(false);
     // The distinction, stated as the thing that must not collapse: these two
     // people read different sentences, and the boolean that separates them is
@@ -131,8 +151,8 @@ describe("toMembershipView", () => {
    */
   it("still carries the full offer to a LAPSED viewer — identical tiers to a stranger's", () => {
     const rows = [tierRow({ id: "tier-1", name: "Perak" }), tierRow({ id: "tier-2", name: "Emas" })];
-    const lapsed = toMembershipView(rows, "lapsed");
-    const stranger = toMembershipView(rows, "none");
+    const lapsed = toMembershipView(rows, "lapsed", null);
+    const stranger = toMembershipView(rows, "none", null);
 
     expect(lapsed.tiers).toEqual([
       { id: "tier-1", name: "Perak", priceAmount: 50_000, billingCycle: "monthly" },
@@ -155,11 +175,11 @@ describe("toMembershipView", () => {
    * non-terminating loop 5a shipped, rebuilt.
    */
   it("a LIVE member is still the only standing that reports viewerIsMember", () => {
-    expect(toMembershipView([tierRow()], "member").viewerIsMember).toBe(true);
-    expect(toMembershipView([tierRow()], "lapsed").viewerIsMember).toBe(false);
-    expect(toMembershipView([tierRow()], "none").viewerIsMember).toBe(false);
+    expect(toMembershipView([tierRow()], "member", null).viewerIsMember).toBe(true);
+    expect(toMembershipView([tierRow()], "lapsed", null).viewerIsMember).toBe(false);
+    expect(toMembershipView([tierRow()], "none", null).viewerIsMember).toBe(false);
     // ...and it is the ONE standing that is not also reported as ended.
-    expect(toMembershipView([tierRow()], "member").viewerMembershipEnded).toBe(false);
+    expect(toMembershipView([tierRow()], "member", null).viewerMembershipEnded).toBe(false);
   });
 
   /**
@@ -168,9 +188,73 @@ describe("toMembershipView", () => {
    * derived from the other.
    */
   it("an empty tier list and viewerIsMember: true are not contradictory", () => {
-    const view = toMembershipView([], "member");
+    const view = toMembershipView([], "member", null);
 
     expect(view.tiers).toEqual([]);
     expect(view.viewerIsMember).toBe(true);
+  });
+
+  /**
+   * Task 6 of "free memberships". `pending` is `null` for the overwhelming
+   * majority of calls (anonymous, self-view, no request) and this is the
+   * default every other test above relies on implicitly — stated explicitly
+   * once here rather than repeated on every call site.
+   */
+  it("viewerRequestPending is false when there is no pending row at all", () => {
+    expect(toMembershipView([tierRow()], "none", null).viewerRequestPending).toBe(false);
+  });
+
+  /**
+   * **THE CASE THIS TASK EXISTS FOR.** A free request, freshly claimed by
+   * `StartUserSubscription`'s free path (`claimPending({ ..., kind: "free"
+   * })`) and not yet decided by the owner — `status: "pending"`,
+   * `kind: "free"`. The web needs this to say "your request is awaiting
+   * approval" instead of re-offering a tier the viewer already asked for.
+   */
+  it("viewerRequestPending is TRUE for a free pending row", () => {
+    const view = toMembershipView([tierRow()], "none", pendingRow({ kind: "free" }));
+    expect(view.viewerRequestPending).toBe(true);
+  });
+
+  /**
+   * **THE RULING THIS TASK'S BRIEF SPELLS OUT.** A PAID pending checkout —
+   * an open Xendit invoice — is a DIFFERENT state from a free request
+   * awaiting the owner. That person is mid-payment, not waiting on anybody's
+   * approval, and `viewerRequestPending: true` here would be a lie told to
+   * exactly the person in the middle of paying. `findPendingFor`'s read is
+   * kind-agnostic on purpose (its own port docstring); this is where the
+   * free-only judgement actually lives.
+   */
+  it("viewerRequestPending is FALSE for a PAID pending checkout — a different state, not a lie to a paying viewer", () => {
+    const view = toMembershipView([tierRow()], "none", pendingRow({ kind: "paid" }));
+    expect(view.viewerRequestPending).toBe(false);
+  });
+
+  /**
+   * An ACTIVE membership (already approved, or a live paid subscription) is
+   * no longer pending — `pending` itself would be `null` by the time this
+   * function is called, since `findPendingFor` only ever returns `status =
+   * 'pending'` rows, but this pins the projection's own behaviour should a
+   * caller ever hand it something stale: only a genuinely pending row can
+   * make this true.
+   */
+  it("viewerRequestPending is false when pending is null, regardless of standing", () => {
+    expect(toMembershipView([tierRow()], "member", null).viewerRequestPending).toBe(false);
+    expect(toMembershipView([tierRow()], "lapsed", null).viewerRequestPending).toBe(false);
+  });
+
+  /**
+   * `viewerIsMember`/`viewerMembershipEnded` and `viewerRequestPending` are
+   * independent fields on one object — nothing here derives one from the
+   * other, so a free pending request can coexist with any standing the
+   * caller happens to pass (in practice `"none"`, since a signed-in viewer
+   * with a live or lapsed membership to this owner cannot also hold a
+   * pending row to the SAME owner — but that exclusion lives in the
+   * database's constraints, not in this pure function).
+   */
+  it("viewerRequestPending does not depend on standing", () => {
+    const view = toMembershipView([tierRow()], "lapsed", pendingRow({ kind: "free" }));
+    expect(view.viewerRequestPending).toBe(true);
+    expect(view.viewerMembershipEnded).toBe(true);
   });
 });

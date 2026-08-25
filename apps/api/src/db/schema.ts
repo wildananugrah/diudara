@@ -1004,6 +1004,11 @@ export const userSubscriptions = pgTable(
      * to add, and any future status added here won't either.
      */
     status: varchar("status", { length: 16 }).notNull().default("pending"),
+    // 'paid' | 'free'. VARCHAR, not an enum — same reasoning as `status` above
+    // and `post.visibility`: a later value needs no migration. The DEFAULT makes
+    // this migration additive and leaves every existing row paid, which is what
+    // every existing row is.
+    kind: varchar("kind", { length: 16 }).notNull().default("paid"),
     currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

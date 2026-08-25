@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { formatRupiah } from "../api";
 import {
   connectPayout,
   createOwnTier,
@@ -13,7 +12,7 @@ import { describeRequestFailure } from "./errorCopy";
 // Moved to `tierCopy.ts` by Task 10, unchanged: the profile's offer renders
 // the same tiers this editor does, and the two screens naming one billing
 // cycle differently is a defect no test would notice.
-import { billingCycleLabel } from "./tierCopy";
+import { billingCycleLabel, formatTierPrice } from "./tierCopy";
 
 type PayoutLoad =
   | { status: "loading" }
@@ -26,20 +25,44 @@ type TiersLoad =
   | { status: "ready"; tiers: UserTier[] };
 
 /**
- * The typed price as an integer of rupiah, or `null` when it is not one.
+ * The typed price, classified into the three shapes `handleCreate` has to
+ * answer differently — "free memberships" is exactly the change that split
+ * what used to be one `null` into two distinct refusals.
  *
- * Non-digits are DROPPED rather than refused, so "50.000" and "Rp 50.000" —
- * both of which an Indonesian will type, since that is how the price is
- * displayed back to them — mean 50000. A value that leaves no digits at all,
- * or leaves only zeros, is `null`: `ManageUserTiers.create` requires a
- * strictly positive integer (a free tier is not a membership anyone pays to
- * hold), and this returns nothing the server would refuse for that reason.
+ * `"empty"` — no digits at all. Still an error (there is nothing to publish
+ * a tier at), and still refused before the server is ever asked.
+ *
+ * `"negative"` — the one input that is genuinely nonsense, matched on a
+ * literal `-` ANYWHERE in the string rather than on the parsed sign: digits
+ * are extracted with `\D` below, which strips a minus sign along with every
+ * thousands separator, so "-50000" would otherwise silently become the
+ * POSITIVE amount 50000 — accepting the exact input the API refuses. `Harga
+ * tingkatan tidak boleh negatif.` is `ManageUserTiers.create`'s own wording
+ * for this refusal (`manage-user-tiers.ts`); this mirrors it verbatim so the
+ * two surfaces never disagree about why a negative price is refused.
+ *
+ * `"amount"` — a non-negative integer, and **`0` is a legal amount now**,
+ * meaning a FREE tier: `ManageUserTiers.create`'s own gate is
+ * `priceAmount < 0`, never `priceAmount <= 0`, since Task 3 of this phase.
+ * The old version of this function folded "empty" and "not positive" into
+ * one `null`, which is exactly what made a free tier unreachable from this
+ * screen — the API would have accepted `0`, but this function turned it into
+ * the same nothing an empty box produces, before the API was ever called.
+ *
+ * Non-digits (aside from the sign check above) are still DROPPED rather than
+ * refused, so "50.000" and "Rp 50.000" — both of which an Indonesian will
+ * type, since that is how the price is displayed back to them — mean 50000.
  */
-function parsePriceAmount(raw: string): number | null {
+type ParsedPrice = { kind: "empty" } | { kind: "negative" } | { kind: "amount"; value: number };
+
+function parsePriceAmount(raw: string): ParsedPrice {
+  const isNegative = raw.includes("-");
   const digits = raw.replace(/\D/g, "");
-  if (digits.length === 0) return null;
+  if (digits.length === 0) return { kind: "empty" };
   const amount = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(amount) && amount > 0 ? amount : null;
+  if (!Number.isSafeInteger(amount)) return { kind: "empty" };
+  if (isNegative) return { kind: "negative" };
+  return { kind: "amount", value: amount };
 }
 
 /**
@@ -60,11 +83,20 @@ function parsePriceAmount(raw: string): number | null {
  * account they have already claimed — and each connect attempt provisions a
  * KYC entity at Xendit that has no delete endpoint.
  *
- * THE TIER EDITOR STAYS SHUT UNTIL THE ACCOUNT IS GENUINELY CONNECTED, with a
- * sentence saying which of the three states is in the way. Spec §5: a
- * membership whose money has nowhere to go is a trap for the buyer and the
- * seller both. `ManageUserTiers.create` enforces the same rule server-side
- * with a 409 — this is the same gate said early, not the only one.
+ * THE TIER EDITOR ONLY STAYS SHUT WHILE THE PAYOUT STATUS ITSELF IS UNKNOWN
+ * (still loading, or unreadable) — not merely because the account is not yet
+ * connected. That used to be the same gate: before "free memberships"
+ * (Task 3 on the API side), every tier needed a connected payout account, so
+ * closing the whole editor until one existed was the correct read of spec §5.
+ * It no longer is. `ManageUserTiers.create` now skips its payout check
+ * entirely for a `priceAmount === 0` tier — no money ever moves for one, so
+ * there is nothing for a payout account to receive — and a screen that still
+ * refused to even show the form would make a free tier just as unreachable as
+ * a paid one on a deployment with no payout account, exactly the gap Task 7 of
+ * "free memberships" exists to close. `TierEditor` below reads `payout` itself
+ * now, and only a PAID tier (`priceAmount > 0`) submitted without a connected
+ * account round-trips to the server's own 409 — the same gate, still said
+ * early where it can be, just no longer over the whole form.
  *
  * Every failure becomes a Bahasa sentence through `errorCopy.ts`. Note that
  * the 409 the server answers here carries Bahasa on the wire, which makes this
@@ -94,8 +126,6 @@ export default function MembershipSettings() {
       cancelled = true;
     };
   }, []);
-
-  const connected = payoutLoad.status === "ready" && payoutLoad.payout.connected;
 
   async function handleConnect() {
     setConnectError(null);
@@ -143,8 +173,8 @@ export default function MembershipSettings() {
       ) : null}
 
       <h3>Tingkatan keanggotaan</h3>
-      {connected ? (
-        <TierEditor />
+      {payoutLoad.status === "ready" ? (
+        <TierEditor payout={payoutLoad.payout} />
       ) : (
         <p className="hint" data-testid="tier-editor-unavailable">
           {tierEditorUnavailableReason(payoutLoad)}
@@ -207,44 +237,43 @@ function PayoutState({
 }
 
 /**
- * WHY the editor is shut, in the words that fit the state the person is
- * actually in. Every branch says that the money has nowhere to go — spec §5's
- * own reason — but only the one where connecting would help tells them to
- * connect. Telling somebody whose KYC is pending to "connect first" would send
- * them to press a button that provisions nothing and answers `provisioning`
- * again, and each press is a KYC entity at Xendit with no delete endpoint.
+ * WHY the editor is shut — which, since Task 7 of "free memberships", is only
+ * while `payoutLoad` itself has not resolved to a real answer: still loading,
+ * or unreadable after an error. Both are reasons the FORM cannot be shown
+ * responsibly (a free-tier submission is possible either way, but the screen
+ * has nothing to tell the person about paid tiers until it knows), and the
+ * error case is one the person can act on themselves by reloading.
  *
- * The two NON-ready states get a sentence too, rather than the heading above
- * standing over nothing: a payout status that could not be read is a reason
- * the editor is shut, and it is one the person can act on by reloading.
+ * Every OTHER payout state — not connected, mid-provisioning, no provider at
+ * all on this deployment — used to shut the editor too, back when every tier
+ * needed a connected account. It no longer does: those three now open
+ * `TierEditor`, which reads `payout` itself and says what a payout account
+ * would still be needed for.
  */
-function tierEditorUnavailableReason(load: PayoutLoad): string {
+function tierEditorUnavailableReason(
+  load: Extract<PayoutLoad, { status: "loading" | "error" }>
+): string {
   if (load.status === "loading") {
     return "Menunggu status akun pembayaran Anda.";
   }
-  if (load.status === "error") {
-    return (
-      "Tingkatan keanggotaan belum bisa dibuat karena status akun pembayaran Anda tidak dapat " +
-      "dibaca. Muat ulang halaman ini."
-    );
-  }
-  const payout = load.payout;
-  if (!payout.available) {
-    return (
-      "Tingkatan keanggotaan belum bisa dibuat karena pembayaran belum tersedia di server ini — " +
-      "uang dari keanggotaan ini belum punya tempat tujuan."
-    );
-  }
-  if (payout.provisioning) {
-    return (
-      "Tingkatan keanggotaan belum bisa dibuat karena akun pembayaran Anda masih menunggu " +
-      "verifikasi. Sampai verifikasi selesai, uang dari keanggotaan ini belum punya tempat tujuan."
-    );
-  }
   return (
-    "Hubungkan akun pembayaran Anda terlebih dahulu sebelum membuat tingkatan keanggotaan — " +
-    "uang dari keanggotaan ini belum punya tempat tujuan."
+    "Tingkatan keanggotaan belum bisa dibuat karena status akun pembayaran Anda tidak dapat " +
+    "dibaca. Muat ulang halaman ini."
   );
+}
+
+/**
+ * A tier's price line, the way both lists below render it — "Gratis" alone
+ * for a free tier, never "Gratis per bulan": `billingCycle` is stored on
+ * every row (the column is NOT NULL) but means nothing for a free one —
+ * nothing downstream reads it to renew or re-charge a membership that never
+ * charges — so pairing it with "Gratis" would name a cadence that does not
+ * apply. A paid tier still reads price and cycle together, exactly as before.
+ */
+function tierPriceLine(tier: UserTier): string {
+  return tier.priceAmount === 0
+    ? formatTierPrice(tier.priceAmount)
+    : `${formatTierPrice(tier.priceAmount)} ${billingCycleLabel(tier.billingCycle)}`;
 }
 
 /**
@@ -255,10 +284,14 @@ function tierEditorUnavailableReason(load: PayoutLoad): string {
  * not offering one, and changing the price of a tier people already hold is
  * explicitly out of scope (spec §11).
  *
- * Rendered only once the payout account is genuinely connected, so it never
- * has to reason about the sentinel itself.
+ * Rendered once the payout STATUS is known, whether or not an account is
+ * actually connected — Task 7 of "free memberships" (see `MembershipSettings`'s
+ * own docstring). `payout` is read here, not to gate the form shut, but to
+ * tell the person up front when only a free tier is reachable: submitting a
+ * PAID tier without a connected account still round-trips to the server's own
+ * 409, this is only the warning said early.
  */
-function TierEditor() {
+function TierEditor({ payout }: { payout: PayoutStatus }) {
   const [load, setLoad] = useState<TiersLoad>({ status: "loading" });
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
@@ -271,7 +304,14 @@ function TierEditor() {
     let cancelled = false;
     listOwnTiers()
       .then((tiers) => {
-        if (!cancelled) setLoad({ status: "ready", tiers });
+        // Read defensively, same as `SubscriberList`/`MembershipRequests`:
+        // this is a screen, not a contract test, and a response that cannot
+        // be parsed into the expected shape should read as empty rather than
+        // throw `.filter` past this component and take Pengaturan down with
+        // it — reachable now that `TierEditor` mounts regardless of payout
+        // state, on any test (or real deployment) whose `/users/me/tiers`
+        // answers something else entirely.
+        if (!cancelled) setLoad({ status: "ready", tiers: Array.isArray(tiers) ? tiers : [] });
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -301,24 +341,34 @@ function TierEditor() {
     setError(null);
     setNotice(null);
 
-    // Checked HERE as well as on the server, and deliberately in the server's
-    // own words. `ManageUserTiers.create` refuses both of these with a 400
-    // whose message is Bahasa — but `describeRequestFailure` answers every
-    // unlabelled 4xx with "Permintaan tidak dapat diproses", because it
-    // chooses from the failure's SHAPE and a 400 carries no shape that says
-    // which field was wrong. So a round trip would replace a precise sentence
-    // with a vague one. The server stays the authority; this only keeps the
-    // two mistakes a person actually makes answerable without a request.
+    // Checked HERE as well as on the server, in the server's own words where
+    // the server has one. `ManageUserTiers.create` refuses an empty name and
+    // a negative price with a 400 whose message is Bahasa — but
+    // `describeRequestFailure` answers every unlabelled 4xx with "Permintaan
+    // tidak dapat diproses", because it chooses from the failure's SHAPE and
+    // a 400 carries no shape that says which field was wrong. So a round trip
+    // would replace a precise sentence with a vague one. The server stays the
+    // authority; this only keeps the mistakes a person actually makes
+    // answerable without a request. An EMPTY price box has no server
+    // counterpart to mirror — there is nothing to send — so that sentence is
+    // this screen's own, not a copy of the wire's.
     const trimmedName = name.trim();
     if (trimmedName.length === 0) {
       setError("Nama tingkatan tidak boleh kosong.");
       return;
     }
-    const priceAmount = parsePriceAmount(price);
-    if (priceAmount === null) {
-      setError("Harga tingkatan harus lebih dari nol.");
+    const parsedPrice = parsePriceAmount(price);
+    if (parsedPrice.kind === "empty") {
+      setError("Harga tingkatan wajib diisi. Isi 0 untuk tingkatan gratis.");
       return;
     }
+    if (parsedPrice.kind === "negative") {
+      // The API's own wording (`ManageUserTiers.create`), matched verbatim —
+      // see `parsePriceAmount`'s own docstring for why.
+      setError("Harga tingkatan tidak boleh negatif.");
+      return;
+    }
+    const priceAmount = parsedPrice.value;
 
     setSubmitting(true);
     try {
@@ -388,8 +438,24 @@ function TierEditor() {
             value={price}
             onChange={(e) => setPrice(e.target.value)}
           />
-          <p className="hint">Contoh: 50000 untuk Rp 50.000 per bulan.</p>
+          <p className="hint">
+            Contoh: 50000 untuk Rp 50.000 per bulan, atau 0 untuk tingkatan gratis.
+          </p>
         </div>
+
+        {/*
+          Said early, in the payout section's own words, rather than only
+          discovered as a 409 after pressing submit — but NOT a block: a free
+          tier (harga 0) needs no payout account at all, so the form stays
+          open and only a paid submission actually round-trips to the
+          server's own refusal. See `TierEditor`'s own docstring.
+        */}
+        {!payout.connected ? (
+          <p className="hint">
+            Tingkatan gratis (harga 0) bisa diterbitkan sekarang. Untuk tingkatan berbayar,
+            hubungkan akun pembayaran Anda terlebih dahulu di atas.
+          </p>
+        ) : null}
 
         {error !== null ? (
           <p className="form-error" role="alert">
@@ -420,9 +486,7 @@ function TierEditor() {
               {active.map((tier) => (
                 <li key={tier.id} className="spread">
                   <span>{tier.name}</span>
-                  <span className="muted">
-                    {formatRupiah(tier.priceAmount)} {billingCycleLabel(tier.billingCycle)}
-                  </span>
+                  <span className="muted">{tierPriceLine(tier)}</span>
                   <button
                     type="button"
                     className="button-quiet"
@@ -452,9 +516,7 @@ function TierEditor() {
             {withdrawn.map((tier) => (
               <li key={tier.id} className="spread">
                 <span>{tier.name}</span>
-                <span className="muted">
-                  {formatRupiah(tier.priceAmount)} {billingCycleLabel(tier.billingCycle)}
-                </span>
+                <span className="muted">{tierPriceLine(tier)}</span>
               </li>
             ))}
           </ul>

@@ -1,0 +1,1 @@
+ALTER TABLE "user_subscription" ADD COLUMN "kind" varchar(16) DEFAULT 'paid' NOT NULL;

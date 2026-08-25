@@ -203,6 +203,7 @@ function subscriptionRow(overrides: Partial<UserSubscriptionRow> = {}): UserSubs
     tierId: "77777777-0000-4000-8000-000000000000",
     ownerId: RINA,
     status: "active",
+    kind: "paid",
     currentPeriodEnd: new Date("2026-09-21T09:00:00.000Z"),
     createdAt: new Date("2026-08-01T09:00:00.000Z"),
     ...overrides,
@@ -211,6 +212,16 @@ function subscriptionRow(overrides: Partial<UserSubscriptionRow> = {}): UserSubs
 
 /**
  * **The one fake in this file that a wrong implementation would hide behind.**
+ *
+ * UPDATED BY THE WHOLE-BRANCH REVIEW (M-5). The predicate is now
+ * `status = 'active'` AND (`kind = 'free'` OR `current_period_end > now`,
+ * strict) — the same disjunct the real query gained for free memberships. It
+ * had been left behind: the branch added `kind: "paid"` to the row factory and
+ * the new port stubs but not here, so these fakes answered "locked" for a free
+ * member, and deleting the `kind = 'free'` disjunct from the real
+ * `listActiveOwnersAmong` would have left BOTH of these files green. The drift
+ * detector these docstrings advertise had quietly stopped detecting drift, in
+ * the two files that decide whether a photo is served.
  *
  * `listActiveOwnersAmong` mirrors the real query's predicate EXACTLY —
  * `status = 'active'` AND `current_period_end > now`, strict — because that is
@@ -241,8 +252,7 @@ class FakeSubscriptions implements UserSubscriptionRepositoryPort {
           r.subscriberId === subscriberId &&
           wanted.has(r.ownerId) &&
           r.status === "active" &&
-          r.currentPeriodEnd !== null &&
-          r.currentPeriodEnd > now
+          (r.kind === "free" || (r.currentPeriodEnd !== null && r.currentPeriodEnd > now))
       )
       .map((r) => r.ownerId);
   }
@@ -286,6 +296,9 @@ class FakeSubscriptions implements UserSubscriptionRepositoryPort {
   async findActiveFor(): Promise<never> {
     return this.unused();
   }
+  async findPendingFor(): Promise<never> {
+    return this.unused();
+  }
   async listActiveSubscribers(): Promise<never> {
     return this.unused();
   }
@@ -302,6 +315,15 @@ class FakeSubscriptions implements UserSubscriptionRepositoryPort {
     return this.unused();
   }
   async markTransactionPaid(): Promise<never> {
+    return this.unused();
+  }
+  async listPendingRequests(): Promise<never> {
+    return this.unused();
+  }
+  async approveFreeRequest(): Promise<never> {
+    return this.unused();
+  }
+  async rejectRequest(): Promise<never> {
     return this.unused();
   }
 }

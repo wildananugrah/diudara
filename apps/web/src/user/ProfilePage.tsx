@@ -237,6 +237,11 @@ export default function ProfilePage() {
         // membership, and defaulting to `true` would tell every signed-in
         // visitor on that deploy that a membership of theirs had ended.
         viewerMembershipEnded={profile.membership?.viewerMembershipEnded ?? false}
+        // `?? false` again, same skew reasoning: an API response that
+        // predates Task 6 says nothing about a pending free request, and
+        // defaulting to `true` would withhold every tier's button from
+        // everybody until the next deploy finished.
+        viewerRequestPending={profile.membership?.viewerRequestPending ?? false}
       />
 
       {/* The same `EditComposer` Beranda renders — keyed on `editing.id`

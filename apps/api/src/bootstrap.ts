@@ -8,6 +8,7 @@ import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
 import { IsMemberOf } from "./application/use-cases/is-member-of";
 import { ListSubscribers } from "./application/use-cases/list-subscribers";
+import { MembershipRequests } from "./application/use-cases/membership-requests";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -95,9 +96,12 @@ export interface Dependencies {
    * `selectPaymentProvider` decided the box has no payment provider at all
    * (see that function's own docstring). Exposed for the same reason
    * `messaging`/`aiProvider` are: a test must be able to prove what a given
-   * environment actually wired. `null` here is why `connectUserPayout` and
-   * `startUserSubscription` below are themselves optional — there is
-   * nothing to construct either against.
+   * environment actually wired. `null` here is why `connectUserPayout` below
+   * is itself optional — there is nothing to construct it against.
+   * `startUserSubscription` is DIFFERENT since Task 4 of "free memberships":
+   * it is constructed unconditionally and takes `payments` straight through
+   * (`null` and all), because a FREE tier needs no provider — see that
+   * field's own docstring below.
    */
   payments: PaymentProviderPort | null;
   /**
@@ -259,23 +263,40 @@ export interface Dependencies {
   manageUserTiers: ManageUserTiers;
   /**
    * Task 6 of Phase 5a. `POST /users/:handle/subscribe` — the moment money
-   * moves on a personal profile. `undefined` EXACTLY when `payments` is `null`,
-   * mirroring `connectUserPayout` and `startCheckout`: there is no
-   * `PaymentProviderPort` to construct it against on a box with payments
-   * disabled. Unlike `startCheckout`, whose route is simply not registered,
-   * `routes/users.ts` keeps this route registered and answers 503 — the same
-   * choice `POST /users/me/payout` already makes on this router.
+   * moves on a personal profile, for a PAID tier; for a FREE one, the moment a
+   * pending membership is created with nothing owed at all.
+   *
+   * NO LONGER `undefined` when `payments` is `null` (Task 4 of "free
+   * memberships" — this docstring used to say exactly that, mirroring
+   * `connectUserPayout` and `startCheckout`, and it was true until this
+   * task). A FREE tier needs no `PaymentProviderPort`, so gating the whole
+   * use case on one made every subscribe request 503 on a payments-disabled
+   * box regardless of price. This is now constructed unconditionally, with
+   * `payments` (possibly `null`) passed straight through — the use case
+   * itself refuses a PAID tier when `payments` is `null`, so the route no
+   * longer needs its own `if (!deps.startUserSubscription)` check at all.
+   * See `StartUserSubscription`'s own docstring.
    */
-  startUserSubscription: StartUserSubscription | undefined;
+  startUserSubscription: StartUserSubscription;
   /**
    * Task 6 of Phase 5b (spec §8). `GET /users/me/subscribers` — a creator's
    * own subscriber list, owner-only and closed to exactly
-   * `{ handle, displayName, since }`. NEVER `undefined`, unlike
-   * `startUserSubscription`: reading who currently subscribes needs no
-   * `PaymentProviderPort`, only `userSubscriptionRepository`, which exists
-   * unconditionally regardless of whether this box takes payments.
+   * `{ handle, displayName, since }`. Reading who currently subscribes needs
+   * no `PaymentProviderPort` either, only `userSubscriptionRepository`, which
+   * exists unconditionally regardless of whether this box takes payments —
+   * the same reason `startUserSubscription` above is unconditional since
+   * Task 4 of "free memberships".
    */
   listSubscribers: ListSubscribers;
+  /**
+   * Task 5 of "free memberships": `GET /users/me/membership-requests` and
+   * the `/approve`/`/reject` pair beside it — an owner's queue of pending
+   * free-membership requests, and the only way one is ever decided.
+   * Constructed unconditionally, same reasoning as `listSubscribers` and
+   * `startUserSubscription` since Task 4 — nothing here touches
+   * `PaymentProviderPort`.
+   */
+  membershipRequests: MembershipRequests;
   handlePaymentWebhook: HandlePaymentWebhook;
   /**
    * The messaging adapters THIS process selected. Exposed for the same reason
@@ -1426,15 +1447,22 @@ export function bootstrap(): Dependencies {
   // per-owner LIST and `isMemberOf` answers a per-pair question. See
   // `ListSubscribers`'s own docstring.
   const listSubscribers = new ListSubscribers(userSubscriptionRepository, clock);
+  // Task 5 of "free memberships": the SAME `userSubscriptionRepository`
+  // `isMemberOf` and `listSubscribers` read — no separate repository, no
+  // separate clock (approving/rejecting never compares against `now`).
+  const membershipRequests = new MembershipRequests(userSubscriptionRepository);
   // Task 5 of memberships-5a: `userTierRepository` (constructed above, Task 1)
   // is now GetUserProfile's third dependency too — the public profile's
   // `membership.tiers` read. Task 10 adds the fourth, `isMemberOf`, for the
-  // same payload's `viewerIsMember`.
+  // same payload's `viewerIsMember`. Task 6 of "free memberships" adds the
+  // fifth, the SAME `userSubscriptionRepository` `isMemberOf` reads, for
+  // `membership.viewerRequestPending`.
   const getUserProfile = new GetUserProfile(
     userRepository,
     followRepository,
     userTierRepository,
-    isMemberOf
+    isMemberOf,
+    userSubscriptionRepository
   );
   const updateUserProfile = new UpdateUserProfile(userRepository);
   const followUser = new FollowUser(userRepository, followRepository);
@@ -1560,28 +1588,30 @@ export function bootstrap(): Dependencies {
     appBaseUrl: process.env.APP_BASE_URL,
     nodeEnv: process.env.NODE_ENV,
   });
-  // Task 6 of Phase 5a. `undefined` EXACTLY when `payments` is `null` — the
-  // constructor requires a real `PaymentProviderPort` — but the ROUTE stays
-  // registered and answers 503, see this field's own docstring on
-  // `Dependencies`.
-  const startUserSubscription = payments
-    ? new StartUserSubscription(
-        userRepository,
-        userTierRepository,
-        userPayoutRepository,
-        userSubscriptionRepository,
-        // Retiring a lapsed membership and claiming this pair's pending slot in
-        // ONE transaction — Phase 5b, Task 2. See `UserPurchaseUnitOfWorkPort`
-        // for the "neither active nor pending" state a split commit leaves.
-        new DrizzleUserPurchaseUnitOfWork(db),
-        payments,
-        // The SAME clock `isMemberOf` above reads, so the two cannot disagree
-        // about whether a subscription's period has passed — the divergence
-        // between them is precisely what the final review's I1 was about.
-        clock,
-        { appBaseUrl }
-      )
-    : undefined;
+  // Task 6 of Phase 5a, changed by Task 4 of "free memberships". NO LONGER
+  // gated on `payments`: a FREE tier needs no provider at all, and gating the
+  // whole use case on `payments` made `POST /users/:handle/subscribe` 503 on
+  // a payments-disabled box regardless of the tier's price — the actual
+  // production deployment right now. `payments` is passed straight through,
+  // `null` and all: the use case refuses a PAID tier itself when `payments`
+  // is `null` (see `StartUserSubscription`'s own docstring), so the decision
+  // moved from BOOT time here to the TIER, at request time.
+  const startUserSubscription = new StartUserSubscription(
+    userRepository,
+    userTierRepository,
+    userPayoutRepository,
+    userSubscriptionRepository,
+    // Retiring a lapsed membership and claiming this pair's pending slot in
+    // ONE transaction — Phase 5b, Task 2. See `UserPurchaseUnitOfWorkPort`
+    // for the "neither active nor pending" state a split commit leaves.
+    new DrizzleUserPurchaseUnitOfWork(db),
+    payments,
+    // The SAME clock `isMemberOf` above reads, so the two cannot disagree
+    // about whether a subscription's period has passed — the divergence
+    // between them is precisely what the final review's I1 was about.
+    clock,
+    { appBaseUrl }
+  );
 
   // The streaming signing secret. Read directly off `process.env` here (rather
   // than derived from `streamingProvider`'s truthiness) for the exact reason
@@ -1783,6 +1813,7 @@ export function bootstrap(): Dependencies {
     manageUserTiers,
     startUserSubscription,
     listSubscribers,
+    membershipRequests,
     handlePaymentWebhook,
     messaging,
     xenditCallbackToken,

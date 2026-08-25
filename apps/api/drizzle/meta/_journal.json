@@ -232,6 +232,13 @@
       "when": 1787383054940,
       "tag": "0032_familiar_tigra",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1787627823755,
+      "tag": "0033_stormy_metal_master",
+      "breakpoints": true
     }
   ]
 }
