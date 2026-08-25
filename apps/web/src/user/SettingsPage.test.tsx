@@ -117,6 +117,39 @@ describe("SettingsPage", () => {
     expect(screen.getByText("@bob")).toBeTruthy();
   });
 
+  /**
+   * Task 7 of "free memberships": `<MembershipRequests />` is mounted by
+   * `SettingsPage.tsx` alongside `SubscriberList`, for the same "nothing in
+   * this file ever referenced it" reason the M-3 note above records. Routed
+   * (not blanket) mock, so real data from `GET /users/me/membership-requests`
+   * has to travel through `apiClient.listMembershipRequests` and
+   * `MembershipRequests`'s own fetch effect and reach the screen.
+   */
+  it("mounts the membership-requests queue and renders what GET /users/me/membership-requests sends", async () => {
+    setUserSession("jwt-abc", USER);
+    global.fetch = mock(async (url: string) => {
+      if (url === "/users/me/membership-requests") {
+        return jsonResponse({
+          requests: [
+            {
+              id: "req-1",
+              subscriberHandle: "andi",
+              subscriberDisplayName: "Andi",
+              tierName: "Gratis",
+              createdAt: "2026-08-20T00:00:00.000Z",
+            },
+          ],
+        });
+      }
+      return jsonResponse(OWN_PROFILE);
+    }) as unknown as typeof fetch;
+
+    renderSettings();
+
+    expect(await screen.findByText("Permintaan keanggotaan")).toBeTruthy();
+    expect(await screen.findByText("@andi")).toBeTruthy();
+  });
+
   it("updates the display name and shows a confirmation", async () => {
     setUserSession("jwt-abc", USER);
     const calls: Array<{ url: string; init: RequestInit }> = [];

@@ -1252,6 +1252,58 @@ export function deactivateOwnTier(tierId: string): Promise<UserTier> {
 }
 
 /**
+ * One pending free-membership request on the wire — mirrors the API's own
+ * `MembershipRequestEntry` (`application/use-cases/membership-requests.ts`)
+ * field for field, a CLOSED projection never widened here. `createdAt` is a
+ * STRING here and a `Date` server-side, the same JSON-has-no-date-type
+ * convention `UserTier.createdAt` and `SubscriberEntry.since` already use.
+ */
+export interface MembershipRequestEntry {
+  id: string;
+  subscriberHandle: string;
+  subscriberDisplayName: string;
+  tierName: string;
+  createdAt: string;
+}
+
+/**
+ * `GET /users/me/membership-requests` — Task 5 of "free memberships": the
+ * owner's own queue of pending free-tier requests, waiting on a decision
+ * only they can make (spec §2.4). Owner-only server-side, same as
+ * `listOwnTiers`/`listSubscribers` above: there is no handle to pass, because
+ * the server answers only for the session's own id.
+ */
+export function listMembershipRequests(): Promise<{ requests: MembershipRequestEntry[] }> {
+  return apiFetch<{ requests: MembershipRequestEntry[] }>("/users/me/membership-requests");
+}
+
+/**
+ * `POST /users/me/membership-requests/:id/approve` — admits one pending
+ * requester, flipping their row to an active, permanent (no
+ * `currentPeriodEnd`) free membership. The response is the resulting
+ * subscription row; nothing on this side reads it — the caller only needs to
+ * know the call succeeded so it can drop the request from its own list.
+ */
+export function approveMembershipRequest(requestId: string): Promise<unknown> {
+  return apiFetch<unknown>(
+    `/users/me/membership-requests/${encodeURIComponent(requestId)}/approve`,
+    { method: "POST" }
+  );
+}
+
+/**
+ * `POST /users/me/membership-requests/:id/reject` — DELETES the pending row
+ * (never a status flip; see the API's own `UserSubscriptionRepositoryPort
+ * .rejectRequest` docstring), so the same person is free to ask again later.
+ */
+export function rejectMembershipRequest(requestId: string): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>(
+    `/users/me/membership-requests/${encodeURIComponent(requestId)}/reject`,
+    { method: "POST" }
+  );
+}
+
+/**
  * **`POST /users/:handle/subscribe` — the moment money moves** (spec §6).
  *
  * The body carries the tier and NOTHING else: the buyer is the session, read
