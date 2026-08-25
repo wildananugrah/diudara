@@ -937,3 +937,187 @@ describe("members-only media: the route refuses an id it never sent", () => {
     await expectServed(thumb(mediaId), "public, max-age=31536000, immutable");
   });
 });
+
+/**
+ * THE BUG THIS BLOCK CLOSES, found in production on 2026-08-25.
+ *
+ * `PostCard` renders `<img src={mediaThumbUrl(id)}>`. A browser image request
+ * carries NO `Authorization` header and there is no way to give it one — so
+ * every gated image arrived at `resolveViewerId` as an anonymous caller and
+ * was refused. Members-only photos were therefore invisible to the author who
+ * posted them and to every member who had paid for them, while non-members
+ * correctly saw the lock card. The feature worked for exactly the people it
+ * was meant to exclude.
+ *
+ * Nothing above caught it because every test in this file speaks to the route
+ * with `authed(token)` — a `fetch` with headers, which is not the client. The
+ * barrier was verified in isolation from the only thing that ever calls it.
+ *
+ * The fix is a cookie, because a cookie is the one credential a browser
+ * attaches to an `<img>` by itself. It is scoped to `/users/media` so it is
+ * never sent anywhere else, and the server refuses it everywhere else too —
+ * the last two tests here are that second half, and they are the ones that
+ * keep this from becoming a general-purpose ambient session.
+ */
+describe("members-only media: the cookie an <img> can actually send", () => {
+  const RINA = { handle: "rina", email: "rina@example.com", displayName: "Rina" };
+
+  let a: ReturnType<typeof app>;
+
+  beforeEach(() => {
+    a = app();
+  });
+
+  /** Signs up, logs in, and returns the LOGIN RESPONSE — headers included. */
+  async function loginResponse(overrides: Partial<typeof VALID> = {}) {
+    const account = { ...VALID, ...overrides };
+    await a.request("/users/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(account),
+    });
+    return a.request("/users/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: account.email, password: account.password }),
+    });
+  }
+
+  /** The `name=value` pair a browser would send back, from a Set-Cookie header. */
+  function cookiePair(setCookie: string | null): string {
+    if (setCookie === null) throw new Error("no Set-Cookie header on this response");
+    return setCookie.split(";")[0]!.trim();
+  }
+
+  async function upload(token: string): Promise<string> {
+    const form = new FormData();
+    form.append("file", new Blob([await fixture("small.png")], { type: "image/png" }), "small.png");
+    const res = await a.request("/users/media", {
+      method: "POST",
+      headers: authed(token),
+      body: form,
+    });
+    return ((await res.json()) as { id: string }).id;
+  }
+
+  /** One members-only post holding one image, created through the real routes. */
+  async function gatedImage() {
+    const res = await loginResponse(RINA);
+    const cookie = cookiePair(res.headers.get("set-cookie"));
+    const token = ((await res.json()) as { token: string }).token;
+    const mediaId = await upload(token);
+    const created = await a.request("/users/posts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ body: "Behind the scenes", mediaIds: [mediaId] }),
+    });
+    const post = (await created.json()) as { id: string };
+    await db.update(postsTable).set({ visibility: "members" }).where(eq(postsTable.id, post.id));
+    return { token, cookie, mediaId };
+  }
+
+  it("serves the owner their gated THUMBNAIL with only the cookie — no Authorization header", async () => {
+    const { cookie, mediaId } = await gatedImage();
+
+    const res = await a.request(`/users/media/${mediaId}/thumb`, { headers: { Cookie: cookie } });
+
+    expect(res.status).toBe(200);
+  });
+
+  it("serves the owner their gated FULL image with only the cookie", async () => {
+    const { cookie, mediaId } = await gatedImage();
+
+    const res = await a.request(`/users/media/${mediaId}`, { headers: { Cookie: cookie } });
+
+    expect(res.status).toBe(200);
+  });
+
+  /**
+   * The control. Without it the two tests above would still pass if the gate
+   * were removed altogether, which is the failure mode that matters most here.
+   */
+  it("still refuses the same gated image when neither cookie nor header is sent", async () => {
+    const { mediaId } = await gatedImage();
+
+    expect((await a.request(`/users/media/${mediaId}/thumb`)).status).toBe(404);
+    expect((await a.request(`/users/media/${mediaId}`)).status).toBe(404);
+  });
+
+  it("ignores a junk cookie rather than trusting the name", async () => {
+    const { mediaId, cookie } = await gatedImage();
+    const name = cookie.split("=")[0];
+
+    const res = await a.request(`/users/media/${mediaId}/thumb`, {
+      headers: { Cookie: `${name}=not-a-real-token` },
+    });
+
+    expect(res.status).toBe(404);
+  });
+
+  /**
+   * THE SCOPING HALF, and the reason this is a media credential rather than a
+   * second way to be signed in. The cookie's `Path` already stops a browser
+   * sending it anywhere but `/users/media`, but `Path` is a client-side
+   * courtesy — anything can send any cookie to any path. The server has to
+   * refuse it independently, and this is the test that says so.
+   */
+  it("does not authenticate any other route — GET /users/me with only the cookie is 401", async () => {
+    const { cookie } = await gatedImage();
+
+    const res = await a.request("/users/me", { headers: { Cookie: cookie } });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("does not authorise writes — POST /users/posts with only the cookie is 401", async () => {
+    const { cookie } = await gatedImage();
+
+    const res = await a.request("/users/posts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ body: "diam-diam", mediaIds: [] }),
+    });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("sets the cookie on login with the attributes that make it safe", async () => {
+    const res = await loginResponse(RINA);
+
+    const setCookie = res.headers.get("set-cookie");
+    expect(setCookie).not.toBeNull();
+    // Asserted as flags rather than one exact string: the order Hono emits
+    // them in is not a contract, and pinning the whole header would fail on a
+    // harmless reordering while telling a reader nothing.
+    const header = setCookie!;
+    expect(header.includes("HttpOnly")).toBe(true);
+    expect(header.includes("Secure")).toBe(true);
+    expect(header.includes("SameSite=Lax")).toBe(true);
+    // The narrow path is the point: the browser never offers this credential
+    // to /users/me, /users/posts, or anything else.
+    expect(header.includes("Path=/users/media")).toBe(true);
+  });
+
+  /**
+   * There was no logout endpoint at all before this — signing out cleared
+   * localStorage in the browser and nothing else. A cookie the server never
+   * clears would keep loading gated images for the full 7-day token lifetime
+   * after "Keluar", which on a shared computer is the whole problem.
+   */
+  it("clears the cookie on logout, on the same path it was set", async () => {
+    const login = await loginResponse(RINA);
+    const cookie = cookiePair(login.headers.get("set-cookie"));
+
+    const res = await a.request("/users/logout", { method: "POST", headers: { Cookie: cookie } });
+
+    expect(res.status).toBe(200);
+    const cleared = res.headers.get("set-cookie");
+    expect(cleared).not.toBeNull();
+    expect(cleared!.includes("Path=/users/media")).toBe(true);
+    expect(cleared!.includes("Max-Age=0")).toBe(true);
+  });
+
+  it("logs out without a session too, so a stale cookie can always be shed", async () => {
+    expect((await a.request("/users/logout", { method: "POST" })).status).toBe(200);
+  });
+});

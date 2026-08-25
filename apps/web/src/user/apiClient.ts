@@ -235,6 +235,40 @@ export function setUserSession(token: string, user: SessionUser): void {
  * while the cached account stayed would leave a page greeting somebody who
  * is no longer signed in.
  */
+/**
+ * Signing out on PURPOSE — the button, not the 401 interceptor.
+ *
+ * `clearUserToken()` below ends the half of the session this browser holds. It
+ * cannot end the other half: `diudara_media_session` is HttpOnly, so no script
+ * can remove it, and until the server clears it the browser keeps attaching it
+ * to every `<img>` and gated images keep loading for the token's full lifetime.
+ * On a shared computer that is precisely the wrong outcome.
+ *
+ * FIRE AND FORGET, and local state is cleared either way. A failed or slow
+ * logout request must never be able to keep somebody signed in on this device
+ * — the worst case if the request is lost is a cookie that outlives the click,
+ * and the best case if we waited on it would be the same cookie plus a user
+ * stuck on a spinner. The endpoint is public and always 200s, so there is no
+ * error here worth showing.
+ *
+ * NOT called from the 401 path: a 401 means the token is already dead, and the
+ * cookie carries that same token, so the server rejects it too.
+ */
+export function signOut(): void {
+  // Through `publicPost`, not a bare `fetch`: N6 (asserted in apiClient.test.ts)
+  // is that exactly three functions in this file touch the network, and a
+  // fourth would be the beginning of the end of that. Public because logging
+  // out must not require a valid token — see the endpoint's own docstring.
+  //
+  // The fallback message is required by the signature and never reaches a
+  // screen: the rejection is swallowed below, because nothing a user can do
+  // about a failed logout is worth interrupting them with.
+  void publicPost<{ ok: true }>("/users/logout", {}, "gagal keluar").catch(() => {
+    // See above: the local session ends regardless.
+  });
+  clearUserToken();
+}
+
 export function clearUserToken(): void {
   try {
     localStorage.removeItem(USER_TOKEN_STORAGE_KEY);
