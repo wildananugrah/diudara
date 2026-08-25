@@ -218,6 +218,9 @@ class FakeSubscriptions implements UserSubscriptionRepositoryPort {
   async findActiveFor(): Promise<never> {
     return this.unused();
   }
+  async findPendingFor(): Promise<never> {
+    return this.unused();
+  }
   async listActiveSubscribers(): Promise<never> {
     return this.unused();
   }

@@ -1454,12 +1454,15 @@ export function bootstrap(): Dependencies {
   // Task 5 of memberships-5a: `userTierRepository` (constructed above, Task 1)
   // is now GetUserProfile's third dependency too — the public profile's
   // `membership.tiers` read. Task 10 adds the fourth, `isMemberOf`, for the
-  // same payload's `viewerIsMember`.
+  // same payload's `viewerIsMember`. Task 6 of "free memberships" adds the
+  // fifth, the SAME `userSubscriptionRepository` `isMemberOf` reads, for
+  // `membership.viewerRequestPending`.
   const getUserProfile = new GetUserProfile(
     userRepository,
     followRepository,
     userTierRepository,
-    isMemberOf
+    isMemberOf,
+    userSubscriptionRepository
   );
   const updateUserProfile = new UpdateUserProfile(userRepository);
   const followUser = new FollowUser(userRepository, followRepository);

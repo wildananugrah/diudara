@@ -787,6 +787,95 @@ describe("DrizzleUserSubscriptionRepository", () => {
 });
 
 /**
+ * Task 6 of "free memberships" — the read `GetUserProfile` uses for
+ * `membership.viewerRequestPending`. `status = 'pending'` for the pair,
+ * nothing else: deliberately KIND-AGNOSTIC, unlike `findPendingCheckout`
+ * (which additionally requires a transaction with an invoice — the very
+ * thing a free request never has) and unlike `listPendingRequests` (which
+ * filters to `kind = 'free'` for the owner's queue). The free-vs-paid
+ * judgement this method's own callers need is `toMembershipView`'s job, not
+ * this query's — see the port's own docstring on `findPendingFor` for why.
+ */
+describe("DrizzleUserSubscriptionRepository.findPendingFor", () => {
+  it("finds a PENDING FREE request for the pair", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Gratis",
+      priceAmount: 0,
+      billingCycle: "monthly",
+    });
+    const claim = await subs.claimPending({
+      subscriberId: bob.id,
+      tierId: tier.id,
+      ownerId: alice.id,
+      kind: "free",
+    });
+
+    const found = await subs.findPendingFor(bob.id, alice.id);
+
+    expect(found?.id).toBe(claim.subscription.id);
+    expect(found?.status).toBe("pending");
+    expect(found?.kind).toBe("free");
+  });
+
+  /**
+   * **THE KIND-AGNOSTIC HALF OF THE CONTRACT.** A PAID pending checkout is
+   * found here too — this method does not narrow by `kind`, unlike
+   * `listPendingRequests`. Narrowing to free-only is `toMembershipView`'s
+   * job (`tier-views.ts`), not this query's; a repository read that already
+   * excluded paid rows would make that projection incapable of ever telling
+   * the two states apart.
+   */
+  it("finds a PENDING PAID checkout for the pair too — this read is kind-agnostic on purpose", async () => {
+    const { subscriberId, ownerId, id } = await seedPendingSubscription();
+
+    const found = await subs.findPendingFor(subscriberId, ownerId);
+
+    expect(found?.id).toBe(id);
+    expect(found?.kind).toBe("paid");
+  });
+
+  it("returns null when there is no pending row for the pair at all", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+
+    expect(await subs.findPendingFor(bob.id, alice.id)).toBe(null);
+  });
+
+  /**
+   * An ACTIVE membership — free or paid — is no longer pending. Reusing
+   * `seedFreeSubscription` (an ACTIVE free row) rather than a fresh free
+   * pending claim is deliberate: it is the case that would silently regress
+   * if this query's `status = 'pending'` predicate were ever dropped or
+   * loosened to "any row for the pair", since an active free row has no
+   * period to otherwise rule it out.
+   */
+  it("returns null for an ACTIVE membership — status-only, an active row is not pending", async () => {
+    const { subscriberId, ownerId } = await seedFreeSubscription();
+
+    expect(await subs.findPendingFor(subscriberId, ownerId)).toBe(null);
+  });
+
+  it("never matches the wrong pair — a pending request for a different owner or subscriber", async () => {
+    const alice = await createUser("alice");
+    const bob = await createUser("bob");
+    const stranger = await createUser("carol");
+    const tier = await tiers.create({
+      ownerId: alice.id,
+      name: "Gratis",
+      priceAmount: 0,
+      billingCycle: "monthly",
+    });
+    await subs.claimPending({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id, kind: "free" });
+
+    expect(await subs.findPendingFor(stranger.id, alice.id)).toBe(null);
+    expect(await subs.findPendingFor(bob.id, stranger.id)).toBe(null);
+  });
+});
+
+/**
  * Task 5 of Phase 5b (spec §7): the pending-checkout cleanup. The window's two ends
  * are tested in both directions here for the same reason `listExpiringActive`'s own
  * comment gives — a query with only clearly-stale rows passes against a cutoff of any

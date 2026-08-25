@@ -1,4 +1,5 @@
 import type { UserTierRow } from "../ports/user-tier-repository.port";
+import type { UserSubscriptionRow } from "../ports/user-subscription-repository.port";
 import type { MembershipStanding } from "./is-member-of";
 
 /**
@@ -79,18 +80,45 @@ export interface TierView {
  * Also `false`, never `null`, for an anonymous visitor, for the identical
  * reason: it too is a claim about the caller.
  *
- * The projection stays CLOSED at exactly these three keys. This endpoint is
- * public, so anything added here is public too — and both viewer booleans are
- * about the CALLER rather than about the creator being viewed, which is
- * precisely the kind of field that must not grow neighbours by accident (a
- * period end, a tier id, a subscription id would each be a new disclosure,
- * and a DATE would be one even here: "ended" is all the web needs to stop
- * offering, and it discloses nothing a renewal endpoint would not).
+ * The projection stays CLOSED at exactly these four keys. This endpoint is
+ * public, so anything added here is public too — and all three viewer
+ * booleans are about the CALLER rather than about the creator being viewed,
+ * which is precisely the kind of field that must not grow neighbours by
+ * accident (a period end, a tier id, a subscription id would each be a new
+ * disclosure, and a DATE would be one even here: "ended" is all the web
+ * needs to stop offering, and it discloses nothing a renewal endpoint would
+ * not).
  */
 export interface MembershipView {
   tiers: TierView[];
   viewerIsMember: boolean;
   viewerMembershipEnded: boolean;
+  /**
+   * Task 6 of "free memberships": is a FREE request from this viewer, to
+   * this creator, awaiting the owner's decision — so the web can say "your
+   * request is awaiting approval" instead of re-offering the tier.
+   *
+   * **`false`, never `null` or `undefined`, for a signed-out viewer** —
+   * identical reasoning to `viewerIsMember`'s own docstring above: this is a
+   * claim about the CALLER, and for somebody we cannot identify the only
+   * honest answer is "no", never a tri-state a client could mishandle into
+   * "yes". It is also `false` on the viewer's own profile without a query —
+   * nobody can have a pending request with themselves, the same way nobody
+   * can be a member of themselves.
+   *
+   * **TRUE ONLY FOR A FREE PENDING ROW, deliberately not a paid one.** The
+   * repository read behind this (`findPendingFor`) answers a broader
+   * question — is there ANY `status = 'pending'` row for this pair, paid
+   * checkout or free request alike — because that is the truthful shape of
+   * "pending" and it is what a second caller (a second-tap guard) would also
+   * need un-narrowed. This projection is where the narrowing happens: a PAID
+   * pending row means the viewer has an open invoice and is mid-payment, and
+   * telling that person "your request is awaiting approval" would be a lie —
+   * they are not waiting on the owner, they are waiting on themselves to pay.
+   * `kind === "free"` is the one predicate that tells the two apart, since a
+   * free request never has a transaction or an invoice to check instead.
+   */
+  viewerRequestPending: boolean;
 }
 
 export function toTierView(row: UserTierRow): TierView {
@@ -114,6 +142,14 @@ export function toTierView(row: UserTierRow): TierView {
  * here would let a caller that forgot to ask the question ship a confident
  * "not a member, go ahead and buy" that looks identical to a real one.
  *
+ * `pending` is likewise REQUIRED, for the identical reason, and it is the
+ * WHOLE row (or `null`), not a pre-narrowed boolean — `UserSubscriptionRow`
+ * `findPendingFor` returns, so this function is where `kind === "free"` gets
+ * checked (see `MembershipView.viewerRequestPending`'s own docstring for why
+ * a PAID pending row must answer `false`, not `true`). A caller that already
+ * knows there is no viewer (anonymous, or the viewer's own profile) passes
+ * `null` without ever querying — see `GetUserProfile.execute`.
+ *
  * It arrives as the STANDING rather than as two booleans because the two
  * booleans have an impossible combination: nobody is simultaneously a live
  * member and a lapsed one. Deriving both here from one value is what makes
@@ -128,10 +164,15 @@ export function toTierView(row: UserTierRow): TierView {
  * it produced a white screen during a deploy (memberships-5a spec, Task 5
  * brief).
  */
-export function toMembershipView(rows: UserTierRow[], standing: MembershipStanding): MembershipView {
+export function toMembershipView(
+  rows: UserTierRow[],
+  standing: MembershipStanding,
+  pending: UserSubscriptionRow | null
+): MembershipView {
   return {
     tiers: rows.map(toTierView),
     viewerIsMember: standing === "member",
     viewerMembershipEnded: standing === "lapsed",
+    viewerRequestPending: pending !== null && pending.kind === "free",
   };
 }

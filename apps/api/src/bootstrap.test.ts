@@ -249,6 +249,9 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   async findActiveFor() {
     return null;
   },
+  async findPendingFor() {
+    return null;
+  },
   async listActiveSubscribers() {
     return [];
   },
@@ -543,7 +546,10 @@ describe("Dependencies (composition root contract)", () => {
         fakeUserTierRepository,
         // Task 10's fourth dependency: the REAL `IsMemberOf` over the two
         // fakes already in this file, never a stub of its own.
-        new IsMemberOf(fakeUserSubscriptionRepository, fakeClock)
+        new IsMemberOf(fakeUserSubscriptionRepository, fakeClock),
+        // Task 6 of "free memberships": the fifth dependency, the same fake
+        // `IsMemberOf` above reads.
+        fakeUserSubscriptionRepository
       ),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),

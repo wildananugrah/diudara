@@ -3,6 +3,7 @@ import { normalizeHandle } from "../../domain/handle";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
 import type { FollowRepositoryPort } from "../ports/follow-repository.port";
 import type { UserTierRepositoryPort } from "../ports/user-tier-repository.port";
+import type { UserSubscriptionRepositoryPort } from "../ports/user-subscription-repository.port";
 import type { IsMemberOf, MembershipStanding } from "./is-member-of";
 import { toMembershipView, type MembershipView } from "./tier-views";
 
@@ -120,7 +121,18 @@ export class GetUserProfile {
      * This is also the ONLY place in 5a that puts `IsMemberOf` on a request
      * path at all.
      */
-    private readonly membership: IsMemberOf
+    private readonly membership: IsMemberOf,
+    /**
+     * Task 6 of "free memberships": the direct repository read
+     * `membership.viewerRequestPending` needs. Not routed through
+     * `IsMemberOf` — that class answers one question, "is this a member",
+     * over `findActiveFor`'s `status = 'active'` row; a pending row is a
+     * DIFFERENT row entirely (`status = 'pending'`), so folding this into
+     * `IsMemberOf` would widen a class Task 8's own docstring pins as
+     * answering exactly one thing. Same repository instance `membership`
+     * was built over — see `bootstrap.ts`.
+     */
+    private readonly subscriptions: UserSubscriptionRepositoryPort
   ) {}
 
   /**
@@ -142,11 +154,17 @@ export class GetUserProfile {
       throw new NotFoundError("user not found");
     }
 
+    // Nobody can have a pending request with themselves, the same fact
+    // `IsMemberOf.describe` checks before it ever queries — computed here
+    // rather than inside `toMembershipView` because it decides whether the
+    // QUERY runs at all, not just how the row that comes back reads.
+    const viewingOwnProfile = viewerId !== null && viewerId === user.id;
+
     // One call for the profile's tiers, not one per tier — `listActiveByOwner`
     // is itself a single scoped query (its own port docstring and
-    // `DrizzleUserTierRepository`); this just runs it alongside the two other
+    // `DrizzleUserTierRepository`); this just runs it alongside the other
     // reads this profile already needed rather than after them.
-    const [counts, viewerFollows, activeTiers, standing] = await Promise.all([
+    const [counts, viewerFollows, activeTiers, standing, pendingRequest] = await Promise.all([
       this.follows.countsFor(user.id),
       viewerId === null ? Promise.resolve(null) : this.follows.isFollowing(viewerId, user.id),
       this.tiers.listActiveByOwner(user.id),
@@ -172,6 +190,20 @@ export class GetUserProfile {
       viewerId === null
         ? Promise.resolve<MembershipStanding>("none")
         : this.membership.describe(viewerId, user.id),
+      // Task 6 of "free memberships". `viewerRequestPending`'s read:
+      // `findPendingFor` hands back ANY pending row for this pair — paid or
+      // free — and `toMembershipView` is where the free-only judgement gets
+      // made (see that function's own docstring, and the task's binding
+      // ruling on why the read itself must stay kind-agnostic).
+      //
+      // Skipped — no query at all — for an anonymous viewer (nobody to hold
+      // a request) and for the viewer's own profile (nobody can have a
+      // pending request with themselves; `user_subscription_no_self` makes
+      // such a row impossible to insert in the first place, mirroring
+      // `IsMemberOf.describe`'s identical short-circuit above).
+      viewerId === null || viewingOwnProfile
+        ? Promise.resolve(null)
+        : this.subscriptions.findPendingFor(viewerId, user.id),
     ]);
 
     return {
@@ -179,7 +211,7 @@ export class GetUserProfile {
       followerCount: counts.followers,
       followingCount: counts.following,
       viewerFollows,
-      membership: toMembershipView(activeTiers, standing),
+      membership: toMembershipView(activeTiers, standing, pendingRequest),
     };
   }
 

@@ -90,7 +90,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
    *
    * **A CAUGHT UNIQUE VIOLATION IS ONLY CLEAN WHEN IT IS THE LAST STATEMENT OF
    * ITS TRANSACTION.** Postgres aborts the transaction the moment the violation
-   * is raised, so everything after the catch — starting with `findPending`
+   * is raised, so everything after the catch — starting with `findPendingFor`
    * below, which the catch itself needs — fails with `25P02`, "current
    * transaction is aborted, commands ignored until end of transaction block".
    * On the pool that never showed, because the implicit transaction was one
@@ -138,7 +138,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     if (row) {
       return { subscription: row, created: true };
     }
-    const existing = await this.findPending(input.subscriberId, input.ownerId);
+    const existing = await this.findPendingFor(input.subscriberId, input.ownerId);
     if (!existing) {
       // The holder settled or released between the conflict and this read.
       // Failing is the honest answer — the caller retries and claims it —
@@ -152,11 +152,21 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     return { subscription: existing, created: false };
   }
 
-  /** The pair's pending subscription, whatever its tier. Private: `claimPending` is the contract. */
-  private async findPending(
-    subscriberId: string,
-    ownerId: string
-  ): Promise<UserSubscriptionRow | null> {
+  /**
+   * See the port's own docstring for the full contract. `claimPending`'s
+   * loser-reads-the-winner path is the other caller — same query, no
+   * `kind` filter either way, because the loser needs to see a PAID pending
+   * row exactly as readily as a FREE one.
+   *
+   * Newest first (`created_at` desc): mirrors `findPendingCheckout`'s own
+   * "most recent such row" tie-break, for the same reason — a pair should
+   * never actually have more than one (`user_subscription_one_pending`), but
+   * if it somehow did, the freshest one is the honest answer.
+   */
+  async findPendingFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null> {
+    if (!UUID_PATTERN.test(subscriberId) || !UUID_PATTERN.test(ownerId)) {
+      return null;
+    }
     const [row] = await this.db
       .select()
       .from(userSubscriptions)
@@ -167,6 +177,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
           eq(userSubscriptions.status, "pending")
         )
       )
+      .orderBy(desc(userSubscriptions.createdAt), desc(userSubscriptions.id))
       .limit(1);
     return row ?? null;
   }

@@ -335,6 +335,27 @@ export interface UserSubscriptionRepositoryPort {
   /** Task 8's membership check: is this subscriber an active member of this owner. */
   findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null>;
   /**
+   * Task 6 of "free memberships": is there a `status = 'pending'` row for
+   * this (subscriber, owner) pair, whatever put it there — a PAID checkout
+   * with an open invoice (`StartUserSubscription`'s paid path) or a FREE
+   * request awaiting the owner's decision (`claimPending({ ..., kind: "free"
+   * })`). `status = 'pending'` alone, nothing else — deliberately NOT
+   * `findPendingCheckout`'s three-way predicate (subscription pending,
+   * transaction pending, transaction has an invoice url): that method exists
+   * to dedupe a SECOND paid checkout tap and a free request has no
+   * transaction at all, so it would never be found through it. This read
+   * stays a truthful, general-purpose "is there a pending row for this
+   * pair" — a caller that only cares about ONE kind (the public profile
+   * cares about free only, so it is not left mid-payment being told "awaiting
+   * approval") decides that in its own projection, off the `kind` this
+   * method hands back, rather than this query silently narrowing to one kind
+   * and becoming useless for the other caller.
+   *
+   * The most recent such row, when a pair somehow has more than one (it
+   * should not: `user_subscription_one_pending` allows only one).
+   */
+  findPendingFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null>;
+  /**
    * A creator's OWN subscriber list — Task 6 of Phase 5b, spec §8. Only
    * CURRENTLY subscribed members: `status = 'active'` AND (`kind = 'free'`
    * OR `current_period_end > now`, strict) — the exact same "currently

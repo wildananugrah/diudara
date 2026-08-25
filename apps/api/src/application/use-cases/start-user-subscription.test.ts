@@ -304,6 +304,9 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
       );
       return row ? { ...row } : null;
     },
+    async findPendingFor() {
+      throw new Error("StartUserSubscription must never read the pending-request flag — GetUserProfile does");
+    },
     /**
      * Task 2 of Phase 6. Mirrors the real query's predicate exactly — `status
      * = 'active'` AND `current_period_end > now`, strict — not merely
