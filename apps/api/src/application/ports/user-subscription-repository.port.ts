@@ -5,7 +5,7 @@ export interface UserSubscriptionRow {
   tierId: string;
   ownerId: string;
   status: string;
-  /** 'paid' | 'free'. See spec §3: this is what keeps a NULL period reading as a bug. */
+  /** 'paid' | 'free'. See spec §3: this is what keeps a PAID row's NULL period reading as a bug, while a free row's NULL is the intended shape. */
   kind: string;
   currentPeriodEnd: Date | null;
   createdAt: Date;
@@ -313,6 +313,15 @@ export interface UserSubscriptionRepositoryPort {
    *
    * Returns the CLOSED projection (`SubscriberRow`) — see that type's own
    * docstring for exactly what may and may not cross this boundary.
+   *
+   * **DIVERGED AS OF 2680dda, AND ONLY UNTIL TASK 2 LANDS.** `membershipStanding`
+   * now also answers `member` for `kind = 'free'`, which has no period at all;
+   * this query does not yet. That is deliberate sequencing, not an oversight —
+   * the WHERE clauses here are Task 2's, because this is the read that gates
+   * photos in a feed. Until Task 2 adds `OR kind = 'free'`, the sentence above
+   * is aspirational rather than true, and a free member is a member on their
+   * profile and a stranger in the feed. Do not delete this note without
+   * checking the query.
    */
   listActiveSubscribers(ownerId: string, now: Date): Promise<SubscriberRow[]>;
   /**
@@ -342,6 +351,15 @@ export interface UserSubscriptionRepositoryPort {
    * An empty `ownerIds` answers `[]` without touching the database — an
    * empty `IN ()` is a SQL error in some drivers and a pointless round trip
    * in all of them.
+   *
+   * **DIVERGED AS OF 2680dda, AND ONLY UNTIL TASK 2 LANDS.** `membershipStanding`
+   * now also answers `member` for `kind = 'free'`, which has no period at all;
+   * this query does not yet. That is deliberate sequencing, not an oversight —
+   * the WHERE clauses here are Task 2's, because this is the read that gates
+   * photos in a feed. Until Task 2 adds `OR kind = 'free'`, the sentence above
+   * is aspirational rather than true, and a free member is a member on their
+   * profile and a stranger in the feed. Do not delete this note without
+   * checking the query.
    */
   listActiveOwnersAmong(subscriberId: string, ownerIds: string[], now: Date): Promise<string[]>;
   createTransaction(input: {

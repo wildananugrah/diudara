@@ -273,7 +273,11 @@ export class StartUserSubscription {
         // WHICH BRANCH IS STILL REACHABLE, AFTER 5b. The "member" one, for
         // anybody still inside their paid period — the ordinary refusal. The
         // "ended" one now only for an `active` row with a NULL
-        // `current_period_end`: `retireExpired`'s predicate is
+        // `current_period_end` AND `kind = 'paid'` — a FREE row with a NULL
+        // period takes the "member" branch instead, because for a free
+        // membership that shape is not a bug but the whole point (spec §3), and
+        // telling a free member their membership has ended would be false.
+        // `retireExpired`'s predicate is
         // `current_period_end <= now`, and `NULL <= now` is not true, so such a
         // row survives the retirement and lands here. It is unreachable through
         // `activate`, which always writes a period end, but it is the one shape
