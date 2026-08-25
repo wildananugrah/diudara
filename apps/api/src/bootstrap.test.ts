@@ -2563,3 +2563,50 @@ describe("selectMediaStorage", () => {
     expect(quietFake).toEqual([]);
   });
 });
+
+/**
+ * THE CLASS, closed at last — four separate provider pairs have now leaked
+ * out of `apps/api/.env` into the suite, one per phase that made a provider
+ * live: streaming (MEDIAMTX_*), then FONNTE_API_TOKEN and XENDIT_*, then S3_*
+ * pre-emptively, then RESEND_API_KEY/EMAIL_FROM on 2026-08-25 — which sent
+ * real POSTs to api.resend.com from every run on a developer's box.
+ *
+ * Each time the fix was to append names to the deletion list in
+ * `test-env-preload.ts`, and each time that list only protected the providers
+ * somebody had remembered. This test needs no list: it asks `bootstrap()` what
+ * it actually built and fails on anything that is not a fake, whatever env var
+ * produced it and whenever that variable was invented.
+ *
+ * WHAT IT CANNOT DO: it proves the adapters this process would use, not that
+ * no test anywhere constructs a real adapter by hand. `S3MediaStorageAdapter`'s
+ * `DIUDARA_BUN_TEST_RUN` refusal covers that second case for the one adapter
+ * where somebody bothered; nothing covers it generally.
+ */
+describe("bootstrap() in the test suite reaches no real provider", () => {
+  /** `null`/`undefined` read as "none" so a disabled provider is not a failure. */
+  function adapterName(value: unknown): string {
+    if (value === null || value === undefined) return "none";
+    return (value as object).constructor.name;
+  }
+
+  it("builds only fakes (or nothing) for every outbound adapter", () => {
+    const deps = bootstrap();
+
+    const built = [
+      `payments=${adapterName(deps.payments)}`,
+      `email=${adapterName(deps.email)}`,
+      `streaming=${adapterName(deps.streamingProvider)}`,
+      `mediaStorage=${adapterName(deps.mediaStorage)}`,
+      ...Object.values(deps.messaging).map((m) => `messaging=${adapterName(m)}`),
+    ];
+
+    // Reported as a joined string, never as a boolean: a failure has to NAME the
+    // adapter that leaked, because the whole difficulty here is not noticing.
+    const real = built.filter((entry) => {
+      const name = entry.slice(entry.indexOf("=") + 1);
+      return name !== "none" && !name.startsWith("Fake");
+    });
+
+    expect(real.sort().join(" | ")).toBe("");
+  });
+});

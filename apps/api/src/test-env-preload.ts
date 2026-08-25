@@ -171,6 +171,25 @@ for (const key of [
   "S3_BUCKET",
   "S3_ENDPOINT",
   "S3_REGION",
+  // Task 4 of Phase 9 put real Resend credentials in `apps/api/.env`, and this
+  // was the ONE provider pair nobody had added here — the fourth time this same
+  // hole has been opened by a provider going live (streaming, then
+  // Fonnte/Xendit, then S3 pre-emptively, now email).
+  //
+  // Unlike S3 above, `ResendEmailAdapter` has NO `DIUDARA_BUN_TEST_RUN` guard of
+  // its own, so nothing stopped it: measured on 2026-08-25, a developer with a
+  // live key got 12 failures across the password-reset routes and
+  // `worker-bootstrap.test.ts`, each one a REAL outbound POST to
+  // api.resend.com. They fail with 422 because the fixtures address
+  // `@example.com` — which means the harm is not only a red suite: every run
+  // aimed real send attempts at undeliverable addresses from the project's own
+  // sending domain.
+  //
+  // BOTH, never just the key: `selectEmailProvider` THROWS on half
+  // configuration ("RESEND_API_KEY is set but EMAIL_FROM is not"), so deleting
+  // one would turn a leaked adapter into a suite that cannot boot at all.
+  "RESEND_API_KEY",
+  "EMAIL_FROM",
 ]) {
   delete process.env[key];
 }
