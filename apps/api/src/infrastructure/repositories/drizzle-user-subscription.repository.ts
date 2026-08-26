@@ -28,6 +28,12 @@ const subscriberProjection = {
   handle: appUsers.handle,
   displayName: appUsers.displayName,
   since: userSubscriptions.createdAt,
+  // Added for revocation. The owner may remove a FREE member and may not
+  // remove a paying one (no refund path exists), so the screen has to be able
+  // to tell them apart — otherwise it offers a button the server will refuse,
+  // which is the defect this project has spent the week removing. Not
+  // sensitive: it is the owner's own tier, priced by the owner.
+  kind: userSubscriptions.kind,
 } as const;
 
 /**

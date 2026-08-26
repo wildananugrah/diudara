@@ -3679,7 +3679,9 @@ describe("GET /users/me/subscribers (Task 6 of Phase 5b)", () => {
 
     expect(res.status).toBe(200);
     expect(body.subscribers).toEqual([
-      { handle: "bob", displayName: "Bob", since: expect.any(String) },
+      // `kind` is on the wire so the owner's screen can offer *Keluarkan*
+      // on exactly the memberships it works for — free ones only.
+      { handle: "bob", displayName: "Bob", since: expect.any(String), kind: "paid" },
     ]);
   });
 
@@ -3804,7 +3806,12 @@ describe("GET /users/me/subscribers (Task 6 of Phase 5b)", () => {
     // Object.keys, not a spot-check — a spot-check against `toMatchObject`
     // or reading three named fields would pass unchanged if a fourth field
     // (an email, a whatsapp_number, a payout id) were added beside them.
-    expect(Object.keys(body.subscribers[0]).sort()).toEqual(["displayName", "handle", "since"]);
+    // `kind` joined this list when an owner gained the ability to remove a
+    // member: only a FREE membership may be revoked, so the screen has to be
+    // able to tell which is which. It is the owner's own tier, priced by the
+    // owner — unlike the email, whatsapp number and payout id this assertion
+    // exists to keep out, which belong to the MEMBER.
+    expect(Object.keys(body.subscribers[0]).sort()).toEqual(["displayName", "handle", "kind", "since"]);
   });
 
   it("`since` is an ISO string on the wire, not a raw Date", async () => {

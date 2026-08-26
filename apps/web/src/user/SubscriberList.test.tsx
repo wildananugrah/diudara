@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { setUserSession } from "./apiClient";
 import SubscriberList from "./SubscriberList";
 
@@ -39,6 +39,83 @@ beforeEach(() => {
 afterEach(() => {
   global.fetch = originalFetch;
   cleanup();
+});
+
+describe("SubscriberList — removing a member", () => {
+  const FREE = { handle: "budi", displayName: "Budi", since: "2026-08-01T00:00:00.000Z", kind: "free" };
+  const PAID = { handle: "andi", displayName: "Andi", since: "2026-08-01T00:00:00.000Z", kind: "paid" };
+
+  /**
+   * The button is offered for a FREE membership only. A paid one cannot be
+   * revoked — stopping it mid-period takes money for a service that then
+   * stops, and this product has no refund path — so the server answers 409.
+   * Rendering the button anyway would offer an action that fails.
+   */
+  it("offers Keluarkan for a free member and not for a paying one", async () => {
+    mockApi((url) =>
+      url === "/users/me/subscribers"
+        ? jsonResponse({ subscribers: [FREE, PAID] })
+        : jsonResponse({ error: `unexpected ${url}` }, 500)
+    );
+
+    render(<SubscriberList now={NOW} />);
+
+    await screen.findByText("Budi");
+    expect(screen.getByTestId("revoke-budi")).toBeTruthy();
+    // `=== null` rather than handing the node to a matcher: a failure prints a
+    // boolean, not a serialised DOM tree.
+    expect(screen.queryByTestId("revoke-andi") === null).toBe(true);
+  });
+
+  /**
+   * Asserts the REQUEST, not just that the row vanished. A list that re-read
+   * an unchanged server would empty just as convincingly if the button were
+   * wired to the wrong endpoint — or to nothing at all.
+   */
+  it("POSTs the revoke, then re-reads the list from the server", async () => {
+    let removed = false;
+    const calls = mockApi((url, init) => {
+      if (url === "/users/me/subscribers/budi/revoke" && (init?.method ?? "GET") === "POST") {
+        removed = true;
+        return jsonResponse({ ok: true });
+      }
+      if (url === "/users/me/subscribers") {
+        return jsonResponse({ subscribers: removed ? [] : [FREE] });
+      }
+      return jsonResponse({ error: `unexpected ${url}` }, 500);
+    });
+
+    render(<SubscriberList now={NOW} />);
+    fireEvent.click(await screen.findByTestId("revoke-budi"));
+
+    await waitFor(() => expect(screen.queryByText("Budi") === null).toBe(true));
+    expect(
+      calls.some(
+        (call) =>
+          call.url === "/users/me/subscribers/budi/revoke" && (call.init?.method ?? "GET") === "POST"
+      )
+    ).toBe(true);
+    // Re-READ, not spliced: the listing was fetched twice.
+    expect(calls.filter((call) => call.url === "/users/me/subscribers").length).toBe(2);
+  });
+
+  it("keeps the member on screen and says why when the server refuses", async () => {
+    mockApi((url) => {
+      if (url.endsWith("/revoke")) {
+        return jsonResponse({ error: "Keanggotaan berbayar tidak dapat dihentikan dari sini." }, 409);
+      }
+      return url === "/users/me/subscribers"
+        ? jsonResponse({ subscribers: [FREE] })
+        : jsonResponse({ error: `unexpected ${url}` }, 500);
+    });
+
+    render(<SubscriberList now={NOW} />);
+    fireEvent.click(await screen.findByTestId("revoke-budi"));
+
+    await screen.findByRole("alert");
+    // Still a member: a refused removal must not look like a successful one.
+    expect(screen.getByText("Budi")).toBeTruthy();
+  });
 });
 
 describe("SubscriberList (Task 6 of Phase 5b)", () => {

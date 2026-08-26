@@ -1380,6 +1380,14 @@ export interface SubscriberEntry {
   handle: string;
   displayName: string;
   since: string;
+  /**
+   * `'paid'` | `'free'`. Decides whether *Keluarkan* is offered at all: only a
+   * FREE membership may be revoked, because stopping a paid one mid-period
+   * takes money for a service that then stops and this product has no refund
+   * path. Rendering the button for a paid member would offer an action the
+   * server refuses — the defect this codebase has spent the week removing.
+   */
+  kind: string;
 }
 
 /**
@@ -1391,6 +1399,20 @@ export interface SubscriberEntry {
  */
 export function listSubscribers(): Promise<{ subscribers: SubscriberEntry[] }> {
   return apiFetch<{ subscribers: SubscriberEntry[] }>("/users/me/subscribers");
+}
+
+/**
+ * Removes one of your own members. BY HANDLE — the subscriber list never
+ * carries a subscription id (see `SubscriberEntry`), and this endpoint exists
+ * so it does not have to start.
+ *
+ * FREE memberships only. The server answers 409 for a paid one; the UI does
+ * not offer the button there, so that 409 is a backstop rather than the plan.
+ */
+export function revokeMembership(handle: string): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>(`/users/me/subscribers/${encodeURIComponent(handle)}/revoke`, {
+    method: "POST",
+  });
 }
 
 /**

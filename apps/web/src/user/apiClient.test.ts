@@ -1756,7 +1756,9 @@ describe("apiClient — a creator's own subscriber list (Task 6 of Phase 5b)", (
     global.fetch = mock(async (url: string, init?: RequestInit) => {
       calls.push({ url, init });
       return jsonResponse({
-        subscribers: [{ handle: "bob", displayName: "Bob", since: "2026-08-01T00:00:00.000Z" }],
+        subscribers: [
+        { handle: "bob", displayName: "Bob", since: "2026-08-01T00:00:00.000Z", kind: "free" },
+      ],
       });
     }) as unknown as typeof fetch;
 
@@ -1766,7 +1768,7 @@ describe("apiClient — a creator's own subscriber list (Task 6 of Phase 5b)", (
     expect(calls[0]!.init?.method ?? "GET").toBe("GET");
     expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
     expect(result).toEqual({
-      subscribers: [{ handle: "bob", displayName: "Bob", since: "2026-08-01T00:00:00.000Z" }],
+      subscribers: [{ handle: "bob", displayName: "Bob", since: "2026-08-01T00:00:00.000Z", kind: "free" }],
     });
   });
 
