@@ -1664,3 +1664,32 @@ button:disabled {
      transform is presentation only. */
   transform: scaleX(-1);
 }
+
+/* --- "SEDANG LIVE" on a profile. A LINK, not a decoration: it jumps to the
+       broadcast rendered further down the same page. Red because that is what
+       "live" means everywhere else people have seen it. ------------------- */
+.profile-live-badge {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  background: oklch(0.55 0.16 25);
+  color: var(--surface);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+}
+
+.profile-live-badge:hover {
+  background: oklch(0.48 0.16 25);
+}
+
+.profile-live {
+  margin: 1.25rem 0;
+}
+
+.profile-live-title {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
