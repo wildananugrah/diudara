@@ -1,0 +1,66 @@
+# The `location` blocks the real VPS's PUBLIC nginx needs so that browser
+# requests reach the API. A FRAGMENT, like live-hls.conf.template beside it —
+# not a standalone server block.
+#
+# WHY THIS FILE EXISTS. It did not, until 2026-08-26, and the live config was
+# hand-maintained. `POST /streams` answered **405 Not Allowed** from nginx in
+# production: there was a `location /streaming` (an older path that no longer
+# exists) and none for `/streams`, so every Siaran call fell through to the SPA
+# fallback. `GET /streams` returned index.html instead of JSON — the page said
+# "Tidak dapat menghubungi server" — and `POST` hit nginx's static handler,
+# which refuses non-GET methods. Nobody could go live, and nothing in the repo
+# recorded what the server was supposed to be doing.
+#
+# `/streaming` and `/streams` never overlap, which is why the mistake survived:
+# "/streaming"[7] is 'i', "/streams"[7] is 's'.
+#
+# KEPT HONEST BY A TEST. `apps/api/src/test/nginx-proxy-coverage.test.ts` reads
+# THIS FILE and the API's real route table, and fails when a route exists whose
+# first path segment no `location` here can match. Adding a route with a new
+# top-level segment therefore fails the suite until this file learns about it.
+# That test cannot check the SERVER — only that the repo and the code agree —
+# so after changing this file, paste the change into
+# /etc/nginx/sites-available/diudara.mhamzah.id, run `sudo nginx -t`, and only
+# then `sudo systemctl reload nginx`.
+#
+# PORT 3004 matches `PORT` in apps/api/.env.
+
+location ^~ /users/ {
+    proxy_pass http://127.0.0.1:3004;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    # Phase 4 images: uploads are multipart and the default 1m is too small.
+    client_max_body_size 12m;
+}
+
+# GET /streams, POST /streams, POST /streams/:id/watch-token, DELETE /streams/:id
+# `^~` so no regex location elsewhere in the server can claim it first.
+location ^~ /streams {
+    proxy_pass http://127.0.0.1:3004;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+# GET /webhooks/mediamtx/auth-request. NOTE live-hls.conf.template defines a
+# LONGER `^~ /webhooks/mediamtx/` block; the longest matching prefix wins, so
+# both can coexist and that one takes precedence for MediaMTX's own callbacks.
+location /webhooks {
+    proxy_pass http://127.0.0.1:3004;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+# DELIBERATELY NOT EXPOSED — the coverage test reads this list, so anything
+# named here is an explicit decision rather than an oversight:
+#
+#   /health — the process liveness probe. pm2 and anything else that needs it
+#             reaches 127.0.0.1:3004 directly; publishing it tells the internet
+#             about the deployment and buys nothing.
+#
+# nginx-proxy-coverage: not-exposed = /health
