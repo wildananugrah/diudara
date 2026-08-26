@@ -504,9 +504,33 @@ describe("SiaranPage — going live actually publishes over WHIP", () => {
     }
   }
 
+  /** Every track this double handed out, so a test can assert the camera was released. */
+  let handedOutTracks: Array<{ kind: string; stopped: boolean }> = [];
+
+  /**
+   * A REAL `MediaStream`, not a duck-typed object.
+   *
+   * It used to be `{ getTracks: () => [...] } as unknown as MediaStream`, which
+   * was enough while nothing did anything with it but hand it to a fake peer
+   * connection. It stopped being enough the moment `SiaranPage` began assigning
+   * the capture to a `<video>`: happy-dom's `srcObject` setter type-checks its
+   * argument and throws `The provided value is not of type 'MediaStream'`. The
+   * double was lying about a type the production code legitimately relies on.
+   *
+   * `getTracks` is overridden on the instance because happy-dom's MediaStream
+   * has no way to add a track without a real capture device.
+   */
   function fakeMediaStream(): MediaStream {
-    const track = { kind: "video", stop() {} };
-    return { getTracks: () => [track] } as unknown as MediaStream;
+    const tracks = [
+      { kind: "video", stopped: false },
+      { kind: "audio", stopped: false },
+    ];
+    handedOutTracks = tracks;
+    const stream = new MediaStream();
+    Object.defineProperty(stream, "getTracks", {
+      value: () => tracks.map((t) => ({ kind: t.kind, stop: () => { t.stopped = true; } })),
+    });
+    return stream;
   }
 
   let originalMediaDevices: MediaDevices | undefined;
@@ -525,6 +549,120 @@ describe("SiaranPage — going live actually publishes over WHIP", () => {
   afterEach(() => {
     Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: originalMediaDevices });
     (globalThis as Record<string, unknown>).RTCPeerConnection = originalRTCPeerConnection;
+  });
+
+  /**
+   * The broadcaster could not see themselves. The capture went straight to
+   * WHIP and was never attached to anything, so the page showed a stream key
+   * and no picture — and there was no way to tell a working camera from a
+   * black one until a viewer said so.
+   *
+   * Asserts `srcObject` IS the captured stream, not merely that a <video>
+   * rendered: an element with nothing attached looks identical on screen and
+   * would pass a presence check.
+   */
+  it("shows the broadcaster their own camera while live", async () => {
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url === "/streams" && method === "GET") return jsonResponse({ streams: [] });
+      if (url === "/streams" && method === "POST") return jsonResponse(STARTED_STREAM, 201);
+      if (typeof url === "string" && url.startsWith(STARTED_STREAM.whipUrl)) {
+        return new Response("v=0\r\no=- fake-answer\r\n", {
+          status: 201,
+          headers: {
+            "Content-Type": "application/sdp",
+            Location: `${new URL(STARTED_STREAM.whipUrl).pathname}/session-x`,
+          },
+        });
+      }
+      return jsonResponse({ error: "unrouted in this test" }, 500);
+    }) as unknown as typeof fetch;
+
+    await renderSignedIn();
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mulai siaran" }));
+
+    const video = (await screen.findByTestId("stream-self-preview")) as HTMLVideoElement;
+    await waitFor(() => expect(video.srcObject === null).toBe(false));
+    // Muted is not cosmetic: unmuted, autoplay policy blocks it AND the
+    // broadcaster's microphone comes back out of their own speakers.
+    expect(video.muted).toBe(true);
+  });
+
+  /**
+   * `PublishHandle.close()` closes the peer connection and DELETEs the WHIP
+   * session — it never owned the tracks and never stopped them, and nothing
+   * else did. After *Akhiri siaran* the camera light stayed on until the tab
+   * was closed. Nobody noticed while there was no preview to make it visible.
+   *
+   * Asserts the TRACKS, not the element: removing the <video> hides the
+   * picture and leaves the camera running, which is the bug wearing a fix.
+   */
+  it("releases the camera and microphone when the broadcast ends", async () => {
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url === "/streams" && method === "GET") return jsonResponse({ streams: [] });
+      if (url === "/streams" && method === "POST") return jsonResponse(STARTED_STREAM, 201);
+      if (url === `/streams/${STARTED_STREAM.id}` && method === "DELETE") return jsonResponse({ ok: true });
+      if (typeof url === "string" && url.startsWith(STARTED_STREAM.whipUrl)) {
+        return new Response("v=0\r\no=- fake-answer\r\n", {
+          status: 201,
+          headers: {
+            "Content-Type": "application/sdp",
+            Location: `${new URL(STARTED_STREAM.whipUrl).pathname}/session-x`,
+          },
+        });
+      }
+      return jsonResponse({ error: "unrouted in this test" }, 500);
+    }) as unknown as typeof fetch;
+
+    await renderSignedIn();
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mulai siaran" }));
+    await screen.findByTestId("stream-self-preview");
+    expect(handedOutTracks.every((track) => track.stopped)).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Akhiri siaran" }));
+
+    await waitFor(() => expect(handedOutTracks.every((track) => track.stopped)).toBe(true));
+    // Both of them — video AND audio. Stopping only the camera leaves a live
+    // microphone, which is the worse half to leave running.
+    expect(handedOutTracks.map((track) => track.kind).sort()).toEqual(["audio", "video"]);
+  });
+
+  /**
+   * `listStreams()` ran once on mount and nothing re-ran it, so the page went
+   * on saying "Belum ada siaran langsung." while its own author was
+   * demonstrably broadcasting, until they reloaded by hand.
+   */
+  it("re-reads the listing after going live, so the page stops contradicting itself", async () => {
+    let listCalls = 0;
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url === "/streams" && method === "GET") {
+        listCalls += 1;
+        return jsonResponse({ streams: [] });
+      }
+      if (url === "/streams" && method === "POST") return jsonResponse(STARTED_STREAM, 201);
+      if (typeof url === "string" && url.startsWith(STARTED_STREAM.whipUrl)) {
+        return new Response("v=0\r\no=- fake-answer\r\n", {
+          status: 201,
+          headers: {
+            "Content-Type": "application/sdp",
+            Location: `${new URL(STARTED_STREAM.whipUrl).pathname}/session-x`,
+          },
+        });
+      }
+      return jsonResponse({ error: "unrouted in this test" }, 500);
+    }) as unknown as typeof fetch;
+
+    await renderSignedIn();
+    expect(listCalls).toBe(1);
+
+    fireEvent.change(screen.getByLabelText("Judul"), { target: { value: "Tanya jawab" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mulai siaran" }));
+
+    await waitFor(() => expect(listCalls).toBe(2));
   });
 
   it("POSTs the SDP offer to the whipUrl POST /streams returned", async () => {

@@ -103,6 +103,115 @@ afterEach(() => {
 });
 
 describe("ProfilePage", () => {
+  /**
+   * Discovery, before this, was: the viewer happens to open Siaran while you
+   * happen to be broadcasting. Nothing on a profile said so — no badge, no
+   * notification (Phase 8 deleted `notify_stream_live`), nothing on Beranda.
+   *
+   * The live row is read off `GET /streams`, the SAME public listing Siaran
+   * renders, precisely so `locked` keeps having exactly ONE implementation.
+   */
+  function liveStreamRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "stream-1",
+      title: "Tanya jawab",
+      visibility: "public",
+      owner: { handle: "wildan", displayName: "Wildan Anugrah" },
+      locked: false,
+      hlsPlaybackPath: "/u/abc/index.m3u8",
+      ...overrides,
+    };
+  }
+
+  function mockProfileWithStreams(streams: unknown[]) {
+    global.fetch = mock(async (url: string) => {
+      if (url === "/streams") return jsonResponse({ streams });
+      if (url.includes("/posts")) return emptyPostsPage();
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan Anugrah" }));
+    }) as unknown as typeof fetch;
+  }
+
+  it("shows SEDANG LIVE on the profile of someone who is broadcasting", async () => {
+    mockProfileWithStreams([liveStreamRow()]);
+
+    renderAt("/@wildan");
+
+    const badge = await screen.findByTestId("profile-live-badge");
+    // A LINK to the broadcast on this page, not an ornament. A badge that
+    // announces a stream and goes nowhere is the same defect as the lock CTA
+    // that pointed at the page you were already standing on.
+    expect(badge.getAttribute("href")).toBe("#profile-live");
+    expect(await screen.findByTestId("profile-live")).toBeTruthy();
+  });
+
+  it("shows no badge when that person is not live", async () => {
+    mockProfileWithStreams([]);
+
+    renderAt("/@wildan");
+
+    await screen.findByText("Wildan Anugrah");
+    // `=== null` first: handing the element itself to a matcher serialises
+    // its whole node graph on failure, which OOM-killed a machine on this
+    // project once. A boolean prints `false`.
+    expect(screen.queryByTestId("profile-live-badge") === null).toBe(true);
+  });
+
+  /**
+   * The control that keeps the badge honest: the listing is EVERY live
+   * stream, so matching on the wrong thing — or not matching at all — would
+   * put a badge on every profile while somebody, anybody, is broadcasting.
+   */
+  it("shows no badge when the live stream belongs to somebody else", async () => {
+    mockProfileWithStreams([
+      liveStreamRow({ owner: { handle: "rina", displayName: "Rina" } }),
+    ]);
+
+    renderAt("/@wildan");
+
+    await screen.findByText("Wildan Anugrah");
+    // `=== null` first: handing the element itself to a matcher serialises
+    // its whole node graph on failure, which OOM-killed a machine on this
+    // project once. A boolean prints `false`.
+    expect(screen.queryByTestId("profile-live-badge") === null).toBe(true);
+  });
+
+  /**
+   * The paywall reaches the profile too. `locked` is the server's answer,
+   * computed once by the membership gate — this asserts the profile RENDERS
+   * it rather than quietly playing a members-only broadcast to a stranger.
+   */
+  it("shows the lock, not a player, for a members-only broadcast", async () => {
+    mockProfileWithStreams([liveStreamRow({ visibility: "members", locked: true })]);
+
+    renderAt("/@wildan");
+
+    expect(await screen.findByTestId("profile-live-lock")).toBeTruthy();
+    // `=== null` first: handing the element itself to a matcher serialises
+    // its whole node graph on failure, which OOM-killed a machine on this
+    // project once. A boolean prints `false`.
+    expect(screen.queryByTestId("stream-player") === null).toBe(true);
+  });
+
+  /**
+   * A profile that loaded is not broken because the live index was
+   * unreachable. The badge simply does not appear.
+   */
+  it("still renders the profile when the live listing fails", async () => {
+    global.fetch = mock(async (url: string) => {
+      if (url === "/streams") return jsonResponse({ error: "boom" }, 500);
+      if (url.includes("/posts")) return emptyPostsPage();
+      return jsonResponse(profileBody({ handle: "wildan", displayName: "Wildan Anugrah" }));
+    }) as unknown as typeof fetch;
+
+    renderAt("/@wildan");
+
+    expect(await screen.findByText("Wildan Anugrah")).toBeTruthy();
+    // `=== null` first: handing the element itself to a matcher serialises
+    // its whole node graph on failure, which OOM-killed a machine on this
+    // project once. A boolean prints `false`.
+    expect(screen.queryByTestId("profile-live-badge") === null).toBe(true);
+  });
+
   it("renders the display name, handle and bio for a known profile", async () => {
     const calls: string[] = [];
     global.fetch = mock(async (url: string) => {
@@ -119,7 +228,13 @@ describe("ProfilePage", () => {
     expect(screen.getByText("@wildan")).toBeTruthy();
     expect(screen.getByText("Membangun DIUDARA.")).toBeTruthy();
     // The `@` is stripped before the API call — a bare handle, per Task 3.
-    expect(calls[0]).toBe("/users/by-handle/wildan");
+    //
+    // `toContain`, not `calls[0]`: the profile is no longer the only request
+    // this page makes. It also reads `GET /streams` to decide whether to show
+    // the SEDANG LIVE badge, and the order two independent effects fire in is
+    // not a contract worth pinning. What this test is actually about is the
+    // stripped `@`, and that survives either ordering.
+    expect(calls).toContain("/users/by-handle/wildan");
   });
 
   it("renders no bio element at all for a bio-less profile", async () => {

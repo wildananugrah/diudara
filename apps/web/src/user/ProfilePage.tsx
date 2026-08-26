@@ -4,14 +4,17 @@ import NotFoundPage from "../pages/NotFoundPage";
 import {
   getProfileByHandle,
   getSessionUser,
+  listStreams,
   listUserPosts,
   UserApiError,
   type PublicUserProfile,
+  type StreamView,
 } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
 import FollowButton from "./FollowButton";
 import MembershipOffer from "./MembershipOffer";
 import PostFeed, { type PostFeedHandle } from "./PostFeed";
+import StreamPlayer from "./StreamPlayer";
 import { DeleteConfirm, EditComposer, usePostOwnerActions } from "./postOwnerActions";
 
 type LoadState =
@@ -37,6 +40,47 @@ export default function ProfilePage() {
   const isProfileUrl = typeof handleParam === "string" && handleParam.startsWith("@");
   const handle = isProfileUrl ? handleParam.slice(1) : "";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
+
+  /**
+   * This person's live broadcast, if they have one right now.
+   *
+   * READ OFF `GET /streams`, the same public listing Siaran renders — NOT a
+   * new field on the profile response. Whether a stream is `locked` is the
+   * membership paywall's answer, and that answer already has exactly one
+   * implementation, reviewed and mutation-tested. Adding a second place that
+   * decides it is the drift this codebase keeps getting caught by: a
+   * whole-branch review found two membership predicates that had silently
+   * disagreed, and the spec names that failure explicitly.
+   *
+   * The cost is honest and small: the profile fetches every live row to find
+   * at most one. If that ever matters, a targeted endpoint is the fix — and
+   * by then `locked` will have a second reviewed home to live in.
+   *
+   * Failures are SILENT. A profile that loaded is not broken because the live
+   * index was unreachable; the badge simply does not appear.
+   */
+  const [liveStream, setLiveStream] = useState<StreamView | null>(null);
+
+  useEffect(() => {
+    if (handle === "") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await listStreams();
+        if (cancelled) return;
+        const mine = result.streams.find(
+          (stream) => stream.owner.handle.toLowerCase() === handle.toLowerCase()
+        );
+        setLiveStream(mine ?? null);
+      } catch {
+        // Silent by design — see the state's own docstring.
+        if (!cancelled) setLiveStream(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [handle]);
   // Mirrors `profile.followerCount`/`profile.viewerFollows` once loaded, kept
   // as separate state (not read straight off `load`) so `FollowButton`'s
   // `onChange` can update the visible count without a refetch — see
@@ -176,12 +220,23 @@ export default function ProfilePage() {
   }
 
   const { profile } = load;
+  const liveSectionId = "profile-live";
   return (
     <main className="user-page profile-page">
       <div className="spread">
         <div>
           <h1 className="profile-name">{profile.displayName}</h1>
           <p className="profile-handle muted">@{profile.handle}</p>
+          {/*
+            Only rendered when there is something to click. A badge that
+            announces a broadcast and goes nowhere is the same defect as the
+            lock CTA that linked to the page you were already standing on.
+          */}
+          {liveStream !== null ? (
+            <a href={`#${liveSectionId}`} className="profile-live-badge" data-testid="profile-live-badge">
+              SEDANG LIVE
+            </a>
+          ) : null}
         </div>
         {/*
           Absent entirely on your own profile — FollowButton itself decides
@@ -203,6 +258,28 @@ export default function ProfilePage() {
           <strong>{profile.followingCount}</strong> Mengikuti
         </Link>
       </div>
+
+      {/*
+        The broadcast itself, on the profile — so "SEDANG LIVE" has somewhere
+        to go. Same `StreamPlayer` Siaran uses (its `attachHls`/`mintToken`
+        props default to the real ones; Siaran only injects them for tests),
+        and the SAME lock treatment: `locked` is the server's answer, computed
+        once by the paywall, so a members-only broadcast stays members-only for
+        a stranger standing on a public profile.
+      */}
+      {liveStream !== null ? (
+        <section id={liveSectionId} className="profile-live" data-testid="profile-live">
+          <h2 className="profile-live-title">{liveStream.title}</h2>
+          {liveStream.locked ? (
+            <div className="stream-lock" data-testid="profile-live-lock">
+              <p className="stream-lock-copy">Siaran ini khusus anggota.</p>
+              <span className="stream-lock-cta">Jadi anggota untuk menonton</span>
+            </div>
+          ) : (
+            <StreamPlayer stream={liveStream} />
+          )}
+        </section>
+      ) : null}
 
       {/*
         Task 10, spec §6. Given the tiers off the profile response and nothing
