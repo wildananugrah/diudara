@@ -41,6 +41,7 @@ import { IsMemberOf } from "./application/use-cases/is-member-of";
 import { ListSubscribers } from "./application/use-cases/list-subscribers";
 import { MembershipRequests } from "./application/use-cases/membership-requests";
 import { RevokeMembership } from "./application/use-cases/revoke-membership";
+import { LeaveMembership } from "./application/use-cases/leave-membership";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -603,6 +604,7 @@ describe("Dependencies (composition root contract)", () => {
       listSubscribers: new ListSubscribers(fakeUserSubscriptionRepository, fakeClock),
       membershipRequests: new MembershipRequests(fakeUserSubscriptionRepository),
       revokeMembership: new RevokeMembership(fakeUserRepository, fakeUserSubscriptionRepository),
+      leaveMembership: new LeaveMembership(fakeUserRepository, fakeUserSubscriptionRepository),
       handlePaymentWebhook: new HandlePaymentWebhook(
         fakeUserSubscriptionRepository,
         fakePaymentActivationUnitOfWork,

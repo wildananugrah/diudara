@@ -1,7 +1,14 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { isOwnHandle, startSubscription, UserApiError, isUserSignedIn, type TierView } from "./apiClient";
-import { describeSubscribeFailure } from "./errorCopy";
+import {
+  isOwnHandle,
+  isUserSignedIn,
+  leaveMembership,
+  startSubscription,
+  UserApiError,
+  type TierView,
+} from "./apiClient";
+import { describeRequestFailure, describeSubscribeFailure } from "./errorCopy";
 import { billingCycleLabel, formatTierPrice } from "./tierCopy";
 
 export interface MembershipOfferProps {
@@ -136,6 +143,31 @@ export default function MembershipOffer({
 }: MembershipOfferProps) {
   /** The tier whose purchase (or free request) is in flight, or `null`. Also what disables every button. */
   const [pendingTierId, setPendingTierId] = useState<string | null>(null);
+  /** Leaving is two presses: this is whether the second one is on screen. */
+  const [confirmingLeave, setConfirmingLeave] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [leaveError, setLeaveError] = useState<string | null>(null);
+
+  /**
+   * Ends this membership, then RELOADS the page.
+   *
+   * A full reload rather than local state, and deliberately: leaving changes
+   * what the whole profile may show — the gated posts below re-lock, and the
+   * offer becomes purchasable again. This component knows about none of that,
+   * and a local edit would leave the rest of the page asserting a membership
+   * the server has just ended.
+   */
+  async function leave(): Promise<void> {
+    setLeaving(true);
+    setLeaveError(null);
+    try {
+      await leaveMembership(handle);
+      window.location.reload();
+    } catch (err: unknown) {
+      setLeaveError(describeRequestFailure(err));
+      setLeaving(false);
+    }
+  }
   /**
    * The free tier THIS SCREEN just requested successfully, mid-session. The
    * server prop `viewerRequestPending` only reflects what `GetUserProfile`
@@ -176,6 +208,59 @@ export default function MembershipOffer({
       <section id="membership-offer" className="card stack membership-offer" aria-labelledby="membership-offer-heading">
         <h2 id="membership-offer-heading">Keanggotaan</h2>
         <p data-testid="membership-member">Anda sudah menjadi anggota @{handle}.</p>
+
+        {/*
+          The way out. Until this existed a member could only be removed BY the
+          owner, and only if their membership was free — so a paying member had
+          no exit at all, and a lapsed one was stuck for ever (spec §9: their
+          row keeps the one-active slot while granting nothing, refusing them
+          both a new purchase and a free request).
+
+          Two presses, not a browser `confirm()`: leaving can cost access that
+          was paid for, and this app renders its own copy rather than handing a
+          consequence to a dialog it cannot word. The second press states the
+          cost plainly instead of asking "are you sure".
+        */}
+        {leaveError !== null ? (
+          <p className="form-error" role="alert">
+            {leaveError}
+          </p>
+        ) : null}
+
+        {confirmingLeave ? (
+          <div className="stack">
+            <p className="muted" data-testid="leave-warning">
+              Akses Anda ke kiriman dan siaran khusus anggota berhenti saat ini juga, dan
+              pembayaran yang sudah berjalan tidak dikembalikan.
+            </p>
+            <button
+              type="button"
+              className="button-danger"
+              data-testid="leave-confirm"
+              disabled={leaving}
+              onClick={() => void leave()}
+            >
+              {leaving ? "Memproses..." : "Ya, berhenti jadi anggota"}
+            </button>
+            <button
+              type="button"
+              className="button-quiet"
+              disabled={leaving}
+              onClick={() => setConfirmingLeave(false)}
+            >
+              Batal
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="button-quiet"
+            data-testid="leave-membership"
+            onClick={() => setConfirmingLeave(true)}
+          >
+            Berhenti jadi anggota
+          </button>
+        )}
       </section>
     );
   }
