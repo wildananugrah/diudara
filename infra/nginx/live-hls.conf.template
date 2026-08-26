@@ -57,7 +57,15 @@
 # `final-fix-report.md` for the transcript. Only after that did this file
 # get treated as proven.
 #
-# THE ONE TEMPLATED VALUE: `${MEDIAMTX_WEBHOOK_SECRET}`. Render it with
+# TWO TEMPLATED VALUES: `${MEDIAMTX_WEBHOOK_SECRET}` and `${API_PORT}`.
+# Render BOTH — an unrendered `${API_PORT}` is an nginx syntax error, which is
+# the failure you want, and `nginx -t` will say so before anything reloads:
+#
+#   API_PORT=3004 MEDIAMTX_WEBHOOK_SECRET=... \
+#     envsubst '${MEDIAMTX_WEBHOOK_SECRET} ${API_PORT}' \
+#     < live-hls.conf.template > /etc/nginx/snippets/live-hls.conf
+#
+# The original note, on the secret, follows and applies to both. Render it with
 # whatever secrets-injection mechanism the real deploy uses before
 # `include`ing this file — plain `envsubst 'MEDIAMTX_WEBHOOK_SECRET' <
 # live-hls.conf.template > /etc/nginx/snippets/live-hls.conf` is enough for
@@ -77,9 +85,11 @@
 # file only runs Postgres and MediaMTX); it runs directly on the VPS host,
 # same as `apps/api`. From there, `127.0.0.1:8888` correctly reaches
 # MediaMTX's HLS port (docker-compose maps it to the HOST's own loopback,
-# not to a container-network address), and `127.0.0.1:3000` correctly
-# reaches `apps/api` (also running directly on the host, not containerised
-# — there is no `api` service in docker-compose.yml to be one).
+# not to a container-network address), and `127.0.0.1:${API_PORT}` reaches
+# `apps/api` (also running directly on the host, not containerised — there is
+# no `api` service in docker-compose.yml to be one). That port is `PORT` in
+# `apps/api/.env` and is 3004 on the real VPS; this text said 3000 until
+# 2026-08-26, which is a port an unrelated app occupies on that same box.
 #
 # IF YOU EVER CONTAINERISE THIS nginx INSTEAD (not the documented path,
 # but worth recording since it changes both proxy_pass targets): a
@@ -485,7 +495,14 @@ location = /_internal/mediamtx-user-auth-request {
     proxy_connect_timeout 3s;
     proxy_read_timeout 3s;
 
-    proxy_pass http://127.0.0.1:3000/webhooks/mediamtx/auth-request;
+    # `${API_PORT}`, NOT a hardcoded 3000. This file said 3000 until 2026-08-26,
+    # and on the real VPS `apps/api` listens on 3004 (`PORT` in apps/api/.env)
+    # while something ELSE — an unrelated app on the same box — listens on
+    # 3000. Pasting this file as written would therefore have sent every watch
+    # authorisation, carrying `X-Mediamtx-Secret` below, to a different
+    # application. Not a dead port that fails closed: a live one belonging to
+    # somebody else, handed the shared secret on every HLS segment request.
+    proxy_pass http://127.0.0.1:${API_PORT}/webhooks/mediamtx/auth-request;
     proxy_pass_request_body off;
     proxy_set_header Content-Length "";
     proxy_set_header X-Mediamtx-Secret "${MEDIAMTX_WEBHOOK_SECRET}";
