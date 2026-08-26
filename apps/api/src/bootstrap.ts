@@ -10,6 +10,7 @@ import { IsMemberOf } from "./application/use-cases/is-member-of";
 import { ListSubscribers } from "./application/use-cases/list-subscribers";
 import { MembershipRequests } from "./application/use-cases/membership-requests";
 import { RevokeMembership } from "./application/use-cases/revoke-membership";
+import { LeaveMembership } from "./application/use-cases/leave-membership";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
@@ -299,6 +300,7 @@ export interface Dependencies {
    */
   membershipRequests: MembershipRequests;
   revokeMembership: RevokeMembership;
+  leaveMembership: LeaveMembership;
   handlePaymentWebhook: HandlePaymentWebhook;
   /**
    * The messaging adapters THIS process selected. Exposed for the same reason
@@ -1454,6 +1456,7 @@ export function bootstrap(): Dependencies {
   // separate clock (approving/rejecting never compares against `now`).
   const membershipRequests = new MembershipRequests(userSubscriptionRepository);
   const revokeMembership = new RevokeMembership(userRepository, userSubscriptionRepository);
+  const leaveMembership = new LeaveMembership(userRepository, userSubscriptionRepository);
   // Task 5 of memberships-5a: `userTierRepository` (constructed above, Task 1)
   // is now GetUserProfile's third dependency too — the public profile's
   // `membership.tiers` read. Task 10 adds the fourth, `isMemberOf`, for the
@@ -1818,6 +1821,7 @@ export function bootstrap(): Dependencies {
     listSubscribers,
     membershipRequests,
     revokeMembership,
+    leaveMembership,
     handlePaymentWebhook,
     messaging,
     xenditCallbackToken,

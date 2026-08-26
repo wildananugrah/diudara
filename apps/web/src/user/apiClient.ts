@@ -1409,6 +1409,22 @@ export function listSubscribers(): Promise<{ subscribers: SubscriberEntry[] }> {
  * FREE memberships only. The server answers 409 for a paid one; the UI does
  * not offer the button there, so that 409 is a backstop rather than the plan.
  */
+/**
+ * Ends YOUR OWN membership with this creator. `DELETE` on the same path
+ * `POST` creates one.
+ *
+ * Any membership, including a paid one still inside its period — that is the
+ * member's own money and their own choice, unlike `revokeMembership` above,
+ * where the owner would be taking it from them. It is also the only exit from
+ * a LAPSED paid row, which otherwise refuses its holder both a new purchase
+ * and a free request for ever (spec §9).
+ */
+export function leaveMembership(handle: string): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>(`/users/${encodeURIComponent(handle)}/subscribe`, {
+    method: "DELETE",
+  });
+}
+
 export function revokeMembership(handle: string): Promise<{ ok: true }> {
   return apiFetch<{ ok: true }>(`/users/me/subscribers/${encodeURIComponent(handle)}/revoke`, {
     method: "POST",

@@ -70,6 +70,7 @@ describe("the app's routing table", () => {
     expect(registeredRoutes()).toEqual([
       "DELETE /streams/:id",
       "DELETE /users/:handle/follow",
+      "DELETE /users/:handle/subscribe",
       "DELETE /users/posts/:id",
       "GET /health",
       "GET /streams",

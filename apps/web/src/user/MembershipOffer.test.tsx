@@ -537,7 +537,59 @@ describe("MembershipOffer — somebody whose membership has ENDED", () => {
    * server refuses is the non-terminating loop 5a shipped. C-1 opened the button
    * for the LAPSED member only.
    */
-  it("a LIVE member is still offered NO button and no tiers", () => {
+  /**
+   * TWO PRESSES, and the second one states the cost. Leaving can end access
+   * that was paid for, and this app words that itself rather than handing the
+   * consequence to a browser `confirm()` it cannot phrase.
+   */
+  it("does not leave on the first press — it asks, naming what is lost", () => {
+    setUserSession("jwt-abc", VIEWER);
+    const calls: Array<{ url: string; method: string | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    renderOffer([tier()], "budi", true, false);
+    fireEvent.click(screen.getByTestId("leave-membership"));
+
+    expect(screen.getByTestId("leave-warning").textContent).toContain("tidak dikembalikan");
+    // Nothing has been sent yet: the first press is a question, not the act.
+    expect(calls.length).toBe(0);
+  });
+
+  it("DELETEs the membership on the second press", async () => {
+    setUserSession("jwt-abc", VIEWER);
+    const calls: Array<{ url: string; method: string | undefined }> = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    renderOffer([tier()], "budi", true, false);
+    fireEvent.click(screen.getByTestId("leave-membership"));
+    fireEvent.click(screen.getByTestId("leave-confirm"));
+
+    await waitFor(() => expect(calls.length).toBe(1));
+    // The same path a subscribe POSTs to, with DELETE — the pair reads as
+    // what it is and needs no new segment.
+    expect(calls[0]!.url).toBe("/users/budi/subscribe");
+    expect(calls[0]!.method).toBe("DELETE");
+  });
+
+  /**
+   * "NO button" was true until a member had a way out. What this test is
+   * actually about survives unchanged — a current member is offered no
+   * PURCHASE and no tier list — and the exit is now pinned alongside it,
+   * rather than the assertion being loosened to `>= 0`.
+   */
+  it("a LIVE member is offered no purchase and no tiers, only the way out", () => {
     setUserSession("jwt-abc", VIEWER);
     renderOffer([tier()], "budi", true, false);
 
@@ -545,8 +597,10 @@ describe("MembershipOffer — somebody whose membership has ENDED", () => {
       "Anda sudah menjadi anggota"
     );
     expect(screen.queryAllByTestId("membership-ended").length).toBe(0);
-    expect(screen.queryAllByRole("button").length).toBe(0);
     expect(screen.queryAllByTestId("membership-tier-tier-1").length).toBe(0);
+    // Exactly one button, and it is the exit — not a purchase.
+    expect(screen.queryAllByRole("button").length).toBe(1);
+    expect(screen.getByTestId("leave-membership").textContent).toBe("Berhenti jadi anggota");
   });
 
   /**

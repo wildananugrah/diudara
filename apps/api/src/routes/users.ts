@@ -263,6 +263,7 @@ export function userRoutes(
     | "listSubscribers"
     | "membershipRequests"
     | "revokeMembership"
+    | "leaveMembership"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -676,6 +677,28 @@ export function userRoutes(
    * thrown only once the tier's price is known), not from this route
    * refusing every request regardless of what was being bought.
    */
+  /**
+   * A member ends their OWN membership with this creator.
+   *
+   * `DELETE` on the same path `POST` creates one — the pair reads as what it
+   * is, and needs no new segment. DYNAMIC, like the follow routes and
+   * `/:handle/subscribe` beside it, so it is registered after every static
+   * `me/…` route above.
+   *
+   * ANY membership, including a paid one still inside its period: that is the
+   * member's own money and their own choice, unlike revocation, where an owner
+   * would be taking it from them. It is also the only exit from spec §9's
+   * trap — a lapsed paid row otherwise refuses its holder both a new purchase
+   * and a free request, for ever.
+   */
+  app.delete<"/:handle/subscribe">("/:handle/subscribe", requireAuth, async (c) => {
+    const result = await deps.leaveMembership.execute({
+      subscriberId: c.get("userId"),
+      ownerHandle: c.req.param("handle"),
+    });
+    return c.json(result, 200);
+  });
+
   app.post<"/:handle/subscribe">("/:handle/subscribe", requireAuth, async (c) => {
     let raw: unknown;
     try {
