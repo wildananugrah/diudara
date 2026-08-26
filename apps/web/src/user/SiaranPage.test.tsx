@@ -66,36 +66,57 @@ const LOCKED_STREAM: StreamView = {
   // never sends `null`. See `StreamView`'s own docstring in `apiClient.ts`.
 };
 
-/** A fake `attachHls` that never touches real `hls.js`, for the rows this suite renders unlocked. */
-function fakeAttach(): { destroy(): void } | null {
-  return { destroy() {} } satisfies StreamPlayerHandle;
-}
-
-/** `SiaranPage` renders `<Link>`s (the owner identity, the lock) — every render needs a router context, the same reason `PostCard.test.tsx`/`ProfilePage.test.tsx` wrap with `MemoryRouter`. */
-function renderSiaran(props?: { attachHls?: (input: AttachHlsInput) => { destroy(): void } | null }) {
+/**
+ * `SiaranPage` renders `<Link>`s (the owner identity, the lock, the watch
+ * link) — every render needs a router context, the same reason
+ * `PostCard.test.tsx`/`ProfilePage.test.tsx` wrap with `MemoryRouter`.
+ *
+ * It used to take an `attachHls` fake, because every unlocked row embedded a
+ * `StreamPlayer`. The player moved to the profile and the prop went with it:
+ * there is no `hls.js` on this page to keep away from.
+ */
+function renderSiaran() {
   return render(
     <MemoryRouter>
-      <SiaranPage attachHls={props?.attachHls} />
+      <SiaranPage />
     </MemoryRouter>
   );
 }
 
-describe("SiaranPage — a public stream renders the player, not a lock", () => {
-  it("renders StreamPlayer, and never the lock, for an unlocked row", async () => {
+/**
+ * REWRITTEN when the player left this page. These two used to assert a
+ * `StreamPlayer` and a mounted `<video>` per unlocked row — which is precisely
+ * the behaviour that was removed: every listed stream minted a watch token and
+ * began an HLS attach on page load, and a row whose playback could not start
+ * became a black "Siaran ini tidak dapat diputar sekarang." box. Watching moved
+ * to the broadcaster's profile, where SEDANG LIVE also leads.
+ *
+ * They assert the REPLACEMENT rather than being deleted: an unlocked row still
+ * has to offer a way to watch, and it still must not be a lock.
+ */
+describe("SiaranPage — a public stream offers a way to watch, not a lock", () => {
+  it("offers a watch link to the broadcaster's profile for an unlocked row", async () => {
     mockStreams([PUBLIC_STREAM]);
 
-    renderSiaran({ attachHls: (_input: AttachHlsInput) => fakeAttach() });
+    renderSiaran();
 
-    await waitFor(() => expect(screen.queryAllByTestId("stream-player").length).toBe(1));
+    const watch = await screen.findByTestId("stream-watch");
+    expect(watch.getAttribute("href")).toBe(`/@${PUBLIC_STREAM.owner.handle}`);
     expect(screen.queryAllByTestId("stream-lock").length).toBe(0);
   });
 
-  it("attaches, and a <video> element actually mounts", async () => {
+  /**
+   * The point of the change, asserted directly: NO media element on this page,
+   * for any row. A player here is work nobody asked for and a failure notice
+   * where a listing entry belongs.
+   */
+  it("mounts no <video> at all — this page lists, it does not play", async () => {
     mockStreams([PUBLIC_STREAM]);
 
-    renderSiaran({ attachHls: (_input: AttachHlsInput) => fakeAttach() });
+    renderSiaran();
 
-    await waitFor(() => expect(document.querySelectorAll("video").length).toBe(1));
+    await screen.findByTestId("stream-watch");
+    expect(document.querySelectorAll("video").length).toBe(0);
   });
 });
 
@@ -194,13 +215,27 @@ describe("SiaranPage — a failed listing never shows the server's own words", (
 });
 
 describe("SiaranPage — both a locked and an unlocked row, together", () => {
-  it("shows one lock and one player, and no leaked playback path for the locked one", async () => {
+  /**
+   * The old version of this test was named "…and no leaked playback path for
+   * the locked one" and never asserted any such thing — it counted locks and
+   * players and nothing else. The name promised a guarantee the body did not
+   * give. Now it does, and it covers BOTH rows: since the player left this
+   * page, no playback path belongs in this markup at all, not even the public
+   * row's.
+   */
+  it("shows one lock and one watch link, and leaks no playback path for either row", async () => {
     mockStreams([LOCKED_STREAM, PUBLIC_STREAM]);
 
-    renderSiaran({ attachHls: (_input: AttachHlsInput) => fakeAttach() });
+    renderSiaran();
 
     await waitFor(() => expect(screen.queryAllByTestId("stream-lock").length).toBe(1));
-    await waitFor(() => expect(screen.queryAllByTestId("stream-player").length).toBe(1));
+    expect(screen.queryAllByTestId("stream-watch").length).toBe(1);
+
+    // Asserted on the rendered markup as a STRING, never by handing a node to
+    // a matcher — a failure here prints a boolean, not a serialised DOM tree.
+    const markup = document.body.innerHTML;
+    expect(markup.includes("index.m3u8")).toBe(false);
+    expect(markup.includes(PUBLIC_STREAM.hlsPlaybackPath as string)).toBe(false);
   });
 });
 
@@ -748,7 +783,7 @@ describe("SiaranPage — Akhiri siaran survives a reload (I2)", () => {
     setUserSession("jwt-abc", SESSION_USER);
     render(
       <MemoryRouter>
-        <SiaranPage attachHls={(_input: AttachHlsInput) => fakeAttach()} />
+        <SiaranPage />
       </MemoryRouter>
     );
     await screen.findByTestId("stream-composer");
