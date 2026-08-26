@@ -12,6 +12,14 @@ export interface SubscriberListEntry {
   handle: string;
   displayName: string;
   since: string;
+  /**
+   * `'paid'` | `'free'`. Present so the owner's screen can offer *Keluarkan*
+   * on exactly the memberships it works for: only a FREE one may be revoked,
+   * because stopping a paid membership mid-period takes money for a service
+   * that then stops and this product has no refund path. A button the server
+   * would refuse is worse than no button.
+   */
+  kind: string;
 }
 
 /**
@@ -51,6 +59,7 @@ export class ListSubscribers {
         handle: row.handle,
         displayName: row.displayName,
         since: row.since.toISOString(),
+        kind: row.kind,
       })),
     };
   }

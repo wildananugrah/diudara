@@ -262,6 +262,7 @@ export function userRoutes(
     | "startUserSubscription"
     | "listSubscribers"
     | "membershipRequests"
+    | "revokeMembership"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -501,6 +502,28 @@ export function userRoutes(
     const result = await deps.listSubscribers.execute(c.get("userId"));
     return c.json(result);
   });
+
+  /**
+   * An owner removes one of their own members. BY HANDLE — the subscriber
+   * list's projection deliberately never emits a subscription id (see
+   * `SubscriberRow`'s own docstring), and this route exists so it does not
+   * have to start.
+   *
+   * Static `me/…` prefix, registered with its siblings above and before
+   * `/:handle`. FREE memberships only; the use case refuses a paid one with a
+   * 409 that says why, because there is no refund path in this product.
+   */
+  app.post<"/me/subscribers/:handle/revoke">(
+    "/me/subscribers/:handle/revoke",
+    requireAuth,
+    async (c) => {
+      const result = await deps.revokeMembership.execute({
+        ownerId: c.get("userId"),
+        handle: c.req.param("handle"),
+      });
+      return c.json(result, 200);
+    }
+  );
 
   /**
    * Task 5 of "free memberships" — an owner's queue of pending free

@@ -1289,7 +1289,12 @@ describe("listActiveSubscribers (Task 6 of Phase 5b)", () => {
     // Object.keys, not a spot-check — a spot-check passes against an extra
     // field, which is the entire failure mode this projection exists to
     // close off. See the port's own `SubscriberRow` docstring.
-    expect(Object.keys(rows[0]!).sort()).toEqual(["displayName", "handle", "since"]);
+    // `kind` joined this list when an owner gained the ability to remove a
+    // member: only a FREE membership may be revoked, so the screen has to be
+    // able to tell which is which. It is the owner's own tier, priced by the
+    // owner — unlike the email, whatsapp number and payout id this assertion
+    // exists to keep out, which belong to the MEMBER.
+    expect(Object.keys(rows[0]!).sort()).toEqual(["displayName", "handle", "kind", "since"]);
     expect(rows[0]!.handle).toBe(bob.handle);
     expect(rows[0]!.displayName).toBe(bob.displayName);
     expect(rows[0]!.since).toEqual(created.createdAt);

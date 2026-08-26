@@ -75,6 +75,8 @@ export interface SubscriberRow {
   displayName: string;
   /** When this membership began — the subscription row's own `created_at`. */
   since: Date;
+  /** 'paid' | 'free'. Only a FREE membership may be revoked by its owner. */
+  kind: string;
 }
 
 /** What `findPendingCheckout` hands back: enough to re-answer a second tap without the provider. */

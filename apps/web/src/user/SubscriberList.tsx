@@ -1,8 +1,18 @@
-import { useEffect, useState } from "react";
-import { listSubscribers, type SubscriberEntry } from "./apiClient";
+import { useCallback, useEffect, useState } from "react";
+import { listSubscribers, revokeMembership, type SubscriberEntry } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
 import { formatRelativeTime } from "./relativeTime";
 
+/**
+ * Removing a member is a WRITE the owner initiates, so this component owns a
+ * little state of its own: which handle is in flight (so its button can say
+ * so and refuse a second press), and a failure message.
+ *
+ * On success it RE-READS the list rather than splicing the row out locally.
+ * The server is what decides who is a member — a local splice would be this
+ * screen's guess at the outcome, and the two would disagree the moment
+ * anything else changed a membership.
+ */
 type Load =
   | { status: "loading" }
   | { status: "error"; message: string }
@@ -44,7 +54,37 @@ export interface SubscriberListProps {
  */
 export default function SubscriberList({ now }: SubscriberListProps) {
   const [load, setLoad] = useState<Load>({ status: "loading" });
+  /** The handle whose removal is in flight, so its own button can say so and refuse a second press. */
+  const [revoking, setRevoking] = useState<string | null>(null);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
   const clock = now ?? new Date();
+
+  const reload = useCallback(async (): Promise<void> => {
+    const result = await listSubscribers();
+    const subscribers = Array.isArray(result.subscribers) ? result.subscribers : [];
+    setLoad({ status: "ready", subscribers });
+  }, []);
+
+  /**
+   * Removes a member, then RE-READS the list rather than splicing the row out
+   * locally: the server decides who is a member, and a local splice would be
+   * this screen's guess at the outcome.
+   */
+  const revoke = useCallback(
+    async (handle: string): Promise<void> => {
+      setRevoking(handle);
+      setRevokeError(null);
+      try {
+        await revokeMembership(handle);
+        await reload();
+      } catch (err: unknown) {
+        setRevokeError(describeRequestFailure(err));
+      } finally {
+        setRevoking(null);
+      }
+    },
+    [reload]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -85,15 +125,47 @@ export default function SubscriberList({ now }: SubscriberListProps) {
             Belum ada pelanggan yang berlangganan saat ini.
           </p>
         ) : (
+          <>
+          {revokeError !== null ? (
+            <p className="form-error" role="alert">
+              {revokeError}
+            </p>
+          ) : null}
           <ul className="card-list" data-testid="subscriber-list">
             {load.subscribers.map((subscriber) => (
               <li key={subscriber.handle} className="spread">
                 <span>{subscriber.displayName}</span>
                 <span className="muted">@{subscriber.handle}</span>
                 <span className="muted">{`Sejak ${formatRelativeTime(subscriber.since, clock)}`}</span>
+                {/*
+                  OFFERED ONLY FOR A FREE MEMBERSHIP, and that is the whole
+                  reason `kind` is on the wire. A paid membership cannot be
+                  revoked — stopping it mid-period takes money for a service
+                  that then stops, and this product has no refund path — so the
+                  server answers 409. Rendering the button anyway would offer an
+                  action that fails, which is the shape of defect this codebase
+                  has spent the week removing: a badge that went nowhere, a CTA
+                  that promised a membership nobody offered.
+
+                  The paid case says nothing at all rather than showing a
+                  disabled control: there is no action to take here, and a
+                  greyed-out button invites a hunt for the way to enable it.
+                */}
+                {subscriber.kind === "free" ? (
+                  <button
+                    type="button"
+                    className="button-quiet"
+                    data-testid={`revoke-${subscriber.handle}`}
+                    disabled={revoking === subscriber.handle}
+                    onClick={() => void revoke(subscriber.handle)}
+                  >
+                    {revoking === subscriber.handle ? "Mengeluarkan..." : "Keluarkan"}
+                  </button>
+                ) : null}
               </li>
             ))}
           </ul>
+          </>
         )
       ) : null}
     </section>

@@ -66,12 +66,16 @@ describe("ListSubscribers", () => {
     expect(Object.keys(result.subscribers[0]!).sort()).toEqual([
       "displayName",
       "handle",
+      "kind",
       "since",
     ]);
     expect(result.subscribers[0]).toEqual({
       handle: bob.handle,
       displayName: bob.displayName,
       since: expect.any(String),
+      // Added so the owner's screen can offer *Keluarkan* on exactly the
+      // memberships it works for — only a FREE one may be revoked.
+      kind: "paid",
     });
     // ISO on the wire, never a raw Date — JSON has no date type.
     expect(new Date(result.subscribers[0]!.since).toISOString()).toBe(
