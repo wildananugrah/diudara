@@ -1645,3 +1645,22 @@ button:disabled {
     padding: 2.5rem;
   }
 }
+
+/* --- The broadcaster's own camera, in the live panel. Not the audience's
+       view: this is the local capture, so it is instant and needs no token.
+       Capped rather than full-bleed — it is a confidence check that the right
+       camera is on, not the thing anyone is watching. --------------------- */
+.stream-self-preview {
+  display: block;
+  width: 100%;
+  max-width: 22rem;
+  aspect-ratio: 16 / 9;
+  margin: 0.75rem 0;
+  border-radius: var(--radius);
+  background: #252b25;
+  object-fit: cover;
+  /* Mirrored, like every video-call self-view: raising your right hand should
+     move the hand on the right. The published stream is NOT mirrored — this
+     transform is presentation only. */
+  transform: scaleX(-1);
+}

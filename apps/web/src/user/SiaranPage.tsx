@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import StreamPlayer, { type AttachHls } from "./StreamPlayer";
 import { describeRequestFailure, describeStreamStartFailure } from "./errorCopy";
@@ -55,26 +55,44 @@ export default function SiaranPage({
   const [error, setError] = useState<string | null>(null);
   const signedIn = useSyncExternalStore(subscribeToUserAuth, isUserSignedIn, () => false);
 
+  /**
+   * Re-reads the listing. Called on mount, and AGAIN after going live and
+   * after ending — `listStreams()` used to run once and nothing re-ran it, so
+   * the page went on saying "Belum ada siaran langsung." while its own author
+   * was demonstrably broadcasting, until they reloaded by hand.
+   *
+   * Failures here are deliberately silent when a listing is already on screen:
+   * the caller has just succeeded at something (started or ended a broadcast)
+   * and replacing that outcome with a listing error would misreport it.
+   */
+  const pageGoneRef = useRef(false);
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    (async () => {
-      try {
-        const result = await listStreams();
-        if (cancelled) return;
-        setStreams(result.streams);
-      } catch (err: unknown) {
-        if (cancelled) return;
-        setError(describeRequestFailure(err));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
+    pageGoneRef.current = false;
     return () => {
-      cancelled = true;
+      pageGoneRef.current = true;
     };
   }, []);
+
+  const refreshStreams = useCallback(async (options?: { quiet?: boolean }): Promise<void> => {
+    if (options?.quiet !== true) {
+      setLoading(true);
+      setError(null);
+    }
+    try {
+      const result = await listStreams();
+      if (pageGoneRef.current) return;
+      setStreams(result.streams);
+    } catch (err: unknown) {
+      if (pageGoneRef.current || options?.quiet === true) return;
+      setError(describeRequestFailure(err));
+    } finally {
+      if (!pageGoneRef.current && options?.quiet !== true) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStreams();
+  }, [refreshStreams]);
 
   /**
    * **The signed-in creator's OWN live row, out of the listing this page
@@ -158,7 +176,7 @@ export default function SiaranPage({
           the listing this page already fetched is where a creator's own
           live row lives, so it is also what makes *Akhiri siaran* reachable
           after a reload. See `StreamComposer`'s own docstring. */}
-      {signedIn ? <StreamComposer ownLiveStream={ownLiveStream} /> : null}
+      {signedIn ? <StreamComposer ownLiveStream={ownLiveStream} onLiveChanged={refreshStreams} /> : null}
     </main>
   );
 }
@@ -276,7 +294,14 @@ interface LiveBroadcast {
  * another in the same session, and the new one carries a different id.
  * =======================================================================
  */
-function StreamComposer({ ownLiveStream }: { ownLiveStream: StreamView | null }) {
+function StreamComposer({
+  ownLiveStream,
+  onLiveChanged,
+}: {
+  ownLiveStream: StreamView | null;
+  /** Re-read the listing, after going live and after ending — so the page stops disagreeing with itself. */
+  onLiveChanged: (options?: { quiet?: boolean }) => void | Promise<void>;
+}) {
   const [title, setTitle] = useState("");
   const [membersOnly, setMembersOnly] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -304,6 +329,42 @@ function StreamComposer({ ownLiveStream }: { ownLiveStream: StreamView | null })
    */
   const cancelledRef = useRef(false);
 
+  /**
+   * The camera capture, shown back to the broadcaster. In BOTH a ref and state
+   * on purpose: the ref is what the unmount cleanup can still see (state read
+   * from that closure is stale); the state is what makes the `<video>` render.
+   */
+  const previewRef = useRef<MediaStream | null>(null);
+  const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  /**
+   * Releases the camera and microphone. THE ONE PLACE THAT DOES.
+   *
+   * `PublishHandle.close()` closes the peer connection and DELETEs the WHIP
+   * session; it does NOT stop the tracks, because it never owned them, and
+   * nothing else did either. The unmount comment below claimed navigating away
+   * "must not leave a camera light on" — it did exactly that, and so did
+   * *Akhiri siaran*: the capture stayed live until the tab was closed.
+   * Invisible while there was no preview; obvious the moment one exists.
+   */
+  const stopPreview = useCallback((): void => {
+    previewRef.current?.getTracks().forEach((track) => track.stop());
+    previewRef.current = null;
+    setPreviewStream(null);
+  }, []);
+
+  /** `srcObject`, never `src` — a MediaStream has no URL. */
+  useEffect(() => {
+    const video = previewVideoRef.current;
+    if (video === null) return;
+    video.srcObject = previewStream;
+    return () => {
+      video.srcObject = null;
+    };
+  }, [previewStream]);
+
+
   useEffect(() => {
     cancelledRef.current = false;
     return () => {
@@ -314,8 +375,11 @@ function StreamComposer({ ownLiveStream }: { ownLiveStream: StreamView | null })
       // BROWSER'S OWN publish is closed here.
       handleRef.current?.close();
       handleRef.current = null;
+      // `close()` alone did NOT honour the comment above: it closes the peer
+      // connection, not the capture. This is what turns the camera off.
+      stopPreview();
     };
-  }, []);
+  }, [stopPreview]);
 
   /**
    * **THE REHYDRATION — I2's fix in four lines.** Adopts the creator's own
@@ -375,7 +439,12 @@ function StreamComposer({ ownLiveStream }: { ownLiveStream: StreamView | null })
         return;
       }
       handleRef.current = handle;
+      previewRef.current = stream;
+      setPreviewStream(stream);
     } catch {
+      // Releases the camera: a failed negotiation used to leave the capture
+      // running — a lit camera light for a broadcast that never started.
+      stream.getTracks().forEach((track) => track.stop());
       if (!cancelledRef.current) {
         setBrowserPublishNotice("Gagal memulai siaran dari browser — gunakan detail OBS di bawah.");
       }
@@ -406,6 +475,7 @@ function StreamComposer({ ownLiveStream }: { ownLiveStream: StreamView | null })
       setTitle("");
       setMembersOnly(false);
       void goLiveOverWhip(started.whipUrl);
+      void onLiveChanged({ quiet: true });
     } catch (err: unknown) {
       // `describeStreamStartFailure` already special-cases the 503 this
       // route answers when no streaming provider is configured, rather
@@ -437,10 +507,14 @@ function StreamComposer({ ownLiveStream }: { ownLiveStream: StreamView | null })
       // Recorded BEFORE the panel closes, so the rehydration effect above
       // cannot re-adopt this same row out of a listing that has not been
       // refetched — see this component's own docstring.
+      stopPreview();
       endedIdsRef.current.add(liveStream.id);
       setLiveStream(null);
       setBrowserPublishNotice(null);
       setEnding(false);
+      // Quiet: the broadcast ended either way, and a listing error here would
+      // report a failure for something that succeeded.
+      void onLiveChanged({ quiet: true });
     }
   }
 
@@ -450,6 +524,26 @@ function StreamComposer({ ownLiveStream }: { ownLiveStream: StreamView | null })
         <p>
           Anda sedang live: <strong>{liveStream.title}</strong>
         </p>
+
+        {/*
+          The broadcaster's own camera, straight from the capture — NOT the HLS
+          the audience sees, which is ten-plus seconds behind and would need a
+          watch token to view your own broadcast.
+
+          `muted` is mandatory: an unmuted self-preview is both blocked by
+          autoplay policy and a microphone fed back through the speakers of the
+          person talking into it. `playsInline` stops iOS Safari going fullscreen.
+        */}
+        {previewStream !== null ? (
+          <video
+            ref={previewVideoRef}
+            className="stream-self-preview"
+            data-testid="stream-self-preview"
+            autoPlay
+            muted
+            playsInline
+          />
+        ) : null}
 
         {browserPublishNotice !== null ? (
           <p className="feed-error" role="alert">
