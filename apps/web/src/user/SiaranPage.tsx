@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import StreamPlayer, { type AttachHls } from "./StreamPlayer";
 import { describeRequestFailure, describeStreamStartFailure } from "./errorCopy";
 import {
   endOwnStream,
@@ -27,12 +26,13 @@ import { publishToWhip, type PublishHandle } from "./whip-publisher";
  * `hlsPlaybackPath` at all. A paywall enforced in React is not a paywall —
  * member-UI spec §5.1.
  *
- * **`attachHls`/`mintToken` are threaded straight through to `StreamPlayer`
- * for every row**, purely so a test can inject a fake without touching real
- * `hls.js` or a real network call — the same DI shape `WatchPage`'s
- * `attachPlayer` prop uses. Production renders always omit both, which is
- * how `<Route path="/siaran" element={<SiaranPage />} />` in `App.tsx`
- * already calls this component.
+ * **NO PLAYER LIVES HERE ANY MORE.** This page lists who is on the air;
+ * watching happens on the broadcaster's profile, where `SEDANG LIVE` also
+ * leads. It used to embed a `StreamPlayer` per row, which minted a watch
+ * token and started an HLS attach for every listed stream on page load, and
+ * rendered a black "Siaran ini tidak dapat diputar sekarang." box whenever
+ * playback could not start. The `attachHls`/`mintToken` props existed only to
+ * inject fakes into those players and went with them.
  *
  * **Creator controls — a title, the *Khusus anggota* checkbox, *Mulai
  * siaran* — are `StreamComposer` below** (design spec §8's second half;
@@ -43,13 +43,7 @@ import { publishToWhip, type PublishHandle } from "./whip-publisher";
  * signed-in visitor, for the identical reason — there is nothing for a
  * signed-out one to do here but collect `SESSION_EXPIRED_MESSAGE`.
  */
-export default function SiaranPage({
-  attachHls,
-  mintToken,
-}: {
-  attachHls?: AttachHls;
-  mintToken?: (streamId: string) => Promise<WatchTokenResult>;
-} = {}) {
+export default function SiaranPage() {
   const [streams, setStreams] = useState<StreamView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -166,7 +160,30 @@ export default function SiaranPage({
               <span className="stream-lock-cta">Jadi anggota untuk menonton</span>
             </Link>
           ) : (
-            <StreamPlayer stream={stream} attachHls={attachHls} mintToken={mintToken} />
+            /*
+              NO PLAYER HERE, deliberately. This page is the index of who is
+              live; watching happens on the broadcaster's own profile, where
+              the SEDANG LIVE badge also leads.
+
+              It used to embed a `StreamPlayer` per row. Every listed stream
+              therefore minted a watch token and began an HLS attach on page
+              load — work for streams nobody had chosen to watch — and when
+              playback could not start, the row became a large black box
+              reading "Siaran ini tidak dapat diputar sekarang." A failure
+              notice makes a poor listing entry: it tells a reader the product
+              is broken when all they asked was who is on the air.
+
+              Both branches now lead to the same place, which is what makes the
+              pair honest: a member is offered the broadcast, a non-member is
+              told what watching it would take.
+            */
+            <Link
+              to={`/@${stream.owner.handle}`}
+              className="stream-watch"
+              data-testid="stream-watch"
+            >
+              Tonton siaran
+            </Link>
           )}
         </article>
       ))}

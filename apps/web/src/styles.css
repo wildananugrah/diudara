@@ -1693,3 +1693,19 @@ button:disabled {
   margin: 0 0 0.5rem;
   font-size: 1rem;
 }
+
+/* --- The listing's "watch" affordance. Deliberately the same shape as
+       `.stream-lock` beside it: both lead to the broadcaster's profile, one
+       to watch and one to learn what watching would take. -------------- */
+.stream-watch {
+  display: block;
+  padding: 0.75rem var(--panel-pad);
+  border-top: 1px solid var(--line);
+  color: var(--green-dark);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.stream-watch:hover {
+  background: var(--green-wash);
+}
