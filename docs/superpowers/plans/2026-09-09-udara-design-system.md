@@ -750,12 +750,40 @@ So that ~15 components inherit the new look without editing their markup, make e
 - `.auth-card`'s hardcoded `border-radius: 12px` → `var(--radius-md)`.
 - Every remaining `border-radius: 6px` on a control → `var(--radius-sm)`.
 
-- [ ] **Step 3: Run the tests**
+- [ ] **Step 3: Eliminate every remaining `var(--green-dark)` except the feed tab's**
+
+Task 1 stopped declaring `--green-dark`. It is still referenced in **eight** places, and each one is a declaration that no longer paints anything in a browser. This step clears seven; Task 7 clears the eighth.
+
+Line numbers are as of Task 1's commit and will have shifted after Task 3's merge — find them by selector, not by line:
+
+| Selector | Declaration | Becomes |
+|---|---|---|
+| `a` | `color: var(--green-dark)` | `color: var(--langit)` |
+| `.button-primary:hover:not(:disabled)` | `background: var(--green-dark)` | `background: color-mix(in srgb, var(--sinyal) 80%, transparent)` |
+| `.button-link` | `color: var(--green-dark)` | `color: var(--langit)` |
+| `.bottom-nav a.active` | `color: var(--green-dark)` | leave for Task 6, which rewrites this rule wholesale |
+| `.button-secondary` | `color: var(--green-dark)` | `color: var(--awan)` (it sits on `--kabut` after re-pointing) |
+| `.stream-watch` | `color: var(--green-dark)` | `color: var(--langit)` |
+| `.feed-tabs button[aria-current="true"]` | `box-shadow: inset 0 -2px 0 var(--green-dark)` | leave for Task 7 |
+
+Task 3 will already have collapsed the two `.button-primary:hover:not(:disabled)` rules into one, so expect one occurrence, not two.
+
+Run: `grep -n "green-dark" src/styles.css`
+Expected: exactly two matches remain — `.bottom-nav a.active` and `.feed-tabs button[aria-current="true"]`. Any other match is a site this table missed; tokenise it with the nearest Udara equivalent and note it in your report.
+
+- [ ] **Step 4: Confirm no selector was re-duplicated**
+
+Task 3 left every selector declared once, and this task edits `.card` in place rather than appending a second rule.
+
+Run: `grep -oE '^[^{@/ ][^{]*\{' src/styles.css | sed 's/ *{$//' | sort | uniq -d`
+Expected: empty output.
+
+- [ ] **Step 5: Run the tests**
 
 Run: `bun test && bun run typecheck`
 Expected: the full suite green, no expected failures. The six asserted class names are untouched by this task, so no component test should move.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/styles.css
