@@ -59,7 +59,7 @@ export default function Sidebar({
           <span className="sidebar-nav-icon">
             <FontAwesomeIcon icon={ICONS[destination.to] ?? faCompass} />
           </span>
-          {!collapsed && destination.label}
+          <span className={collapsed ? "visually-hidden" : undefined}>{destination.label}</span>
         </NavLink>
       ))}
     </nav>

@@ -28,17 +28,15 @@ export default function Header({
   breadcrumb,
   notificationCount,
   actions,
-  insetDivider = true,
 }: {
   title: string;
   subtitle?: string;
   breadcrumb?: readonly Crumb[];
   notificationCount?: number;
   actions?: React.ReactNode;
-  insetDivider?: boolean;
 }) {
   return (
-    <header className={insetDivider ? "app-header" : "app-header app-header-bleed"}>
+    <header className="app-header">
       <div className="app-header-titles">
         <h1>{title}</h1>
         {subtitle !== undefined && <p className="app-header-sub">{subtitle}</p>}

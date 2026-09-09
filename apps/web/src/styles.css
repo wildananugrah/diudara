@@ -397,9 +397,26 @@ code {
   display: none;
 }
 
+/* Keeps content in the accessibility tree and reachable by keyboard focus
+   while removing it from sighted layout — used by the collapsed side rail
+   to keep its link labels for screen readers without a visible tooltip's
+   inconsistent behaviour on touch/keyboard. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .sidebar-nav,
 .sidebar-subnav {
   color: var(--sidebar-text);
+  text-decoration: none;
   font-weight: 500;
   background: transparent;
   transition: background 0.12s ease;
@@ -412,6 +429,7 @@ code {
 .sidebar-nav-active,
 .sidebar-subnav-active {
   color: var(--sidebar-text-active);
+  text-decoration: none;
   font-weight: 700;
   background: var(--sidebar-active-bg);
 }
@@ -1151,10 +1169,18 @@ button:disabled {
   font-weight: 700;
 }
 
+.app-header-titles {
+  min-width: 0;
+}
+
 .app-header-sub,
 .app-header-crumbs {
   font-size: 12.5px;
   color: var(--ink-500);
+}
+
+.app-header-crumbs a {
+  text-decoration: none;
 }
 
 .app-header-crumb-sep {
@@ -1223,6 +1249,7 @@ button:disabled {
 
 .bottom-nav a {
   color: var(--ink-500);
+  text-decoration: none;
   font-size: 0.8rem;
   text-align: center;
   padding: 6px 14px;
