@@ -1116,14 +1116,85 @@ button:disabled {
    --------------------------------------------------------------- */
 .app-shell {
   min-height: 100vh;
+  background: var(--surface);
 }
 
 .app-shell-main {
-  /* Room for the fixed .bottom-nav below md so its own content is never hidden behind it. */
+  /* Room for the fixed .bottom-nav below md so content is never hidden behind it. */
   padding-bottom: 72px;
 }
 
-/* --- The shell. Rail above md, tabs below — same two shapes, new surfaces. -- */
+.page-container {
+  padding: 20px;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  /* Below the navigation's 10 on purpose: the header scrolls with the page
+     and the nav is chrome over everything. AppShell.test.tsx asserts the nav
+     outranks every other z-index in this sheet, and this is the rule most
+     likely to break that if it is raised. */
+  z-index: 5;
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px;
+  background: var(--header-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.app-header h1 {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.app-header-sub,
+.app-header-crumbs {
+  font-size: 12.5px;
+  color: var(--ink-500);
+}
+
+.app-header-crumb-sep {
+  margin: 0 6px;
+}
+
+.app-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.app-header-bell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--ink-150);
+  border-radius: 50%;
+  background: var(--awan);
+}
+
+.app-header-bell-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  background: var(--merah-senja);
+  color: var(--surface);
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .side-rail {
   display: none;
 }
@@ -1139,30 +1210,29 @@ button:disabled {
      `z-index: 1`) lives inside `.stream-card` / `.stream-lock`, which are
      `position: relative` with `z-index: auto` and so create no stacking
      context to hold it in: on Siaran those badges painted over the only way
-     off the page. 10 leaves room below it; `AppShell.test.tsx` asserts the
-     navigation outranks every other z-index in this sheet, so a new one
-     elsewhere fails loudly instead of covering the bar. */
+     off the page. `AppShell.test.tsx` asserts the navigation outranks every
+     other z-index in this sheet, so a new one elsewhere fails loudly instead
+     of covering the bar. */
   z-index: 10;
   display: flex;
   justify-content: space-around;
   background: var(--surface);
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border);
   padding: 8px 4px;
 }
 
 .bottom-nav a {
-  color: var(--ink-faint);
-  text-decoration: none;
+  color: var(--ink-500);
   font-size: 0.8rem;
   text-align: center;
-  padding: 4px 10px;
-  border-radius: var(--radius);
+  padding: 6px 14px;
+  border-radius: 999px;
 }
 
 .bottom-nav a.active {
-  color: var(--ink);
-  font-weight: 600;
-  background: var(--green-wash);
+  background: var(--langit-dark);
+  color: var(--awan);
+  font-weight: 700;
 }
 
 /* ---------------------------------------------------------------
@@ -1630,40 +1700,70 @@ button:disabled {
     display: none;
   }
 
+  /* The rail is INSET, not flush: it floats as a tinted panel on the shell's
+     white. `body` is --awan and `.app-shell` is --surface, which is what makes
+     that inversion read the way the reference intends. */
   .side-rail {
     display: flex;
     flex-direction: column;
     gap: 4px;
     position: fixed;
-    /* Same reasoning as `.bottom-nav` above — the rail is the same chrome in
-       the other shape, and shares its stacking guarantee. */
+    /* Same reasoning as `.bottom-nav` — the rail is the same chrome in the
+       other shape, and shares its stacking guarantee. */
     z-index: 10;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    width: 220px;
-    padding: 24px 16px;
-    border-right: 1px solid var(--line-soft);
-    background: var(--surface-sunk);
+    top: 10px;
+    left: 10px;
+    width: var(--sidebar-width);
+    height: calc(100vh - 20px);
+    padding: 22px 12px 12px;
+    background: var(--sidebar-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    transition: width 0.18s ease;
   }
 
-  .side-rail a {
-    color: var(--ink-soft);
-    text-decoration: none;
-    font-size: 0.95rem;
-    padding: 8px 10px;
-    border-radius: var(--radius);
+  .side-rail-collapsed {
+    width: 76px;
   }
 
-  .side-rail a.active {
-    color: var(--ink);
-    font-weight: 600;
-    background: var(--green-wash);
+  .side-rail-brand {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 4px 28px;
+  }
+
+  .side-rail-wordmark {
+    font-family: var(--font-display);
+    font-weight: 800;
+    color: var(--langit);
+  }
+
+  .side-rail .sidebar-nav {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: 999px;
+    font-size: 14px;
+  }
+
+  .sidebar-nav-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    flex-shrink: 0;
   }
 
   .app-shell-main {
-    margin-left: 220px;
+    margin-left: calc(var(--sidebar-width) + 20px);
     padding-bottom: 0;
+  }
+
+  .side-rail-collapsed ~ .app-shell-main {
+    margin-left: 96px;
   }
 }
 

@@ -1,6 +1,7 @@
-import { useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { isUserSignedIn, subscribeToUserAuth } from "./apiClient";
+import Sidebar from "./shell/Sidebar";
 
 /**
  * The three destinations that never change — see
@@ -83,18 +84,19 @@ function Destinations({ destinations }: { destinations: ReturnType<typeof useDes
  */
 export default function AppShell() {
   const destinations = useDestinations();
+  const [collapsed, setCollapsed] = useState(false);
   return (
     <div className="app-shell">
-      <nav className="side-rail" aria-label="Navigasi utama">
-        <Destinations destinations={destinations} />
-      </nav>
+      <Sidebar
+        destinations={destinations}
+        collapsed={collapsed}
+        onToggleCollapse={() => setCollapsed((value) => !value)}
+      />
       {/*
         A <div>, NOT a <main>: every page this shell renders brings its own
-        <main className="user-page">, so a <main> here nested one inside the
-        other — invalid HTML, and two "main" landmarks for assistive
-        technology to choose between. The class stays, so the CSS keyed on it
-        (the 220px left margin above 768px, the 72px bottom padding that
-        clears the fixed bottom bar below it) is unaffected.
+        <main className="user-page">, so a <main> here would nest one inside
+        the other — invalid HTML, and two "main" landmarks for assistive
+        technology to choose between.
       */}
       <div className="app-shell-main">
         <Outlet />
