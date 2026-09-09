@@ -205,6 +205,18 @@ In `apps/web/src/styles.css`, replace the whole `:root { … }` block (currently
   --danger-bg: #f7e7e1;
   --warning-bg: #fceedc;
 
+  /* The badges' text colours, kept as the reference's own literals rather than
+     swapped for nearby palette tokens. Measured on their own backgrounds, the
+     reference's choices are deliberate and the obvious substitutions fail:
+     #2e6248 on --success-bg is 6.12:1 where var(--hijau-lepas) is 3.47:1, and
+     #93412c on --danger-bg is 5.76:1 where var(--merah-senja) is 3.80:1. Both
+     substitutes drop 12px badge text below AA. They live here, in :root, which
+     is where literals belong and where the no-hardcoded-colours guard allows
+     them. */
+  --badge-active-ink: #2e6248;
+  --badge-pending-ink: #9a5b18;
+  --badge-churn-ink: #93412c;
+
   --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
   --font-body: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
 
@@ -344,13 +356,22 @@ import { rules, selectors, stylesheet } from "./stylesheet";
  *
  * `:root` is exempt because that is where literals belong. `transparent`,
  * `inherit`, `currentColor` and `none` are not colours in this sense.
+ *
+ * `@keyframes` steps are exempt too. `rules()` matches innermost braces, so
+ * each `0%`/`70%`/`100%` step is returned as its own rule, and the pulse
+ * animation's spreading `rgba(255,255,255,…)` glow is an animation parameter
+ * rather than a palette colour — expressing it as a `color-mix` on --surface
+ * would obscure what the rule does without making it themeable.
  */
 const LITERAL = /#[0-9a-f]{3,8}\b|\b(?:rgb|rgba|hsl|hsla|oklch|oklab|lab|lch)\(/i;
+/** A keyframe step selector: `0%`, `70%`, `from`, `to`, or a comma-separated list. */
+const KEYFRAME_STEP = /^(?:from|to|-?\d+(?:\.\d+)?%)(?:\s*,\s*(?:from|to|-?\d+(?:\.\d+)?%))*$/;
 
 describe("no hardcoded colours outside :root", () => {
   it("declares every colour as a token", () => {
     const offenders = rules(stylesheet())
       .filter((rule) => rule.selector !== ":root")
+      .filter((rule) => !KEYFRAME_STEP.test(rule.selector))
       .filter((rule) => LITERAL.test(rule.body));
 
     // Named, not counted: a failure must say WHICH rule reintroduced a literal.
@@ -605,21 +626,21 @@ Add to `styles.css`, after the base/reset section and before the per-feature sec
 }
 .badge-active {
   background: var(--success-bg);
-  color: var(--hijau-lepas);
+  color: var(--badge-active-ink);
 }
 .badge-active .dot {
   background: var(--hijau-lepas);
 }
 .badge-pending {
   background: var(--warning-bg);
-  color: var(--langit-dark);
+  color: var(--badge-pending-ink);
 }
 .badge-pending .dot {
   background: var(--sinyal);
 }
 .badge-churn {
   background: var(--danger-bg);
-  color: var(--merah-senja);
+  color: var(--badge-churn-ink);
 }
 .badge-churn .dot {
   background: var(--merah-senja);
@@ -706,9 +727,11 @@ Add to `styles.css`, after the base/reset section and before the per-feature sec
 }
 ```
 
-Note the badge text colours differ from the reference, which hardcodes `#2e6248`, `#9a5b18` and `#93412c`. Task 2's guard forbids literals outside `:root`, and the nearest tokens carry the same meaning; if any of the three reads too light in review, add a named token to `:root` rather than a literal here.
+The badge text colours use `--badge-*-ink` from Task 1, which hold the reference's own `#2e6248` / `#9a5b18` / `#93412c`. Do **not** substitute `var(--hijau-lepas)` or `var(--merah-senja)` here: measured, those read 3.47:1 and 3.80:1 on their backgrounds against the reference's 6.12:1 and 5.76:1, and this is 12px text.
 
-The `@keyframes pulse` body keeps `rgba(255,255,255,…)` literals. `rules()` matches innermost braces so the keyframe steps are separate rules and WILL trip Task 2's guard — add `@keyframes` bodies to that test's exemptions, or express the steps with `color-mix(in srgb, var(--surface) …)`. Prefer the exemption; a spreading shadow is not a palette colour.
+`@keyframes pulse` keeps its `rgba(255,255,255,…)` literals; Task 2's guard already exempts keyframe steps.
+
+**`.card` already exists in this sheet.** Task 3 removed every duplicate selector; do not append a second `.card` rule. Edit the existing one in place to carry the declarations above.
 
 - [ ] **Step 2: Re-point the existing class names**
 
@@ -744,131 +767,59 @@ rules explicitly."
 
 ---
 
-### Task 5: Font Awesome and the Avatar component
+### Task 5: Font Awesome
 
 **Files:**
-- Modify: `apps/web/package.json`
-- Create: `apps/web/src/user/Avatar.tsx`
-- Create: `apps/web/src/user/Avatar.test.tsx`
+- Modify: `apps/web/package.json`, `apps/web/bun.lock`
 
 **Interfaces:**
-- Consumes: `.avatar` from Task 4.
-- Produces: `export default function Avatar({ initials, color, size }: { initials: string; color?: string; size?: number })` — defaults `color = "var(--kabut)"`, `size = 36`. Task 6's `Header` and `Sidebar` import it.
+- Consumes: nothing.
+- Produces: `FontAwesomeIcon` from `@fortawesome/react-fontawesome`, icon definitions from `@fortawesome/free-solid-svg-icons`, and the `IconDefinition` type from `@fortawesome/fontawesome-svg-core`. Task 6's `Sidebar` and `Header` import all three.
 
-- [ ] **Step 1: Install the dependency**
+**The reference's `Avatar` component is deliberately NOT built in this phase.** An earlier draft of this plan created it here. Nothing in Phase 0 renders an avatar: the app has no member rosters, no comment threads and no chat, and Task 6's `Header` does not build the reference's identity chip (see its docstring). A component with no consumer is scaffolding, which is the same reasoning that cut the sidebar's submenu machinery. The `.avatar` CSS class still ships in Task 4 — that is the design system, and it is what Phase 1's `Avatar` will use.
+
+- [ ] **Step 1: Record the pre-install state**
+
+Run: `bun test 2>&1 | tail -5 && bun run typecheck`
+Expected: the known-red `BerandaPage` indicator test and nothing else; typecheck clean. Note the passing test count — Step 3 compares against it.
+
+- [ ] **Step 2: Install the dependency**
 
 ```bash
 cd apps/web
 bun add @fortawesome/fontawesome-svg-core @fortawesome/free-solid-svg-icons @fortawesome/react-fontawesome
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 3: Verify the dependency does not break the build**
 
-Create `apps/web/src/user/Avatar.test.tsx`:
+This is the task's deliverable and its check. Font Awesome ships its own type declarations, and this repo is `strict: true` with `skipLibCheck` — a package whose types disagree with React 19's would surface here and nowhere else.
 
-```tsx
-import { afterEach, describe, expect, it } from "bun:test";
-import { cleanup, render, screen } from "@testing-library/react";
-import Avatar from "./Avatar";
+Run: `bun run typecheck`
+Expected: clean, no new errors.
 
-afterEach(() => cleanup());
+Run: `bun test 2>&1 | tail -5`
+Expected: the same passing count as Step 1, with the same one known-red test. A different count means the install moved something — investigate before committing.
 
-describe("Avatar", () => {
-  it("renders the initials it is given", () => {
-    render(<Avatar initials="WA" />);
-    expect(screen.getByText("WA")).toBeTruthy();
-  });
+- [ ] **Step 4: Confirm the three packages resolve**
 
-  it("is decorative to assistive technology — the name is always beside it in text", () => {
-    render(<Avatar initials="WA" />);
-    expect(screen.getByText("WA").getAttribute("aria-hidden")).toBe("true");
-  });
+Run: `bun pm ls 2>/dev/null | grep fortawesome`
+Expected: all three listed. If `bun pm ls` is unavailable, `ls node_modules/@fortawesome` instead.
 
-  it("scales its type with its size, so a 96px stage avatar is not a 36px glyph", () => {
-    render(<Avatar initials="PA" size={96} />);
-    const el = screen.getByText("PA");
-    expect(el.style.width).toBe("96px");
-    expect(el.style.fontSize).toBe(`${96 * 0.38}px`);
-  });
-});
-```
-
-- [ ] **Step 3: Run it to make sure it fails**
-
-Run: `bun test src/user/Avatar.test.tsx`
-Expected: FAIL — `Cannot find module './Avatar'`.
-
-- [ ] **Step 4: Write the component**
-
-Create `apps/web/src/user/Avatar.tsx`:
-
-```tsx
-/**
- * A circular initials chip, ported from the reference mockup's only `ui/`
- * component. Sizes it uses across its screens: 96 (live stage), 36 (default,
- * header, chat list), 34 (participant tile), 32 (comment), 30, 28.
- *
- * `aria-hidden` because every call site in the reference renders the person's
- * name as text immediately beside it; without that, a screen reader hears the
- * initials and then the name, twice for one person. A call site that does NOT
- * show the name beside it needs its own label and should not use this.
- *
- * The 0.38 type ratio is the reference's, and is why this takes a `size`
- * rather than a class: at 96px a fixed font-size reads as a small glyph
- * floating in a large disc.
- */
-export default function Avatar({
-  initials,
-  color = "var(--kabut)",
-  size = 36,
-}: {
-  initials: string;
-  color?: string;
-  size?: number;
-}) {
-  return (
-    <span
-      className="avatar"
-      aria-hidden="true"
-      style={{
-        width: size,
-        height: size,
-        background: color,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        color: "var(--surface)",
-        fontSize: size * 0.38,
-        fontWeight: 700,
-      }}
-    >
-      {initials}
-    </span>
-  );
-}
-```
-
-- [ ] **Step 5: Run the tests**
-
-Run: `bun test src/user/Avatar.test.tsx`
-Expected: PASS, all three.
-
-Run: `bun test && bun run typecheck`
-Expected: green except the known-red `BerandaPage` indicator test.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add package.json bun.lock src/user/Avatar.tsx src/user/Avatar.test.tsx
-git commit -m "feat: add Font Awesome and the Avatar chip
+git add package.json bun.lock
+git commit -m "build: add Font Awesome, the reference's icon set
 
-The app had exactly one glyph in it (a literal times sign in MediaStrip)
-and the Udara shell is icon-dense throughout — sidebar rows, tab bars,
-card actions. Font Awesome is the reference's own choice and hand-rolling
-thirty inline SVGs would be more code than the dependency avoids.
+The app had exactly one glyph in it — a literal times sign in
+MediaStrip — and the Udara shell is icon-dense throughout: sidebar rows,
+the header bell, card actions. Hand-rolling thirty inline SVGs would be
+more code than the dependency avoids, and Font Awesome is the reference's
+own documented choice.
 
-Avatar is aria-hidden: every call site shows the person's name in text
-beside it, and without this a screen reader reads the same person twice."
+Typecheck clean and the suite unmoved against the pre-install count, which
+is what this commit is verifying: strict mode plus React 19 is where a
+package's own type declarations would bite."
 ```
 
 ---
@@ -884,7 +835,7 @@ beside it, and without this a screen reader reads the same person twice."
 - Modify: `apps/web/src/styles.css` (the shell section and its `@media (min-width: 768px)` block)
 
 **Interfaces:**
-- Consumes: `Avatar` from Task 5; `.sidebar-nav*`, `.btn-*`, `.card` from Task 4; `useDestinations` stays inside `AppShell.tsx`.
+- Consumes: Font Awesome from Task 5; `.sidebar-nav*`, `.btn-*` from Task 4; `useDestinations` stays inside `AppShell.tsx` unchanged.
 - Produces: `Sidebar({ destinations, collapsed, onToggleCollapse })`, `Header({ title, subtitle, breadcrumb, notificationCount, actions, insetDivider })` with `Crumb = { label: string; to?: string }`, `PageContainer({ children })`. Phase 1 consumes all three.
 
 - [ ] **Step 1: Write the failing tests**
@@ -950,7 +901,6 @@ Create `apps/web/src/user/shell/Header.tsx`:
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faBell } from "@fortawesome/free-solid-svg-icons";
 import { Link } from "react-router-dom";
-import Avatar from "../Avatar";
 
 export type Crumb = { label: string; to?: string };
 
@@ -966,6 +916,11 @@ export type Crumb = { label: string; to?: string };
  *
  * The `actions` slot is dead in every reference page but is kept, because
  * Phase 1's CommunityHome puts its invite / share / Posting controls there.
+ *
+ * The reference's header also carries an identity chip (avatar + name +
+ * handle). It is NOT built here: the shell's fourth nav destination already
+ * answers "who am I / sign in", and a chip needs a `/me` read this component
+ * does not otherwise do. Phase 1 adds it alongside CommunityHome.
  */
 export default function Header({
   title,
