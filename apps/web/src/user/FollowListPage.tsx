@@ -6,7 +6,6 @@ import { listFollowers, listFollowing, UserApiError, type FollowListRow } from "
 import { describeRequestFailure } from "./errorCopy";
 import { FollowRow } from "./JelajahPage";
 import Header from "./shell/Header";
-import PageContainer from "./shell/PageContainer";
 
 type LoadState =
   | { status: "loading" }
@@ -123,9 +122,7 @@ export default function FollowListPage({ direction }: { direction: "followers" |
       <>
         <Header title="Memuat..." />
         <main className="user-page">
-          <PageContainer>
-            <p>Memuat...</p>
-          </PageContainer>
+          <p>Memuat...</p>
         </main>
       </>
     );
@@ -136,10 +133,8 @@ export default function FollowListPage({ direction }: { direction: "followers" |
       <>
         <Header title="Gagal memuat daftar" />
         <main className="user-page">
-          <PageContainer>
-            <BackToProfile handle={handle} />
-            <p>{load.message}</p>
-          </PageContainer>
+          <BackToProfile handle={handle} />
+          <p>{load.message}</p>
         </main>
       </>
     );
@@ -149,7 +144,6 @@ export default function FollowListPage({ direction }: { direction: "followers" |
     <>
       <Header title={TITLE[direction]} />
       <main className="user-page">
-        <PageContainer>
       <BackToProfile handle={handle} />
       {load.rows.length === 0 ? (
         <p className="empty">{EMPTY_MESSAGE[direction]}</p>
@@ -165,7 +159,6 @@ export default function FollowListPage({ direction }: { direction: "followers" |
           ) : null}
         </>
       )}
-        </PageContainer>
       </main>
     </>
   );

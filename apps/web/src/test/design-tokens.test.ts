@@ -2,9 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { rules, stylesheet } from "./stylesheet";
 
 /**
- * The palette's two accessibility deviations from the reference mockup, pinned
- * so they cannot be "corrected" back to the reference's own figures by someone
- * comparing the two files side by side.
+ * Two of the palette's accessibility deviations from the reference mockup —
+ * `--ink-500` and `--ink-300` — pinned here so they cannot be "corrected" back
+ * to the reference's own figures by someone comparing the two files side by
+ * side. The palette carries several such deviations in all; the full table is
+ * under Global Constraints in
+ * docs/superpowers/plans/2026-09-09-udara-design-system.md.
  *
  * Measured on the reference's values: `--ink-500 #6c8298` on `--awan #f4f7fa`
  * is 3.70:1 and `--ink-300 #a9b7c4` is 1.90:1. WCAG AA wants 4.5:1 for normal

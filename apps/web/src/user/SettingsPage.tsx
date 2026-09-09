@@ -14,7 +14,6 @@ import MembershipRequests from "./MembershipRequests";
 import MembershipSettings from "./MembershipSettings";
 import SubscriberList from "./SubscriberList";
 import Header from "./shell/Header";
-import PageContainer from "./shell/PageContainer";
 
 type LoadState =
   | { status: "loading" }
@@ -126,9 +125,7 @@ function SettingsForm() {
       <>
         <Header title="Memuat..." />
         <main className="user-page">
-          <PageContainer>
-            <p>Memuat...</p>
-          </PageContainer>
+          <p>Memuat...</p>
         </main>
       </>
     );
@@ -139,9 +136,7 @@ function SettingsForm() {
       <>
         <Header title="Gagal memuat profil" />
         <main className="user-page">
-          <PageContainer>
-            <p>{load.message}</p>
-          </PageContainer>
+          <p>{load.message}</p>
         </main>
       </>
     );
@@ -180,7 +175,6 @@ function SettingsForm() {
         }
       />
       <main className="user-page">
-        <PageContainer>
       <div className="card stack">
         <p className="muted">@{profile.handle}</p>
         <p className="muted">{profile.email}</p>
@@ -274,7 +268,6 @@ function SettingsForm() {
         this page down with it.
       */}
       <SubscriberList />
-        </PageContainer>
       </main>
     </>
   );

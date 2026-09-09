@@ -17,7 +17,6 @@ import PostFeed, { type PostFeedHandle } from "./PostFeed";
 import StreamPlayer from "./StreamPlayer";
 import { DeleteConfirm, EditComposer, usePostOwnerActions } from "./postOwnerActions";
 import Header from "./shell/Header";
-import PageContainer from "./shell/PageContainer";
 
 type LoadState =
   | { status: "loading" }
@@ -209,9 +208,7 @@ export default function ProfilePage() {
       <>
         <Header title="Memuat..." />
         <main className="user-page">
-          <PageContainer>
-            <p>Memuat...</p>
-          </PageContainer>
+          <p>Memuat...</p>
         </main>
       </>
     );
@@ -222,9 +219,7 @@ export default function ProfilePage() {
       <>
         <Header title="Gagal memuat profil" />
         <main className="user-page">
-          <PageContainer>
-            <p>{load.message}</p>
-          </PageContainer>
+          <p>{load.message}</p>
         </main>
       </>
     );
@@ -236,7 +231,6 @@ export default function ProfilePage() {
     <>
       <Header title={profile.displayName} />
       <main className="user-page profile-page">
-        <PageContainer>
       <div className="spread">
         <div>
           <p className="profile-handle muted">@{profile.handle}</p>
@@ -370,7 +364,6 @@ export default function ProfilePage() {
         onDeleteRequested={onDeleteRequested}
         emptyMessage="Belum ada kiriman untuk ditampilkan."
       />
-        </PageContainer>
       </main>
     </>
   );
