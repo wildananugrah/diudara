@@ -173,7 +173,7 @@ p {
 }
 
 a {
-  color: var(--green-dark);
+  color: var(--langit);
 }
 
 code {
@@ -210,6 +210,218 @@ code {
   flex-wrap: wrap;
 }
 
+/* ---------- Udara components ----------
+   Ported from the reference mockup's tokens.css. Two rules it states
+   explicitly and this sheet now follows: a static card is FLAT (border, no
+   shadow) and only `.card-clickable` lifts, on hover; a list row tints its
+   background and never lifts.
+   --------------------------------------- */
+.card-clickable {
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.05s ease;
+}
+.card-clickable:hover {
+  box-shadow: var(--shadow-card);
+}
+
+.hover-bg {
+  transition: background 0.12s ease;
+}
+.hover-bg:hover {
+  background: var(--awan);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 14px;
+  border-radius: 999px;
+  border: none;
+  padding: 10px 18px;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.05s ease;
+  white-space: nowrap;
+}
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn-primary {
+  background: var(--sinyal);
+  color: var(--awan);
+}
+.btn-primary:hover {
+  background: color-mix(in srgb, var(--sinyal) 80%, transparent);
+}
+
+.btn-secondary {
+  background: var(--kabut);
+  color: var(--awan);
+}
+.btn-secondary:hover {
+  background: var(--langit-dark);
+  color: var(--awan);
+}
+
+.btn-danger {
+  background: var(--danger-bg);
+  color: var(--merah-senja);
+}
+.btn-danger:hover {
+  background: color-mix(in srgb, var(--danger-bg) 80%, transparent);
+}
+
+.btn-petang {
+  background: var(--langit-dark);
+  color: var(--awan);
+}
+.btn-petang:hover {
+  background: var(--kabut);
+  color: var(--awan);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--langit);
+  border: 1px solid var(--ink-150);
+}
+.btn-ghost:hover {
+  background: var(--kabut);
+  color: var(--awan);
+}
+
+.btn-sm {
+  padding: 7px 13px;
+  font-size: 13px;
+}
+.btn-icon {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  flex-shrink: 0;
+}
+.btn-block {
+  width: 100%;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.badge .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.badge-active {
+  background: var(--success-bg);
+  color: var(--success-ink);
+}
+.badge-active .dot {
+  background: var(--hijau-lepas);
+}
+.badge-pending {
+  background: var(--warning-bg);
+  color: var(--warning-ink);
+}
+.badge-pending .dot {
+  background: var(--sinyal);
+}
+.badge-churn {
+  background: var(--danger-bg);
+  color: var(--danger-ink);
+}
+.badge-churn .dot {
+  background: var(--merah-senja);
+}
+.badge-neutral {
+  background: var(--ink-100);
+  color: var(--ink-700);
+}
+
+.avatar {
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--kabut);
+  flex-shrink: 0;
+}
+
+.input {
+  width: 100%;
+  padding: 10px 13px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--awan);
+  color: var(--ink-900);
+  font-size: 14px;
+}
+.input:focus {
+  outline: 2px solid var(--sinyal);
+  outline-offset: 1px;
+  border-color: var(--sinyal);
+}
+
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--merah-senja);
+  color: var(--surface);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  padding: 4px 9px;
+  border-radius: 999px;
+}
+.live-badge .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--surface);
+  animation: pulse 1.6s infinite;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.55); }
+  70% { box-shadow: 0 0 0 7px rgba(255, 255, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+.sidebar-nav,
+.sidebar-subnav {
+  color: var(--sidebar-text);
+  font-weight: 500;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.sidebar-nav:hover,
+.sidebar-subnav:hover {
+  background: var(--langit-dark);
+  color: var(--awan);
+}
+.sidebar-nav-active,
+.sidebar-subnav-active {
+  color: var(--sidebar-text-active);
+  font-weight: 700;
+  background: var(--sidebar-active-bg);
+}
+/* Active nav: hover leaves it exactly as-is, no colour or opacity change. */
+.sidebar-nav-active:hover,
+.sidebar-subnav-active:hover {
+  background: var(--sidebar-active-bg);
+  color: var(--sidebar-text-active);
+}
+
 /* ---------- login ---------- */
 
 .auth-page {
@@ -225,7 +437,7 @@ code {
   max-width: 400px;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 28px 24px;
 }
 
@@ -244,8 +456,8 @@ code {
 
 .card {
   background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   padding: 18px;
 }
 
@@ -297,12 +509,12 @@ code {
 .field select,
 .field textarea {
   font: inherit;
-  font-size: 1rem;
-  padding: 9px 11px;
-  border: 1px solid var(--ink-150);
-  border-radius: 6px;
-  background: var(--surface);
-  color: inherit;
+  font-size: 14px;
+  padding: 10px 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--awan);
+  color: var(--ink-900);
   width: 100%;
 }
 
@@ -318,9 +530,9 @@ code {
 .field input:focus,
 .field select:focus,
 .field textarea:focus {
-  outline: 2px solid var(--green);
+  outline: 2px solid var(--sinyal);
   outline-offset: 1px;
-  border-color: var(--green);
+  border-color: var(--sinyal);
 }
 
 .field input[aria-invalid="true"] {
@@ -367,7 +579,7 @@ button {
 .button-secondary,
 .button-danger,
 .button-quiet {
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 9px 14px;
   font-size: 0.925rem;
   font-weight: 600;
@@ -377,32 +589,42 @@ button {
 
 /* --- Buttons. Flatter, and the primary keeps its own hover one step down. -- */
 .button-primary {
-  background: var(--green);
-  color: var(--surface);
-  border-radius: var(--radius);
+  background: var(--sinyal);
+  color: var(--awan);
+  border-radius: 999px;
+  padding: 10px 18px;
   font-weight: 600;
 }
 
 .button-primary:hover:not(:disabled) {
-  background: var(--green-dark);
+  background: color-mix(in srgb, var(--sinyal) 80%, transparent);
 }
 
 .button-secondary {
-  background: none;
-  color: var(--green-dark);
-  border: 1px solid var(--green);
-  border-radius: var(--radius);
+  background: var(--kabut);
+  color: var(--awan);
+  border: none;
+  border-radius: 999px;
+  padding: 10px 18px;
   font-weight: 600;
 }
 
 .button-secondary:hover {
-  background: var(--green-wash);
+  background: var(--langit-dark);
+  color: var(--awan);
 }
 
 .button-danger {
-  background: var(--surface);
-  border-color: var(--merah-senja);
-  color: var(--red);
+  background: var(--danger-bg);
+  color: var(--merah-senja);
+  border: none;
+  border-radius: 999px;
+  padding: 10px 18px;
+  font-weight: 600;
+}
+
+.button-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger-bg) 80%, transparent);
 }
 
 .button-quiet {
@@ -418,13 +640,18 @@ button:disabled {
 }
 
 .button-link {
-  background: none;
-  border: none;
+  background: transparent;
+  border: 1px solid var(--ink-150);
   padding: 8px 0 0;
-  color: var(--green-dark);
+  color: var(--langit);
   text-decoration: underline;
   cursor: pointer;
   font-size: 0.875rem;
+}
+
+.button-link:hover {
+  background: var(--kabut);
+  color: var(--awan);
 }
 
 /* ---------- notices ---------- */
@@ -434,7 +661,8 @@ button:disabled {
   border-left-width: 4px;
   border-radius: 6px;
   padding: 12px 14px;
-  background: var(--surface);
+  background: var(--ink-100);
+  color: var(--ink-700);
   margin-bottom: 20px;
 }
 
@@ -788,7 +1016,7 @@ button:disabled {
   font-size: 1rem;
   padding: 9px 11px;
   border: 1px solid var(--ink-150);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   color: inherit;
 }
@@ -1211,7 +1439,7 @@ button:disabled {
   font: inherit;
   padding: 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 /* The negative margin pulls the hairline out to the card's edges and the
@@ -1667,7 +1895,7 @@ button:disabled {
   display: block;
   padding: 0.75rem var(--panel-pad);
   border-top: 1px solid var(--line);
-  color: var(--green-dark);
+  color: var(--langit);
   font-weight: 600;
   text-decoration: none;
 }
