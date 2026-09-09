@@ -568,18 +568,27 @@ Add to `styles.css`, after the base/reset section and before the per-feature sec
   background: color-mix(in srgb, var(--sinyal) 80%, transparent);
 }
 
+/* DEVIATION from the reference, third of three, all accessibility.
+   The reference pairs --awan text on this --kabut fill: 2.27:1, below even the
+   3:1 large-text floor, on 14px/600 button labels. --ink-900 on --kabut is
+   6.16:1 and keeps the muted-blue pill exactly as the reference draws it — only
+   the label goes dark instead of white. The hover below is the reference's own
+   and needs no change (--awan on --langit-dark is 11.95:1). */
 .btn-secondary {
   background: var(--kabut);
-  color: var(--awan);
+  color: var(--ink-900);
 }
 .btn-secondary:hover {
   background: var(--langit-dark);
   color: var(--awan);
 }
 
+/* --danger-ink, not --merah-senja: the latter on --danger-bg is 3.80:1, the
+   pairing :root's own comment already names as an AA failure. --danger-ink is
+   5.76:1. This is what the ink tokens exist for, on buttons as well as badges. */
 .btn-danger {
   background: var(--danger-bg);
-  color: var(--merah-senja);
+  color: var(--danger-ink);
 }
 .btn-danger:hover {
   background: color-mix(in srgb, var(--danger-bg) 80%, transparent);
@@ -748,7 +757,7 @@ So that ~15 components inherit the new look without editing their markup, make e
 - `.button-primary` → `.btn-primary`'s: pill radius `999px`, `background: var(--sinyal)`, `color: var(--awan)`, `padding: 10px 18px`, `font-weight: 600`, and the `color-mix` hover.
 - `.button-secondary` → `.btn-secondary`'s.
 - `.button-danger` → `.btn-danger`'s.
-- `.button-link` → `.btn-ghost`'s.
+- `.button-link` → **only** `.btn-ghost`'s `color: var(--langit)`. Not its border, background or hover fill. All six call sites (`LoginPage.tsx:141,146`, `SignupPage.tsx:157`, `ResetRequestPage.tsx:79`) are a bare inline `<Link>` inside a `<p>`, never carrying `.btn` — and `.btn-ghost` declares no radius or padding of its own, because those live on `.btn`. Giving this class a border produces a square box whose edges touch the underlined glyphs with no horizontal padding. It is a text link; style it as one.
 - `.field input`, `.field select`, `.field textarea` → `.input`'s, including the `--sinyal` focus outline.
 - `.notice` → `.badge-neutral`'s background/colour pair. (Earlier drafts also listed `.notice-error` and `.notice-ok`. **Neither exists** — no rule declares them and no component uses them; the app's real success and failure messages are `.form-ok` and `.form-error`, which Task 2 already handled. Do not create them.)
 - `.auth-card`'s hardcoded `border-radius: 12px` → `var(--radius-md)`.
@@ -1469,15 +1478,142 @@ describe("custom properties", () => {
 
 The second case exists because the first passes vacuously if `referenced` is ever empty — a broken `stylesheet()` or a changed regex would turn this guard into decoration without failing.
 
-- [ ] **Step 6: Run the guard**
+- [ ] **Step 6: Add the contrast guard**
 
-Run: `bun test src/test/no-dangling-tokens.test.ts`
-Expected: PASS both. If the first case fails, it names the dangling property — fix that call site rather than declaring the token, unless the token genuinely belongs in the palette.
+Six WCAG AA failures were inherited from the reference during this phase — `--ink-500` (3.70:1), the three badge inks, `.form-ok` (3.47:1), `.btn-primary` (2.45:1), `.btn-secondary` (2.27:1), `.btn-danger` (3.80:1), `.btn-petang:hover` and `.btn-ghost:hover` (2.27:1 each). Every one was found by a person reading rules and doing arithmetic, across three separate reviews, and two of them were found only because someone went looking after the others turned up. That is the wrong mechanism, and Phases 1–8 will add colour pairs far faster than this phase did.
 
-- [ ] **Step 7: Commit**
+By this point every known failing pair is fixed, so this guard goes green on arrival.
+
+Create `apps/web/src/test/contrast.test.ts`:
+
+```ts
+import { describe, expect, it } from "bun:test";
+import { rules, stylesheet } from "./stylesheet";
+
+/**
+ * Every rule that sets BOTH a text colour and a background must clear WCAG AA
+ * for normal text (4.5:1).
+ *
+ * This exists because the design language ported in Phase 0 does not clear AA
+ * on its own: its primary button was white-on-orange at 2.45:1, its secondary
+ * white-on-mist at 2.27:1, its danger 3.80:1, and three more besides. All were
+ * caught by hand, one at a time, across three reviews. A guard finds the next
+ * one on the commit that introduces it.
+ *
+ * WHAT THIS CANNOT DO, stated plainly: it only sees a colour and a background
+ * declared in the SAME rule. Text inheriting its colour from an ancestor while
+ * sitting on a background set elsewhere is invisible to it, and so is anything
+ * whose value is not a plain hex after resolution — color-mix(), gradients,
+ * currentColor, transparent. Those are skipped, not guessed. It is a floor,
+ * not a proof.
+ *
+ * The 4.5:1 threshold is applied regardless of font size. A few call sites are
+ * large enough for the 3:1 allowance, but the rule text does not reliably say
+ * so, and holding everything to the stricter number costs nothing here.
+ */
+
+function linearise(channel: number): number {
+  const c = channel / 255;
+  return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+}
+
+function luminance(hex: string): number {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return (
+    0.2126 * linearise((n >> 16) & 0xff) +
+    0.7152 * linearise((n >> 8) & 0xff) +
+    0.0722 * linearise(n & 0xff)
+  );
+}
+
+function contrastRatio(a: string, b: string): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** `:root`'s custom properties, name -> raw value. */
+function tokens(css: string): Map<string, string> {
+  const root = rules(css).find((rule) => rule.selector === ":root");
+  const map = new Map<string, string>();
+  if (root === undefined) return map;
+  for (const match of root.body.matchAll(/(--[\w-]+)\s*:\s*([^;]+)/g)) {
+    map.set(match[1]!, match[2]!.trim());
+  }
+  return map;
+}
+
+/**
+ * Resolve a declaration value to `#rrggbb`, or null when it is not a plain
+ * colour. Follows `var()` chains — this sheet's aliases are two deep
+ * (`--green` -> `--sinyal` -> `#e8873e`) — with a depth cap so a cycle cannot
+ * hang the suite.
+ */
+function resolve(value: string, map: Map<string, string>, depth = 0): string | null {
+  const v = value.trim();
+  if (depth > 6) return null;
+  if (/^#[0-9a-f]{6}$/i.test(v)) return v.toLowerCase();
+  if (/^#[0-9a-f]{3}$/i.test(v)) {
+    return `#${v.slice(1).split("").map((c) => c + c).join("")}`.toLowerCase();
+  }
+  const ref = /^var\(\s*(--[\w-]+)\s*\)$/.exec(v);
+  if (ref === null) return null;
+  const next = map.get(ref[1]!);
+  return next === undefined ? null : resolve(next, map, depth + 1);
+}
+
+/** Every rule declaring both a resolvable colour and a resolvable background. */
+function pairs(css: string): { selector: string; ratio: number }[] {
+  const map = tokens(css);
+  const found: { selector: string; ratio: number }[] = [];
+  for (const rule of rules(css)) {
+    if (rule.selector === ":root") continue;
+    const fg = /(?:^|;)\s*color:\s*([^;]+)/.exec(rule.body);
+    const bg = /(?:^|;)\s*background(?:-color)?:\s*([^;]+)/.exec(rule.body);
+    if (fg === null || bg === null) continue;
+    const ink = resolve(fg[1]!, map);
+    const ground = resolve(bg[1]!, map);
+    if (ink === null || ground === null) continue;
+    found.push({ selector: rule.selector, ratio: contrastRatio(ink, ground) });
+  }
+  return found;
+}
+
+describe("text contrast", () => {
+  it("clears WCAG AA on every rule that sets both a colour and a background", () => {
+    const failures = pairs(stylesheet())
+      .filter((pair) => pair.ratio < 4.5)
+      .map((pair) => `${pair.selector} ${pair.ratio.toFixed(2)}:1`);
+
+    // Named, not counted: a failure must say WHICH rule and by how much.
+    expect(failures.join(" | ")).toBe("");
+  });
+
+  it("actually examined the sheet — a vacuous pass here would hide every failure", () => {
+    // The sheet held 31 such pairs when this guard was written. A resolver that
+    // silently stopped matching would make the assertion above pass on nothing.
+    expect(pairs(stylesheet()).length >= 20).toBe(true);
+  });
+});
+```
+
+The second case is not decoration. The first passes trivially if `pairs()` ever returns empty — a changed `rules()` helper, a reformatted `:root`, or a regex that stops matching would each turn this guard into a no-op without failing.
+
+- [ ] **Step 7: Run both guards**
+
+Run: `bun test src/test/no-dangling-tokens.test.ts src/test/contrast.test.ts`
+Expected: PASS, all four cases.
+
+If the dangling-token case fails, it names the property — fix that call site rather than declaring the token, unless the token genuinely belongs in the palette.
+
+If a contrast case fails, it names the rule and its ratio. **Fix the rule, never the threshold, and never by adding an exemption.** The established remedy in this phase is to change the ink and leave the reference's hue alone — `--ink-900` on a mid-tone fill, or the matching `--success-ink` / `--warning-ink` / `--danger-ink` on a tinted one.
+
+Then: `bun test && bun run typecheck`
+Expected: the full suite green.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/styles.css src/user/BerandaPage.test.tsx src/test/no-dangling-tokens.test.ts
+git add src/styles.css src/user/BerandaPage.test.tsx src/test/no-dangling-tokens.test.ts src/test/contrast.test.ts
 git commit -m "feat: re-tint the active feed tab to --sinyal, keeping the shadow
 
 The reference paints this as border-bottom: 2px solid var(--sinyal), and
