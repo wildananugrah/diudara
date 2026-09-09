@@ -27,64 +27,102 @@
  */
 
 /*
- * REDESIGN TOKENS (DIUDARA Redesign.dc.html).
+ * UDARA — "Langit & Sinyal", ported from the adamfloothink/diudara reference
+ * mockup's `src/styles/tokens.css`. Indonesian semantics: langit = sky (the
+ * primary navy), sinyal = signal (the orange CTA), kabut = mist, awan = cloud
+ * (the page ground), hijau-lepas = green (success), merah-senja = sunset red
+ * (live and danger).
  *
- * The palette moved from sRGB hex to oklch, and the whole thing is tinted: every
- * neutral carries a trace of the brand's green hue (145) rather than being a pure
- * grey, which is what makes the surfaces read as warm paper instead of as chrome.
- * Lightness is the first number, so a rule that needs "one step darker" changes
- * that and nothing else — the reason for choosing oklch over hex here.
+ * TWO DELIBERATE DEVIATIONS, both accessibility, both pinned by
+ * `src/test/design-tokens.test.ts`:
  *
- * The variable NAMES are unchanged. Every existing rule in this file — including
- * the dashboard's — keeps working and simply inherits the new palette, so this is
- * a re-tint rather than a rewrite.
+ *   --ink-500 is #5d7189 (4.66:1 on --awan), NOT the reference's #6c8298,
+ *   which measures 3.70:1 and is used there for every 12–12.5px meta line.
+ *   --ink-300 (1.90:1) is borders, dividers and disabled icons ONLY, never
+ *   text; the reference sets 11.5px timestamps in it and those move to
+ *   --ink-500 here.
+ *
+ * The block below the palette is the ALIAS layer. The names on the left are
+ * this sheet's originals, and roughly 1,700 lines below still reference them.
+ * Pointing them at Udara values re-tints all of it without an edit. Phase 1
+ * onward writes Udara names directly; the aliases retire when nothing reads
+ * them.
  */
 :root {
-  --green: oklch(0.52 0.12 145);
-  --green-dark: oklch(0.45 0.115 145);
-  --green-wash: oklch(0.93 0.02 145);
-  --red: oklch(0.5 0.15 25);
-  --red-bg: oklch(0.96 0.02 25);
-  --amber: #92400e;
-  --amber-bg: #fffbeb;
-  --amber-border: #fcd34d;
-  --ink: oklch(0.22 0.02 145);
-  --ink-soft: oklch(0.45 0.012 145);
-  /* 0.53, not 0.55: at 0.55 this token was 4.24:1 on --canvas — below AA, and
-     `.muted` lands on --canvas across seven components. 0.53 reads 4.61 on
-     --canvas, 5.10 on --surface and 4.89 on --surface-sunk. The one-number
-     edit the oklch move exists for. */
-  --ink-faint: oklch(0.53 0.012 145);
-  --line: oklch(0.9 0.008 145);
-  --line-soft: oklch(0.93 0.008 145);
-  --surface: oklch(0.99 0.004 90);
-  --surface-sunk: oklch(0.975 0.005 145);
-  --canvas: oklch(0.955 0.006 145);
-  /* The dark action behind a paywall — deliberately NOT the brand green, so
-     "become a member" never reads as the same weight as an ordinary primary. */
-  --gate: oklch(0.24 0.02 145);
-  --gate-dark: oklch(0.18 0.02 145);
-  /* Flatter than the 8px it replaces: the redesign's frames are square-ish and
-     a large radius fights the hairline rules it leans on. */
-  --radius: 4px;
-  /* One step up from --radius, for the panels that frame a whole block
-     (both composers, the locked-post panel, the membership offer) rather
-     than a control. Was 6px and unused; it is now the single definition of
-     the 5px those four frames had hardcoded. */
-  --radius-panel: 5px;
-  /* The inside margin of a panel — both composers, and the negative margin the
-     composer's full-bleed hairline row uses to reach their edges. It was the
-     same 1.125rem written out in four places, and the hairline is only correct
-     while all four agree. */
+  --langit: #2b4c6f;
+  --langit-light: #3e6690;
+  --langit-dark: #1a3350;
+  --sinyal: #e8873e;
+  --sinyal-light: #f2a868;
+  --kabut: #93a8c2;
+  --awan: #f4f7fa;
+  --hijau-lepas: #4c8b6e;
+  --merah-senja: #c1543d;
+
+  --ink-900: #16283a;
+  --ink-700: #35526b;
+  /* See the deviation note above. The reference's #6c8298 fails AA here. */
+  --ink-500: #5d7189;
+  --ink-300: #a9b7c4;
+  --ink-150: #dce3e8;
+  --ink-100: #edf1f3;
+  --surface: #ffffff;
+
+  --border: var(--ink-150);
+
+  --success-bg: #e5f1ea;
+  --danger-bg: #f7e7e1;
+  --warning-bg: #fceedc;
+
+  /* The badges' text colours, kept as the reference's own literals rather than
+     swapped for nearby palette tokens. Measured on their own backgrounds, the
+     reference's choices are deliberate and the obvious substitutions fail:
+     #2e6248 on --success-bg is 6.12:1 where var(--hijau-lepas) is 3.47:1, and
+     #93412c on --danger-bg is 5.76:1 where var(--merah-senja) is 3.80:1. Both
+     substitutes drop 12px badge text below AA. They live here, in :root, which
+     is where literals belong and where the no-hardcoded-colours guard allows
+     them. */
+  --badge-active-ink: #2e6248;
+  --badge-pending-ink: #9a5b18;
+  --badge-churn-ink: #93412c;
+
+  --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+
+  --shadow-card: 0 1px 2px rgba(22, 40, 58, 0.05), 0 8px 24px rgba(22, 40, 58, 0.07);
+
+  --sidebar-width: 248px;
+  --sidebar-bg: var(--awan);
+  --sidebar-text: var(--ink-500);
+  --sidebar-text-active: var(--awan);
+  --sidebar-active-bg: var(--langit-dark);
+  --header-bg: var(--surface);
+
+  /* ---- alias layer: this sheet's original names, re-pointed ---- */
+  --green: var(--sinyal);
+  --green-wash: var(--warning-bg);
+  --red: var(--merah-senja);
+  --red-bg: var(--danger-bg);
+  --ink: var(--ink-900);
+  --ink-soft: var(--ink-700);
+  --ink-faint: var(--ink-500);
+  --line: var(--ink-150);
+  --line-soft: var(--ink-100);
+  --surface-sunk: var(--awan);
+  --canvas: var(--awan);
+  --gate: var(--langit-dark);
+  --gate-dark: var(--langit-dark);
+  --radius: var(--radius-sm);
+  --radius-panel: var(--radius-md);
   --panel-pad: 1.125rem;
-  --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
-  /* The diagonal hatch that stands in for content a viewer may not see. One
-     definition, used by the locked media panel and the gated stream tile. */
   --hatch: repeating-linear-gradient(
     135deg,
-    oklch(0.975 0.005 145) 0 10px,
-    oklch(0.955 0.007 145) 10px 20px
+    var(--awan) 0 10px,
+    var(--ink-100) 10px 20px
   );
 }
 
@@ -99,6 +137,9 @@ body {
   color: var(--ink);
   background: var(--canvas);
   line-height: 1.5;
+  /* Tabular lining numerals, from the reference. Prices, counts and
+     timestamps align in a column instead of jittering. */
+  font-feature-settings: "tnum" 1, "lnum" 1;
 }
 
 h1,
