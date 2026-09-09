@@ -60,7 +60,7 @@ export function FollowRow({ row }: { row: FollowListRow }) {
         <span className="follow-row-name">{row.displayName}</span>
         <span className="follow-row-handle muted">@{row.handle}</span>
       </Link>
-      <FollowButton handle={row.handle} viewerFollows={row.viewerFollows} />
+      <FollowButton handle={row.handle} viewerFollows={row.viewerFollows} compact />
     </li>
   );
 }

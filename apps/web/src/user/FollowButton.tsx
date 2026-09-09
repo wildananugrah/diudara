@@ -43,6 +43,14 @@ export interface FollowButtonProps {
   viewerFollows: boolean | null;
   /** Told the RESULTING state after every successful toggle, so a caller showing a follower count (ProfilePage) can update it without a refetch. */
   onChange?: (following: boolean) => void;
+  /**
+   * `true` in a compact list row (`FollowRow`, on Jelajah and the follow
+   * lists), sizing the button down with `btn-sm`. `false` (the default) is
+   * `ProfilePage`'s own header-level primary action, which stays full size —
+   * the same component renders both, and the reference sizes them
+   * differently rather than picking one size for every context.
+   */
+  compact?: boolean;
 }
 
 /**
@@ -67,7 +75,12 @@ export interface FollowButtonProps {
  * flight anyway, so the displayed count on the profile above it never
  * visibly bounces between two in-flight taps.
  */
-export default function FollowButton({ handle, viewerFollows, onChange }: FollowButtonProps) {
+export default function FollowButton({
+  handle,
+  viewerFollows,
+  onChange,
+  compact = false,
+}: FollowButtonProps) {
   const [following, setFollowing] = useState(viewerFollows === true);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +107,10 @@ export default function FollowButton({ handle, viewerFollows, onChange }: Follow
 
   if (viewerFollows === null) {
     return (
-      <Link className="button-secondary follow-button btn btn-sm" to="/masuk">
+      <Link
+        className={compact ? "button-secondary follow-button btn btn-sm" : "button-secondary follow-button btn"}
+        to="/masuk"
+      >
         Masuk untuk mengikuti
       </Link>
     );
@@ -135,9 +151,14 @@ export default function FollowButton({ handle, viewerFollows, onChange }: Follow
     <span className="follow-control">
       <button
         type="button"
-        className={
-          following ? "button-quiet follow-button btn btn-sm" : "button-primary follow-button btn btn-sm"
-        }
+        className={[
+          following ? "button-quiet" : "button-primary",
+          "follow-button",
+          "btn",
+          compact ? "btn-sm" : null,
+        ]
+          .filter(Boolean)
+          .join(" ")}
         onClick={handleToggle}
         disabled={pending}
       >
