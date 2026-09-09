@@ -74,17 +74,18 @@
   --danger-bg: #f7e7e1;
   --warning-bg: #fceedc;
 
-  /* The badges' text colours, kept as the reference's own literals rather than
-     swapped for nearby palette tokens. Measured on their own backgrounds, the
-     reference's choices are deliberate and the obvious substitutions fail:
-     #2e6248 on --success-bg is 6.12:1 where var(--hijau-lepas) is 3.47:1, and
-     #93412c on --danger-bg is 5.76:1 where var(--merah-senja) is 3.80:1. Both
-     substitutes drop 12px badge text below AA. They live here, in :root, which
-     is where literals belong and where the no-hardcoded-colours guard allows
-     them. */
-  --badge-active-ink: #2e6248;
-  --badge-pending-ink: #9a5b18;
-  --badge-churn-ink: #93412c;
+  /* Legible ink for both badges and form notices on their matching tinted
+     background, kept as the reference's own literals rather than swapped for
+     nearby palette tokens. Measured on their own backgrounds, the reference's
+     choices are deliberate and the obvious substitutions fail: #2e6248 on
+     --success-bg is 6.12:1 where var(--hijau-lepas) is 3.47:1, and #93412c on
+     --danger-bg is 5.76:1 where var(--merah-senja) is 3.80:1. Both substitutes
+     drop 12px badge text (and .form-ok's 14px text) below AA. They live here,
+     in :root, which is where literals belong and where the no-hardcoded-colours
+     guard allows them. */
+  --success-ink: #2e6248;
+  --warning-ink: #9a5b18;
+  --danger-ink: #93412c;
 
   --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
   --font-body: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -334,13 +335,13 @@ code {
 
 .form-error {
   background: var(--red-bg);
-  border: 1px solid var(--danger-bg);
+  border: 1px solid var(--merah-senja);
   border-radius: 6px;
   padding: 8px 10px;
 }
 
 .form-ok {
-  color: var(--hijau-lepas);
+  color: var(--success-ink);
   background: var(--success-bg);
   border: 1px solid var(--hijau-lepas);
   border-radius: 6px;
@@ -1083,7 +1084,7 @@ button:disabled {
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: var(--langit-dark);
+  background: color-mix(in srgb, var(--langit-dark) 60%, transparent);
   color: var(--surface);
   font-size: 1rem;
   line-height: 1;

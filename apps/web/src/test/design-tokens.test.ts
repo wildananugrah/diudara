@@ -81,4 +81,9 @@ describe("design tokens", () => {
       expect(token(alias).startsWith("var(--")).toBe(true);
     }
   });
+
+  it("keeps --success-ink legible on --success-bg, which var(--hijau-lepas) is not", () => {
+    expect(contrastRatio(token("--success-ink"), token("--success-bg")) >= 4.5).toBe(true);
+    expect(contrastRatio(token("--hijau-lepas"), token("--success-bg")) < 4.5).toBe(true);
+  });
 });
