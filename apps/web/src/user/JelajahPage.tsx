@@ -3,6 +3,8 @@ import { Link } from "react-router-dom";
 import { MAX_EXPLORE_QUERY_LENGTH } from "@diudara/shared";
 import { exploreUsers, type FollowListRow } from "./apiClient";
 import FollowButton from "./FollowButton";
+import Header from "./shell/Header";
+import PageContainer from "./shell/PageContainer";
 
 /**
  * The two discovery rails, which do not depend on `q` at all — see
@@ -151,9 +153,10 @@ export default function JelajahPage() {
   const searchFailed = error !== null && submittedQuery.length > 0;
 
   return (
-    <main className="user-page jelajah-page">
-      <h1>Jelajah</h1>
-
+    <>
+      <Header title="Jelajah" />
+      <main className="user-page jelajah-page">
+        <PageContainer>
       <form className="jelajah-search" onSubmit={handleSubmit} role="search">
         <input
           type="search"
@@ -206,6 +209,8 @@ export default function JelajahPage() {
           </section>
         </>
       ) : null}
-    </main>
+        </PageContainer>
+      </main>
+    </>
   );
 }

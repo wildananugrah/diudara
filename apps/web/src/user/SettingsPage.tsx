@@ -13,6 +13,8 @@ import { describeRequestFailure } from "./errorCopy";
 import MembershipRequests from "./MembershipRequests";
 import MembershipSettings from "./MembershipSettings";
 import SubscriberList from "./SubscriberList";
+import Header from "./shell/Header";
+import PageContainer from "./shell/PageContainer";
 
 type LoadState =
   | { status: "loading" }
@@ -121,43 +123,56 @@ function SettingsForm() {
 
   if (load.status === "loading") {
     return (
-      <main className="user-page">
-        <p>Memuat...</p>
-      </main>
+      <>
+        <Header title="Memuat..." />
+        <main className="user-page">
+          <PageContainer>
+            <p>Memuat...</p>
+          </PageContainer>
+        </main>
+      </>
     );
   }
 
   if (load.status === "error") {
     return (
-      <main className="user-page">
-        <h1>Gagal memuat profil</h1>
-        <p>{load.message}</p>
-      </main>
+      <>
+        <Header title="Gagal memuat profil" />
+        <main className="user-page">
+          <PageContainer>
+            <p>{load.message}</p>
+          </PageContainer>
+        </main>
+      </>
     );
   }
 
   const { profile } = load;
 
   return (
-    <main className="user-page">
-      <div className="spread">
-        <h1>Pengaturan akun</h1>
-        {/*
-          F3 (review): this was the ONLY way in — there was no way out. A
-          signed-in visitor is bounced away from /masuk (LoginPage.tsx), so
-          without this button /pengaturan was the one place a signed-in user
-          could reach and the one place they could never leave their session
-          from. Mirrors dashboard/DashboardLayout.tsx's own "Keluar" exactly:
-          signOut() tells the server to clear the HttpOnly media session
-          cookie, then clears and notifies — it does not navigate.
-          SettingsPage's own guard above is already SUBSCRIBED to the token,
-          so the resulting re-render (token now null) is what sends this
-          page to /masuk, the same single code path an expired session takes.
-        */}
-        <button type="button" className="button-quiet" onClick={() => signOut()}>
-          Keluar
-        </button>
-      </div>
+    <>
+      <Header title="Pengaturan akun" />
+      <main className="user-page">
+        <PageContainer>
+      {/*
+        F3 (review): this was the ONLY way in — there was no way out. A
+        signed-in visitor is bounced away from /masuk (LoginPage.tsx), so
+        without this button /pengaturan was the one place a signed-in user
+        could reach and the one place they could never leave their session
+        from. Mirrors dashboard/DashboardLayout.tsx's own "Keluar" exactly:
+        signOut() tells the server to clear the HttpOnly media session
+        cookie, then clears and notifies — it does not navigate.
+        SettingsPage's own guard above is already SUBSCRIBED to the token,
+        so the resulting re-render (token now null) is what sends this
+        page to /masuk, the same single code path an expired session takes.
+
+        No longer wrapped in `.spread` — that div existed to place this
+        button opposite the page's own "Pengaturan akun" heading, which now
+        lives in `Header` above `<main>` instead.
+      */}
+      <button type="button" className="button-quiet" onClick={() => signOut()}>
+        Keluar
+      </button>
 
       <div className="card stack">
         <p className="muted">@{profile.handle}</p>
@@ -252,7 +267,9 @@ function SettingsForm() {
         this page down with it.
       */}
       <SubscriberList />
-    </main>
+        </PageContainer>
+      </main>
+    </>
   );
 }
 

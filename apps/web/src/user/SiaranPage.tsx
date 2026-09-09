@@ -12,6 +12,8 @@ import {
   type WatchTokenResult,
 } from "./apiClient";
 import { publishToWhip, type PublishHandle } from "./whip-publisher";
+import Header from "./shell/Header";
+import PageContainer from "./shell/PageContainer";
 
 /**
  * `/siaran` — who is live, and a lock where a stranger cannot watch (design
@@ -106,9 +108,10 @@ export default function SiaranPage() {
   const ownLiveStream = streams.find((stream) => isOwnHandle(stream.owner.handle)) ?? null;
 
   return (
-    <main className="user-page siaran-page" data-testid="siaran">
-      <h1>Siaran</h1>
-
+    <>
+      <Header title="Siaran" />
+      <main className="user-page siaran-page" data-testid="siaran">
+        <PageContainer>
       {/* `role="alert"` matches every other top-level request-failure element under src/user (PostFeed, FollowButton, ...). */}
       {error !== null ? (
         <p className="feed-error" role="alert">
@@ -194,7 +197,9 @@ export default function SiaranPage() {
           live row lives, so it is also what makes *Akhiri siaran* reachable
           after a reload. See `StreamComposer`'s own docstring. */}
       {signedIn ? <StreamComposer ownLiveStream={ownLiveStream} onLiveChanged={refreshStreams} /> : null}
-    </main>
+        </PageContainer>
+      </main>
+    </>
   );
 }
 

@@ -3,6 +3,8 @@ import { Link, useSearchParams } from "react-router-dom";
 import PostFeed, { type PostFeedHandle } from "./PostFeed";
 import PostComposer from "./PostComposer";
 import { DeleteConfirm, EditComposer, usePostOwnerActions } from "./postOwnerActions";
+import Header from "./shell/Header";
+import PageContainer from "./shell/PageContainer";
 import {
   createPost,
   getSessionUser,
@@ -148,21 +150,26 @@ export default function BerandaPage() {
   }
 
   return (
-    <main className="user-page beranda-page">
-      <h1>Beranda</h1>
-
-      <nav className="feed-tabs" aria-label="Jenis beranda">
-        <button type="button" aria-current={tab === "untuk-anda"} onClick={() => setParams({})}>
-          Untuk Anda
-        </button>
-        <button
-          type="button"
-          aria-current={tab === "mengikuti"}
-          onClick={() => setParams({ tab: "mengikuti" })}
-        >
-          Mengikuti
-        </button>
-      </nav>
+    <>
+      <Header title="Beranda" />
+      <main className="user-page beranda-page">
+        <PageContainer>
+          <nav className="feed-tabs" aria-label="Jenis beranda">
+            <button
+              type="button"
+              aria-current={tab === "untuk-anda"}
+              onClick={() => setParams({})}
+            >
+              Untuk Anda
+            </button>
+            <button
+              type="button"
+              aria-current={tab === "mengikuti"}
+              onClick={() => setParams({ tab: "mengikuti" })}
+            >
+              Mengikuti
+            </button>
+          </nav>
 
       {signedIn ? (
         // Keyed, so switching between composing and editing — and between two
@@ -219,6 +226,8 @@ export default function BerandaPage() {
       <p>
         Temukan orang untuk diikuti di <Link to="/jelajah">Jelajah</Link>.
       </p>
-    </main>
+        </PageContainer>
+      </main>
+    </>
   );
 }
