@@ -13,20 +13,40 @@ import { rules, stylesheet } from "./stylesheet";
  * That is not hypothetical: it shipped exactly that way once, and no test in
  * this project could see it. `bun test` asserts behaviour and reads the sheet as
  * text; nothing computes style.
+ *
+ * This compares the WHOLE families, not one selector from each side — a
+ * narrower check (say, just `.btn-sm` against the first `.button-*`) is blind
+ * to a partial split: someone could move `.btn-ghost` back above the legacy
+ * group while leaving `.btn-sm` where it is, and `.btn-ghost` would go inert
+ * exactly as before while a single-pair check kept reporting `ordered=true`.
  */
-function firstIndexOf(predicate: (selector: string) => boolean): number {
-  return rules(stylesheet()).findIndex((rule) =>
-    rule.selector.split(",").map((s) => s.trim()).some(predicate)
-  );
+
+/** Indices of every rule whose selector group contains a match. */
+function indicesOf(predicate: (selector: string) => boolean): number[] {
+  const found: number[] = [];
+  rules(stylesheet()).forEach((rule, index) => {
+    if (rule.selector.split(",").map((s) => s.trim()).some(predicate)) found.push(index);
+  });
+  return found;
 }
 
 describe("stylesheet cascade order", () => {
-  it("declares the Udara button classes after the legacy .button-* rules", () => {
-    const legacy = firstIndexOf((s) => /^\.button-[a-z]+$/.test(s));
-    const udara = firstIndexOf((s) => s === ".btn-sm");
+  it("declares every Udara button class after every legacy .button-* rule", () => {
+    // `.btn`, `.btn:active`, `.btn-sm`, `.btn-ghost:hover`, … but never
+    // `.button-primary` — that starts ".bu", not ".btn".
+    const udara = indicesOf((selector) => /^\.btn(\b|-)/.test(selector));
+    const legacy = indicesOf((selector) => /^\.button-/.test(selector));
 
-    expect(legacy >= 0 && udara >= 0).toBe(true);
-    // Named, not counted: a failure should say which way round they are.
-    expect(`legacy@${legacy} udara@${udara} ordered=${udara > legacy}`).toContain("ordered=true");
+    // Not decoration: with either list empty, Math.min/max return Infinity and
+    // the assertion below passes vacuously — on exactly the regression this
+    // test exists to catch.
+    expect(udara.length >= 8 && legacy.length >= 4).toBe(true);
+
+    const lastLegacy = Math.max(...legacy);
+    const firstUdara = Math.min(...udara);
+
+    // Named, not counted: a failure should say which way round they ended up.
+    expect(`lastLegacy@${lastLegacy} firstUdara@${firstUdara} ordered=${firstUdara > lastLegacy}`)
+      .toContain("ordered=true");
   });
 });
