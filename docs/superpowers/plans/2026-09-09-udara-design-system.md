@@ -205,17 +205,21 @@ In `apps/web/src/styles.css`, replace the whole `:root { … }` block (currently
   --danger-bg: #f7e7e1;
   --warning-bg: #fceedc;
 
-  /* The badges' text colours, kept as the reference's own literals rather than
-     swapped for nearby palette tokens. Measured on their own backgrounds, the
-     reference's choices are deliberate and the obvious substitutions fail:
-     #2e6248 on --success-bg is 6.12:1 where var(--hijau-lepas) is 3.47:1, and
-     #93412c on --danger-bg is 5.76:1 where var(--merah-senja) is 3.80:1. Both
-     substitutes drop 12px badge text below AA. They live here, in :root, which
-     is where literals belong and where the no-hardcoded-colours guard allows
-     them. */
-  --badge-active-ink: #2e6248;
-  --badge-pending-ink: #9a5b18;
-  --badge-churn-ink: #93412c;
+  /* The ink that is legible on each matching -bg. Used by the badges AND by the
+     form notices (.form-ok, .form-error) — the naming is deliberate, because
+     scoping these to badges is what led .form-ok to be given var(--hijau-lepas)
+     and ship below AA.
+
+     Kept as the reference's own literals rather than swapped for nearby palette
+     tokens, because measured on their own backgrounds the obvious substitutions
+     fail: #2e6248 on --success-bg is 6.12:1 where var(--hijau-lepas) is 3.47:1,
+     and #93412c on --danger-bg is 5.76:1 where var(--merah-senja) is 3.80:1.
+     Both substitutes drop 12-14px text below AA. They live here, in :root,
+     which is where literals belong and where the no-hardcoded-colours guard
+     allows them. */
+  --success-ink: #2e6248;
+  --warning-ink: #9a5b18;
+  --danger-ink: #93412c;
 
   --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
   --font-body: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -630,21 +634,21 @@ Add to `styles.css`, after the base/reset section and before the per-feature sec
 }
 .badge-active {
   background: var(--success-bg);
-  color: var(--badge-active-ink);
+  color: var(--success-ink);
 }
 .badge-active .dot {
   background: var(--hijau-lepas);
 }
 .badge-pending {
   background: var(--warning-bg);
-  color: var(--badge-pending-ink);
+  color: var(--warning-ink);
 }
 .badge-pending .dot {
   background: var(--sinyal);
 }
 .badge-churn {
   background: var(--danger-bg);
-  color: var(--badge-churn-ink);
+  color: var(--danger-ink);
 }
 .badge-churn .dot {
   background: var(--merah-senja);
