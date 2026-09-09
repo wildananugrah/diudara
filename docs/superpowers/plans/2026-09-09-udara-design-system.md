@@ -302,7 +302,11 @@ Run: `bun test src/test/design-tokens.test.ts`
 Expected: PASS, all five.
 
 Then: `bun test`
-Expected: The suite runs. `BerandaPage.test.tsx`'s indicator test is expected to FAIL here — it pins `var(--green-dark)`, which no longer exists. That is Task 7's job; leave it red and note it. Everything else should pass. If any other test fails, it is a real regression — fix it before committing.
+Expected: the full suite green.
+
+**Corrected after execution — this step originally predicted a failure that does not happen.** It said `BerandaPage.test.tsx`'s indicator test would go red because it pins `var(--green-dark)`, which this task stops declaring. It does not: that test string-matches the CSS *source text* of the `.feed-tabs button[aria-current="true"]` rule, which this task never touches, so it still finds the substring and passes.
+
+That is worse than a red test. `var(--green-dark)` is now undefined, which makes `box-shadow: inset 0 -2px 0 var(--green-dark)` invalid at computed-value time, so the active feed tab has **no visible marking in a browser** from this commit until Task 7 — the exact defect that test was written to catch, in a variant it cannot see. Task 7 adds a guard for it. If any test fails here, it is a real regression; fix it before committing.
 
 - [ ] **Step 7: Commit**
 
@@ -419,7 +423,7 @@ Run: `bun test src/test/no-hardcoded-colours.test.ts && bun test src/test/design
 Expected: PASS both.
 
 Run: `bun test`
-Expected: same state as end of Task 1 — everything green except the known-red `BerandaPage` indicator test.
+Expected: same state as end of Task 1 — everything the full suite green, no expected failures.
 
 - [ ] **Step 6: Commit**
 
@@ -476,7 +480,7 @@ Expected: empty output. A selector legitimately repeated inside a `@media` block
 - [ ] **Step 4: Run the tests**
 
 Run: `bun test && bun run typecheck`
-Expected: same state as Task 2 — green except the known-red `BerandaPage` indicator test. This task changes no rendered output; if a test that was passing now fails, a merge dropped a declaration. Find it before continuing.
+Expected: same state as Task 2 — the full suite green, no expected failures. This task changes no rendered output; if a test that was passing now fails, a merge dropped a declaration. Find it before continuing.
 
 - [ ] **Step 5: Commit**
 
@@ -749,7 +753,7 @@ So that ~15 components inherit the new look without editing their markup, make e
 - [ ] **Step 3: Run the tests**
 
 Run: `bun test && bun run typecheck`
-Expected: green except the known-red `BerandaPage` indicator test. The six asserted class names are untouched by this task, so no component test should move.
+Expected: the full suite green, no expected failures. The six asserted class names are untouched by this task, so no component test should move.
 
 - [ ] **Step 4: Commit**
 
@@ -781,7 +785,7 @@ rules explicitly."
 - [ ] **Step 1: Record the pre-install state**
 
 Run: `bun test 2>&1 | tail -5 && bun run typecheck`
-Expected: the known-red `BerandaPage` indicator test and nothing else; typecheck clean. Note the passing test count — Step 3 compares against it.
+Expected: the full suite green; typecheck clean. Note the passing test count — Step 3 compares against it.
 
 - [ ] **Step 2: Install the dependency**
 
@@ -798,7 +802,7 @@ Run: `bun run typecheck`
 Expected: clean, no new errors.
 
 Run: `bun test 2>&1 | tail -5`
-Expected: the same passing count as Step 1, with the same one known-red test. A different count means the install moved something — investigate before committing.
+Expected: the same passing count as Step 1, still green. A different count means the install moved something — investigate before committing.
 
 - [ ] **Step 4: Confirm the three packages resolve**
 
@@ -1286,7 +1290,7 @@ Run: `bun test src/user/AppShell.test.tsx`
 Expected: PASS — the three new cases and every pre-existing one, **including** both z-index invariant cases. If "gives the navigation a higher z-index than anything else in the sheet" fails, the offender is named in the failure; it is almost certainly `.app-header`'s `z-index: 5` having been raised, or a new rule added above 10.
 
 Run: `bun test && bun run typecheck`
-Expected: green except the known-red `BerandaPage` indicator test.
+Expected: the full suite green, no expected failures.
 
 - [ ] **Step 9: Commit**
 
@@ -1366,10 +1370,63 @@ Expected: PASS, all 44 — including the indicator test that has been red since 
 Run: `grep -rn "green-dark" src/`
 Expected: no matches outside a comment. Any match is a rule painting an undefined variable — fix the call site with the right Udara token.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Add the guard that would have caught this**
+
+Task 1 removed `--green-dark` from `:root` while `.feed-tabs button[aria-current="true"]` still referenced it. Every test stayed green — the indicator test string-matches the rule's source text, which was unchanged — while the rendered indicator was silently dead, because a `var()` naming an undeclared property makes its whole declaration invalid at computed-value time. That is the exact defect that test exists to catch, in a variant it cannot see.
+
+Create `apps/web/src/test/no-dangling-tokens.test.ts`:
+
+```ts
+import { describe, expect, it } from "bun:test";
+import { rules, stylesheet } from "./stylesheet";
+
+/**
+ * A `var(--x)` naming a property nothing declares does not fall back or warn —
+ * it makes the WHOLE declaration invalid at computed-value time, and the rule
+ * simply does not paint. Nothing in a text-matching test suite can see that:
+ * during Phase 0, `--green-dark` was removed from `:root` while the active feed
+ * tab still referenced it, and the suite stayed green for five tasks with the
+ * tab indicator dead in every browser.
+ *
+ * Declarations are collected from the whole sheet rather than from `:root`
+ * alone, so a property legitimately scoped to a component (`.foo { --bar: … }`)
+ * counts as declared. The check is only "is it declared anywhere", which is the
+ * one thing that separates a working `var()` from a silently dead one.
+ */
+describe("custom properties", () => {
+  it("leaves no var(--x) referring to a property nothing declares", () => {
+    const css = stylesheet();
+    const declared = new Set(
+      [...css.matchAll(/(--[\w-]+)\s*:/g)].map((match) => match[1]!)
+    );
+    const referenced = new Set(
+      [...css.matchAll(/var\(\s*(--[\w-]+)/g)].map((match) => match[1]!)
+    );
+
+    // Named, not counted: a failure must say WHICH property is dangling.
+    const dangling = [...referenced].filter((name) => !declared.has(name)).sort();
+    expect(dangling.join(" | ")).toBe("");
+  });
+
+  it("actually inspects the sheet — a vacuous pass here would hide every dangling token", () => {
+    const css = stylesheet();
+    expect([...css.matchAll(/var\(\s*(--[\w-]+)/g)].length > 50).toBe(true);
+    expect(rules(css).some((rule) => rule.selector === ":root")).toBe(true);
+  });
+});
+```
+
+The second case exists because the first passes vacuously if `referenced` is ever empty — a broken `stylesheet()` or a changed regex would turn this guard into decoration without failing.
+
+- [ ] **Step 6: Run the guard**
+
+Run: `bun test src/test/no-dangling-tokens.test.ts`
+Expected: PASS both. If the first case fails, it names the dangling property — fix that call site rather than declaring the token, unless the token genuinely belongs in the palette.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/styles.css src/user/BerandaPage.test.tsx
+git add src/styles.css src/user/BerandaPage.test.tsx src/test/no-dangling-tokens.test.ts
 git commit -m "feat: re-tint the active feed tab to --sinyal, keeping the shadow
 
 The reference paints this as border-bottom: 2px solid var(--sinyal), and
@@ -1461,4 +1518,6 @@ Do **not** merge to `main` and do **not** push. Report to the repo owner:
 
 **Type consistency.** `Avatar` is `{ initials, color?, size? }` in Task 5 and consumed as such in Task 6's `Header`. `Crumb` is `{ label, to? }`, declared in Task 6's `Header` and referenced nowhere earlier. `Sidebar`'s `destinations` is `ReadonlyArray<{ to: string; label: string }>`, matching `useDestinations`' existing return type in `AppShell.tsx:45`. `PageContainer` and `Header` both take `React.ReactNode`. No name appears with two shapes.
 
-**Known-red window.** `BerandaPage.test.tsx`'s indicator test is deliberately red from Task 1 Step 7 through Task 7 Step 3. Every intervening task states it. If a task is executed out of order, that test's failure is expected and is not a regression.
+**Known-red window — the prediction was wrong, corrected during execution.** This plan originally said `BerandaPage.test.tsx`'s indicator test would be red from Task 1 through Task 7. It is not: the test string-matches the CSS source text of a rule Task 1 never touches, so it passes while the indicator it guards is silently dead in the browser — `var(--green-dark)` is undeclared from Task 1, which invalidates the whole `box-shadow` declaration.
+
+There is therefore **no expected failure at any point in this plan**. Every task expects the full suite green, and any red test is a real regression. Task 7 Step 5 adds `no-dangling-tokens.test.ts`, the guard that would have caught this, placed there because Task 7 removes the last dangling reference and the guard goes green the moment it is written.
