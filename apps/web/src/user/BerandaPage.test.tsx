@@ -141,6 +141,17 @@ describe("BerandaPage — the two tabs", () => {
    * correct `role="tab"` / `aria-selected` rule elsewhere is none of this test's
    * business. Converting THESE tabs to a real tablist is a change to both halves
    * of the contract below, and is meant to redden it.
+   *
+   * **Phase 0 (Udara) kept the shadow, and did not adopt the reference's
+   * border.** The reference paints this indicator as
+   * `border-bottom: 2px solid var(--sinyal)`. Porting that literally would
+   * have undone this test's whole point: `.feed-tabs` ITSELF declares
+   * `border-bottom: 1px solid var(--line)` for the rail under the row, so
+   * the indicator and the rail would both be `border-bottom` inside the
+   * `.feed-tabs` family and "exactly one declaration" would no longer hold —
+   * and `border: none` on `.feed-tabs button` is how the indicator vanished
+   * the first time. An inset shadow renders identically to a 2px accent, costs
+   * no layout, and keeps the guarantee. Only the colour token changed.
    */
   it("paints the active tab with the sheet's only feed-tab shadow, keyed on the aria-current it sets", async () => {
     mockFetch(() => jsonResponse({ posts: [], nextCursor: null }));
@@ -156,7 +167,7 @@ describe("BerandaPage — the two tabs", () => {
     const tabRules = feedTabRules(stylesheet());
     const active = tabRules.filter((rule) => rule.selector.includes("[aria-current=true]"));
     expect(selectors(active)).toBe(".feed-tabs button[aria-current=true]");
-    expect(active[0]!.body).toContain("box-shadow: inset 0 -2px 0 var(--green-dark);");
+    expect(active[0]!.body).toContain("box-shadow: inset 0 -2px 0 var(--sinyal);");
     // `border: none` on `.feed-tabs button` makes this property inert — it is
     // how the indicator disappeared the first time.
     expect(active[0]!.body.includes("border-bottom-color")).toBe(false);
