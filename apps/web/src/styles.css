@@ -291,7 +291,7 @@ code {
   font: inherit;
   font-size: 1rem;
   padding: 9px 11px;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--ink-150);
   border-radius: 6px;
   background: var(--surface);
   color: inherit;
@@ -334,15 +334,15 @@ code {
 
 .form-error {
   background: var(--red-bg);
-  border: 1px solid #fecaca;
+  border: 1px solid var(--danger-bg);
   border-radius: 6px;
   padding: 8px 10px;
 }
 
 .form-ok {
-  color: #166534;
-  background: #f0fdf4;
-  border: 1px solid #bbf7d0;
+  color: var(--hijau-lepas);
+  background: var(--success-bg);
+  border: 1px solid var(--hijau-lepas);
   border-radius: 6px;
   padding: 8px 10px;
   font-size: 0.875rem;
@@ -369,7 +369,7 @@ button {
 
 .button-primary {
   background: var(--green);
-  color: #fff;
+  color: var(--surface);
 }
 
 .button-primary:hover:not(:disabled) {
@@ -378,13 +378,13 @@ button {
 
 .button-secondary {
   background: var(--surface);
-  border-color: #cbd5e1;
+  border-color: var(--ink-150);
   color: var(--ink);
 }
 
 .button-danger {
   background: var(--surface);
-  border-color: #fca5a5;
+  border-color: var(--merah-senja);
   color: var(--red);
 }
 
@@ -642,7 +642,7 @@ button:disabled {
   font: inherit;
   font-size: 1rem;
   padding: 9px 11px;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--ink-150);
   border-radius: 6px;
   background: var(--surface);
   color: inherit;
@@ -1083,8 +1083,8 @@ button:disabled {
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
+  background: var(--langit-dark);
+  color: var(--surface);
   font-size: 1rem;
   line-height: 1;
   cursor: pointer;
@@ -1484,7 +1484,7 @@ button:disabled {
   width: 100%;
   border-radius: var(--radius);
   overflow: hidden;
-  background: oklch(0.28 0.012 145);
+  background: var(--langit-dark);
 }
 
 /* The frame above is fixed-aspect and clipped, so the video has to be told to
@@ -1521,7 +1521,7 @@ button:disabled {
 .stream-obs-details code {
   display: block;
   padding: 0.5625rem 0.6875rem;
-  background: oklch(0.965 0.006 145);
+  background: var(--awan);
   border-radius: 3px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.75rem;
@@ -1534,7 +1534,7 @@ button:disabled {
    take a deliberate look to find, not sit next to the primary as an equal. */
 .stream-composer-live .button-danger {
   background: none;
-  border: 1px solid oklch(0.6 0.14 25);
+  border: 1px solid var(--merah-senja);
   color: var(--red);
 }
 
@@ -1698,7 +1698,7 @@ button:disabled {
   aspect-ratio: 16 / 9;
   margin: 0.75rem 0;
   border-radius: var(--radius);
-  background: #252b25;
+  background: var(--langit-dark);
   object-fit: cover;
   /* Mirrored, like every video-call self-view: raising your right hand should
      move the hand on the right. The published stream is NOT mirrored — this
@@ -1714,7 +1714,7 @@ button:disabled {
   margin-top: 6px;
   padding: 2px 8px;
   border-radius: var(--radius);
-  background: oklch(0.55 0.16 25);
+  background: var(--merah-senja);
   color: var(--surface);
   font-size: 0.7rem;
   font-weight: 600;
@@ -1723,7 +1723,7 @@ button:disabled {
 }
 
 .profile-live-badge:hover {
-  background: oklch(0.48 0.16 25);
+  background: var(--langit-dark);
 }
 
 .profile-live {
