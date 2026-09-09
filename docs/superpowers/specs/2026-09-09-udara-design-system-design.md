@@ -171,10 +171,15 @@ New components, mirroring the reference's structure:
 var(--border)`, `position: sticky; top: 10px`, `height: calc(100vh - 20px)`.
 Collapses to 76px behind a chevron, `transition: width 0.18s ease`. Nav rows are
 full pills (`border-radius: 999px`, `padding: 9px 12px`) with a 26px icon slot,
-using `.sidebar-nav` / `.sidebar-nav-active`. The parent/submenu machinery —
-`openMenus[key] ?? isChildActive`, auto-expanding when a child is the active
-route, force-closed while collapsed — is built now, unused, because Phase 1's
-joined-communities and created-communities lists are exactly what it is for.
+using `.sidebar-nav` / `.sidebar-nav-active`.
+
+The reference's parent/submenu machinery — `openMenus[key] ?? isChildActive`,
+auto-expanding when a child is the active route, force-closed while collapsed —
+is **not** built in this phase. An earlier draft of this spec had it built now
+and left unused, for Phase 1's joined-communities and created-communities lists
+to adopt. That is scaffolding for a consumer that does not exist yet, and Phase
+1 will know the shape it needs better than this phase can guess. Phase 0 ships
+four flat destinations and no groups.
 
 The shell paints `--surface` while `body` is `--awan`, so the rail reads as a
 tinted panel floating on white. That inversion is deliberate in the reference
@@ -207,18 +212,26 @@ once as a bar — with CSS choosing. That is what lets the existing tests prove
 
 ## 7. Tests
 
-**One invariant is broken on purpose.** `BerandaPage.test.tsx` pins the active
-feed tab to `box-shadow: inset 0 -2px 0 var(--green-dark)` and asserts the rule
-does *not* contain `border-bottom-color`. That test exists because the indicator
-vanished once when a border was removed. The reference's tab indicator is
-`border-bottom: 2px solid var(--sinyal)` — precisely what the test forbids.
+**One invariant is re-tinted, not broken.** `BerandaPage.test.tsx` pins the
+active feed tab to `box-shadow: inset 0 -2px 0 var(--green-dark)` and asserts
+the rule does *not* contain `border-bottom-color`. The reference's tab indicator
+is `border-bottom: 2px solid var(--sinyal)`.
 
-The test is rewritten to pin the new indicator, keeping its structure: still
-keyed on `.feed-tabs button[aria-current=true]`, still asserting exactly one
-rule declares the indicator, still forbidding `aria-selected` and
-`button.active` as the key. The docstring records that the shadow form was
-replaced by the Udara border form in this phase, so the next reader sees a
-deliberate change and not an eroded guard.
+Planning found that porting that border literally would be a mistake. The
+test's real protection is not the choice of property — it is that **exactly one
+rule in the sheet declares the indicator property for a feed tab**, so nothing
+can cancel it at any specificity or source order. `.feed-tabs` itself already
+declares `border-bottom: 1px solid var(--line)` for the rail under the row, so
+moving the indicator to `border-bottom` would put two `border-bottom`
+declarations inside the `.feed-tabs` family and dissolve that guarantee — and
+`border: none` on `.feed-tabs button` is exactly how the indicator disappeared
+the first time.
+
+`box-shadow: inset 0 -2px 0 var(--sinyal)` renders identically to a 2px bottom
+accent, costs no layout, and keeps the one-declaration guarantee. So the change
+is a single token name in the assertion, `--green-dark` → `--sinyal`, with the
+docstring extended to record why the reference's border form was deliberately
+not adopted. The guard is preserved rather than rewritten.
 
 **One invariant is kept and must survive.** `AppShell.test.tsx` asserts both nav
 shapes declare a `z-index` and that the lowest nav z-index beats every other
