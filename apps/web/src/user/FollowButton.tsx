@@ -94,7 +94,7 @@ export default function FollowButton({ handle, viewerFollows, onChange }: Follow
 
   if (viewerFollows === null) {
     return (
-      <Link className="button-secondary follow-button" to="/masuk">
+      <Link className="button-secondary follow-button btn btn-sm" to="/masuk">
         Masuk untuk mengikuti
       </Link>
     );
@@ -135,7 +135,9 @@ export default function FollowButton({ handle, viewerFollows, onChange }: Follow
     <span className="follow-control">
       <button
         type="button"
-        className={following ? "button-quiet follow-button" : "button-primary follow-button"}
+        className={
+          following ? "button-quiet follow-button btn btn-sm" : "button-primary follow-button btn btn-sm"
+        }
         onClick={handleToggle}
         disabled={pending}
       >

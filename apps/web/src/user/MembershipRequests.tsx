@@ -128,7 +128,7 @@ export default function MembershipRequests() {
                 <div>
                   <button
                     type="button"
-                    className="button-primary"
+                    className="button-primary btn btn-sm"
                     disabled={pendingId === request.id}
                     onClick={() => void handleApprove(request.id)}
                   >
@@ -136,7 +136,7 @@ export default function MembershipRequests() {
                   </button>
                   <button
                     type="button"
-                    className="button-quiet"
+                    className="button-quiet btn btn-ghost btn-sm"
                     disabled={pendingId === request.id}
                     onClick={() => void handleReject(request.id)}
                   >

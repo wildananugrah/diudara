@@ -235,7 +235,7 @@ export default function MembershipOffer({
             </p>
             <button
               type="button"
-              className="button-danger"
+              className="button-danger btn btn-sm"
               data-testid="leave-confirm"
               disabled={leaving}
               onClick={() => void leave()}
@@ -244,7 +244,7 @@ export default function MembershipOffer({
             </button>
             <button
               type="button"
-              className="button-quiet"
+              className="button-quiet btn btn-ghost btn-sm"
               disabled={leaving}
               onClick={() => setConfirmingLeave(false)}
             >
@@ -254,7 +254,7 @@ export default function MembershipOffer({
         ) : (
           <button
             type="button"
-            className="button-quiet"
+            className="button-quiet btn btn-ghost btn-sm"
             data-testid="leave-membership"
             onClick={() => setConfirmingLeave(true)}
           >
@@ -406,7 +406,7 @@ export default function MembershipOffer({
                 isFree ? (
                   <button
                     type="button"
-                    className="button-primary"
+                    className="button-primary btn btn-sm"
                     // Deliberately NO " — {tier.name}" suffix, unlike the paid
                     // button below: this exact string, "Minta jadi anggota", is
                     // the accessible name Task 8's brief pins. A creator who
@@ -425,7 +425,7 @@ export default function MembershipOffer({
                 ) : (
                   <button
                     type="button"
-                    className="button-primary"
+                    className="button-primary btn btn-sm"
                     // The tier's name is in the accessible name, not only beside
                     // it: a profile may offer several tiers, and "Jadi anggota"
                     // repeated three times tells a screen-reader user nothing
@@ -441,7 +441,7 @@ export default function MembershipOffer({
                 )
               ) : (
                 <Link
-                  className="button-secondary"
+                  className="button-secondary btn btn-sm"
                   to="/masuk"
                   // The profile they were standing on, so signing in returns
                   // them to the offer instead of dropping them on Beranda —

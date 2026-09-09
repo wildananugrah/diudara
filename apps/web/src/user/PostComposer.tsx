@@ -525,11 +525,11 @@ export default function PostComposer({
           {`${trimmed.length}/${MAX_POST_BODY_LENGTH}`}
         </span>
         {onCancel !== undefined ? (
-          <button type="button" className="button-quiet" onClick={onCancel} disabled={submitting}>
+          <button type="button" className="button-quiet btn btn-ghost btn-sm" onClick={onCancel} disabled={submitting}>
             Batal
           </button>
         ) : null}
-        <button type="submit" className="button-primary" disabled={!canSubmit}>
+        <button type="submit" className="button-primary btn btn-sm" disabled={!canSubmit}>
           {submitLabel}
         </button>
       </div>
