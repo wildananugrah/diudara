@@ -69,7 +69,7 @@ export default function ResetRequestPage() {
               </p>
             ) : null}
 
-            <button type="submit" className="button-primary" disabled={phase === "submitting"}>
+            <button type="submit" className="button-primary btn btn-block" disabled={phase === "submitting"}>
               {phase === "submitting" ? "Mengirim..." : "Kirim tautan pemulihan"}
             </button>
           </form>

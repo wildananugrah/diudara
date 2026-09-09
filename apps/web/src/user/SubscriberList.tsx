@@ -154,7 +154,7 @@ export default function SubscriberList({ now }: SubscriberListProps) {
                 {subscriber.kind === "free" ? (
                   <button
                     type="button"
-                    className="button-quiet"
+                    className="button-quiet btn btn-ghost btn-sm"
                     data-testid={`revoke-${subscriber.handle}`}
                     disabled={revoking === subscriber.handle}
                     onClick={() => void revoke(subscriber.handle)}

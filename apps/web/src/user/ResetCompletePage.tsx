@@ -54,7 +54,7 @@ export default function ResetCompletePage() {
           <>
             <p className="form-ok">Sandi berhasil diganti. Silakan masuk.</p>
             <p>
-              <Link className="button-primary" to="/masuk">
+              <Link className="button-primary btn btn-block" to="/masuk">
                 Ke halaman masuk
               </Link>
             </p>
@@ -78,7 +78,7 @@ export default function ResetCompletePage() {
               </p>
             ) : null}
 
-            <button type="submit" className="button-primary" disabled={phase === "submitting"}>
+            <button type="submit" className="button-primary btn btn-block" disabled={phase === "submitting"}>
               {phase === "submitting" ? "Memproses..." : "Ganti sandi"}
             </button>
           </form>

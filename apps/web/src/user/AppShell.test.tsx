@@ -135,6 +135,35 @@ describe("AppShell", () => {
     expect(screen.queryAllByRole("link", { name: "Profil" }).length).toBe(0);
   });
 });
+
+describe("AppShell — the Udara shell", () => {
+  it("still renders one destination list twice, as a rail and a bar", () => {
+    renderShellAt("/beranda");
+    for (const label of ["Beranda", "Jelajah", "Siaran"]) {
+      expect(screen.getAllByRole("link", { name: label }).length).toBe(2);
+    }
+  });
+
+  it("collapses and expands the rail, and says which state it is in", () => {
+    renderShellAt("/beranda");
+
+    const toggle = screen.getByRole("button", { name: "Tutup navigasi" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(toggle);
+
+    const reopened = screen.getByRole("button", { name: "Buka navigasi" });
+    expect(reopened.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps the rail's links reachable while collapsed, so it is a narrow rail and not a hidden one", () => {
+    renderShellAt("/beranda");
+    fireEvent.click(screen.getByRole("button", { name: "Tutup navigasi" }));
+
+    // Still two of each: the bar is untouched by the rail's collapse.
+    expect(screen.getAllByRole("link", { name: "Beranda" }).length).toBe(2);
+  });
+});
 /**
  * Every `z-index` the sheet declares, split into the navigation's and
  * everything else's. A rule with no `z-index` contributes nothing.

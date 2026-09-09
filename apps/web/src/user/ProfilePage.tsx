@@ -16,6 +16,7 @@ import MembershipOffer from "./MembershipOffer";
 import PostFeed, { type PostFeedHandle } from "./PostFeed";
 import StreamPlayer from "./StreamPlayer";
 import { DeleteConfirm, EditComposer, usePostOwnerActions } from "./postOwnerActions";
+import Header from "./shell/Header";
 
 type LoadState =
   | { status: "loading" }
@@ -204,28 +205,34 @@ export default function ProfilePage() {
 
   if (load.status === "loading") {
     return (
-      <main className="user-page">
-        <p>Memuat...</p>
-      </main>
+      <>
+        <Header title="Memuat..." />
+        <main className="user-page">
+          <p>Memuat...</p>
+        </main>
+      </>
     );
   }
 
   if (load.status === "error") {
     return (
-      <main className="user-page">
-        <h1>Gagal memuat profil</h1>
-        <p>{load.message}</p>
-      </main>
+      <>
+        <Header title="Gagal memuat profil" />
+        <main className="user-page">
+          <p>{load.message}</p>
+        </main>
+      </>
     );
   }
 
   const { profile } = load;
   const liveSectionId = "profile-live";
   return (
-    <main className="user-page profile-page">
+    <>
+      <Header title={profile.displayName} />
+      <main className="user-page profile-page">
       <div className="spread">
         <div>
-          <h1 className="profile-name">{profile.displayName}</h1>
           <p className="profile-handle muted">@{profile.handle}</p>
           {/*
             Only rendered when there is something to click. A badge that
@@ -357,6 +364,7 @@ export default function ProfilePage() {
         onDeleteRequested={onDeleteRequested}
         emptyMessage="Belum ada kiriman untuk ditampilkan."
       />
-    </main>
+      </main>
+    </>
   );
 }

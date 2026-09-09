@@ -142,7 +142,7 @@ export default function SignupPage() {
             </p>
           ) : null}
 
-          <button type="submit" className="button-primary" disabled={submitting}>
+          <button type="submit" className="button-primary btn btn-block" disabled={submitting}>
             {submitting ? "Memproses..." : "Daftar"}
           </button>
         </form>

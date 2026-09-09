@@ -5,6 +5,7 @@ import NotFoundPage from "../pages/NotFoundPage";
 import { listFollowers, listFollowing, UserApiError, type FollowListRow } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
 import { FollowRow } from "./JelajahPage";
+import Header from "./shell/Header";
 
 type LoadState =
   | { status: "loading" }
@@ -118,26 +119,32 @@ export default function FollowListPage({ direction }: { direction: "followers" |
 
   if (load.status === "loading") {
     return (
-      <main className="user-page">
-        <p>Memuat...</p>
-      </main>
+      <>
+        <Header title="Memuat..." />
+        <main className="user-page">
+          <p>Memuat...</p>
+        </main>
+      </>
     );
   }
 
   if (load.status === "error") {
     return (
-      <main className="user-page">
-        <BackToProfile handle={handle} />
-        <h1>Gagal memuat daftar</h1>
-        <p>{load.message}</p>
-      </main>
+      <>
+        <Header title="Gagal memuat daftar" />
+        <main className="user-page">
+          <BackToProfile handle={handle} />
+          <p>{load.message}</p>
+        </main>
+      </>
     );
   }
 
   return (
-    <main className="user-page">
+    <>
+      <Header title={TITLE[direction]} />
+      <main className="user-page">
       <BackToProfile handle={handle} />
-      <h1>{TITLE[direction]}</h1>
       {load.rows.length === 0 ? (
         <p className="empty">{EMPTY_MESSAGE[direction]}</p>
       ) : (
@@ -152,6 +159,7 @@ export default function FollowListPage({ direction }: { direction: "followers" |
           ) : null}
         </>
       )}
-    </main>
+      </main>
+    </>
   );
 }
