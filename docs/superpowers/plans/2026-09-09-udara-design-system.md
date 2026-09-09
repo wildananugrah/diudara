@@ -39,9 +39,22 @@
 --sidebar-width: 248px
 ```
 
-**The two deviations from the reference, both accessibility, both test-pinned in Task 1:**
-- `--ink-500` is `#5d7189` (4.66:1 on `--awan`), not the reference's `#6c8298` (3.70:1 — fails WCAG AA for normal text, and the reference uses it for all 12–12.5px meta copy).
-- `--ink-300` (`#a9b7c4`, 1.90:1) is for borders, dividers and disabled icons only — never text. Timestamps use `--ink-500`.
+**Deviations from the reference. All are accessibility, all change ink only and leave the reference's hues exactly as drawn.** The reference does not clear WCAG AA on its own colour pairings, and this phase found that out one rule at a time — see the ledger's F1, F9, F10 and F12. Task 7's `contrast.test.ts` is what stops the next one reaching a browser.
+
+| Where | The reference | Measured | Ships as | Measured |
+|---|---|---|---|---|
+| `--ink-500` | `#6c8298` on `--awan` | 3.70:1 ✗ | `#5d7189` | 4.66:1 ✓ |
+| `--ink-300` | used for 11.5px timestamps | 1.90:1 ✗ | borders/dividers/disabled icons **only**, never text | — |
+| `.btn-primary` | `--awan` on `--sinyal` | 2.45:1 ✗ | `--ink-900` on `--sinyal` | 5.69:1 ✓ |
+| `.btn-secondary` | `--awan` on `--kabut` | 2.27:1 ✗ | `--ink-900` on `--kabut` | 6.16:1 ✓ |
+| `.btn-danger` | `--merah-senja` on `--danger-bg` | 3.80:1 ✗ | `--danger-ink` on `--danger-bg` | 5.76:1 ✓ |
+| `.btn-petang:hover`, `.btn-ghost:hover` | `--awan` on `--kabut` | 2.27:1 ✗ | `--ink-900` on `--kabut` | 6.16:1 ✓ |
+| `.form-ok` | (this repo's own) `--hijau-lepas` on `--success-bg` | 3.47:1 ✗ | `--success-ink` | 6.12:1 ✓ |
+| badge inks | `#2e6248` / `#9a5b18` / `#93412c` | ✓ — keep | `--success-ink` / `--warning-ink` / `--danger-ink`, same values | ✓ |
+
+The badge row is the reference getting it *right* — those three literals are deliberate contrast choices, and an earlier draft of this plan replaced them with palette tokens at 3.47:1 and 3.80:1 before the pre-flight scan caught it. Do not "tidy" them into palette tokens.
+
+**The one judgement call in the table worth the owner's attention:** the primary CTA now reads dark navy on orange rather than white on orange. Making white pass would need `--sinyal` down to a relative luminance of 0.167, which is brown rather than the brand's orange — so the hue was kept and the label darkened. Reversible by darkening the fill instead, if the owner prefers.
 
 ---
 
