@@ -750,7 +750,7 @@ So that ~15 components inherit the new look without editing their markup, make e
 - `.button-danger` → `.btn-danger`'s.
 - `.button-link` → `.btn-ghost`'s.
 - `.field input`, `.field select`, `.field textarea` → `.input`'s, including the `--sinyal` focus outline.
-- `.notice` → `.badge-neutral`'s background/colour pair; `.notice-error` → `.badge-churn`'s; `.notice-ok` → `.badge-active`'s.
+- `.notice` → `.badge-neutral`'s background/colour pair. (Earlier drafts also listed `.notice-error` and `.notice-ok`. **Neither exists** — no rule declares them and no component uses them; the app's real success and failure messages are `.form-ok` and `.form-error`, which Task 2 already handled. Do not create them.)
 - `.auth-card`'s hardcoded `border-radius: 12px` → `var(--radius-md)`.
 - Every remaining `border-radius: 6px` on a control → `var(--radius-sm)`.
 
@@ -765,7 +765,7 @@ Line numbers are as of Task 1's commit and will have shifted after Task 3's merg
 | `a` | `color: var(--green-dark)` | `color: var(--langit)` |
 | `.button-primary:hover:not(:disabled)` | `background: var(--green-dark)` | `background: color-mix(in srgb, var(--sinyal) 80%, transparent)` |
 | `.button-link` | `color: var(--green-dark)` | `color: var(--langit)` |
-| `.bottom-nav a.active` | `color: var(--green-dark)` | leave for Task 6, which rewrites this rule wholesale |
+| ~~`.bottom-nav a.active`~~ | — | **Not a site.** Task 3's merge found this declaration already dead (a later `color: var(--ink)` won) and dropped it. Listed here only so a reader of the old table knows why it is absent. |
 | `.button-secondary` | `color: var(--green-dark)` | `color: var(--awan)` (it sits on `--kabut` after re-pointing) |
 | `.stream-watch` | `color: var(--green-dark)` | `color: var(--langit)` |
 | `.feed-tabs button[aria-current="true"]` | `box-shadow: inset 0 -2px 0 var(--green-dark)` | leave for Task 7 |
@@ -773,7 +773,7 @@ Line numbers are as of Task 1's commit and will have shifted after Task 3's merg
 Task 3 will already have collapsed the two `.button-primary:hover:not(:disabled)` rules into one, so expect one occurrence, not two.
 
 Run: `grep -n "green-dark" src/styles.css`
-Expected: exactly two matches remain — `.bottom-nav a.active` and `.feed-tabs button[aria-current="true"]`. Any other match is a site this table missed; tokenise it with the nearest Udara equivalent and note it in your report.
+Expected: exactly **one** match remains — `.feed-tabs button[aria-current="true"]`, which Task 7 owns. (The count entering this task is six, not the eight this plan originally said: Task 1 left eight, and Task 3's merge dropped two that were already dead, one of them `.bottom-nav a.active`.) Any other match is a site the table above missed; tokenise it with the nearest Udara equivalent and note it in your report.
 
 - [ ] **Step 4: Confirm no selector was re-duplicated**
 
