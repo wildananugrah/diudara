@@ -24,6 +24,12 @@
  * deleted) checkout pages, which styled themselves inline: green #16a34a
  * for the primary action, #b91c1c for errors, greys from #f8f9fa to #111.
  * The surviving pages below still draw from the same palette.
+ *
+ * Udara design system, Phase 0: the redesign was first applied as a second
+ * "REDESIGN" layer at the end of this file, winning every duplicated
+ * selector by source order alone. That layer was merged back into the
+ * rules it overrode on 2026-09-09, so every selector below is now declared
+ * exactly once.
  */
 
 /*
@@ -223,9 +229,10 @@ code {
   padding: 28px 24px;
 }
 
+/* The wordmark is tracked wide enough to read as a lockup rather than a word. */
 .brand {
-  font-weight: 700;
-  letter-spacing: 0.14em;
+  font-weight: 600;
+  letter-spacing: 0.22em;
   font-size: 0.75rem;
   color: var(--green);
   text-transform: uppercase;
@@ -368,9 +375,12 @@ button {
   border: 1px solid transparent;
 }
 
+/* --- Buttons. Flatter, and the primary keeps its own hover one step down. -- */
 .button-primary {
   background: var(--green);
   color: var(--surface);
+  border-radius: var(--radius);
+  font-weight: 600;
 }
 
 .button-primary:hover:not(:disabled) {
@@ -378,9 +388,15 @@ button {
 }
 
 .button-secondary {
-  background: var(--surface);
-  border-color: var(--ink-150);
-  color: var(--ink);
+  background: none;
+  color: var(--green-dark);
+  border: 1px solid var(--green);
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
+.button-secondary:hover {
+  background: var(--green-wash);
 }
 
 .button-danger {
@@ -464,16 +480,22 @@ button:disabled {
 
 .landing-eyebrow {
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   margin: 0 0 0.5rem;
-  color: var(--ink-faint);
+  color: var(--green);
 }
 
+/* --- Display type. The serif is the redesign's whole voice: it appears on
+       page titles, the landing hero, and prices, and nowhere else. --------- */
 .landing-hero h1 {
-  font-size: 2rem;
-  line-height: 1.2;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(2.25rem, 6vw, 3.75rem);
+  line-height: 1.06;
+  letter-spacing: -0.015em;
+  text-wrap: pretty;
   margin: 0 0 0.75rem;
 }
 
@@ -482,6 +504,7 @@ button:disabled {
   line-height: 1.6;
   margin: 0 0 1.5rem;
   color: var(--ink-soft);
+  text-wrap: pretty;
 }
 
 .landing-cta {
@@ -500,20 +523,52 @@ button:disabled {
   margin: 0 0 1rem;
 }
 
+/* `.landing-closing h2` is intentionally declared twice — here and in the
+   font-size/margin rule above — for two disjoint, non-conflicting property
+   sets, the same pattern as `.field-error`/`.form-error` further up this
+   sheet; nothing here overrides anything above. `.landing-section > h2`
+   (child, not the descendant selector above) is kept verbatim from the
+   original redesign layer rather than folded into that rule, since the two
+   selectors are textually different and `.landing-section` itself has no
+   other child than its own `h2`. */
+.landing-section > h2,
+.landing-closing h2 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
 .landing-list {
   margin: 0;
   padding-left: 1.25rem;
   line-height: 1.7;
 }
 
+/* --- Landing: the feature grid is a single hairline mesh — one shared border
+       with 1px gaps showing through — rather than nine separate boxes. ----- */
 .landing-features {
   display: grid;
-  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+
+/* These are `<article class="card landing-feature">`, so the mesh only appears
+   once `.card`'s own border and radius are cleared: six rounded boxes inside a
+   hairline grid is precisely the look the grid replaces. */
+.landing-feature {
+  background: var(--surface);
+  padding: 1.75rem;
+  margin: 0;
+  border: none;
+  border-radius: 0;
 }
 
 .landing-feature h3 {
   font-size: 1rem;
-  margin: 0 0 0.35rem;
+  margin: 0 0 0.5rem;
+  font-weight: 600;
 }
 
 .landing-feature p {
@@ -525,19 +580,65 @@ button:disabled {
   .landing {
     padding-top: 4rem;
   }
-
-  .landing-hero h1 {
-    font-size: 2.75rem;
-  }
-
-  .landing-features {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 .landing-notfound {
   text-align: center;
   padding-top: 4rem;
+}
+
+.landing-notfound h1 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
+/* An `<ol>`, so `margin` and `padding-left` have to be dealt with here or the
+   grid is indented by the list's own padding and the numbers hang outside their
+   cells. The markers themselves are KEPT — on a section headed "Tiga langkah"
+   they are content, and `list-style: none` would cost the list semantics
+   Safari/VoiceOver reads from it — and with `padding-left: 0` a grid item's
+   marker sits in its own cell as a hanging indent.
+
+   ONE COLUMN here, N at md below. Not `auto-fit`: `.landing` is 44rem wide, so
+   its content box is 664px and `minmax(16rem, 1fr)` can never reach three
+   tracks (that needs 770px). Three steps in two tracks leave a FOURTH, EMPTY
+   track, and an empty track in a 1px-gap mesh paints the container's own line
+   colour — a grey block where a step should be, which is worse than the
+   hairline this mesh replaced. */
+.landing-steps {
+  display: grid;
+  gap: 1px;
+  background: var(--line-soft);
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+  margin: 0;
+  padding-left: 0;
+  line-height: 1.7;
+}
+
+/* The dividers are 1px GAPS with the container's colour showing through, not a
+   border-right per cell: the cells reflow, and a per-cell border leaves a
+   hairline hanging at the container edge at every width where the last cell of
+   a row is not the last cell of the grid — which on a phone-first page is the
+   common case, not the corner one. */
+.landing-steps > * {
+  padding: 2.5rem 2.5rem 2.75rem;
+  background: var(--canvas);
+}
+
+@media (min-width: 768px) {
+  /* One track per step, created by the items themselves: `grid-auto-flow:
+     column` cannot produce a track nothing occupies, whatever number of steps
+     the copy ends up with. `auto-columns: 1fr` keeps them equal. */
+  .landing-steps {
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+  }
+
+  .landing-steps > * {
+    padding: 2.5rem;
+  }
 }
 
 /* ---------------------------------------------------------------
@@ -555,12 +656,25 @@ button:disabled {
   padding: 2.5rem 1.25rem 4rem;
 }
 
+/* `.user-page h1`, not `> h1`: Pengaturan's title is nested in a `.spread`
+   row, and every page under `.user-page` has exactly one h1 — the page title.
+   Beranda / Jelajah / Siaran all carry `.user-page` too, so they need no
+   selector of their own. */
+.user-page h1 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
 .profile-page {
   text-align: left;
 }
 
 .profile-name {
   margin-bottom: 2px;
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
 }
 
 .profile-handle {
@@ -570,6 +684,7 @@ button:disabled {
 .profile-bio {
   margin-top: 20px;
   white-space: pre-wrap;
+  text-wrap: pretty;
 }
 
 /* Task 5: the two counts under a profile's name, each linking to /pengikut
@@ -595,17 +710,25 @@ button:disabled {
 
 /* Task 10 (memberships 5a): the offer on a public profile. Absent entirely
    for a creator who sells nothing — there is no empty state to style. */
+/* --- Membership offer: the price is the one number on the page that should
+       stop the eye, so it takes the serif. --------------------------------- */
 .membership-offer {
   margin-top: 24px;
   text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  overflow: hidden;
+  background: var(--surface);
 }
 
+/* One frame means no gap between the tiers and no box around each of them —
+   both of which the list still carried from its own rules above. */
 .membership-tiers {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 12px;
+  gap: 0;
 }
 
 .membership-tier {
@@ -614,13 +737,24 @@ button:disabled {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 12px 14px;
+  padding: 1.125rem;
+  border: none;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
+}
+
+.membership-tier:last-child {
+  border-bottom: none;
 }
 
 .membership-tier p {
   margin: 2px 0 0;
+}
+
+.membership-tier .price {
+  font-family: var(--font-display);
+  font-size: 1.625rem;
+  color: var(--ink);
 }
 
 /* The signed-out visitor's route to Masuk is a link, not a button, so it needs
@@ -628,6 +762,16 @@ button:disabled {
 .membership-tier a.button-secondary {
   text-decoration: none;
   display: inline-block;
+}
+
+/* --- Jelajah: section labels are small, tracked and upper-case so they read as
+       furniture rather than as content. ------------------------------------ */
+.jelajah-page h2 {
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  font-weight: 400;
 }
 
 /* Task 5: Jelajah's search bar, and the follow-row list shared with it by
@@ -692,6 +836,8 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  padding: 0.875rem 0;
+  border-bottom: 1px solid var(--line-soft);
 }
 
 .follow-row-identity {
@@ -754,6 +900,7 @@ button:disabled {
   padding-bottom: 72px;
 }
 
+/* --- The shell. Rail above md, tabs below — same two shapes, new surfaces. -- */
 .side-rail {
   display: none;
 }
@@ -786,11 +933,13 @@ button:disabled {
   font-size: 0.8rem;
   text-align: center;
   padding: 4px 10px;
+  border-radius: var(--radius);
 }
 
 .bottom-nav a.active {
-  color: var(--green-dark);
+  color: var(--ink);
   font-weight: 600;
+  background: var(--green-wash);
 }
 
 /* ---------------------------------------------------------------
@@ -838,6 +987,7 @@ button:disabled {
 .post-card-body {
   margin: 6px 0 0;
   white-space: pre-wrap;
+  text-wrap: pretty;
 }
 
 .post-card-actions {
@@ -934,6 +1084,50 @@ button:disabled {
   grid-column: span 2;
 }
 
+/* --- The paywall. Hatched fill for content withheld, and a DARK action rather
+       than the brand green: buying access is a different kind of decision from
+       posting, and the two must not look interchangeable. ------------------ */
+.post-card-locked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.375rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--hatch);
+}
+
+.post-card-locked-count {
+  margin: 0;
+  font-size: 0.9375rem;
+  color: var(--ink-soft);
+}
+
+.post-card-locked-link {
+  display: inline-flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 1.125rem;
+  border-radius: var(--radius);
+  background: var(--gate);
+  color: var(--surface);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-decoration: none;
+  /* Task 8: this class now also dresses a <button> — the scroll-to-offer
+     case, when the offer is already on the page — alongside the <a> it has
+     always dressed. A bare <button> carries UA border/background that an <a>
+     never did; reset both so the two render identically. */
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.post-card-locked-link:hover {
+  background: var(--gate-dark);
+}
+
 /* Task 4: PostFeed. `.post-feed` itself needs no layout of its own — each
    `.post-card` already draws its own `border-bottom` and vertical padding,
    so the list reads correctly as a plain stack of block children. */
@@ -962,20 +1156,27 @@ button:disabled {
   margin: 12px 0 4px;
 }
 
+/* --- Feed tabs. Only the resting state is re-tinted here; the ACTIVE state
+       stays where it has always lived, keyed on `aria-current` — the attribute
+       `BerandaPage` actually sets. A second `[aria-selected]`/`.active` rule
+       here matched nothing and left the tabs indistinguishable. --------- */
 .feed-tabs button {
   flex: 1;
+  font: inherit;
+  font-family: inherit;
+  font-size: 0.9375rem;
+  color: var(--ink-faint);
   background: none;
   border: none;
-  padding: 10px 8px;
-  font: inherit;
-  color: var(--ink-faint);
+  padding: 0 0 0.875rem;
+  margin-right: 1.5rem;
   cursor: pointer;
 }
 
 /* `aria-current` is the state, so it is also the selector — there is no second
    `.active` class to fall out of step with what a screen reader is told.
-   The indicator itself is an INSET SHADOW, not a border: the redesign layer
-   below sets `border: none` on these buttons, and a `border-bottom-color`
+   The indicator itself is an INSET SHADOW, not a border: the resting-state
+   rule above sets `border: none` on these buttons, and a `border-bottom-color`
    cannot restore a border that no longer exists — which is how the active tab
    once ended up with no marking at all. A shadow also costs no layout, so
    switching tabs cannot shift the row by a pixel. */
@@ -985,12 +1186,22 @@ button:disabled {
   box-shadow: inset 0 -2px 0 var(--green-dark);
 }
 
-/* The frame and the padding moved to the redesign layer, which makes this a
-   bordered card; what stays here is the block flow and the vertical rhythm it
-   used to get from `padding: 12px 0`. */
+/* --- Composer: a bordered card whose actions sit on their own hairline row.
+       All four sides are padded and NOTHING depends on which child is last:
+       `.post-composer-actions` is followed by `.post-composer-error` on every
+       failed submit (PostComposer.tsx:540), so a card that let the actions row
+       close its bottom edge put that alert flush against the border — the same
+       defect as the padding this replaces, one element further down.
+       `overflow: hidden` because the row below reaches past the padding box and
+       the card has a radius to clip it against. -------------------------- */
 .post-composer {
   display: block;
   margin: 12px 0;
+  padding: var(--panel-pad);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  overflow: hidden;
 }
 
 .post-composer-body {
@@ -1003,11 +1214,42 @@ button:disabled {
   border-radius: 6px;
 }
 
+/* The negative margin pulls the hairline out to the card's edges and the
+   padding puts the row's own content back in line with the rest. No bottom
+   padding: the card's own closes the row, and does so equally whether this row
+   or the error alert is the last thing in it. */
 .post-composer-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 8px;
+  margin: 0.875rem calc(var(--panel-pad) * -1) 0;
+  padding: 0.75rem var(--panel-pad) 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+/* The pill is the LABEL, not the wrapper: the wrapper also holds the
+   conditional hint `<p>`, which is a full sentence and would be crushed into a
+   26px inline-flex box. */
+.post-composer-members-only {
+  margin: 0 0 0.75rem;
+}
+
+.post-composer-members-only label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 26px;
+  padding: 0 0.625rem;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+
+.post-composer-hint {
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
 }
 
 .post-composer-counter {
@@ -1178,8 +1420,8 @@ button:disabled {
     left: 0;
     width: 220px;
     padding: 24px 16px;
-    border-right: 1px solid var(--line);
-    background: var(--surface);
+    border-right: 1px solid var(--line-soft);
+    background: var(--surface-sunk);
   }
 
   .side-rail a {
@@ -1187,13 +1429,13 @@ button:disabled {
     text-decoration: none;
     font-size: 0.95rem;
     padding: 8px 10px;
-    border-radius: 6px;
+    border-radius: var(--radius);
   }
 
   .side-rail a.active {
     color: var(--ink);
     font-weight: 600;
-    background: var(--canvas);
+    background: var(--green-wash);
   }
 
   .app-shell-main {
@@ -1202,198 +1444,15 @@ button:disabled {
   }
 }
 
-/* ===============================================================
-   REDESIGN — DIUDARA Redesign.dc.html
-   ===============================================================
-
-   Applied as a layer at the end of the file rather than by editing the rules
-   above, for two reasons. The tokens were re-tinted in `:root`, so everything
-   already inherits the new palette; what remains is the redesign's *structural*
-   moves, and keeping them together means the next person can read the whole
-   redesign as one thing instead of hunting for it in 1,500 lines.
-
-   Several targets here — `.post-card-locked`, `.stream-lock`, `.stream-card`,
-   `.siaran-page` — had NO rules at all before this. Phase 6's lock panel and
-   Phase 7's Siaran shipped with classes and no styles, so this is the first
-   time they are dressed rather than restyled.
-
-   The mockups draw the >=md left-rail shape only. The bottom-tab shape below md
-   is NOT drawn, and is deliberately kept: the audience is phone-first (member-UI
-   spec §3), so it gets the new visual language rather than being deleted for
-   being absent from a desktop comp.
+/* ---------------------------------------------------------------
+   Siaran: the live broadcast page. `.stream-lock`, `.stream-card` and
+   `.post-card-locked`'s paywall shipped with classes and no styles —
+   Phase 6's lock panel and Phase 7's Siaran — so this section is the
+   first time they are dressed rather than restyled. The >=md left-rail
+   shape below is drawn from the redesign mockups; the bottom-tab shape
+   below md is not, and is kept deliberately, since the audience is
+   phone-first (member-UI spec §3).
    --------------------------------------------------------------- */
-
-/* --- Display type. The serif is the redesign's whole voice: it appears on
-       page titles, the landing hero, and prices, and nowhere else. --------- */
-/* `.user-page h1`, not `> h1`: Pengaturan's title is nested in a `.spread`
-   row, and every page under `.user-page` has exactly one h1 — the page title.
-   Beranda / Jelajah / Siaran all carry `.user-page` too, so they need no
-   selector of their own. */
-.user-page h1,
-.profile-name,
-.landing-hero h1,
-.landing-notfound h1,
-.landing-section > h2,
-.landing-closing h2 {
-  font-family: var(--font-display);
-  font-weight: 400;
-  letter-spacing: -0.01em;
-}
-
-.landing-hero h1 {
-  font-size: clamp(2.25rem, 6vw, 3.75rem);
-  line-height: 1.06;
-  letter-spacing: -0.015em;
-  text-wrap: pretty;
-}
-
-.landing-lede,
-.profile-bio,
-.post-card-body {
-  text-wrap: pretty;
-}
-
-.landing-eyebrow {
-  font-size: 0.75rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--green);
-}
-
-/* The wordmark is tracked wide enough to read as a lockup rather than a word. */
-.brand {
-  letter-spacing: 0.22em;
-  font-weight: 600;
-}
-
-/* --- The shell. Rail above md, tabs below — same two shapes, new surfaces. -- */
-.side-rail {
-  background: var(--surface-sunk);
-  border-right: 1px solid var(--line-soft);
-}
-
-.side-rail a,
-.bottom-nav a {
-  border-radius: var(--radius);
-}
-
-.side-rail a.active,
-.bottom-nav a.active {
-  background: var(--green-wash);
-  color: var(--ink);
-  font-weight: 600;
-}
-
-/* --- Feed tabs. Only the resting state is re-tinted here; the ACTIVE state
-       stays where it has always lived, keyed on `aria-current` — the attribute
-       `BerandaPage` actually sets. A second `[aria-selected]`/`.active` rule
-       here matched nothing and left the tabs indistinguishable. --------- */
-.feed-tabs button {
-  font-family: inherit;
-  font-size: 0.9375rem;
-  color: var(--ink-faint);
-  background: none;
-  border: none;
-  padding: 0 0 0.875rem;
-  margin-right: 1.5rem;
-  cursor: pointer;
-}
-
-/* --- Composer: a bordered card whose actions sit on their own hairline row.
-       All four sides are padded and NOTHING depends on which child is last:
-       `.post-composer-actions` is followed by `.post-composer-error` on every
-       failed submit (PostComposer.tsx:540), so a card that let the actions row
-       close its bottom edge put that alert flush against the border — the same
-       defect as the padding this replaces, one element further down.
-       `overflow: hidden` because the row below reaches past the padding box and
-       the card has a radius to clip it against. -------------------------- */
-.post-composer,
-.stream-composer {
-  padding: var(--panel-pad);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-panel);
-  background: var(--surface);
-  overflow: hidden;
-}
-
-/* The negative margin pulls the hairline out to the card's edges and the
-   padding puts the row's own content back in line with the rest. No bottom
-   padding: the card's own closes the row, and does so equally whether this row
-   or the error alert is the last thing in it. */
-.post-composer-actions {
-  margin: 0.875rem calc(var(--panel-pad) * -1) 0;
-  padding: 0.75rem var(--panel-pad) 0;
-  border-top: 1px solid var(--line-soft);
-}
-
-/* The pill is the LABEL, not the wrapper: the wrapper also holds the
-   conditional hint `<p>`, which is a full sentence and would be crushed into a
-   26px inline-flex box. */
-.post-composer-members-only {
-  margin: 0 0 0.75rem;
-}
-
-.post-composer-members-only label {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  height: 26px;
-  padding: 0 0.625rem;
-  border: 1px solid var(--line);
-  border-radius: 13px;
-  font-size: 0.8125rem;
-  color: var(--ink-soft);
-}
-
-.post-composer-hint {
-  margin: 0.5rem 0 0;
-  font-size: 0.8125rem;
-  color: var(--ink-soft);
-}
-
-/* --- The paywall. Hatched fill for content withheld, and a DARK action rather
-       than the brand green: buying access is a different kind of decision from
-       posting, and the two must not look interchangeable. ------------------ */
-.post-card-locked {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 1.25rem 1.375rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-panel);
-  background: var(--hatch);
-}
-
-.post-card-locked-count {
-  margin: 0;
-  font-size: 0.9375rem;
-  color: var(--ink-soft);
-}
-
-.post-card-locked-link {
-  display: inline-flex;
-  align-items: center;
-  height: 38px;
-  padding: 0 1.125rem;
-  border-radius: var(--radius);
-  background: var(--gate);
-  color: var(--surface);
-  font-size: 0.875rem;
-  font-weight: 600;
-  text-decoration: none;
-  /* Task 8: this class now also dresses a <button> — the scroll-to-offer
-     case, when the offer is already on the page — alongside the <a> it has
-     always dressed. A bare <button> carries UA border/background that an <a>
-     never did; reset both so the two render identically. */
-  border: none;
-  cursor: pointer;
-  font-family: inherit;
-}
-
-.post-card-locked-link:hover {
-  background: var(--gate-dark);
-}
 
 /* --- Siaran. Tiles are 16:9 because that is what a camera produces; a gated
        tile keeps the frame so the grid does not reflow when you become a
@@ -1531,6 +1590,16 @@ button:disabled {
   user-select: all;
 }
 
+/* Same bordered-card treatment as `.post-composer` above (see the PostComposer
+   section): one composer look shared by both surfaces. */
+.stream-composer {
+  padding: var(--panel-pad);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  overflow: hidden;
+}
+
 /* Ending a broadcast is destructive-ish and outlined, never filled: it should
    take a deliberate look to find, not sit next to the primary as an equal. */
 .stream-composer-live .button-danger {
@@ -1541,151 +1610,6 @@ button:disabled {
 
 .stream-composer-live .button-danger:hover {
   background: var(--red-bg);
-}
-
-/* --- Membership offer: the price is the one number on the page that should
-       stop the eye, so it takes the serif. --------------------------------- */
-.membership-offer {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-panel);
-  overflow: hidden;
-  background: var(--surface);
-}
-
-/* One frame means no gap between the tiers and no box around each of them —
-   both of which the list still carried from its own rules above. */
-.membership-tiers {
-  gap: 0;
-}
-
-.membership-tier {
-  padding: 1.125rem;
-  border: none;
-  border-bottom: 1px solid var(--line-soft);
-  border-radius: 0;
-}
-
-.membership-tier:last-child {
-  border-bottom: none;
-}
-
-.membership-tier .price {
-  font-family: var(--font-display);
-  font-size: 1.625rem;
-  color: var(--ink);
-}
-
-/* --- Jelajah: section labels are small, tracked and upper-case so they read as
-       furniture rather than as content. ------------------------------------ */
-.jelajah-page h2 {
-  font-size: 0.75rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-  font-weight: 400;
-}
-
-.follow-row {
-  padding: 0.875rem 0;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-/* --- Landing: the feature grid is a single hairline mesh — one shared border
-       with 1px gaps showing through — rather than nine separate boxes. ----- */
-.landing-features {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-  gap: 1px;
-  background: var(--line);
-  border: 1px solid var(--line);
-}
-
-/* These are `<article class="card landing-feature">`, so the mesh only appears
-   once `.card`'s own border and radius are cleared: six rounded boxes inside a
-   hairline grid is precisely the look the grid replaces. */
-.landing-feature {
-  background: var(--surface);
-  padding: 1.75rem;
-  margin: 0;
-  border: none;
-  border-radius: 0;
-}
-
-.landing-feature h3 {
-  margin: 0 0 0.5rem;
-  font-size: 1rem;
-  font-weight: 600;
-}
-
-/* An `<ol>`, so `margin` and `padding-left` have to be dealt with here or the
-   grid is indented by the list's own padding and the numbers hang outside their
-   cells. The markers themselves are KEPT — on a section headed "Tiga langkah"
-   they are content, and `list-style: none` would cost the list semantics
-   Safari/VoiceOver reads from it — and with `padding-left: 0` a grid item's
-   marker sits in its own cell as a hanging indent.
-
-   ONE COLUMN here, N at md below. Not `auto-fit`: `.landing` is 44rem wide, so
-   its content box is 664px and `minmax(16rem, 1fr)` can never reach three
-   tracks (that needs 770px). Three steps in two tracks leave a FOURTH, EMPTY
-   track, and an empty track in a 1px-gap mesh paints the container's own line
-   colour — a grey block where a step should be, which is worse than the
-   hairline this mesh replaced. */
-.landing-steps {
-  display: grid;
-  gap: 1px;
-  background: var(--line-soft);
-  border-top: 1px solid var(--line-soft);
-  border-bottom: 1px solid var(--line-soft);
-  margin: 0;
-  padding-left: 0;
-  line-height: 1.7;
-}
-
-/* The dividers are 1px GAPS with the container's colour showing through, not a
-   border-right per cell: the cells reflow, and a per-cell border leaves a
-   hairline hanging at the container edge at every width where the last cell of
-   a row is not the last cell of the grid — which on a phone-first page is the
-   common case, not the corner one. */
-.landing-steps > * {
-  padding: 2.5rem 2.5rem 2.75rem;
-  background: var(--canvas);
-}
-
-/* --- Buttons. Flatter, and the primary keeps its own hover one step down. -- */
-.button-primary {
-  background: var(--green);
-  border-radius: var(--radius);
-  font-weight: 600;
-}
-
-.button-primary:hover:not(:disabled) {
-  background: var(--green-dark);
-}
-
-.button-secondary {
-  border: 1px solid var(--green);
-  color: var(--green-dark);
-  background: none;
-  border-radius: var(--radius);
-  font-weight: 600;
-}
-
-.button-secondary:hover {
-  background: var(--green-wash);
-}
-
-@media (min-width: 768px) {
-  /* One track per step, created by the items themselves: `grid-auto-flow:
-     column` cannot produce a track nothing occupies, whatever number of steps
-     the copy ends up with. `auto-columns: 1fr` keeps them equal. */
-  .landing-steps {
-    grid-auto-flow: column;
-    grid-auto-columns: 1fr;
-  }
-
-  .landing-steps > * {
-    padding: 2.5rem;
-  }
 }
 
 /* --- The broadcaster's own camera, in the live panel. Not the audience's
