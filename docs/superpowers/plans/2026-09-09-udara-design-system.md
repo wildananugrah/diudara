@@ -779,8 +779,27 @@ Expected: exactly two matches remain — `.bottom-nav a.active` and `.feed-tabs 
 
 Task 3 left every selector declared once, and this task edits `.card` in place rather than appending a second rule.
 
-Run: `grep -oE '^[^{@/ ][^{]*\{' src/styles.css | sed 's/ *{$//' | sort | uniq -d`
-Expected: empty output.
+**Do not use the `grep … | uniq -d` one-liner earlier drafts of this plan carried.** Task 3 proved it incomplete: it only matches a selector group that opens and closes on one line, so it silently misses any selector that is a non-last member of a multi-line comma group. It reported nothing for `.post-composer`, `.side-rail a`, `.bottom-nav a`, `.landing-lede`, `.profile-bio` and `.profile-name`, all of which were genuinely duplicated.
+
+Use the sheet's own parser instead — the same `rules()` the tests use, which matches innermost braces and so sees every rule however its selector is formatted:
+
+```bash
+bun -e '
+import { rules, stylesheet } from "./src/test/stylesheet";
+const counts = new Map();
+for (const rule of rules(stylesheet())) {
+  for (const sel of rule.selector.split(",").map((s) => s.trim()).filter(Boolean)) {
+    counts.set(sel, (counts.get(sel) ?? 0) + 1);
+  }
+}
+const dupes = [...counts].filter(([, n]) => n > 1).map(([s, n]) => `${n}x  ${s}`);
+console.log(dupes.length ? dupes.join("\n") : "(no duplicated selectors)");
+'
+```
+
+Expected: `(no duplicated selectors)`, or only entries you can account for.
+
+**One caveat this check cannot resolve for you:** `rules()` discards `@media` preludes, so a selector legitimately overridden inside a media query counts as a duplicate of its base rule. A match is therefore a prompt to look, not proof of a defect — read the two rules and confirm whether one is a deliberate media override (fine) or a second unconditional declaration (not fine). The sheet also carries one deliberate same-selector pair, `.landing-closing h2`, whose two rules have disjoint properties and are shared with different siblings.
 
 - [ ] **Step 5: Run the tests**
 
