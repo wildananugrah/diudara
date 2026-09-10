@@ -852,8 +852,11 @@ git commit -m "feat: the community feed use-cases"
 - Modify: `apps/api/src/application/use-cases/write-post.test.ts`
 
 **Interfaces:**
-- Consumes: `CommentRepositoryPort` (Task 4), `PostRepositoryPort.ownershipOf` and the `PostRow.communityId` it must now expose, `CommunityRepositoryPort.isMember`/`findById`.
+- Consumes: `CommentRepositoryPort` (Task 4); `PostRepositoryPort.ownershipOf` — which **already returns `communityId: string | null`**, added to `PostOwnership` in Task 1 under ruling R1, so no further port change is needed for it; `CommunityRepositoryPort.isMember` (Phase 1).
+- **Adds `CommunityRepositoryPort.findById(id: string): Promise<CommunityRecord | null>`** — Phase 1's community port has `findBySlug` but no by-id lookup, and `DeleteComment`'s owner check resolves a community from the post's `communityId`, which is an id. Add it to the port, the Drizzle adapter, and every `CommunityRepositoryPort` fake the compiler flags. Same shape as Task 5's `getById` addition. This is ruling R9.
 - Produces: `class ListComments`, `class CreateComment`, `class DeleteComment`, and a `CommentView` — `{ id, body, createdAt: string, author: { handle, displayName } }`, nested in the same one place `PostView` is.
+
+**`CommentRepositoryPort` already has what the three use-cases need** — `create`, `listForPost`, `ownershipOf`, `softDelete` (Task 4). `ListComments` maps `CommentRow[]` → `CommentView[]`. `CreateComment` needs `posts.ownershipOf(postId)` for `{ communityId, isDeleted }` (null → `NotFoundError`; `isDeleted` → `NotFoundError`; `communityId` null → `ForbiddenError`; else `isMember(communityId, authorId)` → `ForbiddenError` on false). `DeleteComment` needs `comments.ownershipOf(commentId)` for `{ authorId, postId, isDeleted }`, then — if the deleter is not the author — `posts.ownershipOf(postId)` for `communityId`, then `communities.findById(communityId)` for `ownerId`.
 
 - [ ] **Step 1: Write the failing comment tests**
 
@@ -927,13 +930,26 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add apps/api/src/application/use-cases/
+git add apps/api/src/application/use-cases/ \
+        apps/api/src/application/ports/comment-repository.port.ts \
+        apps/api/src/application/ports/community-repository.port.ts \
+        apps/api/src/infrastructure/repositories/drizzle-community.repository.ts \
+        apps/api/src/infrastructure/repositories/drizzle-community.repository.test.ts
 git commit -m "feat: comments, and an owner who can moderate by deletion only"
 ```
+
+If `bun run typecheck` flags a fake in another `*.test.ts` for the new
+`findById`, stage that too. `git status` before the commit and confirm every
+modified file is one this task is meant to touch.
 
 ---
 
 ## Task 7: Routes and wiring
+
+**Carried in from earlier tasks — do this task's wiring on top of these:**
+- `bootstrap.ts` has **no DI wiring** yet for `CreateCommunityPost`, `ListCommunityFeed`, `GetPost` (Task 5), or `ListComments`/`CreateComment`/`DeleteComment` (Task 6). Construct each with its real repositories and add it to the `Dependencies` object, following exactly how Phase 1 wired `joinCommunity` / `createCommunity`. `DrizzleCommentRepository` is constructed once and shared by `ListComments`, `CreateComment`, `DeleteComment`, `ListCommunityFeed`, and `DeleteComment`'s sibling `DeletePost` (which gained the community dep in Task 6).
+- The four `PostView` exact-key-set arrays in `routes/posts.test.ts` were **already widened** with `commentCount` and `type` by Task 5 (to keep the suite green then). Do not re-edit them; if a new route test needs the key set, reuse the existing `POST_KEYS` const.
+- **The community-post route MUST cap `mediaIds` per-call.** `createCommunityPostSchema` (Task 2) deliberately carries no `.max()` — the image cap is a per-process value (`deps.maxPostImages`), which is why `routes/posts.ts` `buildPostBodySchema` is built per-request. The `POST /communities/:slug/posts` handler applies the same `.max(deps.maxPostImages, ...)` refinement to `mediaIds` before validating, or an unbounded id array reaches the media-claim path.
 
 **Files:**
 - Modify: `apps/api/src/routes/communities.ts` + `.test.ts`
@@ -1173,6 +1189,8 @@ git commit -m "feat: a community's feed, under its first real tab bar"
 **Interfaces:**
 - Consumes: `getPost`, `listComments`, `createComment`, `deleteComment` (Task 8 Step 1).
 - Produces: the finished phase.
+
+**`getPost` returns `commentCount: 0` always** — the `GET /users/posts/:id` endpoint has no comment repository behind it (Task 5, ruling deferred). If the discussion-detail view shows a reply count anywhere, derive it from `listComments(...)`'s result length, never from `getPost(...).commentCount`.
 
 - [ ] **Step 1: Write the failing `CommentList` tests**
 
