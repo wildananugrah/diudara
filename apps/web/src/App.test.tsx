@@ -740,18 +740,23 @@ describe("routing — which pages turn a signed-in visitor away", () => {
 });
 
 describe("routing — the shell partition of the real route table", () => {
-  it("renders EXACTLY these seven paths inside the AppShell layout route", () => {
+  it("renders EXACTLY these nine paths inside the AppShell layout route", () => {
     const inside = flattenRouteTable()
       .filter((route) => route.insideShell)
       .map((route) => route.path)
       .sort();
 
+    // Phase 1 added the two `/komunitas` paths. Spelled out rather than
+    // counted, the same discipline the rest of this file keeps: a set that
+    // gained a route nobody meant to add should fail here, naming it.
     expect(inside).toEqual([
       "/:handleParam",
       "/:handleParam/mengikuti",
       "/:handleParam/pengikut",
       "/beranda",
       "/jelajah",
+      "/komunitas/:slug",
+      "/komunitas/baru",
       "/pengaturan",
       "/siaran",
     ]);
