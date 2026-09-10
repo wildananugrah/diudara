@@ -1,19 +1,11 @@
 import { describe, expect, it, beforeEach } from "bun:test";
 import { db } from "./client";
-import { creators, webhookEvents } from "./schema";
+import { webhookEvents } from "./schema";
 import { resetDatabase } from "./test-helpers";
 
 beforeEach(resetDatabase);
 
 describe("phase 3 schema", () => {
-  it("stores a creator without a payment account by default", async () => {
-    const [creator] = await db
-      .insert(creators)
-      .values({ name: "Budi", email: "budi@example.com" })
-      .returning();
-    expect(creator.xenditAccountId).toBeNull();
-  });
-
   it("rejects a duplicate provider event id", async () => {
     await db.insert(webhookEvents).values({
       provider: "xendit",

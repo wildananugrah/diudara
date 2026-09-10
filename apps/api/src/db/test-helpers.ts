@@ -1,26 +1,8 @@
 import { db } from "./client";
 import { isolationIsEnabled } from "./test-database";
 import {
-  eventRsvps,
-  events,
-  enrollments,
-  courses,
-  activityLogs,
-  transactions,
-  renewalReminders,
-  subscriptions,
-  channelMemberships,
-  channels,
-  joinRequests,
-  membershipTiers,
-  communities,
-  members,
-  creators,
   webhookEvents,
   outbox,
-  aiMessages,
-  aiConversations,
-  aiUsage,
   appUsers,
   passwordResetTokens,
   signupNotices,
@@ -72,34 +54,7 @@ export function assertTestEnvironment() {
 export async function resetDatabase() {
   assertTestEnvironment();
   await db.delete(webhookEvents);
-  await db.delete(eventRsvps);
-  await db.delete(events);
-  await db.delete(enrollments);
-  await db.delete(courses);
-  await db.delete(activityLogs);
-  await db.delete(transactions);
-  // renewalReminders references subscriptions, so it must be cleared first — a
-  // single leftover reminder would otherwise make every later test file fail on an
-  // FK violation here rather than on anything it asserts.
-  await db.delete(renewalReminders);
-  await db.delete(subscriptions);
-  // channelMemberships references members and channels, so it must be
-  // cleared before either. outbox has no FKs, so its position is free.
-  await db.delete(channelMemberships);
   await db.delete(outbox);
-  await db.delete(channels);
-  // joinRequests references community, membership_tier, member and creator, so it
-  // must clear before all four.
-  await db.delete(joinRequests);
-  await db.delete(membershipTiers);
-  await db.delete(communities);
-  await db.delete(members);
-  // aiMessages references aiConversations, and both reference creators, so
-  // both must clear before creators — aiMessages first, per FK order.
-  await db.delete(aiMessages);
-  await db.delete(aiConversations);
-  await db.delete(aiUsage);
-  await db.delete(creators);
   // passwordResetTokens and signupNotices both reference app_user, so both
   // must clear before it — Task 5's additions, same FK-ordering rule as
   // every other table above.
@@ -119,8 +74,7 @@ export async function resetDatabase() {
   // Task 2 of Phase 5a.
   await db.delete(userTransactions);
   // membershipReminders references userSubscriptions (Task 4 of Phase 5b), so it
-  // must clear before it — the same FK-ordering rule, and the same failure mode, as
-  // renewalReminders above.
+  // must clear before it — the same FK-ordering rule every table above follows.
   await db.delete(membershipReminders);
   await db.delete(userSubscriptions);
   // userTiers references app_user (owner) — Task 1 of Phase 5a — so it must
