@@ -270,3 +270,30 @@ export function describeStreamStartFailure(err: unknown): string {
   }
   return describeRequestFailure(err);
 }
+
+/**
+ * *Buat komunitas* and the join button, Phase 1.
+ *
+ * Two shapes carry a specific remedy and everything else falls through to
+ * `describeRequestFailure`, the same arrangement `describeStreamStartFailure`
+ * above uses.
+ *
+ * **The 409 is deliberately vague about WHICH conflict it was.** The API
+ * raises it for three different things — a name already taken, a name that
+ * slugs onto a reserved route, and an owner trying to leave their own
+ * community — and the status alone cannot tell them apart. Reading
+ * `err.message` to disambiguate is exactly what this whole file exists to
+ * prevent (`no-raw-server-errors.test.ts` enforces it), and the remedy is the
+ * same sentence for the first two anyway: pick a different name. The
+ * owner-leave case never reaches this function, because the owner is never
+ * shown a *Keluar* button to press.
+ */
+export function describeCommunityFailure(err: unknown): string {
+  if (err instanceof UserApiError && err.status === 409) {
+    return "Nama itu sudah dipakai atau tidak bisa digunakan. Coba nama lain.";
+  }
+  if (err instanceof UserApiError && err.status === 400) {
+    return "Periksa lagi isian Anda: nama minimal 3 karakter dan kategori harus dipilih.";
+  }
+  return describeRequestFailure(err);
+}

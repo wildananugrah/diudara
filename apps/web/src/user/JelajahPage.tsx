@@ -1,7 +1,17 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
-import { MAX_EXPLORE_QUERY_LENGTH } from "@diudara/shared";
-import { exploreUsers, type FollowListRow } from "./apiClient";
+import { Link, useSearchParams } from "react-router-dom";
+import {
+  COMMUNITY_CATEGORIES,
+  MAX_COMMUNITY_SEARCH_LENGTH,
+  MAX_EXPLORE_QUERY_LENGTH,
+} from "@diudara/shared";
+import {
+  browseCommunities,
+  exploreUsers,
+  type CommunityListRow,
+  type FollowListRow,
+} from "./apiClient";
+import CommunityCard from "./CommunityCard";
 import FollowButton from "./FollowButton";
 import Header from "./shell/Header";
 
@@ -32,6 +42,8 @@ const SEARCH_FAILED_MESSAGE = "Pencarian gagal. Coba lagi.";
 /** The same, for the case where nothing has loaded yet and the whole screen is empty. */
 const LOAD_FAILED_MESSAGE = "Gagal memuat Jelajah. Coba lagi.";
 
+/** The same again, for the Komunitas tab. */
+const COMMUNITIES_FAILED_MESSAGE = "Gagal memuat komunitas. Coba lagi.";
 
 /**
  * A single follower/following/search row — shared between this page and
@@ -78,14 +90,131 @@ function FollowRowList({ rows, empty }: { rows: FollowListRow[]; empty: string }
 }
 
 /**
- * `/jelajah` — Task 5. Search by handle or display name, plus two
+ * The Komunitas half — Phase 1, and the DEFAULT tab.
+ *
+ * Search is on SUBMIT for the same reason the Orang half's is: the query runs
+ * an `ILIKE '%…%'` over a grouped join, which is not a thing to re-run per
+ * keystroke. The category chips are different — one tap IS the whole
+ * intention, so they fetch immediately rather than waiting for a second
+ * gesture nobody would understand.
+ *
+ * A component of its own rather than a branch inside the page, so its effect
+ * does not exist at all while the Orang tab is showing. A single component
+ * holding both tabs' hooks would fetch communities for a visitor who only ever
+ * opened `?tab=orang`.
+ */
+function KomunitasTab() {
+  const [query, setQuery] = useState("");
+  const [submittedQuery, setSubmittedQuery] = useState("");
+  const [category, setCategory] = useState("");
+  /** Bumped by every tap of "Cari" — see the Orang half's own `attempt` for why re-submitting the same text must still re-run the effect. */
+  const [attempt, setAttempt] = useState(0);
+  const [communities, setCommunities] = useState<CommunityListRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    browseCommunities({ q: submittedQuery, category })
+      .then((result) => {
+        if (cancelled) return;
+        setCommunities(result.communities);
+        setError(null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setError(COMMUNITIES_FAILED_MESSAGE);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [submittedQuery, category, attempt]);
+
+  function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    setSubmittedQuery(query.trim());
+    setAttempt((previous) => previous + 1);
+  }
+
+  return (
+    <>
+      <form className="jelajah-search" onSubmit={handleSubmit} role="search">
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value.slice(0, MAX_COMMUNITY_SEARCH_LENGTH))}
+          maxLength={MAX_COMMUNITY_SEARCH_LENGTH}
+          placeholder="Cari komunitas"
+          aria-label="Cari komunitas"
+        />
+        <button type="submit" className="button-primary">
+          Cari
+        </button>
+      </form>
+
+      {/*
+        `aria-pressed` rather than `aria-current`: these are filter toggles, not
+        navigation, and only the tab strip above represents where you are.
+      */}
+      <div className="category-chips" role="group" aria-label="Kategori komunitas">
+        <button
+          type="button"
+          className="category-chip"
+          aria-pressed={category === ""}
+          onClick={() => setCategory("")}
+        >
+          Semua
+        </button>
+        {COMMUNITY_CATEGORIES.map((name) => (
+          <button
+            key={name}
+            type="button"
+            className="category-chip"
+            aria-pressed={category === name}
+            onClick={() => setCategory(category === name ? "" : name)}
+          >
+            {name}
+          </button>
+        ))}
+      </div>
+
+      {loading ? <p>Memuat...</p> : null}
+
+      {error !== null ? (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+
+      {communities !== null && error === null ? (
+        communities.length === 0 ? (
+          <p className="empty">Belum ada komunitas di sini.</p>
+        ) : (
+          <div className="community-grid">
+            {communities.map((community) => (
+              <CommunityCard key={community.slug} community={community} />
+            ))}
+          </div>
+        )
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * The Orang half — Task 5's original Jelajah, unchanged in behaviour and moved
+ * whole into a tab. Search by handle or display name, plus two
  * always-populated discovery rails (design spec §4): "Akun terbaru" and
  * "Paling banyak diikuti". Search is on SUBMIT, not on every keystroke — a
  * live input would re-run `GET /explore`'s whole-table `GROUP BY` (Task 3's
  * `mostFollowedPublic`) on every character, which Task 3's own review
  * measured as a full sequential scan rather than an index-only one.
  *
- * An empty query is the screen's DEFAULT state, not an error — it mirrors
+ * An empty query is this half's DEFAULT state, not an error — it mirrors
  * `ExploreUsers.execute`'s own contract exactly: `results` stays empty (and
  * the "Hasil pencarian" section is not shown at all) while the two rails
  * still load.
@@ -97,7 +226,7 @@ function FollowRowList({ rows, empty }: { rows: FollowListRow[]; empty: string }
  * when the value is set programmatically. And a failed request now leaves
  * whatever loaded successfully in place — see `Rails` above.
  */
-export default function JelajahPage() {
+function OrangTab() {
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   /**
@@ -153,8 +282,6 @@ export default function JelajahPage() {
 
   return (
     <>
-      <Header title="Jelajah" />
-      <main className="user-page jelajah-page">
       <form className="jelajah-search" onSubmit={handleSubmit} role="search">
         <input
           type="search"
@@ -207,6 +334,49 @@ export default function JelajahPage() {
           </section>
         </>
       ) : null}
+    </>
+  );
+}
+
+/**
+ * `/jelajah` — one discovery surface with two halves, Komunitas and Orang.
+ *
+ * **ONE PAGE RATHER THAN TWO MENU ENTRIES.** Two near-identical search boxes on
+ * adjacent sidebar items is the kind of thing a person picks wrong every time,
+ * and the sidebar stays at four entries instead of growing toward seven.
+ *
+ * **The tab lives in the URL**, not in component state, so a link to either
+ * half is shareable and the back button steps between them — the same
+ * arrangement Beranda's "Untuk Anda"/"Mengikuti" pair uses, down to reusing its
+ * `.feed-tabs` markup and classes so the indicator invariant
+ * `BerandaPage.test.tsx` pins covers this page too.
+ *
+ * Komunitas is the default: `/jelajah` with no query string is the community
+ * grid, and Orang is `?tab=orang`. Only the active half is mounted, so the
+ * inactive one issues no request at all.
+ */
+export default function JelajahPage() {
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") === "orang" ? "orang" : "komunitas";
+
+  return (
+    <>
+      <Header title="Jelajah" />
+      <main className="user-page jelajah-page">
+        <nav className="feed-tabs" aria-label="Jenis jelajah">
+          <button type="button" aria-current={tab === "komunitas"} onClick={() => setParams({})}>
+            Komunitas
+          </button>
+          <button
+            type="button"
+            aria-current={tab === "orang"}
+            onClick={() => setParams({ tab: "orang" })}
+          >
+            Orang
+          </button>
+        </nav>
+
+        {tab === "komunitas" ? <KomunitasTab /> : <OrangTab />}
       </main>
     </>
   );
