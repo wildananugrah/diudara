@@ -86,21 +86,24 @@ describe("CommunityFeed", () => {
     expect(screen.queryAllByRole("link", { name: "Masuk untuk gabung" }).length).toBe(0);
   });
 
-  it("gives a signed-in non-member a Gabung control in the composer's place", async () => {
+  it("shows a non-member a guest note where the composer would be — no join button in the feed", async () => {
     setUserSession("t", USER);
     stubFetch();
     renderFeed({ viewerIsMember: false });
 
-    expect(await screen.findByRole("button", { name: "Gabung" })).toBeTruthy();
+    // The join control itself lives in CommunityPage's banner (R12); the feed
+    // only points at it.
+    expect(await screen.findByText("Gabung untuk ikut diskusi.")).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: "Gabung" }).length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: "Keluar" }).length).toBe(0);
     expect(screen.queryAllByLabelText("Apa yang terjadi?").length).toBe(0);
   });
 
-  it("gives a signed-out visitor a link to sign in, not a button", async () => {
+  it("shows a signed-out visitor a sign-in note where the composer would be — no button in the feed", async () => {
     stubFetch();
     renderFeed({ viewerIsMember: null });
 
-    const link = await screen.findByRole("link", { name: "Masuk untuk gabung" });
-    expect(link.getAttribute("href")).toBe("/masuk");
+    expect(await screen.findByText("Masuk untuk gabung.")).toBeTruthy();
     expect(screen.queryAllByRole("button", { name: "Gabung" }).length).toBe(0);
     expect(screen.queryAllByLabelText("Apa yang terjadi?").length).toBe(0);
   });
@@ -161,5 +164,15 @@ describe("CommunityFeed", () => {
     renderFeed({ viewerIsMember: null });
 
     expect(await screen.findByText("Belum ada diskusi di komunitas ini.")).toBeTruthy();
+  });
+
+  it("gives each feed card a comment-count link to that post's discussion (R11)", async () => {
+    stubFetch({ posts: [{ ...makePost("p7", "Kiriman lama"), commentCount: 3 }] });
+    renderFeed({ viewerIsMember: null });
+
+    await screen.findByText("Kiriman lama");
+    const link = screen.getByRole("link", { name: /3 komentar/ });
+    // A STRING off the node, never the node itself.
+    expect(link.getAttribute("href")).toBe("/komunitas/kelas-fisika/diskusi/p7");
   });
 });

@@ -1364,6 +1364,14 @@ button:disabled {
   font-size: 0.875rem;
 }
 
+/* The line CommunityFeed shows a non-member / signed-out visitor where the
+   composer would be — the join control itself is in the banner (R12). */
+.community-feed-guestnote {
+  margin: 12px 0 4px;
+  color: var(--ink-faint);
+  font-size: 0.9375rem;
+}
+
 /* ---------------------------------------------------------------
    Task 9: the media slot (images design spec §2 — the media slot itself, and
    thumbnails named as Phase 4's job, are both §2). Lives inside

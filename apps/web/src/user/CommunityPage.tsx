@@ -11,6 +11,7 @@ import {
 } from "./apiClient";
 import { communityColor, communityInk } from "./communityColor";
 import CommunityFeed from "./CommunityFeed";
+import CommunityJoinControl from "./CommunityJoinControl";
 import { describeRequestFailure } from "./errorCopy";
 import Header from "./shell/Header";
 
@@ -85,9 +86,9 @@ function AnggotaTab({ slug }: { slug: string }) {
  * state so a link to either half works, and only the active half mounted so
  * opening the roster does not fetch a feed nobody asked for.
  *
- * **The join / leave control lives in the Diskusi tab now**, not the banner —
- * `CommunityFeed` renders `CommunityJoinControl` (the same Phase 1 control) in
- * the composer's place. The banner carries only the community's identity.
+ * **The join / leave control stays in the banner** (ruling R12) — exactly
+ * where Phase 1 put it, so a non-member can join from either tab. `CommunityFeed`
+ * renders none of its own; it shows a one-line note where the composer would be.
  *
  * Loading, not-found and error are three separate early returns, the shape
  * `ProfilePage` uses. A 404 renders the shared `NotFoundPage`, with no hint
@@ -181,6 +182,25 @@ export default function CommunityPage() {
               <p className="community-banner-description">{community.description}</p>
             )}
           </div>
+          <div className="community-banner-actions">
+            <CommunityJoinControl
+              slug={community.slug}
+              viewerIsMember={community.viewerIsMember}
+              viewerIsOwner={community.viewerIsOwner}
+              onChanged={(member) =>
+                setLoad({
+                  status: "ready",
+                  community: {
+                    ...community,
+                    viewerIsMember: member,
+                    // Moved locally rather than re-fetched: the count is the
+                    // one fact this action is known to have changed.
+                    memberCount: community.memberCount + (member ? 1 : -1),
+                  },
+                })
+              }
+            />
+          </div>
         </section>
 
         <nav className="feed-tabs" aria-label="Tampilan komunitas">
@@ -201,18 +221,6 @@ export default function CommunityPage() {
             slug={community.slug}
             viewerIsMember={community.viewerIsMember}
             viewerIsOwner={community.viewerIsOwner}
-            onMembershipChange={(member) =>
-              setLoad({
-                status: "ready",
-                community: {
-                  ...community,
-                  viewerIsMember: member,
-                  // Moved locally rather than re-fetched: the count is the one
-                  // fact this action is known to have changed.
-                  memberCount: community.memberCount + (member ? 1 : -1),
-                },
-              })
-            }
           />
         ) : (
           <AnggotaTab slug={community.slug} />

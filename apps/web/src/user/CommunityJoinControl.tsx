@@ -5,14 +5,14 @@ import { describeCommunityFailure } from "./errorCopy";
 
 /**
  * **The join control, in its three mutually exclusive shapes** — Phase 1's
- * `CommunityPage` banner control, lifted out of that file so Phase 2's
- * `CommunityFeed` renders the SAME one in the composer's place rather than a
- * second button (spec §"The web app": a non-member "sees the composer's place
- * taken by the same `Gabung` / `Masuk untuk gabung` control").
+ * `CommunityPage` banner control, lifted into its own module in Phase 2. It
+ * still renders in the banner and NOWHERE ELSE (ruling R12): `CommunityFeed`
+ * shows only a non-interactive note pointing here, so a non-member can join
+ * from either tab and there is never a second button to keep in step.
  *
- * Its props are the three primitives both callers already hold — `slug`,
- * `viewerIsMember`, `viewerIsOwner` — not a whole `CommunityDetail`, because
- * `CommunityFeed` is handed exactly those three and nothing more.
+ * Its props are primitives — `slug`, `viewerIsMember`, `viewerIsOwner` — rather
+ * than a whole `CommunityDetail`, so the extraction did not drag the detail
+ * type along.
  *
  * **The owner gets NOTHING — not a disabled button.** `DELETE
  * /communities/:slug/join` answers 409 for an owner every time, and this

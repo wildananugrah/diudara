@@ -479,6 +479,10 @@ export default function PostComposer({
         // composer). An empty `postTypeChoices` (a plain member) sends no type
         // — the server defaults it to `diskusi`.
         if (postTypeChoices !== undefined && postTypeChoices.length > 0) {
+          // TRAP: in community mode this third slot — typed `visibility` for
+          // every other caller — carries the post `type` string instead. No
+          // existing caller (Beranda, EditComposer) reaches this branch;
+          // `communityMode` is false for them.
           await onSubmit(trimmed, attachedIds, postType as "public" | "members");
         } else {
           await onSubmit(trimmed, attachedIds);

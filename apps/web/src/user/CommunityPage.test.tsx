@@ -193,8 +193,8 @@ describe("CommunityPage", () => {
  * half mounted (the inactive one issues no request).
  */
 describe("CommunityPage — the Diskusi / Anggota tab bar", () => {
-  it("has the two tabs, with Diskusi current by default", async () => {
-    stubFetch();
+  it("has the two tabs, with Diskusi current by default, and reads no roster", async () => {
+    const calls = stubFetch();
     renderPage();
 
     await screen.findByText("4 anggota · Skill Digital");
@@ -202,6 +202,9 @@ describe("CommunityPage — the Diskusi / Anggota tab bar", () => {
     const anggota = screen.getByRole("button", { name: "Anggota" });
     expect(diskusi.getAttribute("aria-current")).toBe("true");
     expect(anggota.getAttribute("aria-current")).toBe("false");
+    // Symmetric with the Anggota-tab test below: only the active half mounts,
+    // so the default view never calls listCommunityMembers.
+    expect(calls.some((call) => call.includes("/members"))).toBe(false);
   });
 
   it("shows the roster and not the feed at ?tab=anggota, and does not read the feed", async () => {
