@@ -14,6 +14,8 @@ import {
   userTransactions,
   membershipReminders,
   userStreams,
+  communities,
+  communityMembers,
 } from "./schema";
 
 /**
@@ -83,6 +85,11 @@ export async function resetDatabase() {
   // userStreams references app_user (owner) — Task 1 of Phase 7 — so it too
   // must clear before app_user.
   await db.delete(userStreams);
+  // communityMembers references community and app_user, so it must clear
+  // before both — Phase 1, same FK-ordering rule as every entry above.
+  await db.delete(communityMembers);
+  // community references app_user (owner), so it must clear before app_user.
+  await db.delete(communities);
   // app_user is a fully independent identity table (Phase 9's pivot) — no FK
   // relationship to anything above it, so its position here is free.
   await db.delete(appUsers);

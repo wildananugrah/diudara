@@ -589,3 +589,63 @@ export const userStreams = pgTable(
       .where(sql`${table.status} = 'live'`),
   ]
 );
+
+/**
+ * A community owned by an `app_user`.
+ *
+ * This is NOT the `community` table that was dropped in Phase 1. That one hung
+ * off `creator`, a separate identity with no relationship to `app_user` and no
+ * login path since its routes were deleted. The name is reused because the
+ * table it named is gone and the product's central concept should have it.
+ */
+export const communities = pgTable(
+  "community",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ownerId: uuid("owner_id")
+      .notNull()
+      .references(() => appUsers.id),
+    name: varchar("name", { length: 120 }).notNull(),
+    slug: varchar("slug", { length: 60 }).notNull().unique(),
+    category: varchar("category", { length: 64 }).notNull(),
+    description: varchar("description", { length: 300 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("community_owner_idx").on(table.ownerId),
+    // The browse page's default listing is "newest in this category", and its
+    // unfiltered listing is "newest overall" — the leading column is skipped
+    // for the second, which Postgres allows at a cost this table's size makes
+    // irrelevant.
+    index("community_category_created_idx").on(table.category, table.createdAt),
+  ]
+);
+
+/**
+ * Membership. One row per person per community, including the owner — a
+ * community with no members is not a state this app can reach, because
+ * `CreateCommunity` writes both rows in one transaction.
+ */
+export const communityMembers = pgTable(
+  "community_member",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    communityId: uuid("community_id")
+      .notNull()
+      .references(() => communities.id),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => appUsers.id),
+    role: varchar("role", { length: 16 }).notNull().default("member"),
+    joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // Joining is idempotent through this: the repository uses
+    // onConflictDoNothing on these two columns rather than catching a 23505.
+    uniqueIndex("community_member_unique").on(table.communityId, table.userId),
+    // "which communities am I in" — the sidebar and the browse page's
+    // viewer-is-member marking both read this way.
+    index("community_member_user_idx").on(table.userId),
+    index("community_member_community_joined_idx").on(table.communityId, table.joinedAt),
+  ]
+);
