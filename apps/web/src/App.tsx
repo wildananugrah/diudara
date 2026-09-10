@@ -14,6 +14,8 @@ import RedirectIfSignedIn from "./user/RedirectIfSignedIn";
 import BerandaPage from "./user/BerandaPage";
 import SiaranPage from "./user/SiaranPage";
 import JelajahPage from "./user/JelajahPage";
+import CommunityPage from "./user/CommunityPage";
+import CommunityCreatePage from "./user/CommunityCreatePage";
 import { loadPostImageLimit, repairSplitSession } from "./user/apiClient";
 
 export function AppRoutes() {
@@ -73,6 +75,22 @@ export function AppRoutes() {
         <Route path="/jelajah" element={<JelajahPage />} />
         <Route path="/siaran" element={<SiaranPage />} />
         <Route path="/pengaturan" element={<SettingsPage />} />
+
+        {/*
+          Phase 1's communities. `/komunitas/baru` is declared BEFORE
+          `/komunitas/:slug` so the literal wins — belt and braces, since React
+          Router ranks a static segment above a dynamic one regardless of
+          declaration order, and since `baru` is a RESERVED SLUG
+          (`apps/api/src/domain/community-slug.ts`) that no community can hold.
+          Two independent guarantees for one URL, because the failure mode is a
+          create form nobody can reach.
+
+          Both sit above the catch-all `/:handleParam` further down, which
+          matches a single segment and so could never have claimed a two-segment
+          path anyway.
+        */}
+        <Route path="/komunitas/baru" element={<CommunityCreatePage />} />
+        <Route path="/komunitas/:slug" element={<CommunityPage />} />
 
         {/*
           MOVED INSIDE THE SHELL on 2026-08-25, reversing an earlier ruling.

@@ -6,6 +6,7 @@ import { mediaRoutes } from "./routes/media";
 import { webhookRoutes } from "./routes/webhooks";
 import { mediamtxWebhookRoutes } from "./routes/mediamtx-webhooks";
 import { streamRoutes } from "./routes/streams";
+import { communityRoutes } from "./routes/communities";
 import { errorHandler } from "./http/error-handler";
 import type { UserAuthVariables } from "./http/user-auth.middleware";
 import type { Dependencies } from "./bootstrap";
@@ -86,5 +87,16 @@ export function createApp(deps: Dependencies) {
   // mount order below /users is load-bearing any more. `app.test.ts` pins the
   // whole set.
   app.route("/streams", streamRoutes(deps));
+  // Phase 1 (communities-core). `/communities` is a distinct first segment,
+  // so its position here is free — see the note above `/streams` for why no
+  // mount order below `/users` is load-bearing any more.
+  //
+  // The prefix is REUSED, not new: retire-telegram Task 4 deleted a
+  // `/communities` router (and a nested `/communities/:communityId/tiers`)
+  // belonging to the creator-owned world. Nothing of that router survives —
+  // the tables under it were dropped this phase — and `app.test.ts` pins the
+  // exact route set, so the six registered here are the whole of what this
+  // prefix now serves.
+  app.route("/communities", communityRoutes(deps));
   return app;
 }

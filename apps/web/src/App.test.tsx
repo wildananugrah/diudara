@@ -190,16 +190,34 @@ describe("routing — the app shell", () => {
   });
 
   it("resolves /jelajah inside the shell", async () => {
-    global.fetch = mock(async () =>
-      jsonResponse({ results: [], newest: [], mostFollowed: [] })
+    // Phase 1 made KOMUNITAS the default tab, so bare `/jelajah` loads
+    // `GET /communities` rather than `/users/explore`. One mock answering both
+    // shapes, since which one is asked for is the page's business, not this
+    // routing test's.
+    global.fetch = mock(async (url: string) =>
+      url.startsWith("/communities")
+        ? jsonResponse({ communities: [] })
+        : jsonResponse({ results: [], newest: [], mostFollowed: [] })
     ) as unknown as typeof fetch;
 
     renderAt("/jelajah");
 
     expect(screen.getAllByRole("navigation").length).toBeGreaterThan(0);
-    // Lets JelajahPage's own explore fetch resolve inside this test's `act`
-    // scope, rather than after it — an unmocked `fetch` here previously hit
-    // the real network and updated state outside any `act(...)`.
+    // Lets JelajahPage's own fetch resolve inside this test's `act` scope,
+    // rather than after it — an unmocked `fetch` here previously hit the real
+    // network and updated state outside any `act(...)`.
+    await screen.findByText("Belum ada komunitas di sini.");
+  });
+
+  it("resolves /jelajah?tab=orang onto the people half", async () => {
+    global.fetch = mock(async (url: string) =>
+      url.startsWith("/communities")
+        ? jsonResponse({ communities: [] })
+        : jsonResponse({ results: [], newest: [], mostFollowed: [] })
+    ) as unknown as typeof fetch;
+
+    renderAt("/jelajah?tab=orang");
+
     await screen.findAllByText("Belum ada akun.");
   });
 
@@ -722,18 +740,23 @@ describe("routing — which pages turn a signed-in visitor away", () => {
 });
 
 describe("routing — the shell partition of the real route table", () => {
-  it("renders EXACTLY these seven paths inside the AppShell layout route", () => {
+  it("renders EXACTLY these nine paths inside the AppShell layout route", () => {
     const inside = flattenRouteTable()
       .filter((route) => route.insideShell)
       .map((route) => route.path)
       .sort();
 
+    // Phase 1 added the two `/komunitas` paths. Spelled out rather than
+    // counted, the same discipline the rest of this file keeps: a set that
+    // gained a route nobody meant to add should fail here, naming it.
     expect(inside).toEqual([
       "/:handleParam",
       "/:handleParam/mengikuti",
       "/:handleParam/pengikut",
       "/beranda",
       "/jelajah",
+      "/komunitas/:slug",
+      "/komunitas/baru",
       "/pengaturan",
       "/siaran",
     ]);

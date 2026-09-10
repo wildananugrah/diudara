@@ -81,6 +81,18 @@ export default defineConfig({
       // protect with `bypass`, matching `/auth` and `/payment-account` above
       // rather than the regex entry.
       "/streams": "http://localhost:3000",
+      // Phase 1 (communities-core): `GET /communities`, `POST /communities`,
+      // `GET /communities/:slug`, `GET /communities/:slug/members` and both
+      // directions of `/communities/:slug/join`
+      // (`apps/web/src/user/apiClient.ts`).
+      //
+      // THE PREFIX IS BACK, and this entry is not the one Task 4 removed: that
+      // one forwarded the creator-owned community API, whose tables this phase
+      // dropped. A plain string rather than a regex, matching `/streams` above:
+      // this app's own community pages live under `/komunitas`, an Indonesian
+      // segment that cannot collide with the English API prefix, so there is no
+      // page navigation to protect and no `bypass` to add.
+      "/communities": "http://localhost:3000",
       // NOT PROXIED, DELIBERATELY: `/u/` (M5, final whole-branch review).
       // `/u/<streamId>/index.m3u8` is HLS playback, and in production nginx
       // serves it from MediaMTX after an `auth_request` — apps/api on :3000

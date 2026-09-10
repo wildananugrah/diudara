@@ -171,33 +171,29 @@ export function providerCallOutcome(err: unknown): ProviderCallOutcome {
  * Storage-agnostic names for the uniqueness rules the application reasons about.
  * Repository adapters translate their backing store's constraint names into
  * these, so use-cases never learn a Postgres constraint identifier.
+ *
+ * PHASE 1 ("communities-core") removed `creatorEmail`, `communitySlug`,
+ * `channelPlatformGroup` and `subscriptionMemberTierActive`: nothing can raise
+ * them once `creator`, `community`, `channel` and `subscription` are dropped.
+ *
+ * `communitySlug` WILL BE NEEDED AGAIN. A later task in this phase creates a
+ * new `community` table with its own slug-uniqueness constraint, and that is
+ * NOT this rule — do not re-add it under this name pre-emptively; add a fresh
+ * entry once the new constraint exists and its real Postgres name is known.
  */
 export const UniqueRule = {
-  creatorEmail: "creator_email",
-  communitySlug: "community_slug",
-  channelPlatformGroup: "channel_platform_group",
   /** `app_user_handle_unique` — the handle a user picked at signup. */
   userHandle: "user_handle",
   /** `app_user_email_unique` — the email a user signed up with. */
   userEmail: "user_email",
   /**
-   * `subscription_member_tier_active_unique` — a member may hold at most one
-   * `active` subscription per tier. `DecideJoinRequest` (free communities) is
-   * the first caller to hit this from an INSERT: an already-approved member
-   * can file a fresh pending request (the partial index on `join_request`
-   * only covers `pending` rows), and approving it a second time would
-   * otherwise raise a raw `23505`. The community subscription repository's
-   * `createActiveWithoutBilling` was where this surfaced; retire-telegram
-   * Task 6 deleted it, and the rule this constant names outlives it.
-   */
-  subscriptionMemberTierActive: "subscription_member_tier_active",
-  /**
    * `user_stream_one_live` — the PARTIAL unique index on `user_stream`
    * (`owner_id`, `WHERE status = 'live'`): one live broadcast per person,
    * arbitrated by the database. `DrizzleUserStreamRepository.startLive` is
-   * a bare INSERT, so — same shape as `subscriptionMemberTierActive` above
-   * — nothing upstream can see in advance whether the owner already holds a
-   * `live` row before attempting it.
+   * a bare INSERT, so nothing upstream can see in advance whether the owner
+   * already holds a `live` row before attempting it. (This once cited
+   * `subscriptionMemberTierActive` as the same shape; Phase 1 removed that
+   * rule with the table it named.)
    */
   userStreamOneLive: "user_stream_one_live",
   /**
@@ -212,6 +208,19 @@ export const UniqueRule = {
    * conditional write that can still collide with a partial unique index.
    */
   userSubscriptionOneActive: "user_subscription_one_active",
+  /**
+   * `community_slug_unique` — a community's URL slug.
+   *
+   * This is NOT the `communitySlug` rule Phase 1 removed from this object.
+   * That one named a constraint on the dropped `creator`-owned `community`
+   * table; this one names the constraint on the `app_user`-owned table that
+   * replaced it, whose real Postgres name (migration 0035) is
+   * `community_slug_unique`. `DrizzleCommunityRepository.create` derives the
+   * slug from the submitted name and inserts, so two people naming a
+   * community the same thing at the same moment both pass any application-side
+   * check — the index is the only arbiter.
+   */
+  communitySlug: "community_slug",
 } as const;
 
 export type UniqueRuleName = (typeof UniqueRule)[keyof typeof UniqueRule];

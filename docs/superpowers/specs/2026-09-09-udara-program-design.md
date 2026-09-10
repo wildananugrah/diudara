@@ -69,10 +69,10 @@ its own green test run before the next begins.
 | # | Phase | Ships | Backend |
 |---|---|---|---|
 | 0 | Design system + shell | The app wears the Udara language and the sidebar/header shell | none |
-| 1 | Communities core | Discover, CommunityHome banner + tabs, create/join | revive `community`, `channel`, `join_request` |
+| 1 | Communities core | Browse tabs, CommunityHome banner + roster, create/join | **drop** the 18 dormant tables; new `community` + `community_member` |
 | 2 | Feed | 5 post types, FeedPostCard, PostEditorModal, DiscussionDetail + comments, announcements | posts gain a community owner; new comments table |
-| 3 | Events + calendar | Kegiatan tab, month grid, agenda, EventDetail | revive `event`, `event_rsvp` |
-| 4 | Materi + Dokumen | Syllabus, lesson viewer, document library | revive `course`, `enrollment`; new documents |
+| 3 | Events + calendar | Kegiatan tab, month grid, agenda, EventDetail | new `community_event` + RSVP |
+| 4 | Materi + Dokumen | Syllabus, lesson viewer, document library | new course/lesson + documents |
 | 5 | Per-community checkout | Tier selection, payment, success | adapt existing Xendit path |
 | 6 | Creator dashboard | Metrics, revenue chart, tier distribution, activity log | new aggregate queries |
 | 7 | Live rooms | **Scoping decision required** — see below | likely new SFU |
@@ -81,6 +81,19 @@ its own green test run before the next begins.
 Phase 0 is first because it is the phase that makes the app *look* like the
 reference, it is independently shippable, and it touches no schema — so it can
 land and be judged on its own.
+
+**Correction, made during Phase 1's design.** This table originally said Phases
+1, 3 and 4 would *revive* the dormant `community`, `channel`, `join_request`,
+`event`, `event_rsvp`, `course` and `enrollment` tables. They cannot be revived:
+`community.creator_id` is `NOT NULL REFERENCES creator(id)`, and `creator` is a
+separate identity from `app_user` with no foreign key, no shared id, and no
+login path since it was deleted. Every one of the eighteen dormant tables hangs
+off that root.
+
+Phase 1 therefore **drops** the dormant set and builds fresh user-scoped tables,
+with the repo owner's explicit authorisation for the data loss. Later phases add
+their own tables rather than reviving anything. See
+`2026-09-09-communities-core-design.md` for the full reasoning.
 
 ## Two things the reference cannot simply be copied on
 

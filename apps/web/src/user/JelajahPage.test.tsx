@@ -13,9 +13,27 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+/**
+ * Mounts the page on its ORANG tab.
+ *
+ * Phase 1 put a tab layer above this content and made KOMUNITAS the default,
+ * so `/jelajah` with no query string now renders the community grid. Every
+ * assertion below is about the Orang half and is unchanged from before that
+ * layer existed; the only thing this helper added is the `?tab=orang` that
+ * says which half is on screen. `renderKomunitas` below is its sibling.
+ */
 function renderPage() {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={["/jelajah?tab=orang"]}>
+      <JelajahPage />
+    </MemoryRouter>
+  );
+}
+
+/** Mounts the page on its default (Komunitas) tab. */
+function renderKomunitas(entry = "/jelajah") {
+  return render(
+    <MemoryRouter initialEntries={[entry]}>
       <JelajahPage />
     </MemoryRouter>
   );
@@ -424,5 +442,122 @@ describe("JelajahPage — the ?q= bound and a survivable failed search (item 5)"
 
     expect(await screen.findByText("Budi Santoso")).toBeTruthy();
     expect(screen.queryAllByRole("alert").length).toBe(0);
+  });
+});
+
+/**
+ * Phase 1's tab layer. KOMUNITAS IS THE DEFAULT — `/jelajah` with no query
+ * string renders the community grid, and the Orang half every test above
+ * covers now lives at `?tab=orang`.
+ *
+ * The tab lives in the URL rather than in component state so a link to a
+ * particular half is shareable and the back button steps between them, the
+ * same arrangement Beranda's two feeds use.
+ */
+describe("JelajahPage tabs", () => {
+  const COMMUNITIES = [
+    {
+      slug: "kelas-desain",
+      name: "Kelas Desain",
+      category: "Skill Digital",
+      description: null,
+      memberCount: 3,
+    },
+    {
+      slug: "bimbel-sbmptn",
+      name: "Bimbel SBMPTN",
+      category: "Bimbel & Ujian",
+      description: null,
+      memberCount: 9,
+    },
+  ];
+
+  function stubCommunityFetch(calls: string[] = []) {
+    global.fetch = mock(async (url: string) => {
+      calls.push(url);
+      if (url.startsWith("/communities")) {
+        const wanted = url.includes("q=bimbel") || url.includes("Bimbel")
+          ? COMMUNITIES.filter((c) => c.slug === "bimbel-sbmptn")
+          : COMMUNITIES;
+        return jsonResponse({ communities: wanted });
+      }
+      return jsonResponse({ results: [], newest: NEWEST, mostFollowed: MOST_FOLLOWED });
+    }) as unknown as typeof fetch;
+    return calls;
+  }
+
+  it("offers both tabs", () => {
+    stubCommunityFetch();
+    renderKomunitas();
+
+    expect(screen.getByRole("button", { name: "Komunitas" }).textContent).toBe("Komunitas");
+    expect(screen.getByRole("button", { name: "Orang" }).textContent).toBe("Orang");
+  });
+
+  it("marks the tab the URL names as the current one", () => {
+    stubCommunityFetch();
+    renderKomunitas();
+
+    expect(screen.getByRole("button", { name: "Komunitas" }).getAttribute("aria-current")).toBe(
+      "true"
+    );
+    expect(screen.getByRole("button", { name: "Orang" }).getAttribute("aria-current")).toBe(
+      "false"
+    );
+  });
+
+  it("marks Orang current when the URL says so", () => {
+    stubCommunityFetch();
+    renderPage();
+
+    expect(screen.getByRole("button", { name: "Orang" }).getAttribute("aria-current")).toBe("true");
+    expect(screen.getByRole("button", { name: "Komunitas" }).getAttribute("aria-current")).toBe(
+      "false"
+    );
+  });
+
+  it("renders a card per community from the API", async () => {
+    stubCommunityFetch();
+    renderKomunitas();
+
+    expect(await screen.findByRole("link", { name: "Kelas Desain" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Bimbel SBMPTN" })).toBeTruthy();
+    expect(screen.getByText("3 anggota").textContent).toBe("3 anggota");
+  });
+
+  it("searches on submit, not on every keystroke", async () => {
+    const calls = stubCommunityFetch();
+    renderKomunitas();
+    await screen.findByRole("link", { name: "Kelas Desain" });
+
+    const before = calls.length;
+    fireEvent.change(screen.getByLabelText("Cari komunitas"), { target: { value: "bimbel" } });
+    // Typing alone must not have gone to the network.
+    expect(calls.length).toBe(before);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cari" }));
+    await waitFor(() => {
+      expect(calls.some((url) => url.includes("q=bimbel"))).toBe(true);
+    });
+  });
+
+  it("filters by category when a chip is tapped", async () => {
+    const calls = stubCommunityFetch();
+    renderKomunitas();
+    await screen.findByRole("link", { name: "Kelas Desain" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Bimbel & Ujian" }));
+
+    await waitFor(() => {
+      expect(calls.some((url) => url.includes("category=Bimbel"))).toBe(true);
+    });
+  });
+
+  it("does not fetch communities at all while the Orang tab is showing", async () => {
+    const calls = stubCommunityFetch();
+    renderPage();
+    await screen.findByText("Akun Baru");
+
+    expect(calls.some((url) => url.startsWith("/communities"))).toBe(false);
   });
 });

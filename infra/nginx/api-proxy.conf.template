@@ -45,6 +45,18 @@ location ^~ /streams {
     proxy_set_header X-Forwarded-Proto $scheme;
 }
 
+# GET /communities, POST /communities, GET /communities/:slug,
+# GET /communities/:slug/members, POST and DELETE /communities/:slug/join.
+# `^~` for the same reason /streams uses it. NOTE the web app serves the page
+# these back, /komunitas, from the SPA fallback — only the API prefix is here.
+location ^~ /communities {
+    proxy_pass http://127.0.0.1:3004;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
 # GET /webhooks/mediamtx/auth-request. NOTE live-hls.conf.template defines a
 # LONGER `^~ /webhooks/mediamtx/` block; the longest matching prefix wins, so
 # both can coexist and that one takes precedence for MediaMTX's own callbacks.

@@ -16,6 +16,21 @@ import {
 import { sql } from "drizzle-orm";
 
 /**
+ * PHASE 1 ("communities-core") DROPPED THE COMMUNITY-CENTRIC MODEL HERE.
+ *
+ * Eighteen tables — `creator` down through `enrollment`, plus the three
+ * creator-scoped `ai_*` tables — belonged to a retired product generation with
+ * no live reader: every route, use-case, port and repository above them had
+ * already been deleted across four earlier commits, leaving `test-helpers.ts`
+ * as their only importer. `creator` was a separate identity from `app_user`
+ * with no foreign key and no login path since c8c5046 removed it, so the set
+ * could not be revived in place — Phase 1 needs communities owned by
+ * `app_user`s instead. See the migration that dropped them and
+ * `.superpowers/sdd/2026-09-10-communities-core/task-1-report.md` for the
+ * full accounting.
+ */
+
+/**
  * The pivot's third, independent identity table — a user who follows, posts,
  * goes live and offers memberships. `creator` and `member` are unchanged and
  * keep both existing login paths working; nothing here migrates them. Named
@@ -128,499 +143,6 @@ export const signupNotices = pgTable(
   (table) => [index("signup_notice_user_created_idx").on(table.userId, table.createdAt)]
 );
 
-export const creators = pgTable(
-  "creator",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    name: varchar("name", { length: 255 }).notNull(),
-    whatsappNumber: varchar("whatsapp_number", { length: 32 }),
-    email: varchar("email", { length: 255 }),
-    passwordHash: varchar("password_hash", { length: 255 }),
-    xenditAccountId: varchar("xendit_account_id", { length: 255 }),
-    tierPlan: varchar("tier_plan", { length: 32 }).notNull().default("starter"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    // email is the creator login identity (spec 9: email + password), so it must
-    // resolve to exactly one account — otherwise findByEmail returns an
-    // arbitrary row and which account you log into is non-deterministic.
-    // Partial, because the spec allows WhatsApp-only creators with no email;
-    // several creators may have NULL email, but no two may share an address.
-    uniqueIndex("creator_email_unique")
-      .on(table.email)
-      .where(sql`${table.email} is not null`),
-  ],
-);
-
-export const communities = pgTable(
-  "community",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    creatorId: uuid("creator_id")
-      .notNull()
-      .references(() => creators.id),
-    name: varchar("name", { length: 255 }).notNull(),
-    slug: varchar("slug", { length: 120 }).notNull().unique(),
-    niche: varchar("niche", { length: 128 }),
-    status: varchar("status", { length: 32 }).notNull().default("active"),
-    /**
-     * `paid` | `request`. Default `paid` means existing rows keep today's
-     * behaviour with no backfill: a member can only join by paying through
-     * Xendit unless a creator explicitly switches a community to `request`
-     * (free — a member asks to join and the owner approves). Validated
-     * against that allowlist at the HTTP edge, not by a CHECK constraint —
-     * see `z.enum` in `packages/shared/src/community.schema.ts` — the same
-     * convention every other status column here follows.
-     */
-    accessMode: varchar("access_mode", { length: 16 }).notNull().default("paid"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [index("community_creator_id_idx").on(table.creatorId)],
-);
-
-export const membershipTiers = pgTable(
-  "membership_tier",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    communityId: uuid("community_id")
-      .notNull()
-      .references(() => communities.id),
-    name: varchar("name", { length: 128 }).notNull(),
-    priceAmount: integer("price_amount").notNull(),
-    billingCycle: varchar("billing_cycle", { length: 16 }).notNull(),
-    isActive: boolean("is_active").notNull().default(true),
-  },
-  (table) => [index("membership_tier_community_id_idx").on(table.communityId)],
-);
-
-export const channels = pgTable(
-  "channel",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    communityId: uuid("community_id")
-      .notNull()
-      .references(() => communities.id),
-    platform: varchar("platform", { length: 16 }).notNull(),
-    externalGroupId: varchar("external_group_id", { length: 255 }),
-    inviteLink: varchar("invite_link", { length: 512 }),
-    botStatus: varchar("bot_status", { length: 32 }).notNull().default("disconnected"),
-  },
-  (table) => [
-    index("channel_community_id_idx").on(table.communityId),
-    // Phase 4's gating resolves an inbound group id back to exactly one
-    // community. Without this, two creators could both connect Telegram group
-    // -1001234567890 and the lookup would find two owners — and one community
-    // could connect the same group twice. Partial, because external_group_id is
-    // null until the creator supplies one. Added while the table is empty:
-    // retrofitting it after real rows exist needs a data-cleanup migration.
-    uniqueIndex("channel_platform_group_unique")
-      .on(table.platform, table.externalGroupId)
-      .where(sql`${table.externalGroupId} is not null`),
-  ],
-);
-
-export const members = pgTable("member", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  whatsappNumber: varchar("whatsapp_number", { length: 32 }).notNull().unique(),
-  name: varchar("name", { length: 255 }),
-  joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
-export const subscriptions = pgTable(
-  "subscription",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    memberId: uuid("member_id")
-      .notNull()
-      .references(() => members.id),
-    tierId: uuid("tier_id")
-      .notNull()
-      .references(() => membershipTiers.id),
-    /**
-     * `pending` | `active` | `cancelled` | `superseded`, plus `past_due` and
-     * `churned` added in Phase 5. Deliberately a varchar rather than a Postgres
-     * enum, so the two new values need no migration of their own — see
-     * `schema-phase5.test.ts`, which asserts they physically fit and round-trip.
-     */
-    status: varchar("status", { length: 16 }).notNull().default("pending"),
-    nextBillingDate: date("next_billing_date"),
-    /**
-     * When this subscription's grace period runs out — set once, when it ENTERS
-     * `past_due`, and null at every other time.
-     *
-     * Stored rather than recomputed on each pass, which is the point. If the job
-     * derived the deadline from `next_billing_date` every time it ran, then changing
-     * the grace length or the timezone reasoning later would retroactively move the
-     * deadline of everybody currently inside their grace period — including members
-     * who would be moved into the past and evicted by a config change they never saw.
-     * Written down, a deadline is a promise; computed, it is whatever today's code
-     * says.
-     *
-     * Nullable with no default, because a subscription that is not past due has no
-     * deadline. A `defaultNow()` here would put every new subscriber a fixed time
-     * from eviction.
-     *
-     * The value written is `max(due date + grace, transition + minimum notice)` — see
-     * `computeGraceEndsAt`. The floor exists for the subscription this system meets for
-     * the FIRST time long after its due date (every row Phase 4 left behind, on the first
-     * pass this phase runs): computed from the due date alone, its deadline would already
-     * be in the past and the churn pass would evict it in the same tick that first warned
-     * it. The floor does not make the value recomputable — it is still written exactly
-     * once, by the transition, and read as stored for ever after.
-     */
-    graceEndsAt: timestamp("grace_ends_at", { withTimezone: true }),
-    startedAt: timestamp("started_at", { withTimezone: true }),
-    retryCount: integer("retry_count").notNull().default(0),
-    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
-    // startedAt is null until the first successful payment, so churn timing
-    // (spec 8.3) needs an independent record of when the row came into being.
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    // No BEFORE UPDATE trigger backs this column — the migration constraint
-    // forbids hand-written SQL and drizzle-kit does not generate triggers — so
-    // it would otherwise freeze at creation time. Every repository method that
-    // updates a subscription row (added starting Task 6/7, which write these
-    // rows for the first time) MUST set `updatedAt: new Date()` explicitly.
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    index("subscription_member_id_idx").on(table.memberId),
-    index("subscription_tier_id_idx").on(table.tierId),
-    // A double-submit at checkout creates two PENDING subscriptions for one
-    // (member, tier) and nothing decided which was authoritative. Phase 4 is the
-    // first phase to act on one — activation enqueues a `grant_access` row — so
-    // two activations mean two single-use invite links for the same member, one of
-    // which can be handed to somebody who never paid.
-    //
-    // A member can only hold ONE active membership of a given tier: a renewal
-    // updates the same subscription row (`markPaid` moves next_billing_date), it
-    // does not create another. This index is what ARBITRATES that, rather than the
-    // `not exists` predicate in markPaid — under READ COMMITTED two concurrent
-    // activations cannot see each other's uncommitted row, so the predicate alone
-    // is a TOCTOU. The predicate handles the ordinary already-committed case
-    // gracefully; a true race violates this index, the transaction rolls back with
-    // the webhook event id unspent, and the provider's retry then takes the
-    // graceful path.
-    //
-    // PARTIAL, on `active` only: `pending`, `cancelled` and `expired` duplicates
-    // are all legitimate history. Added while every subscription row in existence
-    // is a test row — retrofitting it over real duplicates needs a cleanup
-    // migration first.
-    uniqueIndex("subscription_member_tier_active_unique")
-      .on(table.memberId, table.tierId)
-      .where(sql`${table.status} = 'active'`),
-    // ===================================================================
-    // THE TWO INDEXES PHASE 5'S HOURLY PASSES READ THROUGH.
-    //
-    // Neither existed when the passes shipped, and a comment in
-    // `apps/worker/src/scheduled-passes.ts` claimed both queries were indexed. Live
-    // `pg_indexes` on `subscription` held the primary key, `member_id`, `tier_id` and
-    // the partial active-unique above and nothing else, so both passes SEQ-SCANNED and
-    // SORTED the whole table every hour — and `findDueForRenewal`'s keyset pagination
-    // re-scanned it once per page, which is worse the bigger the backlog gets.
-    //
-    // Column order is (status, date) in both, and that is the useful way round: every
-    // status filter here is an equality against a small set and the date is a range, so
-    // the leading equality lets the index be scanned rather than merely filtered — and
-    // it delivers the rows in the order both queries sort by, which is what removes the
-    // sort as well as the scan.
-    index("subscription_status_next_billing_date_idx").on(
-      table.status,
-      table.nextBillingDate
-    ),
-    // `findPastGraceDeadline`: `status = 'past_due' and grace_ends_at < now`, ordered by
-    // the deadline. A far smaller slice of the table than the one above — only members
-    // inside their grace period are in it — which is exactly why the seq scan was easy
-    // to miss.
-    index("subscription_status_grace_ends_at_idx").on(table.status, table.graceEndsAt),
-    // ===================================================================
-  ],
-);
-
-/**
- * A member's request to join a FREE community. The owner approves or rejects
- * it; there is no payment involved, ever — a `join_request` never produces a
- * `transaction` row.
- */
-export const joinRequests = pgTable(
-  "join_request",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    communityId: uuid("community_id")
-      .notNull()
-      .references(() => communities.id),
-    tierId: uuid("tier_id")
-      .notNull()
-      .references(() => membershipTiers.id),
-    memberId: uuid("member_id")
-      .notNull()
-      .references(() => members.id),
-    status: varchar("status", { length: 16 }).notNull().default("pending"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    decidedAt: timestamp("decided_at", { withTimezone: true }),
-    decidedBy: uuid("decided_by").references(() => creators.id),
-  },
-  (table) => [
-    // ONE open request per member per community, arbitrated by the DATABASE rather
-    // than by a read-then-write — the same reason `subscription_member_tier_active_unique`
-    // is a partial unique index. Two submits in the same instant cannot both win.
-    // Decided rows are deliberately outside the index: they are the audit trail, and
-    // rejection being silent makes them the only account of what happened.
-    uniqueIndex("join_request_community_member_pending_unique")
-      .on(table.communityId, table.memberId)
-      .where(sql`${table.status} = 'pending'`),
-    index("join_request_community_status_idx").on(table.communityId, table.status),
-  ],
-);
-
-/**
- * One row per reminder stage that has been CLAIMED for a subscription.
- *
- * "Claimed", not "sent": `ProcessRenewals` inserts here and only then enqueues the
- * outbox row, so a row here means "this stage has been dealt with and must never be
- * dealt with again". Usually that means a message was queued and delivered. It also
- * covers the one case where the pass deliberately sends nothing — a community that has
- * been archived — because the claim is what stops a daily pass writing one
- * `renewal_reminder_skipped` audit row per subscription per day, for ever.
- *
- * THIS TABLE IS A LOCK, NOT A LOG. Its reason to exist is the unique
- * `(subscription_id, stage)` below: the reminder pass INSERTS here as the act of
- * claiming the right to send, and the database decides whether that claim is the
- * first one. A pass that runs twice — two workers, a restart mid-pass, a catch-up
- * after downtime — then messages the member exactly once per stage.
- *
- * Doing it the other way round (select, decide, send, insert) is a TOCTOU under
- * READ COMMITTED, in the same shape as the two invite links Phase 4 measured: two
- * passes both read "no reminder yet" and both send. The member gets two WhatsApp
- * messages about the same overdue payment, which reads as either a bug or a dunning
- * campaign, and neither is what we meant.
- */
-export const renewalReminders = pgTable(
-  "renewal_reminder",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    subscriptionId: uuid("subscription_id")
-      .notNull()
-      .references(() => subscriptions.id),
-    /**
-     * One of `REMINDER_STAGES` in `domain/renewal-schedule.ts` — `pre_3d`, `due`,
-     * `overdue_1d`, `overdue_3d`, `overdue_7d`. A varchar rather than an enum, for
-     * the same reason `subscription.status` is: adding a stage should not need a
-     * migration. `dueStageFor` is what constrains the values in practice.
-     */
-    stage: varchar("stage", { length: 16 }).notNull(),
-    sentAt: timestamp("sent_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    /**
-     * The reminder-once mechanism. It must be IN THE DATABASE, not merely in this
-     * file: Drizzle enforces nothing at runtime, so a definition that never reached
-     * Postgres would let a duplicate through in silence while the schema still
-     * looked correct. `schema-phase5.test.ts` asserts on this constraint's NAME in
-     * the raised Postgres error, so a version that exists only here fails the suite.
-     *
-     * Total, not partial: every stage of every subscription is claimed at most once,
-     * and there is no legitimate second send. A subscription that renews and later
-     * lapses again is a matter for whoever clears these rows on renewal (Task 6) —
-     * an explicit delete, so that re-lapsing sends reminders again by an act rather
-     * than by a gap in a predicate.
-     */
-    uniqueIndex("renewal_reminder_subscription_stage_unique").on(
-      table.subscriptionId,
-      table.stage
-    ),
-  ]
-);
-
-export const transactions = pgTable(
-  "transaction",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    subscriptionId: uuid("subscription_id")
-      .notNull()
-      .references(() => subscriptions.id),
-    amount: integer("amount").notNull(),
-    paymentMethod: varchar("payment_method", { length: 16 }).notNull(),
-    status: varchar("status", { length: 16 }).notNull().default("pending"),
-    gatewayReferenceId: varchar("gateway_reference_id", { length: 255 }),
-    paidAt: timestamp("paid_at", { withTimezone: true }),
-    // paidAt is NULL for pending/failed attempts, so revenue-over-time and
-    // funnel analysis (spec 2 dashboard) cannot be built from it alone.
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    // Same carry-forward as subscription.updatedAt above: no trigger backs
-    // this column, so every repository method that updates a transaction row
-    // MUST set `updatedAt: new Date()` explicitly. Task 7's webhook test
-    // should assert updated_at moved past created_at after activation.
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [index("transaction_subscription_id_idx").on(table.subscriptionId)],
-);
-
-/**
- * The audit trail, and PHASE 6'S DECLARED SOURCE for analytics.
- *
- * `event_type` is a free varchar, so the vocabulary is a contract held by convention.
- * Phase 5's design spec (§8b, "What this phase leaves in `activity_log`") enumerates every
- * type this phase writes and what each one means; `activity-log-contract.test.ts` fails if
- * the code and that table drift apart. Three things a query has to know, all of which have
- * been got wrong at least once already:
- *
- *  1. ONE REMINDER PRODUCES TWO ROWS — `renewal_reminder_queued` when the stage is claimed,
- *     then `renewal_reminder_sent` when the message actually reaches the provider. Counting
- *     reminders without filtering by `event_type` doubles every figure, and only the second
- *     one means the member was told.
- *  2. `renewed` IS NOT `joined`. A renewal is the same member paying again. Only `markPaid`
- *     can tell them apart, because only it sees the status the row was in before activation.
- *  3. `renewal_reminder` IS A LOCK, NOT A HISTORY. Its rows are DELETED on renewal (see the
- *     table above), so "how many reminders went out last month" must be answered from HERE.
- */
-export const activityLogs = pgTable(
-  "activity_log",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    memberId: uuid("member_id").references(() => members.id),
-    communityId: uuid("community_id")
-      .notNull()
-      .references(() => communities.id),
-    eventType: varchar("event_type", { length: 32 }).notNull(),
-    metadata: jsonb("metadata"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    index("activity_log_member_id_idx").on(table.memberId),
-    index("activity_log_community_id_idx").on(table.communityId),
-    // ===================================================================
-    // THE INDEX THE CREATOR DASHBOARD READS THROUGH — measured with
-    // EXPLAIN (ANALYZE, BUFFERS) against live PostgreSQL 16.13, 300 000 rows across
-    // six communities with 100 000 of them in the one being read.
-    //
-    // `activity_log` grows with every payment, reminder, grant and revocation, and
-    // the activity feed is the most-viewed screen in the product — so this table
-    // degrades exactly as a creator becomes successful, which is the worst possible
-    // time for it to. It is also the fastest-growing table in the product, which is
-    // why the index list below is SHORT: every index here is paid for on every
-    // insert, forever, by every creator.
-    //
-    // (community_id, created_at) — FOR THE FEED. One equality then the range the
-    // keyset cursor compares and the order the feed sorts by, so Postgres walks the
-    // index BACKWARDS for that community and stops after one page: 0.12 ms and
-    // 5 buffers, an Index Scan Backward with no full sort, against 15 ms and 1277
-    // buffers with only the two single-column indexes. Two orders of magnitude, and
-    // the gap widens with the history, because this is the only one that lets the
-    // scan STOP instead of reading everything the community has ever produced. The
-    // feed's 8-value `event_type` filter is applied to the ~26 rows a page actually
-    // touches, which costs nothing.
-    //
-    // ---- WHY THERE IS NO (community_id, event_type, created_at) HERE ----
-    // There was one, added in Phase 6 Task 1 for a query that does not exist. It was
-    // dropped in migration 0015 after the final review, on two independent grounds:
-    //
-    //  a. NOTHING READS THIS TABLE BY `event_type`. Grep it: the only read in the
-    //     whole API is the feed (`DrizzleAnalyticsRepository.listActivityForCreator`);
-    //     everything else is `insert`. The metrics and CSV paths read `subscription`
-    //     and `transaction`, not this table — an earlier version of this comment said
-    //     otherwise and was simply wrong. So the index served nothing and was pure
-    //     write amplification on the table that grows fastest.
-    //
-    //  b. IT MADE THE FEED WORSE, not neutral. The feed's predicate is
-    //     `event_type in (<8 values>)`, a ScalarArrayOp on that index's MIDDLE
-    //     column, and a btree scan with one of those cannot deliver rows ordered by
-    //     the TRAILING column — so it could satisfy neither the ORDER BY nor anything
-    //     `community_id` alone did not already do. With ONLY that index present the
-    //     feed measured 145 ms / 3676 buffers against 17 ms with no composite index
-    //     at all: it lured the planner into a bitmap scan over 50 000 rows.
-    //
-    // "How many renewal reminders went out last month" — `community_id = ? and
-    // event_type = ? and created_at >= ?` — WOULD use it (11.7 ms / 246 buffers when
-    // it existed). Add it back in the migration that adds that query, not before.
-    // An index kept for an anticipated caller is a cost paid every day for a benefit
-    // that may never arrive, and this one was also making today's query slower.
-    //
-    // This index is not partial on the creator-visible allowlist, deliberately: the
-    // visible set is a product decision stated in `domain/activity-feed.ts` and it
-    // will change (making a hidden diagnostic visible is a one-line edit), and a
-    // partial index would silently stop being used by that edit.
-    // ===================================================================
-    index("activity_log_community_created_idx").on(table.communityId, table.createdAt),
-  ],
-);
-
-export const courses = pgTable(
-  "course",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    communityId: uuid("community_id")
-      .notNull()
-      .references(() => communities.id),
-    title: varchar("title", { length: 255 }).notNull(),
-    dripSchedule: jsonb("drip_schedule"),
-  },
-  (table) => [index("course_community_id_idx").on(table.communityId)],
-);
-
-export const enrollments = pgTable(
-  "enrollment",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    memberId: uuid("member_id")
-      .notNull()
-      .references(() => members.id),
-    courseId: uuid("course_id")
-      .notNull()
-      .references(() => courses.id),
-    progressPercent: integer("progress_percent").notNull().default(0),
-    certificateStatus: varchar("certificate_status", { length: 32 }),
-  },
-  (table) => [
-    index("enrollment_member_id_idx").on(table.memberId),
-    index("enrollment_course_id_idx").on(table.courseId),
-  ],
-);
-
-export const events = pgTable(
-  "event",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    communityId: uuid("community_id")
-      .notNull()
-      .references(() => communities.id),
-    title: varchar("title", { length: 255 }).notNull(),
-    scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
-    meetingLink: varchar("meeting_link", { length: 512 }),
-    streamKey: varchar("stream_key", { length: 128 }),
-    status: varchar("status", { length: 16 }).notNull().default("scheduled"),
-    hlsPlaybackPath: varchar("hls_playback_path", { length: 512 }),
-    recordingUrl: varchar("recording_url", { length: 512 }),
-  },
-  (table) => [
-    index("event_community_id_idx").on(table.communityId),
-    // Spec 7: stream_key is a secret, unique, rotated per session. Phase 8's
-    // MediaMTX on-publish webhook resolves a key to exactly one event, and
-    // ambiguity in a security-token lookup is a real hazard. Partial, because
-    // the key is null until a session is scheduled.
-    uniqueIndex("event_stream_key_unique")
-      .on(table.streamKey)
-      .where(sql`${table.streamKey} is not null`),
-  ],
-);
-
-export const eventRsvps = pgTable(
-  "event_rsvp",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    memberId: uuid("member_id")
-      .notNull()
-      .references(() => members.id),
-    eventId: uuid("event_id")
-      .notNull()
-      .references(() => events.id),
-    status: varchar("status", { length: 16 }).notNull().default("registered"),
-  },
-  (table) => [
-    index("event_rsvp_member_id_idx").on(table.memberId),
-    index("event_rsvp_event_id_idx").on(table.eventId),
-  ],
-);
-
 export const webhookEvents = pgTable("webhook_event", {
   id: uuid("id").primaryKey().defaultRandom(),
   provider: varchar("provider", { length: 32 }).notNull(),
@@ -653,192 +175,6 @@ export const outbox = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("outbox_claim_idx").on(table.status, table.nextAttemptAt)]
-);
-
-/**
- * Who currently has access to which channel.
- * UNIQUE (member_id, channel_id) is the grant-idempotency mechanism: a retried
- * outbox row must not issue a second invite link, and the database arbitrates
- * that, not a pre-check.
- */
-export const channelMemberships = pgTable(
-  "channel_membership",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    memberId: uuid("member_id")
-      .notNull()
-      .references(() => members.id),
-    channelId: uuid("channel_id")
-      .notNull()
-      .references(() => channels.id),
-    status: varchar("status", { length: 16 }).notNull().default("active"),
-    inviteLink: varchar("invite_link", { length: 512 }),
-    /**
-     * The member's id ON THE PLATFORM (a Telegram integer user id), once we learn
-     * it.
-     *
-     * NULL at grant time, always, and that is not an oversight: access is granted
-     * with an INVITE LINK precisely because we do not know who the member is on
-     * Telegram — a WhatsApp number is all checkout gives us. The id only becomes
-     * knowable when the member actually JOINS.
-     *
-     * Filled by `POST /webhooks/telegram` (Task 7b), which receives Telegram's
-     * `chat_member` update and matches it to this row by the `invite_link` it
-     * reports — single-use per member, so it identifies exactly one row (see
-     * `channel_membership_invite_link_unique`).
-     *
-     * It exists because revocation NEEDS it: `banChatMember` addresses a user id.
-     * A row that still has none cannot be revoked automatically, and
-     * `RevokeChannelAccess` reports `no_provider_member_id_recorded` rather than
-     * claiming success — which is what EVERY revocation did before that endpoint.
-     *
-     * DELIBERATELY SURVIVES A REVOKE. Neither `revoke` nor `claim`'s reactivation
-     * clears it, only the link. `banChatMember` also blocks the user from joining
-     * via any invite link, so a churned member who re-pays must be UNBANNED first,
-     * and `unbanChatMember` needs this id — `GrantChannelAccess` reads it back off
-     * a reactivated row and passes it as `previousExternalMemberId`.
-     */
-    externalMemberId: varchar("external_member_id", { length: 64 }),
-    /**
-     * Set when a caller ENTERS the mint window, cleared when it leaves — the marker
-     * that makes "claimed, no link" an unambiguous state instead of a guess.
-     *
-     * THE CREDENTIAL-LIFECYCLE INVARIANT this column exists to enforce: at most one
-     * live invite link per (member, channel) may exist at the provider at any time,
-     * and every link that exists is recorded in `invite_link`.
-     *
-     * Without it, `invite_link IS NULL` on a claimed row conflates three different
-     * situations: nobody has minted yet, somebody minted and could not record it, and
-     * somebody is minting right now. `GrantChannelAccess` read all three as "finish
-     * the grant" and minted a fresh link for each, so a `recordGrant` that failed on
-     * every bounded retry left FIVE live single-use links at Telegram behind one row
-     * whose `invite_link` was NULL — five credentials the system had no record of and
-     * therefore no way to revoke. Measured, before this column existed.
-     *
-     * So: link is null + this is NOT null means A LINK MAY BE LIVE AND UNRECORDED.
-     * Minting another would stack a second credential on an orphan we cannot kill
-     * (Telegram's `revokeChatInviteLink` needs the link's value, and no Bot API method
-     * enumerates a bot's links), so the grant FAILS CLOSED — reported to the member as
-     * manual addition and to the creator in `activity_log`, for a deliberate reissue.
-     *
-     * "MAY BE" IS EXACT, AND THE COLUMN HAS TO BE CLEARED WHENEVER IT CANNOT BE. It is
-     * cleared by `recordGrant` on success, and by `releaseMintWindow` in the two states
-     * where no credential can exist: a lost link that WAS revoked at the provider, and
-     * a `grantAccess` that failed with an HTTP response received, which mints nothing.
-     * Leaving it set in that second case cost a paying member their access
-     * PERMANENTLY — one transient Telegram failure, then a healthy provider, and every
-     * later attempt reported `mint_lost` with no reissue tool to clear it. Measured.
-     */
-    linkMintedAt: timestamp("link_minted_at", { withTimezone: true }),
-    /**
-     * How long the caller inside the mint window holds it. Set with
-     * `link_minted_at`, in the SAME statement as the claim.
-     *
-     * IT DOES NOT PROVIDE SERIALIZATION, and an earlier version of this comment
-     * claiming it did was wrong in a way worth correcting: a misleading invariant
-     * comment is how the next person removes the wrong thing.
-     *
-     * MUTUAL EXCLUSION COMES FROM `link_minted_at` BEING WRITTEN IN THE CLAIM ITSELF.
-     * The second of two callers arriving together has its `DO UPDATE` predicate
-     * re-evaluated against the locked, already-updated tuple, finds `link_minted_at`
-     * non-null, and is excluded — no lease consulted, no read, nothing to race. (The
-     * measured two-live-links case was the version that checked the marker in a
-     * SEPARATE statement from the claim; both callers read NULL and both minted.)
-     *
-     * WHAT THIS COLUMN DOES IS CLASSIFY THE EXCLUDED CALLER, which is the difference
-     * between a retry and a manual reissue and therefore between a member who gets
-     * their link a second later and one who waits for a person:
-     *
-     *   marker + live lease   -> `mint_in_progress`  the holder is mid-flight; RETRY
-     *   marker + lapsed lease -> `mint_lost`         a link may be live and unrecorded;
-     *                                                FAIL CLOSED, report for reissue
-     *
-     * A LEASE rather than `pg_advisory_xact_lock` because the window spans an
-     * external HTTP call: an advisory lock would have to be held in an open
-     * transaction across the provider round-trip, pinning a pooled connection to a
-     * hung Telegram. A lease needs no transaction and is visible to an operator in
-     * the row.
-     *
-     * Its expiry FAILS CLOSED: a second caller arriving after it lapses sees the
-     * marker still set and reports "minted and lost" rather than minting. So a lease
-     * that is too short costs a spurious manual report, never a second credential —
-     * which follows from exclusion living in the marker, not here.
-     *
-     * Cleared alongside `link_minted_at`: by `recordGrant` on success, and by
-     * `releaseMintWindow` whenever no credential can exist — a lost link that WAS
-     * revoked at the provider, or a `grantAccess` that failed with a response received
-     * (nothing was minted). Left SET only where a link may be live and unheld.
-     */
-    mintLeaseUntil: timestamp("mint_lease_until", { withTimezone: true }),
-    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
-    revokedAt: timestamp("revoked_at", { withTimezone: true }),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("channel_membership_member_channel_unique").on(table.memberId, table.channelId),
-    index("channel_membership_channel_idx").on(table.channelId),
-    // `POST /webhooks/telegram` resolves an inbound invite link back to exactly one
-    // membership, so it can record the joining member's platform user id. That
-    // lookup is how revocation becomes automatable at all, and ambiguity in it
-    // would attach a Telegram user id to an arbitrary one of two rows — aiming a
-    // later `banChatMember` at the wrong member of the wrong group.
-    //
-    // Same reasoning as `event_stream_key_unique`: a lookup keyed on a CREDENTIAL
-    // must resolve to one row. Links are single-use per member and the column is
-    // nulled on revoke and on reactivation, so this holds by construction — the
-    // index is what makes it hold by GUARANTEE. Partial, because the column is null
-    // until a grant completes and null again after a revoke.
-    uniqueIndex("channel_membership_invite_link_unique")
-      .on(table.inviteLink)
-      .where(sql`${table.inviteLink} is not null`),
-  ]
-);
-
-export const aiConversations = pgTable(
-  "ai_conversation",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    creatorId: uuid("creator_id")
-      .notNull()
-      .references(() => creators.id),
-    status: varchar("status", { length: 16 }).notNull().default("open"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [index("ai_conversation_creator_idx").on(table.creatorId, table.createdAt)]
-);
-
-export const aiMessages = pgTable(
-  "ai_message",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    conversationId: uuid("conversation_id")
-      .notNull()
-      .references(() => aiConversations.id),
-    role: varchar("role", { length: 16 }).notNull(),
-    content: text("content").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [index("ai_message_conversation_idx").on(table.conversationId, table.createdAt)]
-);
-
-/**
- * One row per creator per UTC day. UNIQUE (creator_id, usage_date) is what lets
- * the cap be enforced by a single upsert — two concurrent requests cannot both
- * pass a limit with one slot left, because the database arbitrates rather than
- * a read-then-write in application code.
- */
-export const aiUsage = pgTable(
-  "ai_usage",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    creatorId: uuid("creator_id")
-      .notNull()
-      .references(() => creators.id),
-    usageDate: date("usage_date").notNull(),
-    messageCount: integer("message_count").notNull().default(0),
-  },
-  (table) => [uniqueIndex("ai_usage_creator_date_unique").on(table.creatorId, table.usageDate)]
 );
 
 /**
@@ -1251,5 +587,65 @@ export const userStreams = pgTable(
     index("user_stream_live_started_idx")
       .on(table.startedAt.desc())
       .where(sql`${table.status} = 'live'`),
+  ]
+);
+
+/**
+ * A community owned by an `app_user`.
+ *
+ * This is NOT the `community` table that was dropped in Phase 1. That one hung
+ * off `creator`, a separate identity with no relationship to `app_user` and no
+ * login path since its routes were deleted. The name is reused because the
+ * table it named is gone and the product's central concept should have it.
+ */
+export const communities = pgTable(
+  "community",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ownerId: uuid("owner_id")
+      .notNull()
+      .references(() => appUsers.id),
+    name: varchar("name", { length: 120 }).notNull(),
+    slug: varchar("slug", { length: 60 }).notNull().unique(),
+    category: varchar("category", { length: 64 }).notNull(),
+    description: varchar("description", { length: 300 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("community_owner_idx").on(table.ownerId),
+    // The browse page's default listing is "newest in this category", and its
+    // unfiltered listing is "newest overall" — the leading column is skipped
+    // for the second, which Postgres allows at a cost this table's size makes
+    // irrelevant.
+    index("community_category_created_idx").on(table.category, table.createdAt),
+  ]
+);
+
+/**
+ * Membership. One row per person per community, including the owner — a
+ * community with no members is not a state this app can reach, because
+ * `CreateCommunity` writes both rows in one transaction.
+ */
+export const communityMembers = pgTable(
+  "community_member",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    communityId: uuid("community_id")
+      .notNull()
+      .references(() => communities.id),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => appUsers.id),
+    role: varchar("role", { length: 16 }).notNull().default("member"),
+    joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // Joining is idempotent through this: the repository uses
+    // onConflictDoNothing on these two columns rather than catching a 23505.
+    uniqueIndex("community_member_unique").on(table.communityId, table.userId),
+    // "which communities am I in" — the sidebar and the browse page's
+    // viewer-is-member marking both read this way.
+    index("community_member_user_idx").on(table.userId),
+    index("community_member_community_joined_idx").on(table.communityId, table.joinedAt),
   ]
 );

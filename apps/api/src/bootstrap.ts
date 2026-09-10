@@ -15,6 +15,13 @@ import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
 import { DrizzleFollowRepository } from "./infrastructure/repositories/drizzle-follow.repository";
+import { DrizzleCommunityRepository } from "./infrastructure/repositories/drizzle-community.repository";
+import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
+import { CreateCommunity } from "./application/use-cases/create-community";
+import { GetCommunity } from "./application/use-cases/get-community";
+import { JoinCommunity } from "./application/use-cases/join-community";
+import { BrowseCommunities } from "./application/use-cases/browse-communities";
+import { ListCommunityMembers } from "./application/use-cases/list-community-members";
 import { DrizzlePostRepository } from "./infrastructure/repositories/drizzle-post.repository";
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
 import { DrizzleMediaRepository } from "./infrastructure/repositories/drizzle-media.repository";
@@ -189,6 +196,33 @@ export interface Dependencies {
    * particular exists to hold (never `email`, never `whatsapp_number`).
    */
   exploreUsers: ExploreUsers;
+  /**
+   * Phase 1 (communities-core). ONE repository, five consumers — the same
+   * arrangement `followRepository` has.
+   */
+  communityRepository: CommunityRepositoryPort;
+  /**
+   * `POST /communities`. Behind `requireUserAuth`. Enforces the two
+   * preconditions no constraint can — an unsluggable name and a reserved slug
+   * — before the write; see its own docstring for why a slug already taken is
+   * deliberately NOT among them.
+   */
+  createCommunity: CreateCommunity;
+  /**
+   * `GET /communities/:slug`. Public, unauthenticated, resolving an optional
+   * viewer — that is what lets one response distinguish an anonymous visitor
+   * from a signed-in non-member.
+   */
+  getCommunity: GetCommunity;
+  /**
+   * `POST`/`DELETE /communities/:slug/join`. ONE use-case for both
+   * directions, `FollowUser`'s arrangement, and idempotent either way.
+   */
+  joinCommunity: JoinCommunity;
+  /** `GET /communities` — the browse grid. Public, like `exploreUsers` above. */
+  browseCommunities: BrowseCommunities;
+  /** `GET /communities/:slug/members` — the roster. Public. */
+  listCommunityMembers: ListCommunityMembers;
   /**
    * Task 2 of posts-and-feed's `POST /users/posts`. Behind `requireUserAuth` —
    * see `routes/posts.ts` for why `PATCH`/`DELETE /users/posts/:id` share the
@@ -1482,6 +1516,18 @@ export function bootstrap(): Dependencies {
   // screen — see `resolveViewerFollowSet`.
   const exploreUsers = new ExploreUsers(userRepository, followRepository);
 
+  // Phase 1 (communities-core). One repository, five use cases — the same
+  // shape `followRepository` above and `postRepository` below both have.
+  // `createCommunity` and `getCommunity` take `userRepository` too: the
+  // detail response carries the owner's handle and display name, which live
+  // on `app_user` and not on `community`.
+  const communityRepository = new DrizzleCommunityRepository(db);
+  const createCommunity = new CreateCommunity(userRepository, communityRepository);
+  const getCommunity = new GetCommunity(userRepository, communityRepository);
+  const joinCommunity = new JoinCommunity(communityRepository);
+  const browseCommunities = new BrowseCommunities(communityRepository);
+  const listCommunityMembers = new ListCommunityMembers(communityRepository);
+
   // Task 2 of posts-and-feed. One repository, five use cases — mirrors
   // `followRepository`'s shape just above.
   //
@@ -1806,6 +1852,12 @@ export function bootstrap(): Dependencies {
     followUser,
     listFollows,
     exploreUsers,
+    communityRepository,
+    createCommunity,
+    getCommunity,
+    joinCommunity,
+    browseCommunities,
+    listCommunityMembers,
     createPost,
     maxPostImages,
     editPost,

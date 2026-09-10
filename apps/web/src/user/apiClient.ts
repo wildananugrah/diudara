@@ -1556,3 +1556,139 @@ export function startOwnStream(input: { title: string; visibility?: "members" })
 export function endOwnStream(id: string): Promise<{ ended: boolean }> {
   return apiFetch<{ ended: boolean }>(`/streams/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
+
+/**
+ * One card in the browse grid — mirrors the API's `CommunityListRow`
+ * (`apps/api/src/application/ports/community-repository.port.ts`). `memberCount`
+ * is computed by the query, not stored, so a card never shows a stale total.
+ */
+export interface CommunityListRow {
+  slug: string;
+  name: string;
+  category: string;
+  description: string | null;
+  memberCount: number;
+}
+
+/**
+ * A community's own page — mirrors the API's `CommunityDetail`
+ * (`apps/api/src/application/use-cases/community-detail.ts`) exactly.
+ *
+ * **`viewerIsMember` is `null` for a signed-out visitor and `false` for a
+ * signed-in non-member**, and the two must not be collapsed: the join button
+ * reads "Masuk untuk gabung" for the first and "Gabung" for the second, so
+ * treating `null` as `false` would offer an anonymous visitor a button that
+ * cannot work. Same contract, same reason, as `FollowListRow.viewerFollows`
+ * above.
+ */
+export interface CommunityDetail {
+  slug: string;
+  name: string;
+  category: string;
+  description: string | null;
+  memberCount: number;
+  ownerHandle: string;
+  ownerDisplayName: string;
+  viewerIsMember: boolean | null;
+  viewerIsOwner: boolean;
+  createdAt: string;
+}
+
+/** One row of a community's roster — the API's `CommunityMemberRow`. */
+export interface CommunityMemberRow {
+  handle: string;
+  displayName: string;
+  bio: string | null;
+  role: string;
+  joinedAt: string;
+}
+
+/**
+ * `GET /communities` — the Komunitas tab of Jelajah.
+ *
+ * Through `publicGet`, not `apiFetch`, for the reason that function's own
+ * docstring gives: this route NOTICES a session rather than requiring one, so
+ * an expired token must show the anonymous view instead of signing a visitor
+ * out mid-browse.
+ */
+export function browseCommunities(input: {
+  q?: string;
+  category?: string;
+} = {}): Promise<{ communities: CommunityListRow[] }> {
+  const params = new URLSearchParams();
+  if (input.q) params.set("q", input.q);
+  if (input.category) params.set("category", input.category);
+  const query = params.toString();
+  return publicGet<{ communities: CommunityListRow[] }>(
+    query === "" ? "/communities" : `/communities?${query}`,
+    "gagal memuat komunitas"
+  );
+}
+
+/**
+ * `GET /communities/:slug`. Public but not anonymous — the viewer's token is
+ * what makes `viewerIsMember` a boolean rather than `null`, so this MUST go
+ * through `publicGet` rather than a bare `fetch`.
+ */
+export function getCommunity(slug: string): Promise<CommunityDetail> {
+  return publicGet<CommunityDetail>(
+    `/communities/${encodeURIComponent(slug)}`,
+    "gagal memuat komunitas"
+  );
+}
+
+/** `GET /communities/:slug/members` — the roster. `capped` is the honest-truncation flag. */
+export function listCommunityMembers(
+  slug: string
+): Promise<{ members: CommunityMemberRow[]; capped: boolean }> {
+  return publicGet<{ members: CommunityMemberRow[]; capped: boolean }>(
+    `/communities/${encodeURIComponent(slug)}/members`,
+    "gagal memuat anggota"
+  );
+}
+
+/**
+ * `POST /communities` — *Buat komunitas*. Authenticated, so `apiFetch`.
+ *
+ * `description` is omitted rather than sent as `null` when empty: the API's
+ * schema has it `.optional()`, and a literal `null` would fail the string
+ * check rather than being read as "not given".
+ */
+export function createCommunity(input: {
+  name: string;
+  category: string;
+  description?: string;
+}): Promise<CommunityDetail> {
+  const payload: { name: string; category: string; description?: string } = {
+    name: input.name,
+    category: input.category,
+  };
+  if (input.description) payload.description = input.description;
+  return apiFetch<CommunityDetail>("/communities", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * `POST /communities/:slug/join`. Idempotent — joining a community you are
+ * already in answers the same `{ member: true }` — so a double tap is safe and
+ * the response can be applied straight to an optimistic button state, the same
+ * contract `followUser` has.
+ */
+export function joinCommunity(slug: string): Promise<{ member: boolean }> {
+  return apiFetch<{ member: boolean }>(`/communities/${encodeURIComponent(slug)}/join`, {
+    method: "POST",
+  });
+}
+
+/**
+ * `DELETE /communities/:slug/join`. Idempotent the same way, with ONE
+ * exception that is not idempotent at all: an owner leaving their own
+ * community is a 409 every time, never a no-op.
+ */
+export function leaveCommunity(slug: string): Promise<{ member: boolean }> {
+  return apiFetch<{ member: boolean }>(`/communities/${encodeURIComponent(slug)}/join`, {
+    method: "DELETE",
+  });
+}

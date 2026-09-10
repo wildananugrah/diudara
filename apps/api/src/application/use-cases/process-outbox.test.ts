@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client";
-import { activityLogs, outbox } from "../../db/schema";
+import { outbox, userTransactions } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { DrizzleOutboxRepository } from "../../infrastructure/repositories/drizzle-outbox.repository";
 import { OUTBOX_GRANT_ACCESS } from "../ports/outbox-repository.port";
@@ -348,11 +348,11 @@ describe("ProcessOutbox", () => {
           [OUTBOX_GRANT_ACCESS]: async () => {
             // A foreign-key violation, with a link-shaped value and a
             // PII-shaped value among the bound parameters.
-            await db.insert(activityLogs).values({
-              memberId: "00000000-0000-0000-0000-000000000000",
-              communityId: "00000000-0000-0000-0000-000000000000",
-              eventType: "0812-payer-pii",
-              metadata: { inviteLink: INVITE_LINK },
+            await db.insert(userTransactions).values({
+              userSubscriptionId: "00000000-0000-0000-0000-000000000000",
+              amount: 1,
+              gatewayReferenceId: "0812-payer-pii",
+              gatewayInvoiceUrl: INVITE_LINK,
             });
           },
         },

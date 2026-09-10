@@ -4,7 +4,7 @@ import { HTTPException } from "hono/http-exception";
 import { errorHandler } from "./error-handler";
 import { ConflictError, NotFoundError, UnauthorizedError, ValidationError } from "../application/errors";
 import { db } from "../db/client";
-import { creators } from "../db/schema";
+import { appUsers } from "../db/schema";
 import { resetDatabase } from "../db/test-helpers";
 
 /** Runs `fn` with console.error captured, returning everything it wrote. */
@@ -83,20 +83,26 @@ describe("errorHandler", () => {
 
   it("never writes a failed query's bound parameters to the log", async () => {
     // A DrizzleQueryError carries `.params` — the bound values of the failed
-    // statement. For an insert into `creator` that includes the argon2id
+    // statement. For an insert into `app_user` that includes the argon2id
     // password hash, so `console.error("...", err)` published it to stderr:
     // "password hashes never leave the repository layer", broken via the log.
     await resetDatabase();
     const passwordHash = await Bun.password.hash("supersecret123");
-    await db
-      .insert(creators)
-      .values({ name: "Racer", email: "dup@example.com", passwordHash });
+    await db.insert(appUsers).values({
+      handle: "racer1",
+      email: "dup@example.com",
+      passwordHash,
+      displayName: "Racer",
+    });
 
     let dbError: Error | undefined;
     try {
-      await db
-        .insert(creators)
-        .values({ name: "Racer", email: "dup@example.com", passwordHash });
+      await db.insert(appUsers).values({
+        handle: "racer2",
+        email: "dup@example.com",
+        passwordHash,
+        displayName: "Racer",
+      });
     } catch (err) {
       dbError = err as Error;
     }
@@ -155,15 +161,15 @@ describe("errorHandler", () => {
     // `err.message` alone gave the wrapper's text — for drizzle, the SQL statement —
     // and discarded the constraint violation on `.cause`, which is the only thing an
     // operator needs.
-    const wrapped = new Error("Failed query: insert into creator ...", {
-      cause: new Error('duplicate key value violates unique constraint "creator_email_unique"'),
+    const wrapped = new Error("Failed query: insert into app_user ...", {
+      cause: new Error('duplicate key value violates unique constraint "app_user_email_unique"'),
     });
 
     const logged = await captureStderr(async () => {
       await appThatThrows(wrapped).request("/boom");
     });
 
-    expect(logged).toContain("creator_email_unique");
+    expect(logged).toContain("app_user_email_unique");
   });
 
   it("truncates a very long message rather than logging it whole", async () => {

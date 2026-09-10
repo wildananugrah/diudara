@@ -15,3 +15,6 @@ dist
 # credentials in them.
 docs/tests/
 docs/image.png
+
+# Claude Code personal overrides
+.claude/settings.local.json

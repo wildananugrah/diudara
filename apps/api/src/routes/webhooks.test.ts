@@ -4,9 +4,7 @@ import { createApp } from "../app";
 import { bootstrap } from "../bootstrap";
 import { db } from "../db/client";
 import {
-  activityLogs,
   outbox,
-  subscriptions,
   userSubscriptions,
   userTiers,
   userTransactions,
@@ -474,26 +472,24 @@ describe("POST /webhooks/xendit", () => {
   });
 
   /**
-   * THE OUTBOX AND `activity_log` HAVE NO WRITER LEFT, and this is what says so.
+   * THE OUTBOX HAS NO WRITER LEFT, and this is what says so.
    *
    * Retire-telegram Task 5 deleted the community branch, which was the only code
-   * that wrote either — an `activity_log` "joined"/"renewed" row and a
-   * `grant_access` outbox row on every activation. The TABLES stay (the phase's
-   * rule is code goes, tables stay), so a re-added writer would be invisible
-   * except here. A membership grants access by BEING active (spec §8): there is
-   * no group to invite anybody to and no `member` row to audit against, so an
-   * activation that produced a queued row would be queuing work for a worker with
-   * no handler for it.
+   * that wrote a `grant_access` outbox row on activation; Phase 1 of
+   * communities-core then dropped `activity_log` and `subscription` outright
+   * (the retired community-centric model — see `db/schema.ts`), so there is
+   * nothing left to assert them empty against. A membership grants access by
+   * BEING active (spec §8): there is no group to invite anybody to, so an
+   * activation that produced a queued row would be queuing work for a worker
+   * with no handler for it.
    */
-  it("writes NOTHING outside the membership tables — no outbox row, no audit row", async () => {
+  it("writes NOTHING to the outbox", async () => {
     const a = app();
     const { externalId, invoiceId } = await buyMembership(a);
 
     expect((await post(a, verifiedEvent(externalId, invoiceId))).status).toBe(200);
 
     expect(await db.select().from(outbox)).toHaveLength(0);
-    expect(await db.select().from(activityLogs)).toHaveLength(0);
-    expect(await db.select().from(subscriptions)).toHaveLength(0);
   });
 
   it("is idempotent — a replayed delivery activates once and extends the period once", async () => {

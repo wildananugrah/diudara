@@ -2035,3 +2035,195 @@ button:disabled {
 .stream-watch:hover {
   background: var(--green-wash);
 }
+
+/* --- Jelajah's Komunitas tab (Phase 1). The chip row filters the grid below
+       it. Chips are TOGGLES, not links, so their state is `aria-pressed` and
+       the selectors key on it — there is no second `.active` class to fall out
+       of step with what a screen reader is told, the same rule the feed tabs
+       above follow for `aria-current`. ---------------------------------- */
+.category-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.category-chip {
+  font: inherit;
+  font-size: 0.8125rem;
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--ink-700);
+  background: var(--surface);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.category-chip:hover {
+  border-color: var(--kabut);
+}
+
+/* Measured: #ffffff on --langit is 8.88:1. */
+.category-chip[aria-pressed="true"] {
+  color: var(--surface);
+  background: var(--langit);
+  border-color: var(--langit);
+}
+
+/* --- The community grid. `auto-fill` rather than a fixed column count, so one
+       card on a phone and three on a desktop come from the same rule and the
+       page needs no breakpoint of its own. ------------------------------ */
+.community-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.75rem;
+}
+
+.community-card {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  padding: 0.875rem;
+}
+
+/* The tile's `background` and `color` are set INLINE, per community — see
+   `communityColor.ts` for the palette and the measured ink pairing. Nothing
+   here declares either, which is also why `contrast.test.ts` has no pair to
+   read on this rule. */
+.community-card-tile {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 0.75rem;
+  /* Large and bold on purpose: this is the size WCAG's 3:1 large-text
+     allowance applies at, which is what `--hijau-lepas` relies on. */
+  font-size: 1.375rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.community-card-body {
+  min-width: 0;
+}
+
+.community-card-name {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+
+.community-card-name a {
+  color: var(--ink-900);
+  text-decoration: none;
+}
+
+.community-card-name a:hover {
+  text-decoration: underline;
+}
+
+/* One line, two facts, separated by a dot the markup does not have to carry. */
+.community-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.community-card-meta .community-card-members::before {
+  content: "·";
+  margin-right: 0.5rem;
+}
+
+.community-card-description {
+  margin: 0.375rem 0 0;
+  font-size: 0.875rem;
+  /* Two lines, then an ellipsis: descriptions run to 300 characters and a card
+     that grows to fit one breaks the grid's rhythm for every card beside it. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* --- A community's own page (Phase 1). The banner is the reference's own
+       gradient. Its ink is declared here against the DARKER of the two stops,
+       which is the honest measurement: `contrast.test.ts` cannot read a
+       gradient, so the pair below names --langit-dark explicitly and the
+       gradient sits on `background-image`, above it. White on --langit-dark
+       (#1a3350) is 13.6:1; on the --langit end (#2b4c6f) it is 8.88:1, so the
+       whole sweep clears AA and the weaker end is the one recorded. ------ */
+.community-banner {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  padding: 1.25rem;
+  border-radius: 1rem;
+  margin: 0.75rem 0 1.25rem;
+  color: var(--surface);
+  background: var(--langit-dark);
+  background-image: linear-gradient(120deg, var(--langit), var(--langit-dark));
+}
+
+/* The tile's own background and ink are inline, per community — the same
+   arrangement `.community-card-tile` uses, and for the same reason. */
+.community-banner-tile {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 1rem;
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.community-banner-body {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.community-banner-name {
+  margin: 0 0 0.25rem;
+  font-size: 1.375rem;
+}
+
+/* Not `.muted`: that token is tuned for ink on --surface and would fall to
+   about 2:1 against this gradient. A flat opacity on white keeps it legible. */
+.community-banner-meta {
+  margin: 0;
+  font-size: 0.875rem;
+  opacity: 0.85;
+}
+
+.community-banner-description {
+  margin: 0.5rem 0 0;
+  font-size: 0.9375rem;
+  opacity: 0.9;
+}
+
+.community-banner-actions {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+/* --- "Pemilik" beside the owner's row in the roster. Measured: --ink-700 on
+       --ink-100 is 7.4:1. ------------------------------------------------ */
+.role-badge {
+  flex: none;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.1875rem 0.5rem;
+  border-radius: 999px;
+  color: var(--ink-700);
+  background: var(--ink-100);
+}
