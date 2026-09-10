@@ -1,18 +1,18 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import NotFoundPage from "../pages/NotFoundPage";
 import {
   UserApiError,
   getCommunity,
   getSessionUser,
-  joinCommunity,
-  leaveCommunity,
   listCommunityMembers,
   type CommunityDetail,
   type CommunityMemberRow,
 } from "./apiClient";
 import { communityColor, communityInk } from "./communityColor";
-import { describeCommunityFailure, describeRequestFailure } from "./errorCopy";
+import CommunityFeed from "./CommunityFeed";
+import CommunityJoinControl from "./CommunityJoinControl";
+import { describeRequestFailure } from "./errorCopy";
 import Header from "./shell/Header";
 
 type LoadState =
@@ -20,76 +20,6 @@ type LoadState =
   | { status: "not-found" }
   | { status: "error"; message: string }
   | { status: "ready"; community: CommunityDetail };
-
-/**
- * The join control, in its three mutually exclusive shapes.
- *
- * **The owner gets NOTHING — not a disabled button.** `DELETE
- * /communities/:slug/join` answers 409 for an owner every time, and this
- * project's rule is that a control is never rendered for an action that would
- * fail. A greyed-out *Keluar* would still say "this is a thing you could do
- * if only something were different", which is not true here and never will be.
- *
- * A signed-out visitor gets a LINK to `/masuk`, not a button: tapping it
- * cannot join anything, so it should navigate rather than fail. That is the
- * whole reason `viewerIsMember` is `null` rather than `false` for them —
- * `false` means "signed in, not a member", which is the one case that gets a
- * working *Gabung*.
- */
-function JoinControl({
-  community,
-  onChanged,
-}: {
-  community: CommunityDetail;
-  onChanged: (member: boolean) => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  if (community.viewerIsOwner) return null;
-  if (community.viewerIsMember === null) {
-    return (
-      <Link className="button-primary btn btn-sm" to="/masuk">
-        Masuk untuk gabung
-      </Link>
-    );
-  }
-
-  const member = community.viewerIsMember;
-
-  async function toggle() {
-    setBusy(true);
-    setError(null);
-    try {
-      const result = member
-        ? await leaveCommunity(community.slug)
-        : await joinCommunity(community.slug);
-      onChanged(result.member);
-    } catch (err) {
-      setError(describeCommunityFailure(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <>
-      <button
-        type="button"
-        className={member ? "button-secondary btn btn-sm" : "button-primary btn btn-sm"}
-        onClick={toggle}
-        disabled={busy}
-      >
-        {member ? "Keluar" : "Gabung"}
-      </button>
-      {error === null ? null : (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
-      )}
-    </>
-  );
-}
 
 function Roster({ members }: { members: CommunityMemberRow[] }) {
   if (members.length === 0) {
@@ -111,25 +41,64 @@ function Roster({ members }: { members: CommunityMemberRow[] }) {
 }
 
 /**
+ * The **Anggota** tab — Phase 1's roster, moved under the tab unchanged (spec
+ * §"The web app").
+ *
+ * A component of its own rather than a branch in the page, so its fetch does
+ * not exist at all while Diskusi is showing — "only the active half mounted so
+ * opening the roster does not fetch a feed nobody asked for" cuts both ways.
+ *
+ * The roster fails SILENTLY: a community that loaded is not broken because its
+ * member list was unreachable, and an empty roster under a working banner is a
+ * smaller lie than an error page over a community that exists.
+ */
+function AnggotaTab({ slug }: { slug: string }) {
+  const [members, setMembers] = useState<CommunityMemberRow[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listCommunityMembers(slug)
+      .then((result) => {
+        if (!cancelled) setMembers(result.members);
+      })
+      .catch(() => {
+        if (!cancelled) setMembers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
+
+  return (
+    <section className="section">
+      <h2>Anggota</h2>
+      <Roster members={members} />
+    </section>
+  );
+}
+
+/**
  * `/komunitas/:slug` — a community's own page.
  *
- * **NO TAB BAR.** One tab is not a tab bar, and this page has exactly one
- * thing on it: who is in the community. Phase 2 adds the feed and the tabs
- * that then earn their place.
+ * **The tab bar Phase 1 cut** (spec §"The web app"): **Diskusi** (default) and
+ * **Anggota** (Phase 1's roster). Jelajah's pattern exactly — `.feed-tabs`
+ * markup, `aria-current`, the tab in the URL as `?tab=` rather than component
+ * state so a link to either half works, and only the active half mounted so
+ * opening the roster does not fetch a feed nobody asked for.
+ *
+ * **The join / leave control stays in the banner** (ruling R12) — exactly
+ * where Phase 1 put it, so a non-member can join from either tab. `CommunityFeed`
+ * renders none of its own; it shows a one-line note where the composer would be.
  *
  * Loading, not-found and error are three separate early returns, the shape
- * `ProfilePage` already uses. A 404 renders the SAME shared `NotFoundPage`
- * every other unknown URL gets, with no hint that the slug happens to be free.
- *
- * The roster is fetched alongside the detail and fails SILENTLY: a community
- * that loaded is not broken because its member list was unreachable, and an
- * empty roster under a working banner is a smaller lie than an error page over
- * a community that exists.
+ * `ProfilePage` uses. A 404 renders the shared `NotFoundPage`, with no hint
+ * that the slug happens to be free.
  */
 export default function CommunityPage() {
   const { slug } = useParams<{ slug: string }>();
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") === "anggota" ? "anggota" : "diskusi";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
-  const [members, setMembers] = useState<CommunityMemberRow[]>([]);
   const signedIn = getSessionUser() !== null;
 
   useEffect(() => {
@@ -156,22 +125,6 @@ export default function CommunityPage() {
     // token this request carries: signing in in another tab must not leave a
     // stale "Masuk untuk gabung" on screen.
   }, [slug, signedIn]);
-
-  useEffect(() => {
-    if (slug === undefined) return;
-    let cancelled = false;
-    listCommunityMembers(slug)
-      .then((result) => {
-        if (!cancelled) setMembers(result.members);
-      })
-      .catch(() => {
-        // Silent by design — see the component docstring.
-        if (!cancelled) setMembers([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [slug]);
 
   if (load.status === "loading") {
     return (
@@ -230,8 +183,10 @@ export default function CommunityPage() {
             )}
           </div>
           <div className="community-banner-actions">
-            <JoinControl
-              community={community}
+            <CommunityJoinControl
+              slug={community.slug}
+              viewerIsMember={community.viewerIsMember}
+              viewerIsOwner={community.viewerIsOwner}
               onChanged={(member) =>
                 setLoad({
                   status: "ready",
@@ -239,9 +194,7 @@ export default function CommunityPage() {
                     ...community,
                     viewerIsMember: member,
                     // Moved locally rather than re-fetched: the count is the
-                    // one fact this action is known to have changed, and a
-                    // second round trip to learn it would leave the number
-                    // stale for as long as it took.
+                    // one fact this action is known to have changed.
                     memberCount: community.memberCount + (member ? 1 : -1),
                   },
                 })
@@ -250,10 +203,28 @@ export default function CommunityPage() {
           </div>
         </section>
 
-        <section className="section">
-          <h2>Anggota</h2>
-          <Roster members={members} />
-        </section>
+        <nav className="feed-tabs" aria-label="Tampilan komunitas">
+          <button type="button" aria-current={tab === "diskusi"} onClick={() => setParams({})}>
+            Diskusi
+          </button>
+          <button
+            type="button"
+            aria-current={tab === "anggota"}
+            onClick={() => setParams({ tab: "anggota" })}
+          >
+            Anggota
+          </button>
+        </nav>
+
+        {tab === "diskusi" ? (
+          <CommunityFeed
+            slug={community.slug}
+            viewerIsMember={community.viewerIsMember}
+            viewerIsOwner={community.viewerIsOwner}
+          />
+        ) : (
+          <AnggotaTab slug={community.slug} />
+        )}
       </main>
     </>
   );

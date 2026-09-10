@@ -16,6 +16,7 @@ import SiaranPage from "./user/SiaranPage";
 import JelajahPage from "./user/JelajahPage";
 import CommunityPage from "./user/CommunityPage";
 import CommunityCreatePage from "./user/CommunityCreatePage";
+import DiscussionPage from "./user/DiscussionPage";
 import { loadPostImageLimit, repairSplitSession } from "./user/apiClient";
 
 export function AppRoutes() {
@@ -91,6 +92,14 @@ export function AppRoutes() {
         */}
         <Route path="/komunitas/baru" element={<CommunityCreatePage />} />
         <Route path="/komunitas/:slug" element={<CommunityPage />} />
+        {/*
+          Task 9 (ruling R11): a community post on its own page, with its comment
+          thread — the link every Diskusi-tab card carries. Declared AFTER
+          `/komunitas/:slug` and (like every route in this block) above the
+          catch-all `/:handleParam`, which matches a single segment and could
+          never have claimed this three-segment path anyway.
+        */}
+        <Route path="/komunitas/:slug/diskusi/:postId" element={<DiscussionPage />} />
 
         {/*
           MOVED INSIDE THE SHELL on 2026-08-25, reversing an earlier ruling.

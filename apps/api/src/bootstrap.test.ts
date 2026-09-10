@@ -51,6 +51,9 @@ import { GetCommunity } from "./application/use-cases/get-community";
 import { JoinCommunity } from "./application/use-cases/join-community";
 import { BrowseCommunities } from "./application/use-cases/browse-communities";
 import { ListCommunityMembers } from "./application/use-cases/list-community-members";
+import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
+import { CreateComment, DeleteComment, ListComments } from "./application/use-cases/comments";
+import type { CommentRepositoryPort } from "./application/ports/comment-repository.port";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
 import type { PasswordResetRepositoryPort } from "./application/ports/password-reset-repository.port";
@@ -74,7 +77,7 @@ import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-
 import type { MediaRepositoryPort } from "./application/ports/media-repository.port";
 import { UploadMedia } from "./application/use-cases/upload-media";
 import { MediaEntitlement } from "./application/use-cases/media-entitlement";
-import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
+import { GetPost, ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { ClockPort } from "./application/ports/clock.port";
 import type { WebhookEventRepositoryPort } from "./application/ports/webhook-event-repository.port";
@@ -333,6 +336,9 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
   async findBySlug() {
     return null;
   },
+  async findById() {
+    return null;
+  },
   async browse() {
     return [];
   },
@@ -355,15 +361,17 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
 
 /** Task 2 of posts-and-feed's repository, faked the same shallow way `fakeFollowRepository` is above. */
 const fakePostRepository: PostRepositoryPort = {
-  async create(_authorId, body) {
+  async create(input) {
     return {
       id: "fake-post",
-      body,
+      body: input.body,
       createdAt: new Date(0),
       editedAt: null,
       // Distinct from any viewer id used in this file's smoke tests.
       authorId: "fake-author",
       visibility: "public",
+      communityId: null,
+      type: "diskusi",
       authorHandle: "fake",
       authorDisplayName: "Fake",
     };
@@ -373,6 +381,10 @@ const fakePostRepository: PostRepositoryPort = {
   },
   /** Same reason as `ownershipOf` above: unused by these smoke tests. */
   async lockForEdit() {
+    return null;
+  },
+  /** `GetPost`'s single-row read; unused by these smoke tests. */
+  async getById() {
     return null;
   },
   // Phase 6's `MediaEntitlement` reads this. `null` is the REFUSING answer —
@@ -394,6 +406,36 @@ const fakePostRepository: PostRepositoryPort = {
   async listByAuthor() {
     return [];
   },
+  async listByCommunity() {
+    return [];
+  },
+};
+
+/**
+ * Task 6 of community-feed. Every method answers "nothing here" — these two
+ * tests pin bootstrap wiring, not the comment paths.
+ */
+const fakeCommentRepository: CommentRepositoryPort = {
+  async create(postId, authorId, body) {
+    return {
+      id: "fake-comment",
+      body,
+      createdAt: new Date(0),
+      authorId,
+      authorHandle: "fake",
+      authorDisplayName: "Fake",
+    };
+  },
+  async listForPost() {
+    return [];
+  },
+  async countForPosts() {
+    return new Map();
+  },
+  async ownershipOf() {
+    return null;
+  },
+  async softDelete() {},
 };
 
 /**
@@ -605,10 +647,22 @@ describe("Dependencies (composition root contract)", () => {
       joinCommunity: new JoinCommunity(fakeCommunityRepository),
       browseCommunities: new BrowseCommunities(fakeCommunityRepository),
       listCommunityMembers: new ListCommunityMembers(fakeCommunityRepository),
+      createCommunityPost: new CreateCommunityPost(
+        fakeCommunityRepository,
+        new CreatePost(fakePostWriteUnitOfWork)
+      ),
+      listCommunityFeed: new ListCommunityFeed(
+        fakeCommunityRepository,
+        fakePostRepository,
+        fakeMediaRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock,
+        fakeCommentRepository
+      ),
       createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,
       editPost: new EditPost(fakePostWriteUnitOfWork),
-      deletePost: new DeletePost(fakePostRepository),
+      deletePost: new DeletePost(fakePostRepository, fakeCommunityRepository),
       listFeed: new ListFeed(
         fakePostRepository,
         fakeMediaRepository,
@@ -621,6 +675,23 @@ describe("Dependencies (composition root contract)", () => {
         fakeMediaRepository,
         fakeUserSubscriptionRepository,
         fakeClock
+      ),
+      getPost: new GetPost(
+        fakePostRepository,
+        fakeMediaRepository,
+        fakeUserSubscriptionRepository,
+        fakeClock
+      ),
+      listComments: new ListComments(fakeCommentRepository),
+      createComment: new CreateComment(
+        fakeCommentRepository,
+        fakePostRepository,
+        fakeCommunityRepository
+      ),
+      deleteComment: new DeleteComment(
+        fakeCommentRepository,
+        fakePostRepository,
+        fakeCommunityRepository
       ),
       requestPasswordReset: new RequestPasswordReset(
         fakeUserRepository,

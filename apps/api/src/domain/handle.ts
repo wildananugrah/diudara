@@ -35,6 +35,11 @@ export function isValidHandle(normalised: string): boolean {
  * `/dashboard`.
  */
 export const RESERVED_HANDLES: ReadonlySet<string> = new Set([
+  // Added with DELETE /users/comments/:id (removing a comment). The guard
+  // test derives this list from the route table, so this literal segment
+  // under `/users` must be reserved or a person could register `comments`
+  // and shadow the route.
+  "comments",
   "explore",
   "feed",
   "limits",

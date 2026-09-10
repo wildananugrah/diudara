@@ -115,6 +115,10 @@ class FakePosts implements PostRepositoryPort {
   async lockForEdit(): Promise<never> {
     return this.unused();
   }
+  /** `GetPost`'s read, not the gate's — nothing in this file drives it. */
+  async getById(): Promise<never> {
+    return this.unused();
+  }
   async updateBody(): Promise<never> {
     return this.unused();
   }
@@ -128,6 +132,9 @@ class FakePosts implements PostRepositoryPort {
     return this.unused();
   }
   async listByAuthor(): Promise<never> {
+    return this.unused();
+  }
+  async listByCommunity(): Promise<never> {
     return this.unused();
   }
 }

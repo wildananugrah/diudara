@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import CommunityPage from "./CommunityPage";
 import { setUserSession } from "./apiClient";
 
@@ -58,11 +58,14 @@ afterEach(() => {
   cleanup();
 });
 
-/** Answers the detail and roster reads; `overrides` patches the detail. */
+/** Answers the detail, roster and feed reads; `overrides` patches the detail. */
 function stubFetch(overrides: Partial<typeof DETAIL> = {}, calls: string[] = []) {
   global.fetch = mock(async (url: string, init?: RequestInit) => {
     calls.push(`${init?.method ?? "GET"} ${url}`);
     if (url.includes("/members")) return jsonResponse(MEMBERS);
+    // The Diskusi tab's CommunityFeed reads this — an empty page keeps the
+    // default view quiet in the banner/join tests below (Phase 2).
+    if (url.includes("/posts")) return jsonResponse({ posts: [], nextCursor: null });
     if (init?.method === "POST") return jsonResponse({ member: true });
     if (init?.method === "DELETE") return jsonResponse({ member: false });
     return jsonResponse({ ...DETAIL, ...overrides });
@@ -70,11 +73,33 @@ function stubFetch(overrides: Partial<typeof DETAIL> = {}, calls: string[] = [])
   return calls;
 }
 
-function renderPage() {
+function renderPage(initialEntry = "/komunitas/kelas-desain") {
   return render(
-    <MemoryRouter initialEntries={["/komunitas/kelas-desain"]}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/komunitas/:slug" element={<CommunityPage />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+/** Renders the page beside a probe that prints the router's current search string. */
+function renderPageWithSearch(initialEntry = "/komunitas/kelas-desain") {
+  function Search() {
+    return <span data-testid="search">{useLocation().search}</span>;
+  }
+  return render(
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <Routes>
+        <Route
+          path="/komunitas/:slug"
+          element={
+            <>
+              <CommunityPage />
+              <Search />
+            </>
+          }
+        />
       </Routes>
     </MemoryRouter>
   );
@@ -134,7 +159,9 @@ describe("CommunityPage", () => {
 
   it("lists the roster with the owner first", async () => {
     stubFetch();
-    renderPage();
+    // roster moved under a tab in Phase 2 — Diskusi is the default, so this
+    // renders at ?tab=anggota to still see it.
+    renderPage("/komunitas/kelas-desain?tab=anggota");
 
     const rows = await screen.findAllByRole("link", { name: /Wildan|Rina/ });
     expect(rows.map((row) => row.getAttribute("href")).join(",")).toBe("/@wildan,/@rina");
@@ -157,5 +184,49 @@ describe("CommunityPage", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toBe("Server sedang bermasalah. Coba lagi sebentar lagi.");
+  });
+});
+
+/**
+ * Task 8 — the tab bar Phase 1 cut. Two tabs, Jelajah's pattern: `.feed-tabs`
+ * markup, `aria-current`, the tab in the URL as `?tab=`, and only the active
+ * half mounted (the inactive one issues no request).
+ */
+describe("CommunityPage — the Diskusi / Anggota tab bar", () => {
+  it("has the two tabs, with Diskusi current by default, and reads no roster", async () => {
+    const calls = stubFetch();
+    renderPage();
+
+    await screen.findByText("4 anggota · Skill Digital");
+    const diskusi = screen.getByRole("button", { name: "Diskusi" });
+    const anggota = screen.getByRole("button", { name: "Anggota" });
+    expect(diskusi.getAttribute("aria-current")).toBe("true");
+    expect(anggota.getAttribute("aria-current")).toBe("false");
+    // Symmetric with the Anggota-tab test below: only the active half mounts,
+    // so the default view never calls listCommunityMembers.
+    expect(calls.some((call) => call.includes("/members"))).toBe(false);
+  });
+
+  it("shows the roster and not the feed at ?tab=anggota, and does not read the feed", async () => {
+    const calls = stubFetch();
+    renderPage("/komunitas/kelas-desain?tab=anggota");
+
+    const rows = await screen.findAllByRole("link", { name: /Wildan|Rina/ });
+    expect(rows.map((row) => row.getAttribute("href")).join(",")).toBe("/@wildan,/@rina");
+    expect(screen.getByRole("button", { name: "Anggota" }).getAttribute("aria-current")).toBe("true");
+    // Only the active half mounts — the feed endpoint is never hit.
+    expect(calls.some((call) => call.includes("/posts"))).toBe(false);
+    expect(screen.queryAllByLabelText("Apa yang terjadi?").length).toBe(0);
+  });
+
+  it("puts the tab in the URL when Anggota is clicked", async () => {
+    stubFetch();
+    renderPageWithSearch();
+
+    await screen.findByText("4 anggota · Skill Digital");
+    fireEvent.click(screen.getByRole("button", { name: "Anggota" }));
+
+    expect(screen.getByTestId("search").textContent).toBe("?tab=anggota");
+    await screen.findAllByRole("link", { name: /Wildan|Rina/ });
   });
 });

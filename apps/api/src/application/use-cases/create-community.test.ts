@@ -94,6 +94,9 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
   async findBySlug(): Promise<CommunityRecord | null> {
     throw new Error("not used in these tests");
   }
+  async findById(): Promise<CommunityRecord | null> {
+    throw new Error("not used in these tests");
+  }
   async browse(): Promise<never> {
     throw new Error("not used in these tests");
   }

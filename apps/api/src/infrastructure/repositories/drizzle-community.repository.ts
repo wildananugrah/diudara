@@ -97,6 +97,20 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
   }
 
   /**
+   * The by-id twin of `findBySlug` — same projection, keyed on the primary
+   * key. `DeleteComment` and `DeletePost` reach a community through a post's
+   * `community_id`, which is an id, so a slug lookup does not serve them.
+   */
+  async findById(id: string): Promise<CommunityRecord | null> {
+    const [row] = await this.db
+      .select(communityColumns)
+      .from(communities)
+      .where(eq(communities.id, id))
+      .limit(1);
+    return row ?? null;
+  }
+
+  /**
    * One query fills the browse grid, member counts included: a LEFT JOIN onto
    * `community_member` grouped by the community's primary key. LEFT, not
    * INNER — a community can only reach zero members if its owner's row is

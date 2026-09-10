@@ -27,7 +27,10 @@ import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-
 import { DrizzleMediaRepository } from "./infrastructure/repositories/drizzle-media.repository";
 import { UploadMedia } from "./application/use-cases/upload-media";
 import { MediaEntitlement } from "./application/use-cases/media-entitlement";
-import { ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
+import { GetPost, ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
+import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
+import { CreateComment, DeleteComment, ListComments } from "./application/use-cases/comments";
+import { DrizzleCommentRepository } from "./infrastructure/repositories/drizzle-comment.repository";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
 import { DrizzlePasswordResetRepository } from "./infrastructure/repositories/drizzle-password-reset.repository";
@@ -224,6 +227,14 @@ export interface Dependencies {
   /** `GET /communities/:slug/members` — the roster. Public. */
   listCommunityMembers: ListCommunityMembers;
   /**
+   * `POST /communities/:slug/posts`. Behind `requireUserAuth`. An
+   * authorisation wrapper around `createPost`: unknown slug 404s, a
+   * non-member 403s a discussion, a non-owner 403s a `pengumuman`.
+   */
+  createCommunityPost: CreateCommunityPost;
+  /** `GET /communities/:slug/posts` — the community's chronological feed. Public, keyset-paged. */
+  listCommunityFeed: ListCommunityFeed;
+  /**
    * Task 2 of posts-and-feed's `POST /users/posts`. Behind `requireUserAuth` —
    * see `routes/posts.ts` for why `PATCH`/`DELETE /users/posts/:id` share the
    * same guard while the two `GET` routes on the same router (`/users/feed`,
@@ -256,6 +267,18 @@ export interface Dependencies {
   listFeed: ListFeed;
   /** `GET /users/:handle/posts`. 404s an unknown handle, same as `getUserProfile`/`listFollows`. */
   listUserPosts: ListUserPosts;
+  /**
+   * `GET /users/posts/:id`. Public, resolving an optional viewer for the
+   * paywall gate. A `NotFoundError` (unknown or soft-deleted id) surfaces
+   * as HTTP 404 through `app.onError`.
+   */
+  getPost: GetPost;
+  /** `GET /users/posts/:id/comments` — the thread under one post. Public. */
+  listComments: ListComments;
+  /** `POST /users/posts/:id/comments`. Behind `requireUserAuth`; only a member of the post's community may comment. */
+  createComment: CreateComment;
+  /** `DELETE /users/comments/:id`. Behind `requireUserAuth`; the comment's author or the community owner, idempotent. */
+  deleteComment: DeleteComment;
   /**
    * Task 5's `POST /users/password-reset/request`. Always answers
    * `{ ok: true }` — see the use-case's own docstring for the enumeration-safety
@@ -1527,6 +1550,11 @@ export function bootstrap(): Dependencies {
   const joinCommunity = new JoinCommunity(communityRepository);
   const browseCommunities = new BrowseCommunities(communityRepository);
   const listCommunityMembers = new ListCommunityMembers(communityRepository);
+  // Task 6 of community-feed. ONE `DrizzleCommentRepository`, shared by
+  // `ListComments`, `CreateComment`, `DeleteComment` and `ListCommunityFeed`
+  // below — the same one-repository-many-consumers shape `communityRepository`
+  // and `postRepository` both have.
+  const commentRepository = new DrizzleCommentRepository(db);
 
   // Task 2 of posts-and-feed. One repository, five use cases — mirrors
   // `followRepository`'s shape just above.
@@ -1553,7 +1581,7 @@ export function bootstrap(): Dependencies {
   const postWriteUnitOfWork = new DrizzlePostWriteUnitOfWork(db);
   const createPost = new CreatePost(postWriteUnitOfWork);
   const editPost = new EditPost(postWriteUnitOfWork);
-  const deletePost = new DeletePost(postRepository);
+  const deletePost = new DeletePost(postRepository, communityRepository);
   // The SAME `userSubscriptionRepository` and the SAME `clock` `isMemberOf`
   // and `listSubscribers` read, so the paywall gate cannot disagree with the
   // rest of the product about who is a member or about what time it is.
@@ -1565,6 +1593,30 @@ export function bootstrap(): Dependencies {
     userSubscriptionRepository,
     clock
   );
+  // Task 5 of community-feed's `GET /users/posts/:id`. The SAME four
+  // collaborators `listFeed` reads, so "who may see a gated post's images"
+  // cannot drift between the single-post endpoint and the feed.
+  const getPost = new GetPost(postRepository, mediaRepository, userSubscriptionRepository, clock);
+  // Task 5's `POST /communities/:slug/posts` — an authorisation wrapper that
+  // takes the already-constructed `createPost`, not raw repositories.
+  const createCommunityPost = new CreateCommunityPost(communityRepository, createPost);
+  // Task 5's `GET /communities/:slug/posts`. Reuses `paginate` through the
+  // same `mediaRepository`/`userSubscriptionRepository`/`clock` the feeds do,
+  // plus `commentRepository` for the one batched comment-count query.
+  const listCommunityFeed = new ListCommunityFeed(
+    communityRepository,
+    postRepository,
+    mediaRepository,
+    userSubscriptionRepository,
+    clock,
+    commentRepository
+  );
+  // Task 6's comment endpoints on `/users`. Constructor arg order is
+  // (comments, posts, communities) for the two that take all three — see
+  // `application/use-cases/comments.ts`.
+  const listComments = new ListComments(commentRepository);
+  const createComment = new CreateComment(commentRepository, postRepository, communityRepository);
+  const deleteComment = new DeleteComment(commentRepository, postRepository, communityRepository);
   // BARRIER TWO (spec §6.2), built from the very same four collaborators the
   // feed's gate above reads — the same `userSubscriptionRepository` and the
   // same `clock` as `isMemberOf`, `listSubscribers` and `listFeed`. Two
@@ -1858,12 +1910,18 @@ export function bootstrap(): Dependencies {
     joinCommunity,
     browseCommunities,
     listCommunityMembers,
+    createCommunityPost,
+    listCommunityFeed,
     createPost,
     maxPostImages,
     editPost,
     deletePost,
     listFeed,
     listUserPosts,
+    getPost,
+    listComments,
+    createComment,
+    deleteComment,
     requestPasswordReset,
     completePasswordReset,
     connectUserPayout,

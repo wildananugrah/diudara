@@ -1,5 +1,6 @@
 import { MAX_POST_BODY_LENGTH } from "@diudara/shared";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../errors";
+import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 import type { MediaRepositoryPort } from "../ports/media-repository.port";
 import type { PostWriteUnitOfWorkPort } from "../ports/post-write-unit-of-work.port";
 import type { PostRepositoryPort } from "../ports/post-repository.port";
@@ -174,6 +175,21 @@ export class CreatePost {
      * nothing here for an omitted field to preserve.
      */
     visibility?: string;
+    /**
+     * The owning community, or omitted for a personal post. Set only by
+     * `CreateCommunityPost`, which has already resolved the slug and checked
+     * the author may post here. Passed to `posts.create` ONLY when present
+     * (never as explicit `undefined`), so an omitted value leaves the column
+     * at its `NULL` default.
+     */
+    communityId?: string;
+    /**
+     * `diskusi` | `pengumuman`, on a community post. Omitted for a personal
+     * post, where the column default (`diskusi`) and the CHECK constraint
+     * agree it is the only value — passed through the same omitted-means-
+     * default way `communityId` is.
+     */
+    type?: string;
   }): Promise<PostView> {
     const body = requireBody(input.body);
     const mediaIds = input.mediaIds ?? [];
@@ -186,14 +202,25 @@ export class CreatePost {
       // call is producing, before any row exists to leave behind.
       requireImageWhenLocked(visibility, mediaIds.length);
 
-      const row = await posts.create(input.authorId, body, visibility);
+      const row = await posts.create({
+        authorId: input.authorId,
+        body,
+        visibility,
+        // Spread in ONLY when present — an explicit `undefined` would ask the
+        // repository to write `NULL` over the column default. `CreateCommunityPost`
+        // is the only caller that passes either.
+        ...(input.communityId === undefined ? {} : { communityId: input.communityId }),
+        ...(input.type === undefined ? {} : { type: input.type }),
+      });
       // `locked: false` — NEVER copy this to a read path. Every `toPostView` in
       // this file answers the post's OWN AUTHOR, who is the one person the
       // paywall never applies to: `CreatePost` and `EditPost` have already
       // proven ownership before reaching here. A read path must instead ask
       // `read-posts.ts`'s gate, which needs a viewer id and a membership lookup
       // that this file has neither of.
-      if (mediaIds.length === 0) return toPostView(row, [], false);
+      //
+      // `commentCount: 0` — a brand-new post genuinely has none, community or not.
+      if (mediaIds.length === 0) return toPostView(row, [], false, 0);
 
       // Inside the SAME transaction as `posts.create` above: `claim` losing
       // the sweep race and `requireFullyClaimed` throwing now rolls the post
@@ -204,8 +231,9 @@ export class CreatePost {
       // Read back rather than echoing the ids: what the client gets is what a
       // reload would show, ordered by the `position` that was actually stored.
       // `locked: false` for the reason given at the call site above — this is
-      // the author's own post coming straight back to them.
-      return toPostView(row, await media.listForPost(row.id), false);
+      // the author's own post coming straight back to them. `commentCount: 0`
+      // for the reason given there too.
+      return toPostView(row, await media.listForPost(row.id), false, 0);
     });
   }
 }
@@ -305,23 +333,49 @@ export class EditPost {
       // that the editor IS the author, and an author is never locked out of
       // their own post. See `CreatePost`'s call site for why a read path
       // must never copy this literal.
-      return toPostView(row, await media.listForPost(input.postId), false);
+      //
+      // `commentCount: 0` is a deliberate Phase 2 simplification, not an
+      // oversight: every post editable through a Phase 2 UI is personal (no
+      // discussion-edit surface is built), and a personal post's count is
+      // always zero. A later phase that adds discussion editing wires the
+      // real count here.
+      return toPostView(row, await media.listForPost(input.postId), false, 0);
     });
   }
 }
 
 export class DeletePost {
-  constructor(private readonly posts: PostRepositoryPort) {}
+  constructor(
+    private readonly posts: PostRepositoryPort,
+    private readonly communities: CommunityRepositoryPort
+  ) {}
 
   /**
    * Idempotent: deleting an already-deleted post returns normally. A button that
    * errors when the state already matches what you asked for is worse than one
    * that agrees — the same ruling follow/unfollow made.
+   *
+   * The author may always delete. Failing that, the owner of the community
+   * the post belongs to may — moderation by REMOVAL only. `EditPost` gets no
+   * matching rule, deliberately: an owner takes a member's post down, they do
+   * not rewrite it under the member's name. A personal post has a null
+   * `communityId` and no such override.
    */
   async execute(input: { deleterId: string; postId: string }): Promise<void> {
     const owned = await this.posts.ownershipOf(input.postId);
     if (owned === null) throw new NotFoundError("post not found");
-    if (owned.authorId !== input.deleterId) throw new ForbiddenError(NOT_YOURS_MESSAGE);
+    if (
+      owned.authorId !== input.deleterId &&
+      !(await this.ownsCommunity(owned.communityId, input.deleterId))
+    ) {
+      throw new ForbiddenError(NOT_YOURS_MESSAGE);
+    }
     await this.posts.softDelete(input.postId);
+  }
+
+  private async ownsCommunity(communityId: string | null, deleterId: string): Promise<boolean> {
+    if (communityId === null) return false;
+    const community = await this.communities.findById(communityId);
+    return community !== null && community.ownerId === deleterId;
   }
 }

@@ -153,12 +153,14 @@ describe("POST /users/posts", () => {
     expect(Object.keys(body).sort()).toEqual([
       "author",
       "body",
+      "commentCount",
       "createdAt",
       "editedAt",
       "id",
       "lockedMediaCount",
       "media",
       "membersOnly",
+      "type",
     ]);
     expect(body.media).toEqual([]);
     // The author of a brand-new public post: nothing is gated and nothing is
@@ -687,12 +689,14 @@ describe("media on posts", () => {
     expect(Object.keys(post).sort()).toEqual([
       "author",
       "body",
+      "commentCount",
       "createdAt",
       "editedAt",
       "id",
       "lockedMediaCount",
       "media",
       "membersOnly",
+      "type",
     ]);
     expect(post.media).toHaveLength(1);
     expect(Object.keys(post.media[0]).sort()).toEqual(["height", "id", "width"]);
@@ -730,12 +734,14 @@ describe("media on posts", () => {
     const POST_KEYS = [
       "author",
       "body",
+      "commentCount",
       "createdAt",
       "editedAt",
       "id",
       "lockedMediaCount",
       "media",
       "membersOnly",
+      "type",
     ];
     const MEDIA_KEYS = ["height", "id", "width"];
     for (const post of [patched, feed.posts[0], profile.posts[0]]) {
@@ -1250,12 +1256,14 @@ describe("members-only posts: the projection never sends a media id to a non-mem
     const POST_KEYS = [
       "author",
       "body",
+      "commentCount",
       "createdAt",
       "editedAt",
       "id",
       "lockedMediaCount",
       "media",
       "membersOnly",
+      "type",
     ];
     expect(Object.keys(locked).sort()).toEqual(POST_KEYS);
     expect(Object.keys(unlocked).sort()).toEqual(POST_KEYS);
@@ -1388,5 +1396,90 @@ describe("members-only posts: the projection never sends a media id to a non-mem
     expect(feed.posts[0].media.map((image: { id: string }) => image.id)).toEqual([mediaId]);
     expect(feed.posts[0].membersOnly).toBe(false);
     expect(feed.posts[0].lockedMediaCount).toBe(0);
+  });
+});
+
+/**
+ * Task 7: the single-post, comment-list, comment-create and comment-delete
+ * routes on this router, plus the community feed's cousin — all driven
+ * through the real `createApp`, exactly like the feed tests above.
+ */
+async function makeCommunityWithPost(a: ReturnType<typeof app>) {
+  const ownerToken = await tokenForValidUser(a, {
+    handle: "owner",
+    email: "owner@example.com",
+  });
+  await a.request("/communities", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authed(ownerToken) },
+    body: JSON.stringify({ name: "Kelas Fisika", category: "Skill Digital" }),
+  });
+  const created = await a.request("/communities/kelas-fisika/posts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authed(ownerToken) },
+    body: JSON.stringify({ body: "diskusi pertama" }),
+  });
+  const post = await created.json();
+  return { ownerToken, slug: "kelas-fisika", postId: post.id as string };
+}
+
+describe("GET /users/posts/:id", () => {
+  it("answers a community post signed out — 200", async () => {
+    const a = app();
+    const { postId } = await makeCommunityWithPost(a);
+
+    const res = await a.request(`/users/posts/${postId}`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.id).toBe(postId);
+  });
+
+  it("is 404 for a deleted post", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const created = await (await createPost(a, token, "akan dihapus")).json();
+    await a.request(`/users/posts/${created.id}`, { method: "DELETE", headers: authed(token) });
+
+    const res = await a.request(`/users/posts/${created.id}`);
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("comment routes on /users", () => {
+  it("POST /users/posts/:id/comments requires auth — 401", async () => {
+    const res = await app().request(
+      "/users/posts/aaaaaaaa-0000-4000-8000-000000000000/comments",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: "halo" }) }
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("DELETE /users/comments/:id by a stranger is 403", async () => {
+    const a = app();
+    const { slug, postId } = await makeCommunityWithPost(a);
+    const memberToken = await tokenForValidUser(a, {
+      handle: "rina",
+      email: "rina@example.com",
+    });
+    await a.request(`/communities/${slug}/join`, { method: "POST", headers: authed(memberToken) });
+    const commentRes = await a.request(`/users/posts/${postId}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(memberToken) },
+      body: JSON.stringify({ body: "komentar saya" }),
+    });
+    const comment = await commentRes.json();
+    const strangerToken = await tokenForValidUser(a, {
+      handle: "budi",
+      email: "budi@example.com",
+    });
+
+    const res = await a.request(`/users/comments/${comment.id}`, {
+      method: "DELETE",
+      headers: authed(strangerToken),
+    });
+
+    expect(res.status).toBe(403);
   });
 });

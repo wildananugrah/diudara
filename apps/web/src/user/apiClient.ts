@@ -1021,6 +1021,43 @@ export interface PostView {
    * the composer work — the lock panel that renders it is Task 7.
    */
   lockedMediaCount: number;
+  /**
+   * The post's kind — `"diskusi"` or `"pengumuman"` for a community post
+   * (the values live in `COMMUNITY_POST_TYPES` in `@diudara/shared`),
+   * `"diskusi"` for a personal one. `PostCard` reads it to show a
+   * `Pengumuman` badge.
+   *
+   * **OPTIONAL here, unlike the server's always-present field.** Three
+   * existing `PostView`-typed test fixtures — `PostFeed`, `Beranda`, the
+   * profile — predate this field and Task 8's brief forbids touching them
+   * (hard rule 3: existing PostCard/PostFeed/Beranda/profile tests stay
+   * green untouched). Making it required is a compile break across those
+   * three files. `PostCard` reads it defensively for the same reason.
+   */
+  type?: string;
+  /**
+   * How many undeleted comments the post carries. `0` from `GET
+   * /users/posts/:id` regardless of the real number — that endpoint has no
+   * comment port (Task 5) — so a discussion view derives its own count from
+   * `listComments(...).length`, never from here. Optional for the same
+   * fixture reason as `type` above.
+   */
+  commentCount?: number;
+}
+
+/**
+ * One comment as the API renders it — mirrors the server's `toCommentView`
+ * (`apps/api/src/application/use-cases/post-views.ts`): no `authorId`, no
+ * `postId`, just what a thread row shows.
+ */
+export interface CommentView {
+  id: string;
+  body: string;
+  createdAt: string;
+  author: {
+    handle: string;
+    displayName: string;
+  };
 }
 
 /** One keyset page of posts — `nextCursor` is `null` on the last page, never absent. */
@@ -1134,6 +1171,72 @@ export function editPost(
 /** `DELETE /users/posts/:id` — idempotent 200. */
 export function deletePost(id: string): Promise<void> {
   return apiFetch<void>(`/users/posts/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/**
+ * `GET /communities/:slug/posts` — PUBLIC (signed out included), backs the
+ * Diskusi tab. Through `publicGet` for the same reason `listUserPosts` is: the
+ * route notices a session rather than requiring one.
+ */
+export function listCommunityPosts(slug: string, before?: string | null): Promise<FeedPage> {
+  const params = new URLSearchParams();
+  if (before !== undefined && before !== null) params.set("before", before);
+  const search = params.toString();
+  return publicGet<FeedPage>(
+    `/communities/${encodeURIComponent(slug)}/posts${search === "" ? "" : `?${search}`}`,
+    "gagal memuat diskusi"
+  );
+}
+
+/** `GET /users/posts/:id` — public, one post for the discussion view. */
+export function getPost(id: string): Promise<PostView> {
+  return publicGet<PostView>(`/users/posts/${encodeURIComponent(id)}`, "gagal memuat kiriman");
+}
+
+/** `GET /users/posts/:id/comments` — public. */
+export function listComments(postId: string): Promise<CommentView[]> {
+  return publicGet<CommentView[]>(
+    `/users/posts/${encodeURIComponent(postId)}/comments`,
+    "gagal memuat komentar"
+  );
+}
+
+/**
+ * `POST /communities/:slug/posts` (201). A member writes a `diskusi`; an owner
+ * may also write a `pengumuman`. `type` and `mediaIds` are omitted from the
+ * body when the caller passes nothing — the route's schema defaults `type` to
+ * `"diskusi"` and treats an absent `mediaIds` as none.
+ */
+export function createCommunityPost(
+  slug: string,
+  input: { body: string; type?: string; mediaIds?: string[] }
+): Promise<PostView> {
+  const payload: { body: string; type?: string; mediaIds?: string[] } = { body: input.body };
+  if (input.type !== undefined) payload.type = input.type;
+  if (input.mediaIds !== undefined) payload.mediaIds = input.mediaIds;
+  return apiFetch<PostView>(`/communities/${encodeURIComponent(slug)}/posts`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** `POST /users/posts/:id/comments` (201). */
+export function createComment(postId: string, body: string): Promise<CommentView> {
+  return apiFetch<CommentView>(`/users/posts/${encodeURIComponent(postId)}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
+}
+
+/**
+ * `DELETE /users/comments/:id` — resolves `{ deleted: true }` at HTTP **200**,
+ * the same shape `deletePost` gets (ruling R10). **Do not add a 204 check
+ * here.** The body is discarded; callers only need "it is gone".
+ */
+export function deleteComment(id: string): Promise<void> {
+  return apiFetch<{ deleted: true }>(`/users/comments/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  }).then(() => undefined);
 }
 
 /**

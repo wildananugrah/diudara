@@ -176,32 +176,33 @@ And in the same table's constraint array:
     check("post_community_is_public", sql`${table.communityId} is null or ${table.visibility} = 'public'`),
 ```
 
-`communities` is declared above `posts` in this file already (Phase 1), so the reference resolves without reordering. `check` and `sql` are already imported for `follow_no_self`.
+`communities` is declared *below* `posts` in this file, and the forward reference still resolves: drizzle's `.references(() => communities.id)` takes a lazy closure, evaluated after the module has finished loading. Do not reorder the file to "fix" it. `check` and `sql` are already imported for `follow_no_self`.
 
-- [ ] **Step 4: Update the three indexes**
-
-Replace the two existing `posts` indexes and add the third:
+- [ ] **Step 4: Add the community feed's index — and ONLY that one**
 
 ```ts
-    // Untuk Anda: newest first across everybody. PARTIAL on BOTH conditions,
-    // so deleted rows AND community rows leave the hot index entirely rather
-    // than being filtered out of every scan. Phase 2 added the second
-    // condition when Beranda became `community_id IS NULL`.
-    index("post_live_created_idx")
-      .on(table.createdAt.desc(), table.id.desc())
-      .where(sql`${table.deletedAt} is null and ${table.communityId} is null`),
-    // A profile's posts, and the post side of the Mengikuti join. BOTH
-    // consumers exclude community posts, so the filter belongs in the index.
-    index("post_author_created_idx")
-      .on(table.authorId, table.createdAt.desc())
-      .where(sql`${table.deletedAt} is null and ${table.communityId} is null`),
     // Phase 2: the community feed's keyset page.
     index("post_community_created_idx")
       .on(table.communityId, table.createdAt.desc(), table.id.desc())
       .where(sql`${table.deletedAt} is null`),
 ```
 
-Note `post_author_created_idx` was NOT partial before. Making it partial is deliberate and is why it is rewritten rather than extended.
+**Leave `post_live_created_idx` and `post_author_created_idx` exactly as they
+are.** This step originally rewrote both to add `community_id IS NULL` to their
+predicates, and that was wrong *here*: a partial index and the query whose
+WHERE clause must match it are one change, not two. Rewriting the predicate in
+this task while `listGlobal` and `listByAuthor` still filter on `deleted_at`
+alone leaves Postgres unable to prove the partial index applies, so it falls
+back to a sequential scan and `drizzle-post.repository.test.ts`'s "plans
+listGlobal and listByAuthor WITHOUT a sequential scan of post" goes red — which
+is exactly what happened when this task was first executed.
+
+Both rewrites now live in **Task 3 Step 3**, landing in the same commit as the
+filters that make them usable. The generated migration for this task therefore
+contains no `DROP INDEX` at all.
+
+Adding `post_community_created_idx` here is safe by the same reasoning
+inverted: no current query filters on `community_id`, so it changes no plan.
 
 - [ ] **Step 5: Add `post_comment`**
 
@@ -443,9 +444,48 @@ The `listFollowing` row must be authored by someone the follower follows, or the
 Run: `cd apps/api && bun test src/infrastructure/repositories/drizzle-post.repository.test.ts`
 Expected: FAIL on all three rows — each currently returns both posts.
 
-- [ ] **Step 3: Add the filter to the three read paths**
+- [ ] **Step 3: Add the filter to the three read paths, and rewrite the two indexes with it**
 
-In `drizzle-post.repository.ts`:
+These land together, in one commit, and the order is not negotiable: the index
+predicates and the query WHERE clauses must match, or the planner cannot use
+the index. Task 1 deliberately left both indexes alone for this reason.
+
+In `apps/api/src/db/schema.ts`, replace the two existing `posts` indexes:
+
+```ts
+    // Untuk Anda: newest first across everybody. PARTIAL on BOTH conditions,
+    // so deleted rows AND community rows leave the hot index entirely rather
+    // than being filtered out of every scan. Phase 2 added the second
+    // condition when Beranda became `community_id IS NULL`.
+    index("post_live_created_idx")
+      .on(table.createdAt.desc(), table.id.desc())
+      .where(sql`${table.deletedAt} is null and ${table.communityId} is null`),
+    // A profile's posts, and the post side of the Mengikuti join. BOTH
+    // consumers exclude community posts, so the filter belongs in the index.
+    index("post_author_created_idx")
+      .on(table.authorId, table.createdAt.desc())
+      .where(sql`${table.deletedAt} is null and ${table.communityId} is null`),
+```
+
+`post_author_created_idx` was NOT partial before; making it partial is
+deliberate and is why it is rewritten rather than extended. Run
+`bun run db:generate` for the migration carrying both — this one DOES contain
+`DROP INDEX`, which is correct for an index rewrite.
+
+**Two existing tests in `drizzle-post.repository.test.ts` break here, and both
+are updated deliberately with a comment recording why** — the programme's
+working agreement requires exactly that, rather than deleting or weakening
+them:
+
+- `indexes listGlobal's (created_at desc, id desc), live rows only` pins the
+  predicate string `WHERE (deleted_at IS NULL)`. It becomes
+  `WHERE ((deleted_at IS NULL) AND (community_id IS NULL))`.
+- `plans listGlobal and listByAuthor WITHOUT a sequential scan of post` is
+  **not** edited. It must go green on its own once the filters below land. If
+  it does not, the index and the query still disagree — stop and report rather
+  than relaxing the assertion.
+
+Then in `drizzle-post.repository.ts`:
 
 ```ts
   listGlobal(limit: number, before: KeysetCursor | null): Promise<PostRow[]> {
@@ -812,8 +852,11 @@ git commit -m "feat: the community feed use-cases"
 - Modify: `apps/api/src/application/use-cases/write-post.test.ts`
 
 **Interfaces:**
-- Consumes: `CommentRepositoryPort` (Task 4), `PostRepositoryPort.ownershipOf` and the `PostRow.communityId` it must now expose, `CommunityRepositoryPort.isMember`/`findById`.
+- Consumes: `CommentRepositoryPort` (Task 4); `PostRepositoryPort.ownershipOf` — which **already returns `communityId: string | null`**, added to `PostOwnership` in Task 1 under ruling R1, so no further port change is needed for it; `CommunityRepositoryPort.isMember` (Phase 1).
+- **Adds `CommunityRepositoryPort.findById(id: string): Promise<CommunityRecord | null>`** — Phase 1's community port has `findBySlug` but no by-id lookup, and `DeleteComment`'s owner check resolves a community from the post's `communityId`, which is an id. Add it to the port, the Drizzle adapter, and every `CommunityRepositoryPort` fake the compiler flags. Same shape as Task 5's `getById` addition. This is ruling R9.
 - Produces: `class ListComments`, `class CreateComment`, `class DeleteComment`, and a `CommentView` — `{ id, body, createdAt: string, author: { handle, displayName } }`, nested in the same one place `PostView` is.
+
+**`CommentRepositoryPort` already has what the three use-cases need** — `create`, `listForPost`, `ownershipOf`, `softDelete` (Task 4). `ListComments` maps `CommentRow[]` → `CommentView[]`. `CreateComment` needs `posts.ownershipOf(postId)` for `{ communityId, isDeleted }` (null → `NotFoundError`; `isDeleted` → `NotFoundError`; `communityId` null → `ForbiddenError`; else `isMember(communityId, authorId)` → `ForbiddenError` on false). `DeleteComment` needs `comments.ownershipOf(commentId)` for `{ authorId, postId, isDeleted }`, then — if the deleter is not the author — `posts.ownershipOf(postId)` for `communityId`, then `communities.findById(communityId)` for `ownerId`.
 
 - [ ] **Step 1: Write the failing comment tests**
 
@@ -887,13 +930,26 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add apps/api/src/application/use-cases/
+git add apps/api/src/application/use-cases/ \
+        apps/api/src/application/ports/comment-repository.port.ts \
+        apps/api/src/application/ports/community-repository.port.ts \
+        apps/api/src/infrastructure/repositories/drizzle-community.repository.ts \
+        apps/api/src/infrastructure/repositories/drizzle-community.repository.test.ts
 git commit -m "feat: comments, and an owner who can moderate by deletion only"
 ```
+
+If `bun run typecheck` flags a fake in another `*.test.ts` for the new
+`findById`, stage that too. `git status` before the commit and confirm every
+modified file is one this task is meant to touch.
 
 ---
 
 ## Task 7: Routes and wiring
+
+**Carried in from earlier tasks — do this task's wiring on top of these:**
+- `bootstrap.ts` has **no DI wiring** yet for `CreateCommunityPost`, `ListCommunityFeed`, `GetPost` (Task 5), or `ListComments`/`CreateComment`/`DeleteComment` (Task 6). Construct each with its real repositories and add it to the `Dependencies` object, following exactly how Phase 1 wired `joinCommunity` / `createCommunity`. `DrizzleCommentRepository` is constructed once and shared by `ListComments`, `CreateComment`, `DeleteComment`, `ListCommunityFeed`, and `DeleteComment`'s sibling `DeletePost` (which gained the community dep in Task 6).
+- The four `PostView` exact-key-set arrays in `routes/posts.test.ts` were **already widened** with `commentCount` and `type` by Task 5 (to keep the suite green then). Do not re-edit them; if a new route test needs the key set, reuse the existing `POST_KEYS` const.
+- **The community-post route MUST cap `mediaIds` per-call.** `createCommunityPostSchema` (Task 2) deliberately carries no `.max()` — the image cap is a per-process value (`deps.maxPostImages`), which is why `routes/posts.ts` `buildPostBodySchema` is built per-request. The `POST /communities/:slug/posts` handler applies the same `.max(deps.maxPostImages, ...)` refinement to `mediaIds` before validating, or an unbounded id array reaches the media-claim path.
 
 **Files:**
 - Modify: `apps/api/src/routes/communities.ts` + `.test.ts`
@@ -1037,7 +1093,55 @@ export function listCommunityPosts(slug: string, before?: string | null): Promis
 }
 ```
 
-Add `type: string` and `commentCount: number` to the client's `PostView` interface to match the server's.
+The other five client functions follow the same two patterns — reads via
+`publicGet`, writes via `apiFetch`:
+
+```ts
+/** `GET /users/posts/:id` — public, one post for the discussion view. */
+export function getPost(id: string): Promise<PostView> {
+  return publicGet<PostView>(`/users/posts/${encodeURIComponent(id)}`, "gagal memuat kiriman");
+}
+/** `GET /users/posts/:id/comments` — public. */
+export function listComments(postId: string): Promise<CommentView[]> {
+  return publicGet<CommentView[]>(
+    `/users/posts/${encodeURIComponent(postId)}/comments`, "gagal memuat komentar");
+}
+/** `POST /communities/:slug/posts` — member writes a diskusi, owner may write a pengumuman. */
+export function createCommunityPost(
+  slug: string,
+  input: { body: string; type?: string; mediaIds?: string[] },
+): Promise<PostView> {
+  return apiFetch<PostView>(`/communities/${encodeURIComponent(slug)}/posts`, {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
+/** `POST /users/posts/:id/comments`. */
+export function createComment(postId: string, body: string): Promise<CommentView> {
+  return apiFetch<CommentView>(`/users/posts/${encodeURIComponent(postId)}/comments`, {
+    method: "POST", body: JSON.stringify({ body }),
+  });
+}
+/** `DELETE /users/comments/:id` — resolves `{ deleted: true }` at HTTP 200 (mirrors deletePost). */
+export function deleteComment(id: string): Promise<void> {
+  return apiFetch<{ deleted: true }>(`/users/comments/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  }).then(() => undefined);
+}
+```
+
+Copy the real `publicGet` / `apiFetch` call shapes from the existing `listFeed`
+/ `createPost` / `deletePost` in this file — the signatures above are the
+contract, not necessarily the exact wrapper arguments. **`deleteComment` must
+not check for a 204** — Task 7's endpoint returns `200 { deleted: true }` to
+match `deletePost`, ruling R10.
+
+Add `type: string` and `commentCount: number` to the client's `PostView`
+interface, and add a `CommentView` interface — `{ id: string; body: string;
+createdAt: string; author: { handle: string; displayName: string } }` — to
+match the server's `toCommentView` output. `getPost` always returns
+`commentCount: 0` from the server (Task 5), so a discussion view that wants a
+reply count derives it from `listComments(...).length`, never from
+`getPost(...).commentCount`.
 
 - [ ] **Step 2: Write the failing `PostCard` tests**
 
@@ -1088,7 +1192,29 @@ Cases: a member sees the composer; a non-member sees `Gabung` in its place; a si
 
 - [ ] **Step 6: Write `CommunityFeed`**
 
-It renders `PostComposer` (or the join control) above a `PostFeed` whose `load` is `(before) => listCommunityPosts(slug, before)`, holding `PostFeedHandle` to `prepend` on submit. The type selector renders **only** when `viewerIsOwner` — never disabled, never hidden-but-present.
+`CommunityFeed` takes the community's `slug`, `viewerIsMember: boolean | null`
+and `viewerIsOwner: boolean` — the same three values `CommunityPage` already has
+from its `CommunityDetail` fetch, passed down as props (do not re-fetch).
+
+It renders, above a `PostFeed` whose `load` is `(before) =>
+listCommunityPosts(slug, before)` and whose `PostFeedHandle` it holds to
+`prepend` on submit:
+- `viewerIsMember === null` (signed out) → a `Masuk untuk gabung` link to `/masuk`.
+- `viewerIsMember === false` → a `Gabung` control (reuse whatever Phase 1's
+  `CommunityPage` banner uses for join — do not build a second one).
+- `viewerIsMember === true` → `PostComposer`.
+
+**The type selector.** `PostComposer` today conditionally renders a visibility
+selector. Add ONE optional prop — e.g. `postTypeChoices?: readonly string[]` —
+that, when passed, replaces the visibility selector with a type `<select>`. It
+is passed **only when `viewerIsOwner`**; a plain member gets `PostComposer` with
+no selector at all and every submit is a `diskusi`. Never render a disabled or
+hidden-but-present selector — Phase 1's rule.
+
+**Ruling R5: the choices come from `COMMUNITY_POST_TYPES` imported from
+`@diudara/shared`**, never a literal `["diskusi", "pengumuman"]` in the web
+tree. Phase 3/4 extend that constant; a hardcoded copy is a second list to
+forget.
 
 - [ ] **Step 7: Write the failing `CommunityPage` tab tests**
 
@@ -1102,7 +1228,16 @@ Every assertion by role, label and text.
 
 - [ ] **Step 8: Add the tab bar**
 
-Copy Jelajah's pattern exactly — `.feed-tabs` markup, `aria-current`, `useSearchParams`, and **only the active half mounted**, for the reason Jelajah's own comment gives: the inactive half must not fetch. Phase 1's roster moves under `?tab=anggota` unchanged.
+Copy Jelajah's pattern exactly — `.feed-tabs` markup, `aria-current`,
+`useSearchParams`, and **only the active half mounted**, for the reason
+Jelajah's own comment gives: the inactive half must not fetch. Phase 1's roster
+markup moves under `?tab=anggota` unchanged.
+
+**Phase 1's existing `CommunityPage.test.tsx` roster tests will need to render
+the page at `?tab=anggota`** to see the roster now that Diskusi is the default
+tab. That is deliberate test churn: update each with a one-line comment saying
+the roster moved under a tab in Phase 2 — do not delete or weaken the
+assertions, and do not change what they check about the roster itself.
 
 - [ ] **Step 9: Style the announcement card**
 
@@ -1111,7 +1246,13 @@ In `styles.css`, the `pengumuman` badge and card accent, using existing Udara to
 - [ ] **Step 10: Run the web suite**
 
 Run: `cd apps/web && bun test && bun run typecheck`
-Expected: PASS. Beranda's and the profile's existing tests must be untouched and green.
+Expected: PASS. Beranda's and the profile's existing tests must be untouched and green (the roster tests noted in Step 8 are the only sanctioned change).
+
+**Do not run Playwright, the dev server, or any browser check** — this repo's
+owner runs those. `bun test` (happy-dom) plus `bun run typecheck` is the whole
+gate for this task. When a test assertion could hold a happy-dom node, compare
+`.textContent` / `.getAttribute(...)` / an array of strings — never the element
+object; a failing assertion that serialises a DOM node exhausts memory.
 
 - [ ] **Step 11: Commit**
 
@@ -1133,6 +1274,8 @@ git commit -m "feat: a community's feed, under its first real tab bar"
 **Interfaces:**
 - Consumes: `getPost`, `listComments`, `createComment`, `deleteComment` (Task 8 Step 1).
 - Produces: the finished phase.
+
+**`getPost` returns `commentCount: 0` always** — the `GET /users/posts/:id` endpoint has no comment repository behind it (Task 5, ruling deferred). If the discussion-detail view shows a reply count anywhere, derive it from `listComments(...)`'s result length, never from `getPost(...).commentCount`.
 
 - [ ] **Step 1: Write the failing `CommentList` tests**
 

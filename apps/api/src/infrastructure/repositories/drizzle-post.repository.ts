@@ -26,6 +26,14 @@ const postColumns = {
   editedAt: posts.editedAt,
   authorId: posts.authorId,
   visibility: posts.visibility,
+  // Phase 2. `communityId` is `null` on every row the three personal read
+  // paths return (they filter `community_id IS NULL`); `listByCommunity` is
+  // the one path where it is set. `type` rides along so a community feed row
+  // can render its `pengumuman` badge without a second lookup. Both are in
+  // the SHARED projection rather than a `listByCommunity`-only one for the
+  // reason this comment block already gives: one projection, decided once.
+  communityId: posts.communityId,
+  type: posts.type,
   authorHandle: appUsers.handle,
   authorDisplayName: appUsers.displayName,
 } as const;
@@ -70,14 +78,29 @@ function newestFirstOrder() {
 export class DrizzlePostRepository implements PostRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
 
-  async create(authorId: string, body: string, visibility?: string): Promise<PostRow> {
+  async create(input: {
+    authorId: string;
+    body: string;
+    visibility?: string;
+    communityId?: string;
+    type?: string;
+  }): Promise<PostRow> {
+    // Each optional column is spread in ONLY when the caller passed a value —
+    // never as `key: undefined`. drizzle turns an explicit `undefined` into a
+    // literal `NULL` in the INSERT, which throws against the `NOT NULL DEFAULT`
+    // columns (`visibility`, `type`) instead of letting the column's own
+    // default decide. `communityId` is genuinely nullable, but omitting it
+    // when absent keeps the one rule for all three.
+    const values = {
+      authorId: input.authorId,
+      body: input.body,
+      ...(input.visibility === undefined ? {} : { visibility: input.visibility }),
+      ...(input.communityId === undefined ? {} : { communityId: input.communityId }),
+      ...(input.type === undefined ? {} : { type: input.type }),
+    };
     const [inserted] = await this.db
       .insert(posts)
-      // `visibility` omitted entirely (not `visibility: undefined`) when the
-      // caller did not pass one, so the column's own `default('public')`
-      // decides — a spread with an explicit `undefined` value would instead
-      // ask drizzle to insert NULL into a `NOT NULL` column and throw.
-      .values(visibility === undefined ? { authorId, body } : { authorId, body, visibility })
+      .values(values)
       .returning({ id: posts.id });
     const row = await this.readOne(inserted!.id);
     // The row was just inserted inside this call; a null here means the
@@ -93,6 +116,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
         authorId: posts.authorId,
         deletedAt: posts.deletedAt,
         visibility: posts.visibility,
+        communityId: posts.communityId,
       })
       .from(posts)
       .where(eq(posts.id, id));
@@ -102,7 +126,25 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       authorId: row.authorId,
       isDeleted: row.deletedAt !== null,
       visibility: row.visibility,
+      communityId: row.communityId,
     };
+  }
+
+  /**
+   * `GET /users/posts/:id`. The SHARED projection, joined the same way the
+   * list paths join it, with `deleted_at IS NULL` — a soft-deleted post is
+   * unreachable here exactly as it is through `listGlobal` and friends. This
+   * is NOT `readOne` below: `readOne` reads a row back right after this
+   * process wrote it (create / updateBody, both already deleted-guarded) and
+   * deliberately carries no delete filter of its own.
+   */
+  async getById(id: string): Promise<PostRow | null> {
+    const [row] = await this.db
+      .select(postColumns)
+      .from(posts)
+      .innerJoin(appUsers, eq(posts.authorId, appUsers.id))
+      .where(and(eq(posts.id, id), isNull(posts.deletedAt)));
+    return row ?? null;
   }
 
   /**
@@ -124,6 +166,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
         authorId: posts.authorId,
         deletedAt: posts.deletedAt,
         visibility: posts.visibility,
+        communityId: posts.communityId,
       })
       .from(posts)
       .where(eq(posts.id, id))
@@ -134,6 +177,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       authorId: row.authorId,
       isDeleted: row.deletedAt !== null,
       visibility: row.visibility,
+      communityId: row.communityId,
     };
   }
 
@@ -188,24 +232,65 @@ export class DrizzlePostRepository implements PostRepositoryPort {
   }
 
   listGlobal(limit: number, before: KeysetCursor | null): Promise<PostRow[]> {
-    return this.page(isNull(posts.deletedAt), limit, before);
+    // `community_id IS NULL` is the Phase 2 addition, and it is the WHOLE of
+    // "Beranda shows personal posts only": a community post is reachable from
+    // its own community page and nowhere else. The predicate is duplicated
+    // into `post_live_created_idx`'s `WHERE` so the planner can serve this
+    // scan straight from the partial index — the two must be kept in step.
+    return this.page(and(isNull(posts.deletedAt), isNull(posts.communityId)), limit, before);
   }
 
   listByAuthor(authorId: string, limit: number, before: KeysetCursor | null): Promise<PostRow[]> {
-    return this.page(and(eq(posts.authorId, authorId), isNull(posts.deletedAt)), limit, before);
+    // Same `community_id IS NULL` as `listGlobal`, for the same reason: a
+    // profile lists that person's PERSONAL posts. It matches
+    // `post_author_created_idx`'s `WHERE` — that index was made partial in
+    // Phase 2 specifically so this filter costs nothing.
+    return this.page(
+      and(eq(posts.authorId, authorId), isNull(posts.deletedAt), isNull(posts.communityId)),
+      limit,
+      before
+    );
   }
 
   listFollowing(viewerId: string, limit: number, before: KeysetCursor | null): Promise<PostRow[]> {
     // The join through `follow` is what excludes the viewer's own posts:
     // `follow_no_self` means no row can pair someone with themselves.
+    // `community_id IS NULL` — the third of the three personal read paths a
+    // community post must never surface on (Phase 2). The post side of this
+    // join is `post_author_created_idx`, whose `WHERE` now carries the same
+    // condition.
     return this.db
       .select(postColumns)
       .from(posts)
       .innerJoin(appUsers, eq(posts.authorId, appUsers.id))
       .innerJoin(follows, eq(follows.followeeId, posts.authorId))
-      .where(and(eq(follows.followerId, viewerId), isNull(posts.deletedAt), beforeCursor(before)))
+      .where(
+        and(
+          eq(follows.followerId, viewerId),
+          isNull(posts.deletedAt),
+          isNull(posts.communityId),
+          beforeCursor(before)
+        )
+      )
       .orderBy(...newestFirstOrder())
       .limit(clampLimit(limit));
+  }
+
+  listByCommunity(
+    communityId: string,
+    limit: number,
+    before: KeysetCursor | null
+  ): Promise<PostRow[]> {
+    // The mirror image of the three personal paths: `community_id = $1`
+    // where they have `community_id IS NULL`. `deleted_at IS NULL` is the
+    // only filter shared with them. `post_community_created_idx` (added in
+    // Task 1) is the partial index this rides — `(community_id, created_at
+    // desc, id desc) WHERE deleted_at IS NULL`.
+    return this.page(
+      and(eq(posts.communityId, communityId), isNull(posts.deletedAt)),
+      limit,
+      before
+    );
   }
 
   private page(

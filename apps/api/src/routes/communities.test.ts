@@ -254,3 +254,88 @@ describe("GET /communities/:slug/members", () => {
     expect(body.capped).toBe(false);
   });
 });
+
+async function postToCommunity(
+  a: ReturnType<typeof app>,
+  token: string,
+  slug: string,
+  body: Record<string, unknown>
+) {
+  return a.request(`/communities/${slug}/posts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authed(token) },
+    body: JSON.stringify(body),
+  });
+}
+
+describe("GET and POST /communities/:slug/posts", () => {
+  it("GET is readable signed out — 200", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await a.request("/communities/kelas-desain/posts");
+
+    expect(res.status).toBe(200);
+  });
+
+  it("POST requires auth — 401", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await a.request("/communities/kelas-desain/posts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body: "halo" }),
+    });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("POST by a non-member is 403", async () => {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    await createCommunity(a, ownerToken, KELAS);
+    const strangerToken = await tokenForValidUser(a, {
+      handle: "rina",
+      email: "rina@example.com",
+    });
+
+    const res = await postToCommunity(a, strangerToken, "kelas-desain", { body: "halo" });
+
+    expect(res.status).toBe(403);
+  });
+
+  it("POST with type pengumuman by a member (not the owner) is 403", async () => {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    await createCommunity(a, ownerToken, KELAS);
+    const memberToken = await tokenForValidUser(a, {
+      handle: "rina",
+      email: "rina@example.com",
+    });
+    await a.request("/communities/kelas-desain/join", {
+      method: "POST",
+      headers: authed(memberToken),
+    });
+
+    const res = await postToCommunity(a, memberToken, "kelas-desain", {
+      body: "halo",
+      type: "pengumuman",
+    });
+
+    expect(res.status).toBe(403);
+  });
+
+  it("an unknown slug is 404 on both GET and POST", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const getRes = await a.request("/communities/tidak-ada/posts");
+    expect(getRes.status).toBe(404);
+
+    const postRes = await postToCommunity(a, token, "tidak-ada", { body: "halo" });
+    expect(postRes.status).toBe(404);
+  });
+});

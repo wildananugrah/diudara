@@ -38,6 +38,14 @@ interface Props {
   onEdit?: (post: PostView) => void;
   onDeleteRequested?: (id: string) => void;
   /**
+   * **Task 8 (ruling R11).** Given a post id, returns the href of its
+   * discussion page — passed straight to each `PostCard` as `detailHref`, which
+   * renders the comment-count link. `CommunityFeed` passes it; Beranda and
+   * profiles do not, so `detailHrefFor?.(id)` is `undefined` there and no link
+   * renders — identical to before this prop existed.
+   */
+  detailHrefFor?: (postId: string) => string;
+  /**
    * Optional access to `PostFeedHandle` above. Declared as a plain prop rather
    * than via `forwardRef`: React 19 (this project is on 19.2.8) passes `ref`
    * to function components as an ordinary prop, and `forwardRef` is deprecated.
@@ -60,7 +68,15 @@ interface Props {
  * already loaded on screen, with the error shown alongside it, not instead
  * of it.
  */
-export default function PostFeed({ load, emptyMessage, ownHandle, onEdit, onDeleteRequested, ref }: Props) {
+export default function PostFeed({
+  load,
+  emptyMessage,
+  ownHandle,
+  onEdit,
+  onDeleteRequested,
+  detailHrefFor,
+  ref,
+}: Props) {
   const [posts, setPosts] = useState<PostView[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -175,6 +191,7 @@ export default function PostFeed({ load, emptyMessage, ownHandle, onEdit, onDele
           isOwn={ownHandle !== null && post.author.handle === ownHandle}
           onEdit={onEdit}
           onDeleteRequested={onDeleteRequested}
+          detailHref={detailHrefFor?.(post.id)}
         />
       ))}
 

@@ -93,6 +93,22 @@ export interface PostComposerProps {
    * function components as an ordinary prop and `forwardRef` is deprecated.
    */
   ref?: Ref<HTMLFormElement>;
+  /**
+   * **Task 8 — the community feed's ONE variant hook.** When present the
+   * composer is in "community mode": the "Khusus anggota" visibility block is
+   * gone (a community post is never members-only gated), and — if the array is
+   * NON-empty — a post-type `<select>` takes its place, offering exactly these
+   * choices. On submit the chosen type is passed as `onSubmit`'s third
+   * argument, where a visibility normally goes.
+   *
+   * `CommunityFeed` passes `COMMUNITY_POST_TYPES` (from `@diudara/shared`,
+   * ruling R5) **only when the viewer owns the community**, and an empty array
+   * for a plain member — who then sees no selector at all and whose every
+   * submit is a `diskusi`. Never a disabled or hidden-but-present selector.
+   * `undefined` (the default, and what Beranda/profiles pass) leaves the
+   * visibility block exactly as it was.
+   */
+  postTypeChoices?: readonly string[];
 }
 
 /**
@@ -189,8 +205,17 @@ export default function PostComposer({
   onSubmit,
   onCancel,
   ref,
+  postTypeChoices,
 }: PostComposerProps) {
   const [body, setBody] = useState(initialBody);
+  /**
+   * Task 8. `postTypeChoices !== undefined` means a community post: no
+   * "Khusus anggota" block, and — when the list is non-empty (owner only) — a
+   * type `<select>` in its place. The selected type rides out on `onSubmit`'s
+   * third argument.
+   */
+  const communityMode = postTypeChoices !== undefined;
+  const [postType, setPostType] = useState<string>(postTypeChoices?.[0] ?? "diskusi");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A lazy initialiser, so the seed is built once rather than on every render
@@ -446,15 +471,33 @@ export default function PostComposer({
     setSubmitting(true);
     setError(null);
     try {
-      // `visibility` is passed ONLY when it actually changed — see
-      // `resolveVisibility` and the prop's own docstring for why an
-      // unchanged box omits the argument entirely rather than sending it as
-      // `undefined`.
-      const visibility = resolveVisibility();
-      if (visibility !== undefined) {
-        await onSubmit(trimmed, attachedIds, visibility);
+      if (communityMode) {
+        // Task 8: the third argument carries the post TYPE, not a visibility —
+        // `CommunityFeed.handleCreate` reads it as such. The cast is LOCAL:
+        // widening the public `onSubmit` type to `string` would break every
+        // existing narrow caller (Beranda's `handleCreate`, the edit
+        // composer). An empty `postTypeChoices` (a plain member) sends no type
+        // — the server defaults it to `diskusi`.
+        if (postTypeChoices !== undefined && postTypeChoices.length > 0) {
+          // TRAP: in community mode this third slot — typed `visibility` for
+          // every other caller — carries the post `type` string instead. No
+          // existing caller (Beranda, EditComposer) reaches this branch;
+          // `communityMode` is false for them.
+          await onSubmit(trimmed, attachedIds, postType as "public" | "members");
+        } else {
+          await onSubmit(trimmed, attachedIds);
+        }
       } else {
-        await onSubmit(trimmed, attachedIds);
+        // `visibility` is passed ONLY when it actually changed — see
+        // `resolveVisibility` and the prop's own docstring for why an
+        // unchanged box omits the argument entirely rather than sending it as
+        // `undefined`.
+        const visibility = resolveVisibility();
+        if (visibility !== undefined) {
+          await onSubmit(trimmed, attachedIds, visibility);
+        } else {
+          await onSubmit(trimmed, attachedIds);
+        }
       }
       // ONLY on success. See the docstring: a rejection leaves this line
       // unreached, and the text AND the photos exactly where the author left
@@ -486,26 +529,49 @@ export default function PostComposer({
         onRetry={retryImage}
       />
 
-      {/* "Khusus anggota" (spec §7). Disabled until an image is attached —
-          a courtesy that explains the server's own rule before the creator
-          hits it, not the rule itself. */}
-      <div className="post-composer-members-only">
-        <label htmlFor="post-composer-members-only">
-          <input
-            id="post-composer-members-only"
-            type="checkbox"
-            checked={membersOnly}
-            disabled={!canBeMembersOnly}
-            onChange={(event) => setMembersOnly(event.target.checked)}
-          />
-          Khusus anggota
-        </label>
-        {!canBeMembersOnly ? (
-          <p className="post-composer-hint" data-testid="members-only-hint">
-            Tambahkan foto dulu — teks selalu bisa dibaca semua orang.
-          </p>
-        ) : null}
-      </div>
+      {/* Task 8: in community mode the "Khusus anggota" block is gone — a
+          community post is never members-only gated. An OWNER (non-empty
+          choices) gets a type <select> in its place; a plain member (empty
+          choices) gets nothing, and every submit is a `diskusi`. */}
+      {postTypeChoices !== undefined ? (
+        postTypeChoices.length > 0 ? (
+          <div className="post-composer-type">
+            <label htmlFor="post-composer-type">Jenis kiriman</label>
+            <select
+              id="post-composer-type"
+              value={postType}
+              onChange={(event) => setPostType(event.target.value)}
+            >
+              {postTypeChoices.map((choice) => (
+                <option key={choice} value={choice}>
+                  {choice.charAt(0).toUpperCase() + choice.slice(1)}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null
+      ) : (
+        /* "Khusus anggota" (spec §7). Disabled until an image is attached —
+           a courtesy that explains the server's own rule before the creator
+           hits it, not the rule itself. */
+        <div className="post-composer-members-only">
+          <label htmlFor="post-composer-members-only">
+            <input
+              id="post-composer-members-only"
+              type="checkbox"
+              checked={membersOnly}
+              disabled={!canBeMembersOnly}
+              onChange={(event) => setMembersOnly(event.target.checked)}
+            />
+            Khusus anggota
+          </label>
+          {!canBeMembersOnly ? (
+            <p className="post-composer-hint" data-testid="members-only-hint">
+              Tambahkan foto dulu — teks selalu bisa dibaca semua orang.
+            </p>
+          ) : null}
+        </div>
+      )}
 
       <textarea
         className="post-composer-body"

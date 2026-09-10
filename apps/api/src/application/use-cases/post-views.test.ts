@@ -10,6 +10,8 @@ const row: PostRow = {
   editedAt: null,
   authorId: "77777777-0000-4000-8000-000000000000",
   visibility: "public",
+  communityId: null,
+  type: "diskusi",
   authorHandle: "budi",
   authorDisplayName: "Budi",
 };
@@ -22,16 +24,25 @@ const row: PostRow = {
  */
 const NOBODY_LOCKED: ReadonlySet<string> = new Set<string>();
 
+/**
+ * The comment-count map `toFeedPage` threads per row. Named for the same
+ * reason `NOBODY_LOCKED` is: every test here that is not about counts wants
+ * the map empty, and the name says so.
+ */
+const NO_COMMENTS: ReadonlyMap<string, number> = new Map<string, number>();
+
 /** The wire's complete key set, in sorted order. Literal, never the type. */
 const POST_VIEW_KEYS = [
   "author",
   "body",
+  "commentCount",
   "createdAt",
   "editedAt",
   "id",
   "lockedMediaCount",
   "media",
   "membersOnly",
+  "type",
 ];
 
 const membersRow: PostRow = { ...row, visibility: "members" };
@@ -52,23 +63,32 @@ function mediaRow(overrides: Partial<MediaRow> = {}): MediaRow {
 
 describe("toPostView", () => {
   it("returns EXACTLY the wire keys, with the author nested", () => {
-    const view = toPostView(row, [], false);
+    const view = toPostView(row, [], false, 0);
 
     expect(Object.keys(view).sort()).toEqual([
       "author",
       "body",
+      "commentCount",
       "createdAt",
       "editedAt",
       "id",
       "lockedMediaCount",
       "media",
       "membersOnly",
+      "type",
     ]);
     expect(Object.keys(view.author).sort()).toEqual(["displayName", "handle"]);
   });
 
+  it("carries the row's type and the comment count it was handed", () => {
+    const view = toPostView({ ...row, type: "pengumuman" }, [], false, 4);
+
+    expect(view.type).toBe("pengumuman");
+    expect(view.commentCount).toBe(4);
+  });
+
   it("gives a post with no images an EMPTY media array, never a missing key", () => {
-    const view = toPostView(row, [], false);
+    const view = toPostView(row, [], false, 0);
 
     expect("media" in view).toBe(true);
     expect(view.media).toEqual([]);
@@ -82,7 +102,7 @@ describe("toPostView", () => {
    * every one of them.
    */
   it("returns EXACTLY id, width and height per image — never ownerId, postId, position or byteSize", () => {
-    const view = toPostView(row, [mediaRow()], false);
+    const view = toPostView(row, [mediaRow()], false, 0);
 
     expect(view.media).toHaveLength(1);
     expect(Object.keys(view.media[0]!).sort()).toEqual(["height", "id", "width"]);
@@ -97,7 +117,7 @@ describe("toPostView", () => {
     const first = mediaRow({ id: "11111111-0000-4000-8000-000000000000", position: 0 });
     const second = mediaRow({ id: "22222222-0000-4000-8000-000000000000", position: 1 });
 
-    const view = toPostView(row, [second, first], false);
+    const view = toPostView(row, [second, first], false, 0);
 
     expect(view.media.map((m) => m.id)).toEqual([
       "22222222-0000-4000-8000-000000000000",
@@ -106,12 +126,12 @@ describe("toPostView", () => {
   });
 
   it("keeps editedAt as an explicit null so the key set never varies", () => {
-    expect("editedAt" in toPostView(row, [], false)).toBe(true);
-    expect(toPostView(row, [], false).editedAt === null).toBe(true);
+    expect("editedAt" in toPostView(row, [], false, 0)).toBe(true);
+    expect(toPostView(row, [], false, 0).editedAt === null).toBe(true);
   });
 
   it("serialises timestamps as ISO strings", () => {
-    expect(toPostView(row, [], false).createdAt).toBe("2026-08-18T03:00:00.000Z");
+    expect(toPostView(row, [], false, 0).createdAt).toBe("2026-08-18T03:00:00.000Z");
   });
 
   /**
@@ -125,7 +145,7 @@ describe("toPostView", () => {
     const mediaB = mediaRow({ id: "aaaaaaa2-0000-4000-8000-000000000000", position: 1 });
     const mediaC = mediaRow({ id: "aaaaaaa3-0000-4000-8000-000000000000", position: 2 });
 
-    const view = toPostView(membersRow, [mediaA, mediaB, mediaC], true);
+    const view = toPostView(membersRow, [mediaA, mediaB, mediaC], true, 0);
 
     expect(view.media).toEqual([]);
     expect(view.membersOnly).toBe(true);
@@ -140,7 +160,7 @@ describe("toPostView", () => {
   it("an unlocked members-only post carries its media AND still says it is members-only", () => {
     const mediaA = mediaRow({ id: "aaaaaaa1-0000-4000-8000-000000000000" });
 
-    const view = toPostView(membersRow, [mediaA], false);
+    const view = toPostView(membersRow, [mediaA], false, 0);
 
     expect(view.media.map((m) => m.id)).toEqual(["aaaaaaa1-0000-4000-8000-000000000000"]);
     expect(view.membersOnly).toBe(true);
@@ -148,7 +168,7 @@ describe("toPostView", () => {
   });
 
   it("a public post says membersOnly false and hides nothing", () => {
-    const view = toPostView(row, [mediaRow()], false);
+    const view = toPostView(row, [mediaRow()], false, 0);
 
     expect(view.membersOnly).toBe(false);
     expect(view.lockedMediaCount).toBe(0);
@@ -164,8 +184,8 @@ describe("toPostView", () => {
   it("the wire projection is CLOSED and identical in both shapes", () => {
     const mediaA = mediaRow({ id: "aaaaaaa1-0000-4000-8000-000000000000" });
 
-    expect(Object.keys(toPostView(membersRow, [mediaA], true)).sort()).toEqual(POST_VIEW_KEYS);
-    expect(Object.keys(toPostView(row, [mediaA], false)).sort()).toEqual(POST_VIEW_KEYS);
+    expect(Object.keys(toPostView(membersRow, [mediaA], true, 0)).sort()).toEqual(POST_VIEW_KEYS);
+    expect(Object.keys(toPostView(row, [mediaA], false, 0)).sort()).toEqual(POST_VIEW_KEYS);
   });
 
   /**
@@ -177,7 +197,7 @@ describe("toPostView", () => {
   it("a leaked media id cannot hide anywhere in a locked view", () => {
     const mediaA = mediaRow({ id: "aaaaaaa1-0000-4000-8000-000000000000" });
 
-    const serialised = JSON.stringify(toPostView(membersRow, [mediaA], true));
+    const serialised = JSON.stringify(toPostView(membersRow, [mediaA], true, 0));
 
     expect(serialised).not.toContain("aaaaaaa1-0000-4000-8000-000000000000");
   });
@@ -185,7 +205,7 @@ describe("toPostView", () => {
 
 describe("toFeedPage", () => {
   it("returns a null nextCursor when the page is not full", () => {
-    const page = toFeedPage([row], 20, [], NOBODY_LOCKED);
+    const page = toFeedPage([row], 20, [], NOBODY_LOCKED, NO_COMMENTS);
 
     expect(page.posts).toHaveLength(1);
     expect(page.nextCursor === null).toBe(true);
@@ -195,7 +215,7 @@ describe("toFeedPage", () => {
     const second: PostRow = { ...row, id: "bbbbbbbb-0000-4000-8000-000000000000", body: "dua" };
     const third: PostRow = { ...row, id: "cccccccc-0000-4000-8000-000000000000", body: "tiga" };
 
-    const page = toFeedPage([row, second, third], 2, [], NOBODY_LOCKED);
+    const page = toFeedPage([row, second, third], 2, [], NOBODY_LOCKED, NO_COMMENTS);
 
     expect(page.posts.map((post) => post.body)).toEqual(["halo", "dua"]);
     expect(page.nextCursor).toBe("2026-08-18T03:00:00.000Z|bbbbbbbb-0000-4000-8000-000000000000");
@@ -214,7 +234,7 @@ describe("toFeedPage", () => {
   it("an EXACTLY full page (no probe row) is the last page — nextCursor stays null", () => {
     const second: PostRow = { ...row, id: "bbbbbbbb-0000-4000-8000-000000000000", body: "dua" };
 
-    const page = toFeedPage([row, second], 2, [], NOBODY_LOCKED);
+    const page = toFeedPage([row, second], 2, [], NOBODY_LOCKED, NO_COMMENTS);
 
     expect(page.posts).toHaveLength(2);
     expect(page.nextCursor === null).toBe(true);
@@ -224,7 +244,7 @@ describe("toFeedPage", () => {
     const second: PostRow = { ...row, id: "bbbbbbbb-0000-4000-8000-000000000000", body: "dua" };
     const probe: PostRow = { ...row, id: "cccccccc-0000-4000-8000-000000000000", body: "TIDAK BOLEH TAMPIL" };
 
-    const page = toFeedPage([row, second, probe], 2, [], NOBODY_LOCKED);
+    const page = toFeedPage([row, second, probe], 2, [], NOBODY_LOCKED, NO_COMMENTS);
 
     expect(page.posts).toHaveLength(2);
     expect(page.posts.map((post) => post.body)).not.toContain("TIDAK BOLEH TAMPIL");
@@ -245,7 +265,7 @@ describe("toFeedPage", () => {
       mediaRow({ id: "33333333-0000-4000-8000-000000000000", postId: row.id, position: 1 }),
     ];
 
-    const page = toFeedPage([row, second], 2, media, NOBODY_LOCKED);
+    const page = toFeedPage([row, second], 2, media, NOBODY_LOCKED, NO_COMMENTS);
 
     expect(page.posts[0]!.media.map((m) => m.id)).toEqual([
       "11111111-0000-4000-8000-000000000000",
@@ -259,10 +279,24 @@ describe("toFeedPage", () => {
   it("gives a post with no media an empty array while its neighbour has images", () => {
     const second: PostRow = { ...row, id: "bbbbbbbb-0000-4000-8000-000000000000", body: "dua" };
 
-    const page = toFeedPage([row, second], 2, [mediaRow({ postId: second.id })], NOBODY_LOCKED);
+    const page = toFeedPage([row, second], 2, [mediaRow({ postId: second.id })], NOBODY_LOCKED, NO_COMMENTS);
 
     expect(page.posts[0]!.media).toEqual([]);
     expect(page.posts[1]!.media).toHaveLength(1);
+  });
+
+  /**
+   * The comment counts arrive as ONE map for the page, the same shape the
+   * media does — so this function is also what puts each row's count on its
+   * own view, and a row the map does not mention has zero.
+   */
+  it("hands each post its own comment count from the map, zero when the map omits it", () => {
+    const second: PostRow = { ...row, id: "bbbbbbbb-0000-4000-8000-000000000000", body: "dua" };
+
+    const page = toFeedPage([row, second], 2, [], NOBODY_LOCKED, new Map([[row.id, 7]]));
+
+    expect(page.posts[0]!.commentCount).toBe(7);
+    expect(page.posts[1]!.commentCount).toBe(0);
   });
 
   /**
@@ -279,7 +313,7 @@ describe("toFeedPage", () => {
   it("locks a gated row whose author is in the locked set", () => {
     const gated: PostRow = { ...row, visibility: "members" };
 
-    const page = toFeedPage([gated], 20, [mediaRow()], new Set([row.authorId]));
+    const page = toFeedPage([gated], 20, [mediaRow()], new Set([row.authorId]), NO_COMMENTS);
 
     expect(page.posts[0]!.media).toEqual([]);
     expect(page.posts[0]!.lockedMediaCount).toBe(1);
@@ -299,7 +333,7 @@ describe("toFeedPage", () => {
       mediaRow({ id: "22222222-0000-4000-8000-000000000000", postId: gated.id }),
     ];
 
-    const page = toFeedPage([row, gated], 20, media, new Set([row.authorId]));
+    const page = toFeedPage([row, gated], 20, media, new Set([row.authorId]), NO_COMMENTS);
 
     expect(page.posts[0]!.media.map((m) => m.id)).toEqual(["11111111-0000-4000-8000-000000000000"]);
     expect(page.posts[0]!.membersOnly).toBe(false);
@@ -309,7 +343,7 @@ describe("toFeedPage", () => {
   it("a gated row whose author is NOT locked keeps its media", () => {
     const gated: PostRow = { ...row, visibility: "members" };
 
-    const page = toFeedPage([gated], 20, [mediaRow()], NOBODY_LOCKED);
+    const page = toFeedPage([gated], 20, [mediaRow()], NOBODY_LOCKED, NO_COMMENTS);
 
     expect(page.posts[0]!.media).toHaveLength(1);
     expect(page.posts[0]!.membersOnly).toBe(true);
@@ -321,7 +355,7 @@ describe("toFeedPage", () => {
     const probe: PostRow = { ...row, id: "cccccccc-0000-4000-8000-000000000000", body: "tiga" };
     const media = [mediaRow({ id: "99999999-0000-4000-8000-000000000000", postId: probe.id })];
 
-    const page = toFeedPage([row, second, probe], 2, media, NOBODY_LOCKED);
+    const page = toFeedPage([row, second, probe], 2, media, NOBODY_LOCKED, NO_COMMENTS);
 
     expect(page.posts).toHaveLength(2);
     expect(page.posts.flatMap((post) => post.media)).toEqual([]);

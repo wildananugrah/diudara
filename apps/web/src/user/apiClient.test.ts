@@ -16,11 +16,14 @@ import {
   getMaxPostImages,
   getOwnProfile,
   getPayoutStatus,
+  getPost,
   getProfileByHandle,
   getSessionUser,
   getUserToken,
   isOwnHandle,
   isUserSignedIn,
+  listComments,
+  listCommunityPosts,
   listFeed,
   listFollowers,
   listFollowing,
@@ -145,6 +148,9 @@ describe("apiClient — one place to reach the network (N6)", () => {
       ["listFollowers", () => listFollowers("wildan")],
       ["listFollowing", () => listFollowing("wildan")],
       ["exploreUsers", () => exploreUsers({ q: "budi" })],
+      ["listCommunityPosts", () => listCommunityPosts("kelas-fisika")],
+      ["getPost", () => getPost("post-1")],
+      ["listComments", () => listComments("post-1")],
     ];
 
     // Collected into an array rather than a reassigned `let`: TypeScript
