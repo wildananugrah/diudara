@@ -178,30 +178,31 @@ And in the same table's constraint array:
 
 `communities` is declared above `posts` in this file already (Phase 1), so the reference resolves without reordering. `check` and `sql` are already imported for `follow_no_self`.
 
-- [ ] **Step 4: Update the three indexes**
-
-Replace the two existing `posts` indexes and add the third:
+- [ ] **Step 4: Add the community feed's index — and ONLY that one**
 
 ```ts
-    // Untuk Anda: newest first across everybody. PARTIAL on BOTH conditions,
-    // so deleted rows AND community rows leave the hot index entirely rather
-    // than being filtered out of every scan. Phase 2 added the second
-    // condition when Beranda became `community_id IS NULL`.
-    index("post_live_created_idx")
-      .on(table.createdAt.desc(), table.id.desc())
-      .where(sql`${table.deletedAt} is null and ${table.communityId} is null`),
-    // A profile's posts, and the post side of the Mengikuti join. BOTH
-    // consumers exclude community posts, so the filter belongs in the index.
-    index("post_author_created_idx")
-      .on(table.authorId, table.createdAt.desc())
-      .where(sql`${table.deletedAt} is null and ${table.communityId} is null`),
     // Phase 2: the community feed's keyset page.
     index("post_community_created_idx")
       .on(table.communityId, table.createdAt.desc(), table.id.desc())
       .where(sql`${table.deletedAt} is null`),
 ```
 
-Note `post_author_created_idx` was NOT partial before. Making it partial is deliberate and is why it is rewritten rather than extended.
+**Leave `post_live_created_idx` and `post_author_created_idx` exactly as they
+are.** This step originally rewrote both to add `community_id IS NULL` to their
+predicates, and that was wrong *here*: a partial index and the query whose
+WHERE clause must match it are one change, not two. Rewriting the predicate in
+this task while `listGlobal` and `listByAuthor` still filter on `deleted_at`
+alone leaves Postgres unable to prove the partial index applies, so it falls
+back to a sequential scan and `drizzle-post.repository.test.ts`'s "plans
+listGlobal and listByAuthor WITHOUT a sequential scan of post" goes red — which
+is exactly what happened when this task was first executed.
+
+Both rewrites now live in **Task 3 Step 3**, landing in the same commit as the
+filters that make them usable. The generated migration for this task therefore
+contains no `DROP INDEX` at all.
+
+Adding `post_community_created_idx` here is safe by the same reasoning
+inverted: no current query filters on `community_id`, so it changes no plan.
 
 - [ ] **Step 5: Add `post_comment`**
 
@@ -443,9 +444,48 @@ The `listFollowing` row must be authored by someone the follower follows, or the
 Run: `cd apps/api && bun test src/infrastructure/repositories/drizzle-post.repository.test.ts`
 Expected: FAIL on all three rows — each currently returns both posts.
 
-- [ ] **Step 3: Add the filter to the three read paths**
+- [ ] **Step 3: Add the filter to the three read paths, and rewrite the two indexes with it**
 
-In `drizzle-post.repository.ts`:
+These land together, in one commit, and the order is not negotiable: the index
+predicates and the query WHERE clauses must match, or the planner cannot use
+the index. Task 1 deliberately left both indexes alone for this reason.
+
+In `apps/api/src/db/schema.ts`, replace the two existing `posts` indexes:
+
+```ts
+    // Untuk Anda: newest first across everybody. PARTIAL on BOTH conditions,
+    // so deleted rows AND community rows leave the hot index entirely rather
+    // than being filtered out of every scan. Phase 2 added the second
+    // condition when Beranda became `community_id IS NULL`.
+    index("post_live_created_idx")
+      .on(table.createdAt.desc(), table.id.desc())
+      .where(sql`${table.deletedAt} is null and ${table.communityId} is null`),
+    // A profile's posts, and the post side of the Mengikuti join. BOTH
+    // consumers exclude community posts, so the filter belongs in the index.
+    index("post_author_created_idx")
+      .on(table.authorId, table.createdAt.desc())
+      .where(sql`${table.deletedAt} is null and ${table.communityId} is null`),
+```
+
+`post_author_created_idx` was NOT partial before; making it partial is
+deliberate and is why it is rewritten rather than extended. Run
+`bun run db:generate` for the migration carrying both — this one DOES contain
+`DROP INDEX`, which is correct for an index rewrite.
+
+**Two existing tests in `drizzle-post.repository.test.ts` break here, and both
+are updated deliberately with a comment recording why** — the programme's
+working agreement requires exactly that, rather than deleting or weakening
+them:
+
+- `indexes listGlobal's (created_at desc, id desc), live rows only` pins the
+  predicate string `WHERE (deleted_at IS NULL)`. It becomes
+  `WHERE ((deleted_at IS NULL) AND (community_id IS NULL))`.
+- `plans listGlobal and listByAuthor WITHOUT a sequential scan of post` is
+  **not** edited. It must go green on its own once the filters below land. If
+  it does not, the index and the query still disagree — stop and report rather
+  than relaxing the assertion.
+
+Then in `drizzle-post.repository.ts`:
 
 ```ts
   listGlobal(limit: number, before: KeysetCursor | null): Promise<PostRow[]> {
