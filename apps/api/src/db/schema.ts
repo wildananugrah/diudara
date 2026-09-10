@@ -243,13 +243,18 @@ export const posts = pgTable(
     type: varchar("type", { length: 16 }).notNull().default("diskusi"),
   },
   (table) => [
-    // Untuk Anda: newest first across everybody. PARTIAL, so deleted rows leave
-    // the hot index entirely rather than being filtered out of every scan.
+    // Untuk Anda: newest first across everybody. PARTIAL on BOTH conditions,
+    // so deleted rows AND community rows leave the hot index entirely rather
+    // than being filtered out of every scan. Phase 2 added the second
+    // condition when Beranda became `community_id IS NULL`.
     index("post_live_created_idx")
       .on(table.createdAt.desc(), table.id.desc())
-      .where(sql`${table.deletedAt} is null`),
-    // A profile's posts, and the post side of the Mengikuti join.
-    index("post_author_created_idx").on(table.authorId, table.createdAt.desc()),
+      .where(sql`${table.deletedAt} is null and ${table.communityId} is null`),
+    // A profile's posts, and the post side of the Mengikuti join. BOTH
+    // consumers exclude community posts, so the filter belongs in the index.
+    index("post_author_created_idx")
+      .on(table.authorId, table.createdAt.desc())
+      .where(sql`${table.deletedAt} is null and ${table.communityId} is null`),
     // Phase 2: the community feed's keyset page.
     index("post_community_created_idx")
       .on(table.communityId, table.createdAt.desc(), table.id.desc())

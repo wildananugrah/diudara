@@ -18,6 +18,20 @@ export interface PostRow {
   authorId: string;
   /** `public` | `members`. Widened here rather than in the DB so a new value needs no migration. */
   visibility: string;
+  /**
+   * `null` for a personal post — Beranda and profiles. Non-null for a
+   * community post, which appears on that community's page and nowhere else
+   * (schema `post.community_id`). The three personal read paths all filter
+   * `community_id IS NULL`, so a row this projection returns for one of them
+   * always has `communityId === null`; `listByCommunity` is where it is set.
+   */
+  communityId: string | null;
+  /**
+   * `diskusi` | `pengumuman` — a VARCHAR the schema widens without a
+   * migration, exactly as `visibility` is. Always `diskusi` for a personal
+   * post (schema `post.type`, and the `post_personal_has_no_type` CHECK).
+   */
+  type: string;
   authorHandle: string;
   authorDisplayName: string;
 }
@@ -65,11 +79,20 @@ export interface PostOwnership {
 
 export interface PostRepositoryPort {
   /**
-   * `visibility` is OPTIONAL and, when omitted, leaves the column at
-   * whatever the schema default is (`public`) — every pre-Phase-6 caller of
-   * `create` still compiles and still means the same thing it always did.
+   * A SINGLE object parameter, not positionals. `visibility`, `communityId`
+   * and `type` are all optional and, when omitted, leave the column at its
+   * schema default (`public`, `NULL`, `diskusi` respectively). Positional
+   * `(authorId, body, visibility?, communityId?, type?)` was rejected in
+   * Phase 2: a fourth and fifth trailing string argument is exactly where a
+   * caller silently passes `type` into `communityId`.
    */
-  create(authorId: string, body: string, visibility?: string): Promise<PostRow>;
+  create(input: {
+    authorId: string;
+    body: string;
+    visibility?: string;
+    communityId?: string;
+    type?: string;
+  }): Promise<PostRow>;
   /** `null` when the id has never existed. A soft-deleted post still resolves, with `isDeleted: true`. */
   ownershipOf(id: string): Promise<PostOwnership | null>;
   /**
@@ -110,10 +133,23 @@ export interface PostRepositoryPort {
   updateBody(id: string, body: string, visibility?: string): Promise<PostRow | null>;
   /** Idempotent: deleting an already-deleted post is a no-op, not an error. */
   softDelete(id: string): Promise<void>;
-  /** Newest first, across every author. Excludes deleted. */
+  /** Newest first, across every author. Excludes deleted. Excludes community posts. */
   listGlobal(limit: number, before: KeysetCursor | null): Promise<PostRow[]>;
-  /** Newest first, only authors `viewerId` follows. Excludes deleted. Excludes the viewer's own. */
+  /**
+   * Newest first, only authors `viewerId` follows. Excludes deleted. Excludes
+   * the viewer's own. Excludes community posts.
+   */
   listFollowing(viewerId: string, limit: number, before: KeysetCursor | null): Promise<PostRow[]>;
-  /** Newest first, one author. Excludes deleted. */
+  /** Newest first, one author. Excludes deleted. Excludes community posts. */
   listByAuthor(authorId: string, limit: number, before: KeysetCursor | null): Promise<PostRow[]>;
+  /**
+   * Newest first, one community's posts — the community feed's keyset page.
+   * Excludes deleted. This is the ONLY read path that returns rows with a
+   * non-null `communityId`.
+   */
+  listByCommunity(
+    communityId: string,
+    limit: number,
+    before: KeysetCursor | null
+  ): Promise<PostRow[]>;
 }

@@ -186,7 +186,7 @@ export class CreatePost {
       // call is producing, before any row exists to leave behind.
       requireImageWhenLocked(visibility, mediaIds.length);
 
-      const row = await posts.create(input.authorId, body, visibility);
+      const row = await posts.create({ authorId: input.authorId, body, visibility });
       // `locked: false` — NEVER copy this to a read path. Every `toPostView` in
       // this file answers the post's OWN AUTHOR, who is the one person the
       // paywall never applies to: `CreatePost` and `EditPost` have already

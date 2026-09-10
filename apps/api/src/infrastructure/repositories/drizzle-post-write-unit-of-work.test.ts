@@ -32,7 +32,7 @@ async function seedUser() {
 
 async function seedPost(): Promise<{ authorId: string; postId: string }> {
   const author = await seedUser();
-  const post = await posts.create(author.id, "asli", "public");
+  const post = await posts.create({ authorId: author.id, body: "asli", visibility: "public" });
   return { authorId: author.id, postId: post.id };
 }
 
@@ -87,7 +87,7 @@ describe("DrizzlePostWriteUnitOfWork", () => {
 
     await expect(
       unitOfWork().run(async ({ posts: tx }) => {
-        await tx.create(author.id, "khusus anggota, foto hilang", "members");
+        await tx.create({ authorId: author.id, body: "khusus anggota, foto hilang", visibility: "members" });
         // Stands in for `requireFullyClaimed` throwing after `posts.create`
         // has already run in the same `work` — fix round 2, reproduced at
         // the level this class alone is responsible for.

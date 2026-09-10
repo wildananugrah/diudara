@@ -1,7 +1,7 @@
-import { describe, expect, it, beforeEach } from "bun:test";
+import { describe, expect, it, test, beforeEach } from "bun:test";
 import { sql } from "drizzle-orm";
 import { db, sql as pgClient } from "../../db/client";
-import { appUsers, follows, posts } from "../../db/schema";
+import { appUsers, communities, follows, posts } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { DrizzlePostRepository } from "./drizzle-post.repository";
 
@@ -36,6 +36,147 @@ async function seedPost(authorId: string, body: string, createdAt: Date, id?: st
   return row!;
 }
 
+/** The handles the leak test's table needs from its ONE fixture. */
+type Ids = {
+  authorId: string;
+  followerId: string;
+  personalPostId: string;
+  communityPostId: string;
+};
+
+/**
+ * ONE fixture for "community posts never leak into a personal read path":
+ * an author, a follower who ACTUALLY follows them (or `listFollowing` passes
+ * vacuously — it returns nothing for a follower who follows nobody, filter or
+ * no filter), a community the author owns, and two posts by that author — one
+ * personal, one in the community. The community post is the row every
+ * personal read path must exclude.
+ */
+async function seedOnePersonalAndOneCommunityPost(): Promise<Ids> {
+  const author = await seedUser();
+  const follower = await seedUser();
+
+  const [follow] = await db
+    .insert(follows)
+    .values({ followerId: follower.id, followeeId: author.id })
+    .returning();
+  if (follow === undefined) throw new Error("seed: the follow row was not created");
+
+  seedCounter += 1;
+  const [community] = await db
+    .insert(communities)
+    .values({
+      ownerId: author.id,
+      name: `Community ${seedCounter}`,
+      slug: `community-${seedCounter}`,
+      category: "umum",
+    })
+    .returning();
+
+  const [personalPost] = await db
+    .insert(posts)
+    .values({ authorId: author.id, body: "kiriman pribadi" })
+    .returning();
+  const [communityPost] = await db
+    .insert(posts)
+    .values({ authorId: author.id, body: "kiriman komunitas", communityId: community!.id })
+    .returning();
+
+  return {
+    authorId: author.id,
+    followerId: follower.id,
+    personalPostId: personalPost!.id,
+    communityPostId: communityPost!.id,
+  };
+}
+
+/**
+ * Two communities owned by one person: A has two live posts (`pertama` then
+ * `kedua`, newest last) plus a soft-deleted one, B has one live post. Every
+ * row is by the same author, so only the `community_id` and `deleted_at`
+ * filters can produce the expected `["kedua", "pertama"]`.
+ */
+async function seedTwoCommunitiesWithPosts(): Promise<{
+  ownerId: string;
+  communityAId: string;
+  communityBId: string;
+}> {
+  const owner = await seedUser();
+
+  seedCounter += 1;
+  const [a] = await db
+    .insert(communities)
+    .values({
+      ownerId: owner.id,
+      name: `Community A ${seedCounter}`,
+      slug: `community-a-${seedCounter}`,
+      category: "umum",
+    })
+    .returning();
+  seedCounter += 1;
+  const [b] = await db
+    .insert(communities)
+    .values({
+      ownerId: owner.id,
+      name: `Community B ${seedCounter}`,
+      slug: `community-b-${seedCounter}`,
+      category: "umum",
+    })
+    .returning();
+
+  await db
+    .insert(posts)
+    .values({
+      authorId: owner.id,
+      body: "pertama",
+      communityId: a!.id,
+      createdAt: new Date("2026-08-18T01:00:00.000Z"),
+    });
+  await db
+    .insert(posts)
+    .values({
+      authorId: owner.id,
+      body: "kedua",
+      communityId: a!.id,
+      createdAt: new Date("2026-08-18T02:00:00.000Z"),
+    });
+  await db
+    .insert(posts)
+    .values({
+      authorId: owner.id,
+      body: "dihapus",
+      communityId: a!.id,
+      createdAt: new Date("2026-08-18T03:00:00.000Z"),
+      deletedAt: new Date("2026-08-18T03:30:00.000Z"),
+    });
+  await db
+    .insert(posts)
+    .values({
+      authorId: owner.id,
+      body: "komunitas lain",
+      communityId: b!.id,
+      createdAt: new Date("2026-08-18T04:00:00.000Z"),
+    });
+
+  return { ownerId: owner.id, communityAId: a!.id, communityBId: b!.id };
+}
+
+/** One person who owns one community — for the `create` tests. */
+async function seedCommunity(): Promise<{ ownerId: string; communityId: string }> {
+  const owner = await seedUser();
+  seedCounter += 1;
+  const [community] = await db
+    .insert(communities)
+    .values({
+      ownerId: owner.id,
+      name: `Community ${seedCounter}`,
+      slug: `community-${seedCounter}`,
+      category: "umum",
+    })
+    .returning();
+  return { ownerId: owner.id, communityId: community!.id };
+}
+
 /**
  * Builds `count` UUIDs for a same-timestamp tie test: `idAtRank(count, 0)` is
  * the LARGEST of the set (sorts first under `desc(id)`), `idAtRank(count,
@@ -68,16 +209,23 @@ describe("DrizzlePostRepository.create", () => {
   it("returns the row with the author's public fields, its id and visibility", async () => {
     const author = await seedUser();
 
-    const row = await repo.create(author.id, "halo semua");
+    const row = await repo.create({ authorId: author.id, body: "halo semua" });
 
+    // Phase 2 widened `postColumns` with `communityId` and `type`, so the
+    // exact key set widens with it — the same maintenance the Phase 6 note on
+    // `DrizzlePostRepository projection on every list path` below records for
+    // `authorId`/`visibility`: the assertion tracks the projection, it is not
+    // exempted from changing when the projection legitimately does.
     expect(Object.keys(row).sort()).toEqual([
       "authorDisplayName",
       "authorHandle",
       "authorId",
       "body",
+      "communityId",
       "createdAt",
       "editedAt",
       "id",
+      "type",
       "visibility",
     ]);
     expect(row.authorHandle).toBe(author.handle);
@@ -87,7 +235,7 @@ describe("DrizzlePostRepository.create", () => {
   it("carries the author's id and its visibility, defaulting to public", async () => {
     const author = await seedUser();
 
-    const post = await repo.create(author.id, "halo");
+    const post = await repo.create({ authorId: author.id, body: "halo" });
     const rows = await repo.listByAuthor(author.id, 10, null);
 
     expect(rows[0]?.authorId).toBe(author.id);
@@ -104,7 +252,7 @@ describe("DrizzlePostRepository.create", () => {
   it("persists an explicit visibility", async () => {
     const author = await seedUser();
 
-    const post = await repo.create(author.id, "khusus anggota", "members");
+    const post = await repo.create({ authorId: author.id, body: "khusus anggota", visibility: "members" });
 
     expect(post.visibility).toBe("members");
   });
@@ -117,7 +265,7 @@ describe("DrizzlePostRepository.create", () => {
 describe("DrizzlePostRepository.gatingOf", () => {
   it("answers the author and the visibility of a public post", async () => {
     const author = await seedUser();
-    const post = await repo.create(author.id, "terbuka");
+    const post = await repo.create({ authorId: author.id, body: "terbuka" });
 
     expect(await repo.gatingOf(post.id)).toEqual({
       authorId: author.id,
@@ -129,7 +277,7 @@ describe("DrizzlePostRepository.gatingOf", () => {
 
   it("answers 'members' for a gated post", async () => {
     const author = await seedUser();
-    const post = await repo.create(author.id, "khusus anggota");
+    const post = await repo.create({ authorId: author.id, body: "khusus anggota" });
     await db
       .update(posts)
       .set({ visibility: "members" })
@@ -150,7 +298,7 @@ describe("DrizzlePostRepository.gatingOf", () => {
    */
   it("still answers for a SOFT-DELETED post, with the visibility it was deleted with", async () => {
     const author = await seedUser();
-    const post = await repo.create(author.id, "dihapus");
+    const post = await repo.create({ authorId: author.id, body: "dihapus" });
     await db
       .update(posts)
       .set({ visibility: "members" })
@@ -173,7 +321,7 @@ describe("DrizzlePostRepository soft delete", () => {
     const author = await seedUser();
     const viewer = await seedUser();
     await db.insert(follows).values({ followerId: viewer.id, followeeId: author.id });
-    const post = await repo.create(author.id, "akan dihapus");
+    const post = await repo.create({ authorId: author.id, body: "akan dihapus" });
 
     await repo.softDelete(post.id);
 
@@ -184,7 +332,7 @@ describe("DrizzlePostRepository soft delete", () => {
 
   it("is idempotent — deleting twice does not throw", async () => {
     const author = await seedUser();
-    const post = await repo.create(author.id, "sekali saja");
+    const post = await repo.create({ authorId: author.id, body: "sekali saja" });
 
     await repo.softDelete(post.id);
     await repo.softDelete(post.id);
@@ -195,7 +343,7 @@ describe("DrizzlePostRepository soft delete", () => {
 
   it("refuses to edit a deleted post", async () => {
     const author = await seedUser();
-    const post = await repo.create(author.id, "asli");
+    const post = await repo.create({ authorId: author.id, body: "asli" });
     await repo.softDelete(post.id);
 
     expect(await repo.updateBody(post.id, "diubah") === null).toBe(true);
@@ -205,7 +353,7 @@ describe("DrizzlePostRepository soft delete", () => {
 describe("DrizzlePostRepository.updateBody", () => {
   it("changes the body and stamps editedAt", async () => {
     const author = await seedUser();
-    const post = await repo.create(author.id, "asli");
+    const post = await repo.create({ authorId: author.id, body: "asli" });
 
     const updated = await repo.updateBody(post.id, "sudah diubah");
 
@@ -216,7 +364,7 @@ describe("DrizzlePostRepository.updateBody", () => {
   /** Task 5: the third argument changes the column. */
   it("changes visibility when given one", async () => {
     const author = await seedUser();
-    const post = await repo.create(author.id, "asli");
+    const post = await repo.create({ authorId: author.id, body: "asli" });
 
     const updated = await repo.updateBody(post.id, "asli", "members");
 
@@ -233,7 +381,7 @@ describe("DrizzlePostRepository.updateBody", () => {
    */
   it("leaves visibility untouched when the third argument is omitted", async () => {
     const author = await seedUser();
-    const post = await repo.create(author.id, "asli", "members");
+    const post = await repo.create({ authorId: author.id, body: "asli", visibility: "members" });
 
     const updated = await repo.updateBody(post.id, "teks berubah, visibilitas tidak");
 
@@ -302,9 +450,9 @@ describe("DrizzlePostRepository.listFollowing", () => {
     const followed = await seedUser();
     const stranger = await seedUser();
     await db.insert(follows).values({ followerId: viewer.id, followeeId: followed.id });
-    await repo.create(followed.id, "diikuti");
-    await repo.create(stranger.id, "tidak diikuti");
-    await repo.create(viewer.id, "milik sendiri");
+    await repo.create({ authorId: followed.id, body: "diikuti" });
+    await repo.create({ authorId: stranger.id, body: "tidak diikuti" });
+    await repo.create({ authorId: viewer.id, body: "milik sendiri" });
 
     const rows = await repo.listFollowing(viewer.id, 20, null);
 
@@ -333,7 +481,7 @@ describe("DrizzlePostRepository.listFollowing", () => {
     const viewer = await seedUser();
     const followed = await seedUser();
     await db.insert(follows).values({ followerId: viewer.id, followeeId: followed.id });
-    await repo.create(followed.id, "satu juga");
+    await repo.create({ authorId: followed.id, body: "satu juga" });
 
     // I4: `listFollowing` calls `clampLimit` at its OWN call site rather than
     // through `page()` — this fails independently if that call is ever
@@ -345,7 +493,7 @@ describe("DrizzlePostRepository.listFollowing", () => {
 describe("DrizzlePostRepository limits", () => {
   it("returns nothing for a nonsensical limit rather than the whole table", async () => {
     const author = await seedUser();
-    await repo.create(author.id, "satu");
+    await repo.create({ authorId: author.id, body: "satu" });
 
     expect(await repo.listGlobal(-1, null)).toEqual([]);
   });
@@ -360,7 +508,8 @@ describe("DrizzlePostRepository limits", () => {
  * `listFollowing()` left the whole suite at 9 pass / 0 fail before these
  * existed. (`authorId` and `visibility` were later added to `postColumns`
  * deliberately, in Phase 6 — the exact-key-set below was widened alongside
- * them, not exempted from this check.) `postColumns` is shared by all three
+ * them, not exempted from this check. Phase 2 widened it again, with
+ * `communityId` and `type`.) `postColumns` is shared by all three
  * list paths, so one row from each is enough to catch a leak introduced at
  * either call site.
  */
@@ -370,15 +519,17 @@ describe("DrizzlePostRepository projection on every list path", () => {
     "authorHandle",
     "authorId",
     "body",
+    "communityId",
     "createdAt",
     "editedAt",
     "id",
+    "type",
     "visibility",
   ].sort();
 
   it("listGlobal rows carry only the public post fields", async () => {
     const author = await seedUser();
-    await repo.create(author.id, "cek proyeksi global");
+    await repo.create({ authorId: author.id, body: "cek proyeksi global" });
 
     const [row] = await repo.listGlobal(1, null);
 
@@ -387,7 +538,7 @@ describe("DrizzlePostRepository projection on every list path", () => {
 
   it("listByAuthor rows carry only the public post fields", async () => {
     const author = await seedUser();
-    await repo.create(author.id, "cek proyeksi penulis");
+    await repo.create({ authorId: author.id, body: "cek proyeksi penulis" });
 
     const [row] = await repo.listByAuthor(author.id, 1, null);
 
@@ -398,7 +549,7 @@ describe("DrizzlePostRepository projection on every list path", () => {
     const viewer = await seedUser();
     const followed = await seedUser();
     await db.insert(follows).values({ followerId: viewer.id, followeeId: followed.id });
-    await repo.create(followed.id, "cek proyeksi mengikuti");
+    await repo.create({ authorId: followed.id, body: "cek proyeksi mengikuti" });
 
     const [row] = await repo.listFollowing(viewer.id, 1, null);
 
@@ -441,7 +592,11 @@ describe("the indexes post reads go through", () => {
     const definition = await indexDefinition("post_live_created_idx");
     expect(definition).not.toBeNull();
     expect(definition).toMatch(/\(\s*created_at\s+DESC[^,]*,\s*id\s+DESC/i);
-    expect(definition).toContain("WHERE (deleted_at IS NULL)");
+    // Phase 2 (community feed): `post_live_created_idx` became partial on a
+    // SECOND condition, `community_id IS NULL`, so community posts leave the
+    // Beranda index entirely rather than being filtered out of every scan.
+    // `listGlobal`'s WHERE clause carries the matching `isNull(posts.communityId)`.
+    expect(definition).toContain("WHERE ((deleted_at IS NULL) AND (community_id IS NULL))");
   });
 
   it("indexes listByAuthor's/listFollowing's (author_id, created_at desc)", async () => {
@@ -515,5 +670,54 @@ describe("the indexes post reads go through", () => {
     const byAuthorPlanText = byAuthorPlan.map((row) => row["QUERY PLAN"]).join("\n");
     expect(byAuthorPlanText).not.toContain("Seq Scan on post");
     expect(byAuthorPlanText).toContain("post_author_created_idx");
+  });
+});
+
+describe("community posts never leak into a personal read path", () => {
+  /**
+   * ONE fixture, THREE paths, driven from a table. Deliberately not three
+   * tests that each happen to remember the filter: that is the exact shape
+   * that let a missing `deleted_at` filter through on the fourth path last
+   * phase. A path added later joins this table.
+   */
+  test.each([
+    ["listGlobal", (repo: DrizzlePostRepository, ids: Ids) => repo.listGlobal(20, null)],
+    ["listFollowing", (repo: DrizzlePostRepository, ids: Ids) => repo.listFollowing(ids.followerId, 20, null)],
+    ["listByAuthor", (repo: DrizzlePostRepository, ids: Ids) => repo.listByAuthor(ids.authorId, 20, null)],
+  ])("%s excludes it", async (_name, read) => {
+    const ids = await seedOnePersonalAndOneCommunityPost();
+    const rows = await read(new DrizzlePostRepository(db), ids);
+    // Compare ids, never row objects: a failing assertion that holds a row
+    // serialises everything joined to it.
+    expect(rows.map((r) => r.id)).toEqual([ids.personalPostId]);
+  });
+});
+
+describe("DrizzlePostRepository.listByCommunity", () => {
+  test("listByCommunity returns only that community's live posts, newest first", async () => {
+    const ids = await seedTwoCommunitiesWithPosts();
+    const rows = await new DrizzlePostRepository(db).listByCommunity(ids.communityAId, 20, null);
+    expect(rows.map((r) => r.body)).toEqual(["kedua", "pertama"]);
+  });
+});
+
+describe("DrizzlePostRepository.create — community and type", () => {
+  test("create stores the community and the type", async () => {
+    const ids = await seedCommunity();
+    const row = await new DrizzlePostRepository(db).create({
+      authorId: ids.ownerId,
+      body: "pengumuman penting",
+      communityId: ids.communityId,
+      type: "pengumuman",
+    });
+    expect(row.type).toBe("pengumuman");
+    expect(row.communityId).toBe(ids.communityId);
+  });
+
+  test("create with no community leaves a personal diskusi post", async () => {
+    const ids = await seedCommunity();
+    const row = await new DrizzlePostRepository(db).create({ authorId: ids.ownerId, body: "halo" });
+    expect(row.communityId).toBeNull();
+    expect(row.type).toBe("diskusi");
   });
 });

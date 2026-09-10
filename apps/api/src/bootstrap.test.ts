@@ -355,15 +355,17 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
 
 /** Task 2 of posts-and-feed's repository, faked the same shallow way `fakeFollowRepository` is above. */
 const fakePostRepository: PostRepositoryPort = {
-  async create(_authorId, body) {
+  async create(input) {
     return {
       id: "fake-post",
-      body,
+      body: input.body,
       createdAt: new Date(0),
       editedAt: null,
       // Distinct from any viewer id used in this file's smoke tests.
       authorId: "fake-author",
       visibility: "public",
+      communityId: null,
+      type: "diskusi",
       authorHandle: "fake",
       authorDisplayName: "Fake",
     };
@@ -392,6 +394,9 @@ const fakePostRepository: PostRepositoryPort = {
     return [];
   },
   async listByAuthor() {
+    return [];
+  },
+  async listByCommunity() {
     return [];
   },
 };

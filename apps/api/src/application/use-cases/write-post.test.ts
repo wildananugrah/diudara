@@ -32,6 +32,8 @@ function fakeRow(overrides: Partial<PostRow> = {}): PostRow {
     // pass for the wrong reason.
     authorId: "33333333-0000-4000-8000-000000000000",
     visibility: "public",
+    communityId: null,
+    type: "diskusi",
     authorHandle: "budi",
     authorDisplayName: "Budi",
     ...overrides,
@@ -45,9 +47,15 @@ class FakePosts implements PostRepositoryPort {
   deleted: string[] = [];
   updateResult: PostRow | null = fakeRow();
 
-  async create(_authorId: string, body: string, visibility?: string): Promise<PostRow> {
-    this.created.push(body);
-    return fakeRow({ body, visibility: visibility ?? "public" });
+  async create(input: {
+    authorId: string;
+    body: string;
+    visibility?: string;
+    communityId?: string;
+    type?: string;
+  }): Promise<PostRow> {
+    this.created.push(input.body);
+    return fakeRow({ body: input.body, visibility: input.visibility ?? "public" });
   }
   async ownershipOf(): Promise<PostOwnership | null> {
     return this.ownership;
@@ -89,6 +97,9 @@ class FakePosts implements PostRepositoryPort {
     return [];
   }
   async listByAuthor(): Promise<PostRow[]> {
+    return [];
+  }
+  async listByCommunity(): Promise<PostRow[]> {
     return [];
   }
 }
@@ -893,7 +904,7 @@ describe("EditPost — real transaction (Task 5 fix round 1)", () => {
     const posts = new DrizzlePostRepository(db);
     const media = new DrizzleMediaRepository(db);
     const author = await seedRealUser();
-    const post = await posts.create(author.id, "asli", "public");
+    const post = await posts.create({ authorId: author.id, body: "asli", visibility: "public" });
     const image = await media.create({ ownerId: author.id, width: 10, height: 10, byteSize: 1 });
     await media.claim(post.id, [image.id]);
     return { authorId: author.id, postId: post.id, mediaId: image.id };
@@ -958,7 +969,7 @@ describe("EditPost — real transaction (Task 5 fix round 1)", () => {
   it("a claim lost to ANOTHER POST says the photo is taken, not that it vanished", async () => {
     const { authorId, postId, mediaId } = await seedPublicPostWithOneImage();
     const posts = new DrizzlePostRepository(db);
-    const thief = await posts.create(authorId, "kiriman pencuri", "public");
+    const thief = await posts.create({ authorId: authorId, body: "kiriman pencuri", visibility: "public" });
     const raceUnitOfWork: PostWriteUnitOfWorkPort = {
       run: (work) =>
         db.transaction((tx) =>
@@ -1158,7 +1169,7 @@ describe("CreatePost/EditPost — cross-post media race (MAJ-2, real transaction
       Array.from({ length: PAIRS }, async (_unused, index) => {
         const author = await seedRealUser();
         // Q is the OTHER post — public, and the thing whose edit would steal M.
-        const otherPost = await posts.create(author.id, "kiriman lain", "public");
+        const otherPost = await posts.create({ authorId: author.id, body: "kiriman lain", visibility: "public" });
         const image = await media.create({
           ownerId: author.id,
           width: 10,
@@ -1382,7 +1393,7 @@ describe("CreatePost — real transaction (Task 5 fix round 2)", () => {
     const posts = new DrizzlePostRepository(db);
     const media = new DrizzleMediaRepository(db);
     const image = await media.create({ ownerId: author.id, width: 10, height: 10, byteSize: 1 });
-    const thief = await posts.create(author.id, "kiriman pencuri", "public");
+    const thief = await posts.create({ authorId: author.id, body: "kiriman pencuri", visibility: "public" });
     const raceUnitOfWork: PostWriteUnitOfWorkPort = {
       run: (work) =>
         db.transaction((tx) =>

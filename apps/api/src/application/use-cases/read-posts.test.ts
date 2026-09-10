@@ -21,6 +21,8 @@ function fakeRow(overrides: Partial<PostRow> = {}): PostRow {
     // make a later gate test pass for the wrong reason.
     authorId: "99999999-0000-4000-8000-000000000000",
     visibility: "public",
+    communityId: null,
+    type: "diskusi",
     authorHandle: "budi",
     authorDisplayName: "Budi",
     ...overrides,
@@ -68,6 +70,11 @@ class FakePosts implements PostRepositoryPort {
   }
   async listByAuthor(authorId: string, limit: number, before: unknown): Promise<PostRow[]> {
     this.byAuthorCalls.push({ authorId, limit, before });
+    return this.rows;
+  }
+  byCommunityCalls: Array<{ communityId: string; limit: number; before: unknown }> = [];
+  async listByCommunity(communityId: string, limit: number, before: unknown): Promise<PostRow[]> {
+    this.byCommunityCalls.push({ communityId, limit, before });
     return this.rows;
   }
 }

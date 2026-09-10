@@ -130,6 +130,9 @@ class FakePosts implements PostRepositoryPort {
   async listByAuthor(): Promise<never> {
     return this.unused();
   }
+  async listByCommunity(): Promise<never> {
+    return this.unused();
+  }
 }
 
 function subscriptionRow(overrides: Partial<UserSubscriptionRow> = {}): UserSubscriptionRow {

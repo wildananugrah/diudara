@@ -10,6 +10,8 @@ const row: PostRow = {
   editedAt: null,
   authorId: "77777777-0000-4000-8000-000000000000",
   visibility: "public",
+  communityId: null,
+  type: "diskusi",
   authorHandle: "budi",
   authorDisplayName: "Budi",
 };
