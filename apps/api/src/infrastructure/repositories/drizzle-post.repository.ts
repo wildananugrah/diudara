@@ -131,6 +131,23 @@ export class DrizzlePostRepository implements PostRepositoryPort {
   }
 
   /**
+   * `GET /users/posts/:id`. The SHARED projection, joined the same way the
+   * list paths join it, with `deleted_at IS NULL` — a soft-deleted post is
+   * unreachable here exactly as it is through `listGlobal` and friends. This
+   * is NOT `readOne` below: `readOne` reads a row back right after this
+   * process wrote it (create / updateBody, both already deleted-guarded) and
+   * deliberately carries no delete filter of its own.
+   */
+  async getById(id: string): Promise<PostRow | null> {
+    const [row] = await this.db
+      .select(postColumns)
+      .from(posts)
+      .innerJoin(appUsers, eq(posts.authorId, appUsers.id))
+      .where(and(eq(posts.id, id), isNull(posts.deletedAt)));
+    return row ?? null;
+  }
+
+  /**
    * Task 5 fix round 1. Same projection and same shape as `ownershipOf`,
    * `FOR UPDATE OF post` added — this is what makes it safe to read
    * `visibility` and the post's current media for a resulting-state check: a

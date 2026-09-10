@@ -96,6 +96,18 @@ export interface PostRepositoryPort {
   /** `null` when the id has never existed. A soft-deleted post still resolves, with `isDeleted: true`. */
   ownershipOf(id: string): Promise<PostOwnership | null>;
   /**
+   * One post by id, in the SHARED projection — what `GetPost`
+   * (`GET /users/posts/:id`) hands straight to the paywall gate.
+   *
+   * `null` when the id has never existed OR when the post is soft-deleted.
+   * This is a READ path, so — unlike `ownershipOf`/`gatingOf`, which must
+   * still answer for a deleted row — it filters `deleted_at IS NULL` exactly
+   * as `listGlobal`/`listByAuthor`/`listByCommunity` do: a soft-deleted post
+   * is unreachable through every projection, and the caller turns a `null`
+   * from either cause into the same 404.
+   */
+  getById(id: string): Promise<PostRow | null>;
+  /**
    * Task 5 fix round 1. Identical answer to `ownershipOf`, but taken under
    * `SELECT ... FOR UPDATE`: a row lock a caller holds for the rest of an
    * open transaction, so a SECOND call to `lockForEdit` on the SAME id — from

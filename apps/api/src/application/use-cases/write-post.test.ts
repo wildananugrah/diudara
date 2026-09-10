@@ -60,6 +60,10 @@ class FakePosts implements PostRepositoryPort {
   async ownershipOf(): Promise<PostOwnership | null> {
     return this.ownership;
   }
+  /** Not driven from the write paths — `GetPost` (read-posts.ts) is its only caller. */
+  async getById(): Promise<PostRow | null> {
+    return null;
+  }
   /**
    * No real lock semantics in a synchronous fake — there is nothing for a
    * SECOND caller to block on inside one `bun:test` process. The DB-backed

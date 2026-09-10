@@ -8,7 +8,7 @@ import type {
   UserSubscriptionRow,
 } from "../ports/user-subscription-repository.port";
 import type { UserRecord, UserRepositoryPort } from "../ports/user-repository.port";
-import { ListFeed, ListUserPosts } from "./read-posts";
+import { GetPost, ListFeed, ListUserPosts } from "./read-posts";
 
 function fakeRow(overrides: Partial<PostRow> = {}): PostRow {
   return {
@@ -47,6 +47,13 @@ class FakePosts implements PostRepositoryPort {
   }
   async ownershipOf() {
     return null;
+  }
+  /** What `GetPost` reads. `null` models both "never existed" and "soft-deleted". */
+  byId: PostRow | null = null;
+  byIdCalls: string[] = [];
+  async getById(id: string): Promise<PostRow | null> {
+    this.byIdCalls.push(id);
+    return this.byId;
   }
   /** Not used from this file's read paths, same as `ownershipOf` above. */
   async lockForEdit() {
@@ -772,5 +779,72 @@ describe("ListUserPosts — the paywall gate", () => {
 
     expect(page.posts[0]?.media).toHaveLength(2);
     expect(subscriptions.amongCalls).toEqual([]);
+  });
+});
+
+/**
+ * `GET /users/posts/:id` — one post for DiscussionDetail, gated the SAME way
+ * the feed is because it runs the single row through `paginate` as a one-row
+ * page rather than re-deriving the lock rule. These tests pin that: the gate
+ * still answers, and a missing or soft-deleted row is a 404.
+ */
+describe("GetPost", () => {
+  const POST_ID = "aaaaaaaa-0000-4000-8000-000000000000";
+
+  function subject(posts: FakePosts, media: FakeMedia, subscriptions: FakeSubscriptions) {
+    return new GetPost(posts, media, subscriptions, new CountingClock(NOW));
+  }
+
+  it("returns the post as a view, with commentCount 0, for a signed-out viewer", async () => {
+    const posts = new FakePosts();
+    posts.byId = fakeRow({ id: POST_ID, body: "diskusi kita" });
+
+    const view = await subject(posts, new FakeMedia(), new FakeSubscriptions()).execute({
+      postId: POST_ID,
+      viewerId: null,
+    });
+
+    expect(view.body).toBe("diskusi kita");
+    expect(view.commentCount).toBe(0);
+    expect(posts.byIdCalls).toEqual([POST_ID]);
+  });
+
+  it("throws NotFoundError when the id resolves to nothing — missing or soft-deleted alike", async () => {
+    const posts = new FakePosts();
+    posts.byId = null;
+
+    await expect(
+      subject(posts, new FakeMedia(), new FakeSubscriptions()).execute({ postId: POST_ID, viewerId: null })
+    ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it("applies the paywall gate: a signed-out viewer gets a gated post's caption but no media", async () => {
+    const posts = new FakePosts();
+    posts.byId = fakeRow({ id: POST_ID, authorId: RINA, visibility: "members" });
+    const media = new FakeMedia();
+    media.rows = [fakeMediaRow({ id: "eeeeeee1-0000-4000-8000-000000000000", postId: POST_ID })];
+
+    const view = await subject(posts, media, new FakeSubscriptions()).execute({
+      postId: POST_ID,
+      viewerId: null,
+    });
+
+    expect(view.media).toEqual([]);
+    expect(view.membersOnly).toBe(true);
+    expect(view.lockedMediaCount).toBe(1);
+  });
+
+  it("a current member gets the gated post's media", async () => {
+    const posts = new FakePosts();
+    posts.byId = fakeRow({ id: POST_ID, authorId: RINA, visibility: "members" });
+    const media = new FakeMedia();
+    media.rows = [fakeMediaRow({ id: "eeeeeee1-0000-4000-8000-000000000000", postId: POST_ID })];
+    const subscriptions = new FakeSubscriptions();
+    subscriptions.rows = [subscriptionRow()];
+
+    const view = await subject(posts, media, subscriptions).execute({ postId: POST_ID, viewerId: BUYER });
+
+    expect(view.media.map((m) => m.id)).toEqual(["eeeeeee1-0000-4000-8000-000000000000"]);
+    expect(view.lockedMediaCount).toBe(0);
   });
 });

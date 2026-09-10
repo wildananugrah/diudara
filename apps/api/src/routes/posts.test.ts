@@ -153,12 +153,14 @@ describe("POST /users/posts", () => {
     expect(Object.keys(body).sort()).toEqual([
       "author",
       "body",
+      "commentCount",
       "createdAt",
       "editedAt",
       "id",
       "lockedMediaCount",
       "media",
       "membersOnly",
+      "type",
     ]);
     expect(body.media).toEqual([]);
     // The author of a brand-new public post: nothing is gated and nothing is
@@ -687,12 +689,14 @@ describe("media on posts", () => {
     expect(Object.keys(post).sort()).toEqual([
       "author",
       "body",
+      "commentCount",
       "createdAt",
       "editedAt",
       "id",
       "lockedMediaCount",
       "media",
       "membersOnly",
+      "type",
     ]);
     expect(post.media).toHaveLength(1);
     expect(Object.keys(post.media[0]).sort()).toEqual(["height", "id", "width"]);
@@ -730,12 +734,14 @@ describe("media on posts", () => {
     const POST_KEYS = [
       "author",
       "body",
+      "commentCount",
       "createdAt",
       "editedAt",
       "id",
       "lockedMediaCount",
       "media",
       "membersOnly",
+      "type",
     ];
     const MEDIA_KEYS = ["height", "id", "width"];
     for (const post of [patched, feed.posts[0], profile.posts[0]]) {
@@ -1250,12 +1256,14 @@ describe("members-only posts: the projection never sends a media id to a non-mem
     const POST_KEYS = [
       "author",
       "body",
+      "commentCount",
       "createdAt",
       "editedAt",
       "id",
       "lockedMediaCount",
       "media",
       "membersOnly",
+      "type",
     ];
     expect(Object.keys(locked).sort()).toEqual(POST_KEYS);
     expect(Object.keys(unlocked).sort()).toEqual(POST_KEYS);

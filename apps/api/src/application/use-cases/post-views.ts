@@ -55,6 +55,19 @@ export interface PostView {
    * see". A count is not an id: it says how many, never which.
    */
   lockedMediaCount: number;
+  /**
+   * `diskusi` | `pengumuman` on a community post; always `diskusi` on a
+   * personal one, where the CHECK constraint permits nothing else. Present on
+   * EVERY post rather than only community ones, so the key set is stable —
+   * the same reasoning `membersOnly` records.
+   */
+  type: string;
+  /**
+   * Live comments only. `0` on a personal post, which cannot be commented on
+   * this phase, and on a community post nobody has replied to — the two are
+   * not distinguished, because no surface needs to tell them apart.
+   */
+  commentCount: number;
 }
 
 export interface FeedPage {
@@ -95,8 +108,23 @@ function toMediaView(row: MediaRow): MediaView {
  * (`read-posts.ts`). BARRIER ONE of two lives on this line; the media route
  * (spec §6.2) independently refuses an id it did not send, because a paying
  * member holds legitimate ids and can pass them on.
+ *
+ * `commentCount` is REQUIRED for the same reason `media` and `locked` are, with
+ * a milder failure than `locked`'s: a defaulted count is how a feed page ships
+ * a zero for every row the moment a caller forgets to thread the count map
+ * through `paginate`. The number is the CALLER's — this function does not count
+ * anything, because the count is one batched `comments.countForPosts` for the
+ * whole page (`ListCommunityFeed`), not a per-row lookup here. `0` is correct
+ * and deliberate on every personal read path (`ListFeed`, `ListUserPosts`) and
+ * on both write paths (`CreatePost`, `EditPost`): a personal post takes no
+ * comments this phase.
  */
-export function toPostView(row: PostRow, media: MediaRow[], locked: boolean): PostView {
+export function toPostView(
+  row: PostRow,
+  media: MediaRow[],
+  locked: boolean,
+  commentCount: number
+): PostView {
   return {
     id: row.id,
     body: row.body,
@@ -106,6 +134,8 @@ export function toPostView(row: PostRow, media: MediaRow[], locked: boolean): Po
     media: locked ? [] : media.map(toMediaView),
     membersOnly: row.visibility === MEMBERS_ONLY,
     lockedMediaCount: locked ? media.length : 0,
+    type: row.type,
+    commentCount,
   };
 }
 
@@ -130,12 +160,19 @@ export function toPostView(row: PostRow, media: MediaRow[], locked: boolean): Po
  * public post on the same page is in that set because of the gated one, and
  * locking on membership alone would withhold the public post's images from
  * everybody.
+ *
+ * `commentCounts` arrives as ONE map for the whole page — the same shape and
+ * the same reason `media` does: `comments.countForPosts` is a single query,
+ * not one per row. A row absent from the map has zero comments (`?? 0`), which
+ * is how the personal feeds pass an empty map and every one of their rows
+ * still gets a well-formed `commentCount`.
  */
 export function toFeedPage(
   rows: PostRow[],
   limit: number,
   media: MediaRow[],
-  lockedAuthors: ReadonlySet<string>
+  lockedAuthors: ReadonlySet<string>,
+  commentCounts: ReadonlyMap<string, number>
 ): FeedPage {
   const kept = rows.slice(0, limit);
   const hasMore = rows.length > limit;
@@ -152,7 +189,8 @@ export function toFeedPage(
       toPostView(
         row,
         byPost.get(row.id) ?? [],
-        row.visibility === MEMBERS_ONLY && lockedAuthors.has(row.authorId)
+        row.visibility === MEMBERS_ONLY && lockedAuthors.has(row.authorId),
+        commentCounts.get(row.id) ?? 0
       )
     ),
     nextCursor:

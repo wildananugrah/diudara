@@ -377,6 +377,10 @@ const fakePostRepository: PostRepositoryPort = {
   async lockForEdit() {
     return null;
   },
+  /** `GetPost`'s single-row read; unused by these smoke tests. */
+  async getById() {
+    return null;
+  },
   // Phase 6's `MediaEntitlement` reads this. `null` is the REFUSING answer —
   // these smoke tests never drive the gate, and a fake that answered "public"
   // by default would be a fake that opens a paywall.

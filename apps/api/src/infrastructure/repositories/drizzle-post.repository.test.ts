@@ -701,6 +701,30 @@ describe("DrizzlePostRepository.listByCommunity", () => {
   });
 });
 
+describe("DrizzlePostRepository.getById", () => {
+  test("returns the row in the shared projection for a live post", async () => {
+    const author = await seedUser();
+    const post = await seedPost(author.id, "diskusi", new Date("2026-08-18T03:00:00.000Z"));
+
+    const row = await repo.getById(post.id);
+
+    expect(row?.id).toBe(post.id);
+    expect(row?.authorHandle).toBe(author.handle);
+  });
+
+  test("answers null for a soft-deleted post — the same delete filter every list path carries", async () => {
+    const author = await seedUser();
+    const post = await seedPost(author.id, "akan dihapus", new Date("2026-08-18T03:00:00.000Z"));
+    await repo.softDelete(post.id);
+
+    expect(await repo.getById(post.id)).toBeNull();
+  });
+
+  test("answers null for an id that never existed", async () => {
+    expect(await repo.getById("ffffffff-0000-4000-8000-000000000000")).toBeNull();
+  });
+});
+
 describe("DrizzlePostRepository.create — community and type", () => {
   test("create stores the community and the type", async () => {
     const ids = await seedCommunity();
