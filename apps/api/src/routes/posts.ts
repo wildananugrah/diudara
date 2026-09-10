@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { MAX_POST_BODY_LENGTH } from "@diudara/shared";
+import { MAX_POST_BODY_LENGTH, createCommentSchema } from "@diudara/shared";
 import { ValidationError } from "../application/errors";
 import { decodeKeysetCursor, type KeysetCursor } from "../domain/keyset-cursor";
 import { uuidParam, validate, validateParams } from "../http/validate";
@@ -86,16 +86,35 @@ function buildPostBodySchema(maxPostImages: number) {
 }
 
 const postIdParams = z.object({ id: uuidParam });
+const commentIdParams = z.object({ id: uuidParam });
 
 const feedQuerySchema = z.object({
   tab: z.enum(["untuk-anda", "mengikuti"]).optional(),
   limit: z.coerce.number().int().min(1).max(MAX_FEED_PAGE_SIZE).optional(),
 });
 
+/**
+ * The `?limit=` half of `parseFeedQuery`, exported so the community feed
+ * (`routes/communities.ts`) clamps to the SAME `DEFAULT_FEED_PAGE_SIZE` /
+ * `MAX_FEED_PAGE_SIZE` this file owns — the two numbers must exist once. A
+ * `?limit=` over the maximum is a 400 with the message below, never a silent
+ * clamp: that message promises the caller a range, not a correction.
+ */
+export function parseFeedLimit(raw: string | undefined): number {
+  const parsed = feedQuerySchema.safeParse(
+    raw === undefined || raw === "" ? {} : { limit: raw }
+  );
+  if (!parsed.success) {
+    throw new ValidationError(
+      `permintaan tidak valid: tab harus untuk-anda atau mengikuti, dan limit 1-${MAX_FEED_PAGE_SIZE}`
+    );
+  }
+  return parsed.data.limit ?? DEFAULT_FEED_PAGE_SIZE;
+}
+
 function parseFeedQuery(rawTab: string | undefined, rawLimit: string | undefined) {
   const parsed = feedQuerySchema.safeParse({
     ...(rawTab === undefined || rawTab === "" ? {} : { tab: rawTab }),
-    ...(rawLimit === undefined || rawLimit === "" ? {} : { limit: rawLimit }),
   });
   if (!parsed.success) {
     throw new ValidationError(
@@ -104,7 +123,7 @@ function parseFeedQuery(rawTab: string | undefined, rawLimit: string | undefined
   }
   return {
     tab: (parsed.data.tab ?? "untuk-anda") as FeedTab,
-    limit: parsed.data.limit ?? DEFAULT_FEED_PAGE_SIZE,
+    limit: parseFeedLimit(rawLimit),
   };
 }
 
@@ -113,7 +132,7 @@ function parseFeedQuery(rawTab: string | undefined, rawLimit: string | undefined
  * restarts the list at page 1, so a "Muat lebih banyak" button with a corrupt
  * cursor loops for ever showing the same rows — see `keyset-cursor.ts`.
  */
-function parseBefore(raw: string | undefined): KeysetCursor | null {
+export function parseBefore(raw: string | undefined): KeysetCursor | null {
   if (raw === undefined || raw === "") return null;
   const cursor = decodeKeysetCursor(raw);
   if (cursor === null) throw new ValidationError("penanda halaman tidak valid");
@@ -130,6 +149,10 @@ export function postRoutes(
     | "deletePost"
     | "listFeed"
     | "listUserPosts"
+    | "getPost"
+    | "listComments"
+    | "createComment"
+    | "deleteComment"
     | "maxPostImages"
   >
 ) {
@@ -192,6 +215,60 @@ export function postRoutes(
     await deps.deletePost.execute({ deleterId: c.get("userId"), postId: c.req.param("id") });
     return c.json({ deleted: true });
   });
+
+  // One post by id — PUBLIC, like `GET /:handle/posts` below: the discussion
+  // detail page is reachable signed out, and the paywall gate is answered per
+  // viewer, so `resolveViewerId` (degrades to `null`) rather than `requireAuth`.
+  // An unknown or soft-deleted id is a `NotFoundError` from the use case,
+  // which `app.onError` maps to 404 — the same mapping every other route relies
+  // on. `validateParams` keeps a non-uuid `:id` a 400, not a failing cast.
+  app.get<"/posts/:id">("/posts/:id", validateParams(postIdParams), async (c) => {
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    return c.json(
+      await deps.getPost.execute({ postId: c.req.param("id"), viewerId })
+    );
+  });
+
+  // The thread under a post — PUBLIC, same reasoning as the single post above.
+  app.get<"/posts/:id/comments">(
+    "/posts/:id/comments",
+    validateParams(postIdParams),
+    async (c) => {
+      return c.json(await deps.listComments.execute({ postId: c.req.param("id") }));
+    }
+  );
+
+  app.post<"/posts/:id/comments">(
+    "/posts/:id/comments",
+    requireAuth,
+    validateParams(postIdParams),
+    validate(createCommentSchema),
+    async (c) => {
+      const input = c.get("validated") as { body: string };
+      const view = await deps.createComment.execute({
+        postId: c.req.param("id"),
+        authorId: c.get("userId"),
+        body: input.body,
+      });
+      return c.json(view, 201);
+    }
+  );
+
+  // `comments` is a `RESERVED_HANDLES` entry for exactly this literal segment —
+  // see `domain/handle.ts`. Idempotent and bodyless-success like
+  // `DELETE /posts/:id` above, whose `{ deleted: true }` shape it mirrors.
+  app.delete<"/comments/:id">(
+    "/comments/:id",
+    requireAuth,
+    validateParams(commentIdParams),
+    async (c) => {
+      await deps.deleteComment.execute({
+        commentId: c.req.param("id"),
+        deleterId: c.get("userId"),
+      });
+      return c.json({ deleted: true });
+    }
+  );
 
   // §5.1: `untuk-anda` is PUBLIC and `mengikuti` requires a session. `/beranda`
   // is a publicly reachable page, so an auth-only feed endpoint would break a

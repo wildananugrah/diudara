@@ -5,6 +5,7 @@ import {
   DEFAULT_COMMUNITY_LIST_LIMIT,
   DEFAULT_COMMUNITY_MEMBER_LIMIT,
   MAX_COMMUNITY_SEARCH_LENGTH,
+  createCommunityPostSchema,
   createCommunitySchema,
 } from "@diudara/shared";
 import { ValidationError } from "../application/errors";
@@ -14,6 +15,7 @@ import {
   resolveViewerId,
   type UserAuthVariables,
 } from "../http/user-auth.middleware";
+import { parseBefore, parseFeedLimit } from "./posts";
 import type { Dependencies } from "../bootstrap";
 
 /**
@@ -107,10 +109,25 @@ export function communityRoutes(
     | "joinCommunity"
     | "browseCommunities"
     | "listCommunityMembers"
+    | "createCommunityPost"
+    | "listCommunityFeed"
+    | "maxPostImages"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
   const requireAuth = requireUserAuth(deps.userTokenIssuer, deps.userRepository);
+  // Built ONCE per router instance from THIS process's resolved
+  // `maxPostImages`, the same per-call construction `routes/posts.ts`
+  // `buildPostBodySchema` documents: `createCommunityPostSchema` deliberately
+  // carries no `.max()` (the cap is a runtime env var, not a shared
+  // constant), so an unbounded `mediaIds` array would otherwise reach the
+  // media-claim path.
+  const communityPostBodySchema = createCommunityPostSchema.extend({
+    mediaIds: z
+      .array(z.string().uuid())
+      .max(deps.maxPostImages, `maksimal ${deps.maxPostImages} foto per kiriman`)
+      .optional(),
+  });
 
   app.post("/", requireAuth, validate(createCommunitySchema), async (c) => {
     const input = c.get("validated") as {
@@ -135,6 +152,42 @@ export function communityRoutes(
     });
     return c.json(await deps.browseCommunities.execute({ search: q, category, limit }));
   });
+
+  // DECLARED BEFORE `/:slug` so the literal `posts` segment wins over the
+  // `:slug` param capture — the same literal-wins ordering `app.ts` documents
+  // for its own mount order.
+  app.get<"/:slug/posts">("/:slug/posts", async (c) => {
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    return c.json(
+      await deps.listCommunityFeed.execute({
+        slug: c.req.param("slug"),
+        viewerId,
+        before: parseBefore(c.req.query("before")),
+        limit: parseFeedLimit(c.req.query("limit")),
+      })
+    );
+  });
+
+  app.post<"/:slug/posts">(
+    "/:slug/posts",
+    requireAuth,
+    validate(communityPostBodySchema),
+    async (c) => {
+      const input = c.get("validated") as {
+        body: string;
+        type: string;
+        mediaIds?: string[];
+      };
+      const view = await deps.createCommunityPost.execute({
+        slug: c.req.param("slug"),
+        authorId: c.get("userId"),
+        body: input.body,
+        type: input.type,
+        mediaIds: input.mediaIds,
+      });
+      return c.json(view, 201);
+    }
+  );
 
   app.get<"/:slug">("/:slug", async (c) => {
     const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);

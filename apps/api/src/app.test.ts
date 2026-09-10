@@ -15,12 +15,14 @@ import type { Dependencies } from "./bootstrap";
  * unreachable for six tasks while this table still protected them.
  *
  * `/communities` IS BACK, and it is not the router that was deleted. Phase 1
- * (communities-core) mounts a new one over six routes for communities owned by
- * an `app_user`; the creator-owned tables the old one read were dropped in that
- * phase's first task. EIGHT MOUNTS NOW, all of them new-world. The exact-set
- * assertions below are what make the distinction checkable: the six paths are
- * spelled out, so the old router's `/communities/:communityId/tiers` shape
- * cannot quietly return under the same prefix.
+ * (communities-core) mounts a new one — six routes at first, now eight with
+ * community-feed's `GET`/`POST /communities/:slug/posts` — for communities
+ * owned by an `app_user`; the creator-owned tables the old one read were
+ * dropped in that phase's first task. EIGHT MOUNTS NOW, all of them new-world.
+ * The exact-set assertions below are what make the distinction checkable: the
+ * `/communities` paths are spelled out, so the old router's
+ * `/communities/:communityId/tiers` shape cannot quietly return under the same
+ * prefix.
  *
  * A `not.toContain("/communities")` check would have passed just as happily with
  * `/ai` still mounted, which is why every assertion in this file compares a whole
@@ -80,10 +82,12 @@ describe("the app's routing table", () => {
       "DELETE /streams/:id",
       "DELETE /users/:handle/follow",
       "DELETE /users/:handle/subscribe",
+      "DELETE /users/comments/:id",
       "DELETE /users/posts/:id",
       "GET /communities",
       "GET /communities/:slug",
       "GET /communities/:slug/members",
+      "GET /communities/:slug/posts",
       "GET /health",
       "GET /streams",
       "GET /users/:handle/followers",
@@ -100,12 +104,15 @@ describe("the app's routing table", () => {
       "GET /users/me/tiers",
       "GET /users/media/:id",
       "GET /users/media/:id/thumb",
+      "GET /users/posts/:id",
+      "GET /users/posts/:id/comments",
       "GET /webhooks/mediamtx/auth-request",
       "PATCH /users/me",
       "PATCH /users/me/tiers/:tierId",
       "PATCH /users/posts/:id",
       "POST /communities",
       "POST /communities/:slug/join",
+      "POST /communities/:slug/posts",
       "POST /streams",
       "POST /streams/:id/watch-token",
       "POST /users/:handle/follow",
@@ -121,6 +128,7 @@ describe("the app's routing table", () => {
       "POST /users/password-reset/complete",
       "POST /users/password-reset/request",
       "POST /users/posts",
+      "POST /users/posts/:id/comments",
       "POST /users/signup",
       "POST /webhooks/mediamtx/auth",
       "POST /webhooks/mediamtx/lifecycle",
