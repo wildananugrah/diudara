@@ -176,7 +176,7 @@ And in the same table's constraint array:
     check("post_community_is_public", sql`${table.communityId} is null or ${table.visibility} = 'public'`),
 ```
 
-`communities` is declared above `posts` in this file already (Phase 1), so the reference resolves without reordering. `check` and `sql` are already imported for `follow_no_self`.
+`communities` is declared *below* `posts` in this file, and the forward reference still resolves: drizzle's `.references(() => communities.id)` takes a lazy closure, evaluated after the module has finished loading. Do not reorder the file to "fix" it. `check` and `sql` are already imported for `follow_no_self`.
 
 - [ ] **Step 4: Add the community feed's index — and ONLY that one**
 
