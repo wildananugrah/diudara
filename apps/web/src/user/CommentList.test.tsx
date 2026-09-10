@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { useState } from "react";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import CommentList from "./CommentList";
 import { setUserSession, type CommentView } from "./apiClient";
 
@@ -16,11 +17,49 @@ const THREAD: CommentView[] = [
 
 function noop() {}
 
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/**
+ * A stateful host for the cases that exercise CommentList's own writes —
+ * `onSubmitted` appends, `onDeleted` removes, exactly as `DiscussionPage` wires
+ * them, so a resolved delete really drops the row on screen.
+ */
+function Harness({
+  initial,
+  viewerIsMember = true,
+  viewerIsOwner = false,
+}: {
+  initial: CommentView[];
+  viewerIsMember?: boolean;
+  viewerIsOwner?: boolean;
+}) {
+  const [comments, setComments] = useState(initial);
+  return (
+    <CommentList
+      postId="post-1"
+      comments={comments}
+      viewerIsMember={viewerIsMember}
+      viewerIsOwner={viewerIsOwner}
+      onSubmitted={(c) => setComments((current) => [...current, c])}
+      onDeleted={(id) => setComments((current) => current.filter((c) => c.id !== id))}
+    />
+  );
+}
+
+let originalFetch: typeof fetch;
+
 beforeEach(() => {
+  originalFetch = global.fetch;
   localStorage.clear();
 });
 
 afterEach(() => {
+  global.fetch = originalFetch;
   cleanup();
 });
 
@@ -113,6 +152,50 @@ describe("CommentList", () => {
     );
 
     expect(screen.getAllByRole("button", { name: "Hapus" }).length).toBe(2);
+  });
+
+  it("removes a comment's row on a successful delete, with no refetch", async () => {
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      return jsonResponse({ deleted: true });
+    }) as unknown as typeof fetch;
+
+    render(<Harness initial={THREAD} viewerIsOwner={true} />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Hapus" })[0]);
+
+    await waitFor(() => expect(screen.getAllByRole("listitem").length).toBe(1));
+    expect((screen.getByRole("listitem").textContent ?? "").includes("Kedua")).toBe(true);
+    // Only the DELETE fired — the list is not reloaded.
+    expect(calls).toEqual(["DELETE /users/comments/c1"]);
+  });
+
+  it("keeps the row and shows an alert when the delete fails", async () => {
+    global.fetch = mock(async () => jsonResponse({ error: "boom" }, 500)) as unknown as typeof fetch;
+
+    render(<Harness initial={THREAD} viewerIsOwner={true} />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Hapus" })[0]);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("Server sedang bermasalah. Coba lagi sebentar lagi.");
+    expect(screen.getAllByRole("listitem").length).toBe(2);
+  });
+
+  it("keeps the typed body and shows an alert when the submit fails", async () => {
+    global.fetch = mock(async () => jsonResponse({ error: "boom" }, 500)) as unknown as typeof fetch;
+
+    render(<Harness initial={THREAD} viewerIsMember={true} />);
+
+    const box = screen.getByRole("textbox", { name: "Tulis komentar" });
+    fireEvent.change(box, { target: { value: "Komentar saya" } });
+    fireEvent.click(screen.getByRole("button", { name: "Kirim" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("Server sedang bermasalah. Coba lagi sebentar lagi.");
+    // The value property, not text content — see the report's happy-dom note.
+    expect((box as HTMLTextAreaElement).value).toBe("Komentar saya");
   });
 
   it("shows the empty-thread copy when there are no comments", () => {

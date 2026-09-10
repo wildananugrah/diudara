@@ -93,7 +93,10 @@ export default function DiscussionPage() {
       <>
         <Header title="Diskusi" />
         <main className="user-page discussion-page">
-          <p className="feed-error" role="alert">
+          {/* `form-error` (not `feed-error`): it has a bare rule in styles.css,
+              and it is the class `CommunityPage` uses for this same early
+              return. */}
+          <p className="form-error" role="alert">
             {load.message}
           </p>
         </main>
