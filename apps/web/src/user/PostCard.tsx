@@ -31,6 +31,12 @@ export interface PostCardProps {
    * edit (which does need the body) has `onEdit` for it.
    */
   onDeleteRequested?: (id: string) => void;
+  /**
+   * **Task 8.** Rendered as a link ("N komentar") to the post's own discussion
+   * page. Absent on Beranda and profiles, where there is no discussion page —
+   * so nothing new renders there, which is what keeps those feeds unchanged.
+   */
+  detailHref?: string;
 }
 
 /**
@@ -47,7 +53,14 @@ export interface PostCardProps {
  * the reverse, so a single guard is the honest shape rather than two that
  * could drift apart.
  */
-export default function PostCard({ post, isOwn, now, onEdit, onDeleteRequested }: PostCardProps) {
+export default function PostCard({
+  post,
+  isOwn,
+  now,
+  onEdit,
+  onDeleteRequested,
+  detailHref,
+}: PostCardProps) {
   const clock = now ?? new Date();
   // Guarded, not read bare, even though `PostView.media` is documented as
   // required and never absent — see the comment on the media slot below for
@@ -107,6 +120,13 @@ export default function PostCard({ post, isOwn, now, onEdit, onDeleteRequested }
           {post.editedAt !== null ? " · diedit" : ""}
         </span>
       </header>
+
+      {/* Task 8: a `pengumuman` reads as a distinct card in the ordinary
+          chronological feed (spec §"Announcements are not pinned") — a
+          `diskusi` and every personal post carry no badge. */}
+      {post.type === "pengumuman" ? (
+        <p className="post-card-type-badge">Pengumuman</p>
+      ) : null}
 
       {/* Never dangerouslySetInnerHTML: post.body is untrusted input from any
           signed-up user. white-space: pre-wrap in styles.css preserves line
@@ -224,6 +244,16 @@ export default function PostCard({ post, isOwn, now, onEdit, onDeleteRequested }
             />
           ))}
         </div>
+      ) : null}
+
+      {/* Task 8: only the community feed passes `detailHref` (the discussion
+          route). Beranda and profiles pass nothing, so this renders nowhere
+          on them — the count itself is `post.commentCount`, guarded because
+          the field is optional on `PostView` for the fixtures' sake. */}
+      {detailHref !== undefined ? (
+        <Link to={detailHref} className="post-card-comments">
+          {post.commentCount ?? 0} komentar
+        </Link>
       ) : null}
 
       {isOwn ? (

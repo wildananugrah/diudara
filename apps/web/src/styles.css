@@ -1326,6 +1326,45 @@ button:disabled {
 }
 
 /* ---------------------------------------------------------------
+   Task 8: the community feed. The `pengumuman` badge reuses the warning token
+   pair — the same `--warning-bg` / `--warning-ink` `.badge-pending` carries,
+   already AA-cleared by `contrast.test.ts`. No new colour literals: Phase 0's
+   palette and its ratios are settled.
+   --------------------------------------------------------------- */
+.post-card-type-badge {
+  display: inline-block;
+  margin: 6px 0 0;
+  padding: 0.1875rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--warning-ink);
+  background: var(--warning-bg);
+}
+
+.post-card-comments {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 0.8125rem;
+  color: var(--ink-faint);
+  text-decoration: none;
+}
+.post-card-comments:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+/* The owner-only post-type selector, standing in for the "Khusus anggota"
+   block a community post never shows. */
+.post-composer-type {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.875rem;
+}
+
+/* ---------------------------------------------------------------
    Task 9: the media slot (images design spec §2 — the media slot itself, and
    thumbnails named as Phase 4's job, are both §2). Lives inside
    `.user-page`/`.beranda-page`, whose container is capped at 36rem

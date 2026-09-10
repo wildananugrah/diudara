@@ -562,6 +562,49 @@ describe("PostCard — the lock CTA goes somewhere real (Task 8, the reported bu
 });
 
 /**
+ * **Task 8 — the community feed's additions to `PostCard` (spec §"One card, not
+ * two"):** an optional `detailHref`, a `Pengumuman` badge read from `post.type`,
+ * and a comment-count link. All three additive: a personal post passes none of
+ * them and renders exactly as before.
+ *
+ * Negative assertions use `queryAllBy…().length`, never
+ * `queryBy…().toBeNull()` — the brief's own snippet used `.toBeNull()`, which
+ * `no-hanging-dom-assertions.test.ts` flags (a failing serialising matcher on a
+ * happy-dom node exhausts RAM). Same intent, safe form.
+ */
+function aPost(overrides: Partial<PostView> = {}): PostView {
+  return { ...POST, ...overrides };
+}
+
+describe("PostCard — the community feed additions (Task 8)", () => {
+  it("a pengumuman card is labelled as one", () => {
+    renderCard({ post: aPost({ type: "pengumuman" }) });
+    expect(screen.getByText("Pengumuman")).toBeTruthy();
+  });
+
+  it("a diskusi card carries no type label", () => {
+    renderCard({ post: aPost({ type: "diskusi" }) });
+    expect(screen.queryAllByText("Pengumuman").length).toBe(0);
+  });
+
+  it("the comment count links to the discussion", () => {
+    renderCard({
+      post: aPost({ commentCount: 3 }),
+      detailHref: "/komunitas/kelas-fisika/diskusi/p1",
+    });
+    const link = screen.getByRole("link", { name: /3 komentar/ });
+    // A STRING, never the node: a failing assertion holding a happy-dom
+    // element serialises the whole tree and exhausts memory.
+    expect(link.getAttribute("href")).toBe("/komunitas/kelas-fisika/diskusi/p1");
+  });
+
+  it("with no detailHref there is no comment link at all", () => {
+    renderCard({ post: aPost({ commentCount: 3 }) });
+    expect(screen.queryAllByRole("link", { name: /komentar/ }).length).toBe(0);
+  });
+});
+
+/**
  * **The judgement call the task brief asked to be made honestly, and the
  * behaviour this file deliberately does NOT test.**
  *
