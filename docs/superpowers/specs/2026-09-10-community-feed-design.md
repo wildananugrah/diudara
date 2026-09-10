@@ -131,7 +131,7 @@ comment's lifecycle needs no second migration.
 
 **Only community posts take comments this phase.** `post_id` references `post`
 rather than a community-only table, so the schema does not forbid a comment on
-a personal post — but no endpoint creates one: `POST /posts/:id/comments`
+a personal post — but no endpoint creates one: `POST /users/posts/:id/comments`
 requires membership of the post's community, and a personal post has none, so
 the request is rejected. Opening comments on personal posts is a product
 decision for a later phase, not a migration.
@@ -148,18 +148,31 @@ Reads are open, writes are member-gated.
 |---|---|---|
 | `GET` | `/communities/:slug/posts?before=` | none |
 | `POST` | `/communities/:slug/posts` | member; `pengumuman` owner-only |
-| `GET` | `/posts/:id` | none — **new** |
-| `GET` | `/posts/:id/comments` | none |
-| `POST` | `/posts/:id/comments` | member of the post's community |
-| `DELETE` | `/comments/:id` | own comment, or the community's owner |
+| `GET` | `/users/posts/:id` | none — **new** |
+| `GET` | `/users/posts/:id/comments` | none |
+| `POST` | `/users/posts/:id/comments` | member of the post's community |
+| `DELETE` | `/users/comments/:id` | own comment, or the community's owner |
 
-`GET /posts/:id` does not exist today — the post endpoints are create, edit,
+**The `/users` prefix is not a typo.** `app.ts` mounts `postRoutes` with
+`app.route("/users", postRoutes(deps))`, so today's post surface is already
+`/users/posts`, `/users/feed` and `/users/:handle/posts`. Comment endpoints
+join `postRoutes` and inherit that prefix. The community feed's two endpoints
+sit in `communityRoutes`, mounted at `/communities`, and keep that prefix.
+
+**`comments` must be added to `RESERVED_HANDLES`** in `domain/handle.ts`.
+`DELETE /users/comments/:id` introduces a new literal segment directly under
+`/users/`, and a guard test derives the reserved list from the route table
+precisely so that a literal nobody reserved is caught there rather than by a
+user who registers the handle and shadows the route. `posts` and `media` are
+already in that list for the same reason.
+
+`GET /users/posts/:id` does not exist today — the post endpoints are create, edit,
 delete, feed and a user's posts. DiscussionDetail needs a single-post read and
 this is it. It answers for personal posts too, honouring the existing paywall
 gate, since one endpoint that applies the gate correctly is safer than a
 community-only endpoint that never learns about it.
 
-`PATCH /posts/:id` and `DELETE /posts/:id` are reused for edit and delete with
+`PATCH /users/posts/:id` and `DELETE /users/posts/:id` are reused for edit and delete with
 one change: `DeletePost` currently permits the author alone, and gains the
 community-owner rule — an owner may delete any post in their community.
 **`EditPost` does not gain it.** An owner moderating removes a post; they never
@@ -242,10 +255,12 @@ declared before `/:handleParam` for the reason `/komunitas/baru` precedes
 `/komunitas/:slug`. The post, a flat comment list, and a comment form for
 members. An unknown id renders `NotFoundPage`, matching an unknown slug.
 
-**Vite proxy.** `DELETE /comments/:id` introduces `/comments` as a new first
-path segment. `src/test/vite-proxy-coverage.test.ts` greps every fetch call
-site for its first segment and fails if the proxy table cannot match it, so
-this is enforced rather than remembered.
+**Vite proxy: nothing to add.** Every endpoint this phase introduces sits under
+`/users` or `/communities`, both already in the proxy table, so
+`src/test/vite-proxy-coverage.test.ts` is satisfied without a change. This is
+stated rather than left silent because the same test caught three separate
+instances of a missing entry answering `200 text/html` from the SPA fallback,
+and "no change needed" is a conclusion worth recording once.
 
 ## Not in this phase
 
