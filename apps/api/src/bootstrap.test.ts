@@ -45,6 +45,12 @@ import { LeaveMembership } from "./application/use-cases/leave-membership";
 import { UpdateUserProfile } from "./application/use-cases/update-user-profile";
 import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
+import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
+import { CreateCommunity } from "./application/use-cases/create-community";
+import { GetCommunity } from "./application/use-cases/get-community";
+import { JoinCommunity } from "./application/use-cases/join-community";
+import { BrowseCommunities } from "./application/use-cases/browse-communities";
+import { ListCommunityMembers } from "./application/use-cases/list-community-members";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
 import type { PasswordResetRepositoryPort } from "./application/ports/password-reset-repository.port";
@@ -311,6 +317,42 @@ const fakeFollowRepository: FollowRepositoryPort = {
   },
 };
 
+/** Phase 1 (communities-core)'s repository, faked the same shallow way `fakeFollowRepository` is above. */
+const fakeCommunityRepository: CommunityRepositoryPort = {
+  async create() {
+    return {
+      id: "community-1",
+      ownerId: "user-1",
+      slug: "kelas-desain",
+      name: "Kelas Desain",
+      category: "Skill Digital",
+      description: null,
+      createdAt: new Date("2026-02-01T00:00:00Z"),
+    };
+  },
+  async findBySlug() {
+    return null;
+  },
+  async browse() {
+    return [];
+  },
+  async memberCountFor() {
+    return 0;
+  },
+  async isMember() {
+    return false;
+  },
+  async join() {
+    return true;
+  },
+  async leave() {
+    return true;
+  },
+  async listMembers() {
+    return [];
+  },
+};
+
 /** Task 2 of posts-and-feed's repository, faked the same shallow way `fakeFollowRepository` is above. */
 const fakePostRepository: PostRepositoryPort = {
   async create(_authorId, body) {
@@ -557,6 +599,12 @@ describe("Dependencies (composition root contract)", () => {
       followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
+      communityRepository: fakeCommunityRepository,
+      createCommunity: new CreateCommunity(fakeUserRepository, fakeCommunityRepository),
+      getCommunity: new GetCommunity(fakeUserRepository, fakeCommunityRepository),
+      joinCommunity: new JoinCommunity(fakeCommunityRepository),
+      browseCommunities: new BrowseCommunities(fakeCommunityRepository),
+      listCommunityMembers: new ListCommunityMembers(fakeCommunityRepository),
       createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,
       editPost: new EditPost(fakePostWriteUnitOfWork),
