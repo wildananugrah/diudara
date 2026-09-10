@@ -1093,7 +1093,55 @@ export function listCommunityPosts(slug: string, before?: string | null): Promis
 }
 ```
 
-Add `type: string` and `commentCount: number` to the client's `PostView` interface to match the server's.
+The other five client functions follow the same two patterns — reads via
+`publicGet`, writes via `apiFetch`:
+
+```ts
+/** `GET /users/posts/:id` — public, one post for the discussion view. */
+export function getPost(id: string): Promise<PostView> {
+  return publicGet<PostView>(`/users/posts/${encodeURIComponent(id)}`, "gagal memuat kiriman");
+}
+/** `GET /users/posts/:id/comments` — public. */
+export function listComments(postId: string): Promise<CommentView[]> {
+  return publicGet<CommentView[]>(
+    `/users/posts/${encodeURIComponent(postId)}/comments`, "gagal memuat komentar");
+}
+/** `POST /communities/:slug/posts` — member writes a diskusi, owner may write a pengumuman. */
+export function createCommunityPost(
+  slug: string,
+  input: { body: string; type?: string; mediaIds?: string[] },
+): Promise<PostView> {
+  return apiFetch<PostView>(`/communities/${encodeURIComponent(slug)}/posts`, {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
+/** `POST /users/posts/:id/comments`. */
+export function createComment(postId: string, body: string): Promise<CommentView> {
+  return apiFetch<CommentView>(`/users/posts/${encodeURIComponent(postId)}/comments`, {
+    method: "POST", body: JSON.stringify({ body }),
+  });
+}
+/** `DELETE /users/comments/:id` — resolves `{ deleted: true }` at HTTP 200 (mirrors deletePost). */
+export function deleteComment(id: string): Promise<void> {
+  return apiFetch<{ deleted: true }>(`/users/comments/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  }).then(() => undefined);
+}
+```
+
+Copy the real `publicGet` / `apiFetch` call shapes from the existing `listFeed`
+/ `createPost` / `deletePost` in this file — the signatures above are the
+contract, not necessarily the exact wrapper arguments. **`deleteComment` must
+not check for a 204** — Task 7's endpoint returns `200 { deleted: true }` to
+match `deletePost`, ruling R10.
+
+Add `type: string` and `commentCount: number` to the client's `PostView`
+interface, and add a `CommentView` interface — `{ id: string; body: string;
+createdAt: string; author: { handle: string; displayName: string } }` — to
+match the server's `toCommentView` output. `getPost` always returns
+`commentCount: 0` from the server (Task 5), so a discussion view that wants a
+reply count derives it from `listComments(...).length`, never from
+`getPost(...).commentCount`.
 
 - [ ] **Step 2: Write the failing `PostCard` tests**
 
@@ -1144,7 +1192,29 @@ Cases: a member sees the composer; a non-member sees `Gabung` in its place; a si
 
 - [ ] **Step 6: Write `CommunityFeed`**
 
-It renders `PostComposer` (or the join control) above a `PostFeed` whose `load` is `(before) => listCommunityPosts(slug, before)`, holding `PostFeedHandle` to `prepend` on submit. The type selector renders **only** when `viewerIsOwner` — never disabled, never hidden-but-present.
+`CommunityFeed` takes the community's `slug`, `viewerIsMember: boolean | null`
+and `viewerIsOwner: boolean` — the same three values `CommunityPage` already has
+from its `CommunityDetail` fetch, passed down as props (do not re-fetch).
+
+It renders, above a `PostFeed` whose `load` is `(before) =>
+listCommunityPosts(slug, before)` and whose `PostFeedHandle` it holds to
+`prepend` on submit:
+- `viewerIsMember === null` (signed out) → a `Masuk untuk gabung` link to `/masuk`.
+- `viewerIsMember === false` → a `Gabung` control (reuse whatever Phase 1's
+  `CommunityPage` banner uses for join — do not build a second one).
+- `viewerIsMember === true` → `PostComposer`.
+
+**The type selector.** `PostComposer` today conditionally renders a visibility
+selector. Add ONE optional prop — e.g. `postTypeChoices?: readonly string[]` —
+that, when passed, replaces the visibility selector with a type `<select>`. It
+is passed **only when `viewerIsOwner`**; a plain member gets `PostComposer` with
+no selector at all and every submit is a `diskusi`. Never render a disabled or
+hidden-but-present selector — Phase 1's rule.
+
+**Ruling R5: the choices come from `COMMUNITY_POST_TYPES` imported from
+`@diudara/shared`**, never a literal `["diskusi", "pengumuman"]` in the web
+tree. Phase 3/4 extend that constant; a hardcoded copy is a second list to
+forget.
 
 - [ ] **Step 7: Write the failing `CommunityPage` tab tests**
 
@@ -1158,7 +1228,16 @@ Every assertion by role, label and text.
 
 - [ ] **Step 8: Add the tab bar**
 
-Copy Jelajah's pattern exactly — `.feed-tabs` markup, `aria-current`, `useSearchParams`, and **only the active half mounted**, for the reason Jelajah's own comment gives: the inactive half must not fetch. Phase 1's roster moves under `?tab=anggota` unchanged.
+Copy Jelajah's pattern exactly — `.feed-tabs` markup, `aria-current`,
+`useSearchParams`, and **only the active half mounted**, for the reason
+Jelajah's own comment gives: the inactive half must not fetch. Phase 1's roster
+markup moves under `?tab=anggota` unchanged.
+
+**Phase 1's existing `CommunityPage.test.tsx` roster tests will need to render
+the page at `?tab=anggota`** to see the roster now that Diskusi is the default
+tab. That is deliberate test churn: update each with a one-line comment saying
+the roster moved under a tab in Phase 2 — do not delete or weaken the
+assertions, and do not change what they check about the roster itself.
 
 - [ ] **Step 9: Style the announcement card**
 
@@ -1167,7 +1246,13 @@ In `styles.css`, the `pengumuman` badge and card accent, using existing Udara to
 - [ ] **Step 10: Run the web suite**
 
 Run: `cd apps/web && bun test && bun run typecheck`
-Expected: PASS. Beranda's and the profile's existing tests must be untouched and green.
+Expected: PASS. Beranda's and the profile's existing tests must be untouched and green (the roster tests noted in Step 8 are the only sanctioned change).
+
+**Do not run Playwright, the dev server, or any browser check** — this repo's
+owner runs those. `bun test` (happy-dom) plus `bun run typecheck` is the whole
+gate for this task. When a test assertion could hold a happy-dom node, compare
+`.textContent` / `.getAttribute(...)` / an array of strings — never the element
+object; a failing assertion that serialises a DOM node exhausts memory.
 
 - [ ] **Step 11: Commit**
 
