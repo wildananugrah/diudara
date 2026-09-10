@@ -448,7 +448,7 @@ describe("EditPost", () => {
 
   it("403s someone else's post — and does NOT write", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: SOMEONE_ELSE, isDeleted: false, visibility: "public" };
+    posts.ownership = { id: POST_ID, authorId: SOMEONE_ELSE, isDeleted: false, visibility: "public", communityId: null };
     await expect(
       editPostFor(posts, new FakeMedia()).execute({
         editorId: AUTHOR,
@@ -461,7 +461,7 @@ describe("EditPost", () => {
 
   it("404s a deleted post", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: true, visibility: "public" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: true, visibility: "public", communityId: null };
     await expect(
       editPostFor(posts, new FakeMedia()).execute({
         editorId: AUTHOR,
@@ -478,7 +478,7 @@ describe("EditPost", () => {
    */
   it("may keep the post's OWN existing media", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public", communityId: null };
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
@@ -494,7 +494,7 @@ describe("EditPost", () => {
 
   it("refuses media claimed by a DIFFERENT post — and does NOT write the body", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public", communityId: null };
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: OTHER_POST_ID });
 
@@ -512,7 +512,7 @@ describe("EditPost", () => {
 
   it("refuses another person's unclaimed media", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public", communityId: null };
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: SOMEONE_ELSE });
 
@@ -535,7 +535,7 @@ describe("EditPost", () => {
    */
   it("leaves the images alone when mediaIds is omitted entirely", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public", communityId: null };
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
@@ -551,7 +551,7 @@ describe("EditPost", () => {
 
   it("an explicit empty mediaIds removes every image", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public", communityId: null };
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
@@ -584,7 +584,7 @@ describe("EditPost", () => {
    */
   it("removing an image unclaims its row and leaves the bytes in storage", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public", communityId: null };
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID, position: 0 });
     media.seed({ id: SECOND_IMAGE, ownerId: AUTHOR, postId: POST_ID, position: 1 });
@@ -603,7 +603,7 @@ describe("EditPost", () => {
 
   it("refuses loudly when an edit's claim attaches fewer rows than it was given", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public", communityId: null };
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR });
     const seen = media.findManyByIds.bind(media);
@@ -631,7 +631,7 @@ describe("EditPost", () => {
    */
   it("refuses to EDIT away the last image of a members-only post", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "members" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "members", communityId: null };
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
@@ -656,7 +656,7 @@ describe("EditPost", () => {
    */
   it("allows removing the last image once the post is public again, in the same edit", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "members" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "members", communityId: null };
     posts.updateResult = fakeRow({ visibility: "members" });
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
@@ -683,7 +683,7 @@ describe("EditPost", () => {
    */
   it("an omitted visibility on an edit leaves a members-only post members-only", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "members" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "members", communityId: null };
     posts.updateResult = fakeRow({ visibility: "members" });
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
@@ -706,7 +706,7 @@ describe("EditPost", () => {
    */
   it("refuses flipping to members-only when the post currently has no images and mediaIds is omitted", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public", communityId: null };
     const media = new FakeMedia();
 
     await expect(
@@ -727,7 +727,7 @@ describe("EditPost", () => {
    */
   it("flips a post to members-only fine when it already carries an image, mediaIds omitted", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public" };
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public", communityId: null };
     const media = new FakeMedia();
     media.seed({ id: FIRST_IMAGE, ownerId: AUTHOR, postId: POST_ID });
 
@@ -747,14 +747,14 @@ describe("EditPost", () => {
 describe("DeletePost", () => {
   it("is idempotent on an already-deleted post", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: "p", authorId: AUTHOR, isDeleted: true, visibility: "public" };
+    posts.ownership = { id: "p", authorId: AUTHOR, isDeleted: true, visibility: "public", communityId: null };
     await new DeletePost(posts).execute({ deleterId: AUTHOR, postId: "p" });
     expect(posts.deleted).toEqual(["p"]);
   });
 
   it("403s someone else's post — and does NOT delete", async () => {
     const posts = new FakePosts();
-    posts.ownership = { id: "p", authorId: SOMEONE_ELSE, isDeleted: false, visibility: "public" };
+    posts.ownership = { id: "p", authorId: SOMEONE_ELSE, isDeleted: false, visibility: "public", communityId: null };
     await expect(
       new DeletePost(posts).execute({ deleterId: AUTHOR, postId: "p" })
     ).rejects.toBeInstanceOf(ForbiddenError);

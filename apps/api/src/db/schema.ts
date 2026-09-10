@@ -232,6 +232,15 @@ export const posts = pgTable(
     // The DEFAULT is load-bearing: it makes this migration additive and turns
     // every existing post public, which is the only safe direction.
     visibility: varchar("visibility", { length: 16 }).notNull().default("public"),
+    // Phase 2. NULL means a personal post — Beranda and profiles. NOT NULL
+    // means a community post, which appears on its community page and
+    // nowhere else. There is no third state and nothing infers one from
+    // the other.
+    communityId: uuid("community_id").references(() => communities.id),
+    // `diskusi` | `pengumuman`. VARCHAR, not an enum, so Phase 3's
+    // `kegiatan` and Phase 4's `materi`/`dokumen` need no migration — the
+    // reasoning `subscription.status` already records.
+    type: varchar("type", { length: 16 }).notNull().default("diskusi"),
   },
   (table) => [
     // Untuk Anda: newest first across everybody. PARTIAL, so deleted rows leave
@@ -241,6 +250,22 @@ export const posts = pgTable(
       .where(sql`${table.deletedAt} is null`),
     // A profile's posts, and the post side of the Mengikuti join.
     index("post_author_created_idx").on(table.authorId, table.createdAt.desc()),
+    // Phase 2: the community feed's keyset page.
+    index("post_community_created_idx")
+      .on(table.communityId, table.createdAt.desc(), table.id.desc())
+      .where(sql`${table.deletedAt} is null`),
+    // A personal post has no type: types are a community concept, and a
+    // personal row carrying `pengumuman` is a row no surface renders.
+    check("post_personal_has_no_type", sql`${table.communityId} is not null or ${table.type} = 'diskusi'`),
+    // DO NOT DELETE THIS AS BELT-AND-BRACES. `visibility = 'members'` is the
+    // PERSONAL paywall: `paginate()` in read-posts.ts resolves it against
+    // `user_tier` subscriptions via `listActiveOwnersAmong`. A community post
+    // carrying `members` would be gated against the author's personal tier,
+    // which has no relationship to the community it is in — a member of the
+    // community would be locked OUT of it, and a subscriber to the author who
+    // never joined would be let IN. A community post's audience is the
+    // community; this column must not be made to mean anything else here.
+    check("post_community_is_public", sql`${table.communityId} is null or ${table.visibility} = 'public'`),
   ]
 );
 
@@ -276,6 +301,37 @@ export const postMedia = pgTable(
     index("post_media_unclaimed_idx")
       .on(table.createdAt)
       .where(sql`${table.postId} is null`),
+  ]
+);
+
+/**
+ * Phase 2. FLAT — no `parent_id`. The programme's feature list says "threaded
+ * comments"; the spec records the deviation and its reason. `parent_id` can
+ * be added later as a nullable column without moving a row.
+ */
+export const postComments = pgTable(
+  "post_comment",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    postId: uuid("post_id")
+      .notNull()
+      .references(() => posts.id),
+    authorId: uuid("author_id")
+      .notNull()
+      .references(() => appUsers.id),
+    body: text("body").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Present from the start so a comment's lifecycle needs no second
+    // migration. NOTHING WRITES IT THIS PHASE — there is no edit endpoint.
+    editedAt: timestamp("edited_at", { withTimezone: true }),
+    // SOFT delete, matching `post`. Every read path must filter it.
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (table) => [
+    // The thread, oldest first. PARTIAL: deleted comments leave the index.
+    index("post_comment_post_created_idx")
+      .on(table.postId, table.createdAt)
+      .where(sql`${table.deletedAt} is null`),
   ]
 );
 

@@ -7,6 +7,7 @@ import {
   passwordResetTokens,
   signupNotices,
   follows,
+  postComments,
   postMedia,
   posts,
   userTiers,
@@ -65,6 +66,9 @@ export async function resetDatabase() {
   // follow references app_user twice (follower and followee), so it must
   // clear before app_user too — Task 1 of profiles-and-following.
   await db.delete(follows);
+  // postComments references app_user (author) and post, so it must clear
+  // before both — Phase 2.
+  await db.delete(postComments);
   // postMedia references app_user (owner) and post, so it must clear before
   // both — Task 1 of the images phase.
   await db.delete(postMedia);

@@ -93,6 +93,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
         authorId: posts.authorId,
         deletedAt: posts.deletedAt,
         visibility: posts.visibility,
+        communityId: posts.communityId,
       })
       .from(posts)
       .where(eq(posts.id, id));
@@ -102,6 +103,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       authorId: row.authorId,
       isDeleted: row.deletedAt !== null,
       visibility: row.visibility,
+      communityId: row.communityId,
     };
   }
 
@@ -124,6 +126,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
         authorId: posts.authorId,
         deletedAt: posts.deletedAt,
         visibility: posts.visibility,
+        communityId: posts.communityId,
       })
       .from(posts)
       .where(eq(posts.id, id))
@@ -134,6 +137,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       authorId: row.authorId,
       isDeleted: row.deletedAt !== null,
       visibility: row.visibility,
+      communityId: row.communityId,
     };
   }
 

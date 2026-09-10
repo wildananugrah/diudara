@@ -141,6 +141,7 @@ describe("DrizzlePostWriteUnitOfWork", () => {
       authorId,
       isDeleted: false,
       visibility: "public",
+      communityId: null,
     });
   });
 });

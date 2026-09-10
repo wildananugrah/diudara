@@ -52,6 +52,15 @@ export interface PostOwnership {
    * place that current value is available before the write happens.
    */
   visibility: string;
+  /**
+   * `null` for a personal post, the owning community's id otherwise. Phase 2
+   * needs this here for two authorisation rules that both read
+   * `ownershipOf`/`lockForEdit` rather than a new query: "the community's
+   * owner may delete any post in their community", and "only a member of
+   * the post's community may comment" — neither is answerable from
+   * `authorId` alone.
+   */
+  communityId: string | null;
 }
 
 export interface PostRepositoryPort {
