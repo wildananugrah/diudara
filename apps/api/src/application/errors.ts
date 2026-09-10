@@ -190,9 +190,10 @@ export const UniqueRule = {
    * `user_stream_one_live` — the PARTIAL unique index on `user_stream`
    * (`owner_id`, `WHERE status = 'live'`): one live broadcast per person,
    * arbitrated by the database. `DrizzleUserStreamRepository.startLive` is
-   * a bare INSERT, so — same shape as `subscriptionMemberTierActive` above
-   * — nothing upstream can see in advance whether the owner already holds a
-   * `live` row before attempting it.
+   * a bare INSERT, so nothing upstream can see in advance whether the owner
+   * already holds a `live` row before attempting it. (This once cited
+   * `subscriptionMemberTierActive` as the same shape; Phase 1 removed that
+   * rule with the table it named.)
    */
   userStreamOneLive: "user_stream_one_live",
   /**
@@ -207,6 +208,19 @@ export const UniqueRule = {
    * conditional write that can still collide with a partial unique index.
    */
   userSubscriptionOneActive: "user_subscription_one_active",
+  /**
+   * `community_slug_unique` — a community's URL slug.
+   *
+   * This is NOT the `communitySlug` rule Phase 1 removed from this object.
+   * That one named a constraint on the dropped `creator`-owned `community`
+   * table; this one names the constraint on the `app_user`-owned table that
+   * replaced it, whose real Postgres name (migration 0035) is
+   * `community_slug_unique`. `DrizzleCommunityRepository.create` derives the
+   * slug from the submitted name and inserts, so two people naming a
+   * community the same thing at the same moment both pass any application-side
+   * check — the index is the only arbiter.
+   */
+  communitySlug: "community_slug",
 } as const;
 
 export type UniqueRuleName = (typeof UniqueRule)[keyof typeof UniqueRule];

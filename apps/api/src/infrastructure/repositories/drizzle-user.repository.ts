@@ -265,7 +265,12 @@ export class DrizzleUserRepository implements UserRepositoryPort {
  * character in a real handle, so an unescaped search for an EXACT handle
  * like `budi_santoso` matched two other users too (`budi1santoso`,
  * `budixsantoso`) before this fix.
+ *
+ * EXPORTED for the same reason `clampLimit` is exported from
+ * `drizzle-follow.repository.ts`: `DrizzleCommunityRepository.browse` runs an
+ * ILIKE over a user-supplied string too, and a second copy of "what counts as
+ * a metacharacter" would drift from this one.
  */
-function escapeLikePattern(raw: string): string {
+export function escapeLikePattern(raw: string): string {
   return raw.replace(/[\\%_]/g, "\\$&");
 }
