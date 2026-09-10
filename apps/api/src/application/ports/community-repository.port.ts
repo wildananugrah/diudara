@@ -49,6 +49,15 @@ export interface CommunityRepositoryPort {
 
   findBySlug(slug: string): Promise<CommunityRecord | null>;
 
+  /**
+   * One community by its primary key, in the same full `CommunityRecord`
+   * projection `findBySlug` returns; `null` when no such id exists. The
+   * moderation rules that let a community's owner delete a post or a comment
+   * in it start from a post's `communityId` — an id, never a slug — so they
+   * cannot use `findBySlug`.
+   */
+  findById(id: string): Promise<CommunityRecord | null>;
+
   browse(query: BrowseCommunitiesQuery): Promise<CommunityListRow[]>;
 
   memberCountFor(communityId: string): Promise<number>;

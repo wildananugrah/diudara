@@ -9,6 +9,10 @@ import { DrizzleMediaRepository } from "../../infrastructure/repositories/drizzl
 import { DrizzlePostWriteUnitOfWork } from "../../infrastructure/repositories/drizzle-post-write-unit-of-work";
 import { DrizzlePostRepository } from "../../infrastructure/repositories/drizzle-post.repository";
 import { ArrivalLatch } from "../../test-support/arrival-latch";
+import type {
+  CommunityRecord,
+  CommunityRepositoryPort,
+} from "../ports/community-repository.port";
 import type { MediaRepositoryPort, MediaRow } from "../ports/media-repository.port";
 import type { PostWriteUnitOfWorkPort } from "../ports/post-write-unit-of-work.port";
 import type {
@@ -200,6 +204,8 @@ const AUTHOR = "11111111-0000-4000-8000-000000000000";
 const SOMEONE_ELSE = "22222222-0000-4000-8000-000000000000";
 const FIRST_IMAGE = "cccccccc-0000-4000-8000-000000000000";
 const SECOND_IMAGE = "dddddddd-0000-4000-8000-000000000000";
+const COMMUNITY_ID = "eeeeeeee-0000-4000-8000-000000000000";
+const COMMUNITY_OWNER = "44444444-0000-4000-8000-000000000000";
 
 /**
  * `CreatePost` and `EditPost` both take a `PostWriteUnitOfWorkPort` now
@@ -226,6 +232,64 @@ function createPostFor(posts: PostRepositoryPort, media: MediaRepositoryPort): C
 
 function editPostFor(posts: PostRepositoryPort, media: MediaRepositoryPort): EditPost {
   return new EditPost(postWriteUnitOfWorkFor(posts, media));
+}
+
+/**
+ * Community-repo stand-in for `DeletePost`'s owner rule — only `findById` is
+ * ever reached (the moderation check resolves a post's `communityId`, an
+ * id), so everything else throws. `records` seeds the communities a test
+ * cares about.
+ */
+class FakeCommunities implements CommunityRepositoryPort {
+  records: CommunityRecord[] = [];
+
+  async findById(id: string): Promise<CommunityRecord | null> {
+    return this.records.find((r) => r.id === id) ?? null;
+  }
+  async findBySlug(): Promise<CommunityRecord | null> {
+    throw new Error("not used in these tests");
+  }
+  async create(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async browse(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async memberCountFor(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async isMember(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async join(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async leave(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async listMembers(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+}
+
+function communityRecord(overrides: Partial<CommunityRecord> = {}): CommunityRecord {
+  return {
+    id: COMMUNITY_ID,
+    ownerId: COMMUNITY_OWNER,
+    slug: "komunitas",
+    name: "Komunitas",
+    category: "Umum",
+    description: null,
+    createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    ...overrides,
+  };
+}
+
+function deletePostFor(
+  posts: PostRepositoryPort,
+  communities: CommunityRepositoryPort = new FakeCommunities()
+): DeletePost {
+  return new DeletePost(posts, communities);
 }
 
 describe("CreatePost", () => {
@@ -763,7 +827,7 @@ describe("DeletePost", () => {
   it("is idempotent on an already-deleted post", async () => {
     const posts = new FakePosts();
     posts.ownership = { id: "p", authorId: AUTHOR, isDeleted: true, visibility: "public", communityId: null };
-    await new DeletePost(posts).execute({ deleterId: AUTHOR, postId: "p" });
+    await deletePostFor(posts).execute({ deleterId: AUTHOR, postId: "p" });
     expect(posts.deleted).toEqual(["p"]);
   });
 
@@ -771,7 +835,41 @@ describe("DeletePost", () => {
     const posts = new FakePosts();
     posts.ownership = { id: "p", authorId: SOMEONE_ELSE, isDeleted: false, visibility: "public", communityId: null };
     await expect(
-      new DeletePost(posts).execute({ deleterId: AUTHOR, postId: "p" })
+      deletePostFor(posts).execute({ deleterId: AUTHOR, postId: "p" })
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    expect(posts.deleted).toEqual([]);
+  });
+
+  it("a community's owner may delete a member's post in it", async () => {
+    const posts = new FakePosts();
+    posts.ownership = { id: "p", authorId: SOMEONE_ELSE, isDeleted: false, visibility: "public", communityId: COMMUNITY_ID };
+    const communities = new FakeCommunities();
+    communities.records.push(communityRecord({ id: COMMUNITY_ID, ownerId: COMMUNITY_OWNER }));
+    await deletePostFor(posts, communities).execute({ deleterId: COMMUNITY_OWNER, postId: "p" });
+    expect(posts.deleted).toEqual(["p"]);
+  });
+
+  /**
+   * The negative that must NOT be dropped as redundant: an owner moderating
+   * removes a post, they never rewrite a member's words under that member's
+   * name. `EditPost` gets no community-owner rule; `DeletePost` alone does.
+   */
+  it("a community's owner may NOT edit a member's post in it", async () => {
+    const posts = new FakePosts();
+    posts.ownership = { id: "p", authorId: SOMEONE_ELSE, isDeleted: false, visibility: "public", communityId: COMMUNITY_ID };
+    await expect(
+      editPostFor(posts, new FakeMedia()).execute({ editorId: COMMUNITY_OWNER, postId: "p", body: "diubah" })
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    expect(posts.updated === null).toBe(true);
+  });
+
+  it("a stranger may not delete a community post", async () => {
+    const posts = new FakePosts();
+    posts.ownership = { id: "p", authorId: SOMEONE_ELSE, isDeleted: false, visibility: "public", communityId: COMMUNITY_ID };
+    const communities = new FakeCommunities();
+    communities.records.push(communityRecord({ id: COMMUNITY_ID, ownerId: COMMUNITY_OWNER }));
+    await expect(
+      deletePostFor(posts, communities).execute({ deleterId: AUTHOR, postId: "p" })
     ).rejects.toBeInstanceOf(ForbiddenError);
     expect(posts.deleted).toEqual([]);
   });

@@ -1,5 +1,6 @@
 import { MAX_POST_BODY_LENGTH } from "@diudara/shared";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../errors";
+import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 import type { MediaRepositoryPort } from "../ports/media-repository.port";
 import type { PostWriteUnitOfWorkPort } from "../ports/post-write-unit-of-work.port";
 import type { PostRepositoryPort } from "../ports/post-repository.port";
@@ -344,17 +345,37 @@ export class EditPost {
 }
 
 export class DeletePost {
-  constructor(private readonly posts: PostRepositoryPort) {}
+  constructor(
+    private readonly posts: PostRepositoryPort,
+    private readonly communities: CommunityRepositoryPort
+  ) {}
 
   /**
    * Idempotent: deleting an already-deleted post returns normally. A button that
    * errors when the state already matches what you asked for is worse than one
    * that agrees — the same ruling follow/unfollow made.
+   *
+   * The author may always delete. Failing that, the owner of the community
+   * the post belongs to may — moderation by REMOVAL only. `EditPost` gets no
+   * matching rule, deliberately: an owner takes a member's post down, they do
+   * not rewrite it under the member's name. A personal post has a null
+   * `communityId` and no such override.
    */
   async execute(input: { deleterId: string; postId: string }): Promise<void> {
     const owned = await this.posts.ownershipOf(input.postId);
     if (owned === null) throw new NotFoundError("post not found");
-    if (owned.authorId !== input.deleterId) throw new ForbiddenError(NOT_YOURS_MESSAGE);
+    if (
+      owned.authorId !== input.deleterId &&
+      !(await this.ownsCommunity(owned.communityId, input.deleterId))
+    ) {
+      throw new ForbiddenError(NOT_YOURS_MESSAGE);
+    }
     await this.posts.softDelete(input.postId);
+  }
+
+  private async ownsCommunity(communityId: string | null, deleterId: string): Promise<boolean> {
+    if (communityId === null) return false;
+    const community = await this.communities.findById(communityId);
+    return community !== null && community.ownerId === deleterId;
   }
 }

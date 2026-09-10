@@ -26,6 +26,9 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
   async findBySlug(): Promise<null> {
     throw new Error("not used in these tests");
   }
+  async findById(): Promise<null> {
+    throw new Error("not used in these tests");
+  }
   async browse(query: BrowseCommunitiesQuery): Promise<CommunityListRow[]> {
     this.browseCalls += 1;
     this.lastQuery = query;

@@ -333,6 +333,9 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
   async findBySlug() {
     return null;
   },
+  async findById() {
+    return null;
+  },
   async browse() {
     return [];
   },
@@ -617,7 +620,7 @@ describe("Dependencies (composition root contract)", () => {
       createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,
       editPost: new EditPost(fakePostWriteUnitOfWork),
-      deletePost: new DeletePost(fakePostRepository),
+      deletePost: new DeletePost(fakePostRepository, fakeCommunityRepository),
       listFeed: new ListFeed(
         fakePostRepository,
         fakeMediaRepository,

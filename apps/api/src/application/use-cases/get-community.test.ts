@@ -84,6 +84,9 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
   async findBySlug(slug: string): Promise<CommunityRecord | null> {
     return this.rows.find((r) => r.slug === slug) ?? null;
   }
+  async findById(id: string): Promise<CommunityRecord | null> {
+    return this.rows.find((r) => r.id === id) ?? null;
+  }
   async browse(): Promise<never> {
     throw new Error("not used in these tests");
   }

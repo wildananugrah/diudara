@@ -1553,7 +1553,7 @@ export function bootstrap(): Dependencies {
   const postWriteUnitOfWork = new DrizzlePostWriteUnitOfWork(db);
   const createPost = new CreatePost(postWriteUnitOfWork);
   const editPost = new EditPost(postWriteUnitOfWork);
-  const deletePost = new DeletePost(postRepository);
+  const deletePost = new DeletePost(postRepository, communityRepository);
   // The SAME `userSubscriptionRepository` and the SAME `clock` `isMemberOf`
   // and `listSubscribers` read, so the paywall gate cannot disagree with the
   // rest of the product about who is a member or about what time it is.

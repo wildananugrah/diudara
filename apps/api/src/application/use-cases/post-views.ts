@@ -1,4 +1,5 @@
 import { encodeKeysetCursor } from "../../domain/keyset-cursor";
+import type { CommentRow } from "../ports/comment-repository.port";
 import type { MediaRow } from "../ports/media-repository.port";
 import type { PostRow } from "../ports/post-repository.port";
 
@@ -74,6 +75,31 @@ export interface FeedPage {
   posts: PostView[];
   /** `null` means this was the last page. */
   nextCursor: string | null;
+}
+
+/**
+ * A comment as the wire sees it. Nested HERE, the same one place `PostView`
+ * is assembled, so "what a comment looks like to a client" has a single
+ * definition. `CommentRow` also carries `authorId` for the delete check —
+ * a question about ids, not handles — and this mapper drops it on this line
+ * rather than leaving it to be stripped downstream, exactly as `toPostView`
+ * drops the post's `authorId`.
+ */
+export interface CommentView {
+  id: string;
+  body: string;
+  /** ISO-8601. */
+  createdAt: string;
+  author: { handle: string; displayName: string };
+}
+
+export function toCommentView(row: CommentRow): CommentView {
+  return {
+    id: row.id,
+    body: row.body,
+    createdAt: row.createdAt.toISOString(),
+    author: { handle: row.authorHandle, displayName: row.authorDisplayName },
+  };
 }
 
 /**

@@ -53,6 +53,23 @@ describe("DrizzleCommunityRepository", () => {
     expect(members.map((m) => `${m.handle}:${m.role}`).join(",")).toBe("wildan:owner");
   });
 
+  it("findById returns the record for a live id and null for an unknown one", async () => {
+    const ownerId = await seedUser("wildan");
+    const created = await repo().create({
+      ownerId,
+      slug: "kelas-desain",
+      name: "Kelas Desain",
+      category: "Skill Digital",
+      description: null,
+    });
+
+    const found = await repo().findById(created.id);
+    expect(found?.slug).toBe("kelas-desain");
+    expect(found?.ownerId).toBe(ownerId);
+
+    expect(await repo().findById("00000000-0000-4000-8000-000000000000")).toBeNull();
+  });
+
   it("joining twice writes one row and reports the second as already present", async () => {
     const ownerId = await seedUser("wildan");
     const joinerId = await seedUser("rina");
