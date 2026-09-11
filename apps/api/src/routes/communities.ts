@@ -5,8 +5,9 @@ import {
   DEFAULT_COMMUNITY_LIST_LIMIT,
   DEFAULT_COMMUNITY_MEMBER_LIMIT,
   MAX_COMMUNITY_SEARCH_LENGTH,
-  createCommunityPostSchema,
+  createCommunityPostFields,
   createCommunitySchema,
+  refineCommunityPostEvent,
 } from "@diudara/shared";
 import { ValidationError } from "../application/errors";
 import { validate } from "../http/validate";
@@ -122,12 +123,19 @@ export function communityRoutes(
   // carries no `.max()` (the cap is a runtime env var, not a shared
   // constant), so an unbounded `mediaIds` array would otherwise reach the
   // media-claim path.
-  const communityPostBodySchema = createCommunityPostSchema.extend({
-    mediaIds: z
-      .array(z.string().uuid())
-      .max(deps.maxPostImages, `maksimal ${deps.maxPostImages} foto per kiriman`)
-      .optional(),
-  });
+  const communityPostBodySchema = createCommunityPostFields
+    .extend({
+      mediaIds: z
+        .array(z.string().uuid())
+        .max(deps.maxPostImages, `maksimal ${deps.maxPostImages} foto per kiriman`)
+        .optional(),
+    })
+    // RE-APPLIED, not re-implemented. `.extend()` returns a fresh ZodObject
+    // that carries none of the source's refinements, so without this line the
+    // one path that actually receives community posts would accept a
+    // `kegiatan` with no schedule. Sharing the function is what keeps the two
+    // schemas' rules from drifting.
+    .superRefine(refineCommunityPostEvent);
 
   app.post("/", requireAuth, validate(createCommunitySchema), async (c) => {
     const input = c.get("validated") as {

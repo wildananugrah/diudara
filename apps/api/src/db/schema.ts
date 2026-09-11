@@ -710,3 +710,56 @@ export const communityMembers = pgTable(
     index("community_member_community_joined_idx").on(table.communityId, table.joinedAt),
   ]
 );
+
+/**
+ * Phase 3. The when-and-where of a `post` whose `type` is `kegiatan` — the
+ * post itself carries the description, the author, the media, the soft delete
+ * and the comment thread.
+ *
+ * `post_id` IS the primary key, not a column beside a separate `id`. The
+ * relationship is 1:1 and the post is the identity: the detail URL, the
+ * comment thread and the owner's moderation all key off it, and a second id
+ * would be a second name for the same thing.
+ *
+ * NO `created_at`, `edited_at` or `deleted_at`. The post has all three, every
+ * read path here joins it, and a lifecycle of its own is a lifecycle that can
+ * disagree with the post's.
+ */
+export const communityEvents = pgTable(
+  "community_event",
+  {
+    postId: uuid("post_id")
+      .primaryKey()
+      .references(() => posts.id),
+    // DUPLICATES `post.community_id`, deliberately. The calendar's only query
+    // is "this community's events between two instants"; without this column
+    // that means walking the community's whole post history to find the
+    // handful that are events. Both rows are written in one transaction
+    // (`CreatePost`'s unit of work), so they cannot drift, and nothing reads
+    // this to decide which community owns a post — it exists to be ranged over.
+    communityId: uuid("community_id")
+      .notNull()
+      .references(() => communities.id),
+    // Separate from `post.body`: a `diskusi` has no title and `PostCard`
+    // renders none, so a nullable `title` on `post` would put the unused
+    // column on the hot table instead of the cold one.
+    title: varchar("title", { length: 160 }).notNull(),
+    startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+    endsAt: timestamp("ends_at", { withTimezone: true }),
+    location: varchar("location", { length: 200 }),
+  },
+  (table) => [
+    // The calendar's month range and the agenda's ordering, in one. No partial
+    // WHERE: there is no soft-delete column here, and the `post.deleted_at`
+    // filter lands on the joined side.
+    index("community_event_community_starts_idx").on(table.communityId, table.startsAt),
+    // A CHECK and not only a use-case guard, the reason `follow_no_self`
+    // records: it holds however the row arrives. `>` and not `>=` — a
+    // zero-length event is a data-entry slip the composer's own time fields
+    // make easy to produce.
+    check(
+      "community_event_ends_after_starts",
+      sql`${table.endsAt} is null or ${table.endsAt} > ${table.startsAt}`
+    ),
+  ]
+);
