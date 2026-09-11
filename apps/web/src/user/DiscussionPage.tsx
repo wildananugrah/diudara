@@ -22,6 +22,25 @@ type LoadState =
   | { status: "error"; message: string }
   | { status: "ready"; post: PostView; community: CommunityDetail };
 
+interface Props {
+  /**
+   * Phase 3. `"diskusi"` (the default) is `/komunitas/:slug/diskusi/:postId`;
+   * `"kegiatan"` is `/komunitas/:slug/kegiatan/:postId`, which additionally
+   * REFUSES a post carrying no schedule.
+   *
+   * ONE component for both, not two. The two-read gate, the thread state, the
+   * three early returns and the comment wiring are identical — a second file
+   * would be all of that copied and then kept in sync by hand, which is the
+   * drift Phase 2 refused when it declined a second `PostCard`. The schedule
+   * itself needs no code here at all: `PostCard` renders it from
+   * `post.event`.
+   *
+   * If Phase 4 adds a third variant, that is the moment to rename this file
+   * rather than the moment to fork it.
+   */
+  variant?: "diskusi" | "kegiatan";
+}
+
 /**
  * `/komunitas/:slug/diskusi/:postId` — one community post on its own page, with
  * its comment thread. The card on the Diskusi tab links here (ruling R11).
@@ -42,8 +61,9 @@ type LoadState =
  * "N komentar" count is `comments.length`, never `getPost(...).commentCount`,
  * which that endpoint always returns as `0` (Task 5).
  */
-export default function DiscussionPage() {
+export default function DiscussionPage({ variant = "diskusi" }: Props = {}) {
   const { slug, postId } = useParams<{ slug: string; postId: string }>();
+  const title = variant === "kegiatan" ? "Kegiatan" : "Diskusi";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [comments, setComments] = useState<CommentView[]>([]);
   // Derived from the token this request carries, exactly like `CommunityPage`:
@@ -76,7 +96,7 @@ export default function DiscussionPage() {
   if (load.status === "loading") {
     return (
       <>
-        <Header title="Diskusi" />
+        <Header title={title} />
         <main className="user-page discussion-page">
           <p>Memuat...</p>
         </main>
@@ -91,7 +111,7 @@ export default function DiscussionPage() {
   if (load.status === "error") {
     return (
       <>
-        <Header title="Diskusi" />
+        <Header title={title} />
         <main className="user-page discussion-page">
           {/* `form-error` (not `feed-error`): it has a bare rule in styles.css,
               and it is the class `CommunityPage` uses for this same early
@@ -106,9 +126,18 @@ export default function DiscussionPage() {
 
   const { post, community } = load;
 
+  // A discussion id typed into an event URL. NotFound and not a redirect: the
+  // page cannot render a schedule it has no date for, and redirecting would
+  // make two URLs for one post. Placed AFTER the load so a slow fetch is
+  // "Memuat…" rather than a flash of 404 — `load.status === "ready"` is the
+  // first moment `post.event` means anything.
+  if (variant === "kegiatan" && (post.event ?? null) === null) {
+    return <NotFoundPage />;
+  }
+
   return (
     <>
-      <Header title="Diskusi" />
+      <Header title={title} />
       <main className="user-page discussion-page">
         {/* Read-only here — the discussion page carries no post editing, so no
             `onEdit` / `onDeleteRequested` and `isOwn={false}`. */}

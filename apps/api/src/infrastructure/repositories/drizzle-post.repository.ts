@@ -1,6 +1,6 @@
 import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { appUsers, follows, posts } from "../../db/schema";
+import { appUsers, communityEvents, follows, posts } from "../../db/schema";
 import type { KeysetCursor } from "../../domain/keyset-cursor";
 import type {
   PostGating,
@@ -36,6 +36,19 @@ const postColumns = {
   type: posts.type,
   authorHandle: appUsers.handle,
   authorDisplayName: appUsers.displayName,
+  // Phase 3. A NESTED group, which drizzle resolves to `null` — the whole
+  // object, not four null fields — when the LEFT JOIN misses. That is exactly
+  // `PostRow.event`'s shape, so this projection needs no mapping step, and
+  // every read path stays a bare query builder. The EXPLAIN guard test below
+  // ("the indexes post reads go through") calls `.toSQL()` on the
+  // un-awaited return of `listGlobal`/`listByAuthor`, which a `.then()` here
+  // would quietly turn into a Promise and disarm.
+  event: {
+    title: communityEvents.title,
+    startsAt: communityEvents.startsAt,
+    endsAt: communityEvents.endsAt,
+    location: communityEvents.location,
+  },
 } as const;
 
 /**
@@ -84,6 +97,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
     visibility?: string;
     communityId?: string;
     type?: string;
+    event?: { title: string; startsAt: Date; endsAt?: Date; location?: string };
   }): Promise<PostRow> {
     // Each optional column is spread in ONLY when the caller passed a value —
     // never as `key: undefined`. drizzle turns an explicit `undefined` into a
@@ -102,6 +116,25 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       .insert(posts)
       .values(values)
       .returning({ id: posts.id });
+    if (input.event !== undefined) {
+      // `this.db` is the TRANSACTION handle whenever this runs under
+      // `DrizzlePostWriteUnitOfWork`, so this insert and the post's are one
+      // unit: a CHECK violation here rolls the post back rather than leaving
+      // a `kegiatan` with no schedule. `communityId!` is safe because the
+      // column is NOT NULL and the port documents that the two arrive
+      // together; a caller that passes an event without a community gets a
+      // not-null violation, which is the honest failure.
+      await this.db.insert(communityEvents).values({
+        postId: inserted!.id,
+        communityId: input.communityId!,
+        title: input.event.title,
+        startsAt: input.event.startsAt,
+        // Spread rather than `key: undefined` — the same rule the post's own
+        // values object above follows, and for the same drizzle reason.
+        ...(input.event.endsAt === undefined ? {} : { endsAt: input.event.endsAt }),
+        ...(input.event.location === undefined ? {} : { location: input.event.location }),
+      });
+    }
     const row = await this.readOne(inserted!.id);
     // The row was just inserted inside this call; a null here means the
     // projection join is broken, which is a bug rather than a missing post.
@@ -143,6 +176,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       .select(postColumns)
       .from(posts)
       .innerJoin(appUsers, eq(posts.authorId, appUsers.id))
+      .leftJoin(communityEvents, eq(communityEvents.postId, posts.id))
       .where(and(eq(posts.id, id), isNull(posts.deletedAt)));
     return row ?? null;
   }
@@ -264,6 +298,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       .from(posts)
       .innerJoin(appUsers, eq(posts.authorId, appUsers.id))
       .innerJoin(follows, eq(follows.followeeId, posts.authorId))
+      .leftJoin(communityEvents, eq(communityEvents.postId, posts.id))
       .where(
         and(
           eq(follows.followerId, viewerId),
@@ -302,6 +337,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       .select(postColumns)
       .from(posts)
       .innerJoin(appUsers, eq(posts.authorId, appUsers.id))
+      .leftJoin(communityEvents, eq(communityEvents.postId, posts.id))
       .where(and(filter, beforeCursor(before)))
       .orderBy(...newestFirstOrder())
       .limit(clampLimit(limit));
@@ -312,6 +348,7 @@ export class DrizzlePostRepository implements PostRepositoryPort {
       .select(postColumns)
       .from(posts)
       .innerJoin(appUsers, eq(posts.authorId, appUsers.id))
+      .leftJoin(communityEvents, eq(communityEvents.postId, posts.id))
       .where(eq(posts.id, id));
     return row ?? null;
   }

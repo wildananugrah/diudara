@@ -14,6 +14,7 @@ const row: PostRow = {
   type: "diskusi",
   authorHandle: "budi",
   authorDisplayName: "Budi",
+  event: null,
 };
 
 /**
@@ -38,6 +39,7 @@ const POST_VIEW_KEYS = [
   "commentCount",
   "createdAt",
   "editedAt",
+  "event",
   "id",
   "lockedMediaCount",
   "media",
@@ -71,6 +73,7 @@ describe("toPostView", () => {
       "commentCount",
       "createdAt",
       "editedAt",
+      "event",
       "id",
       "lockedMediaCount",
       "media",

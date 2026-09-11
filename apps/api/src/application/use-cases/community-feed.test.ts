@@ -82,6 +82,9 @@ function postRow(overrides: Partial<PostRow> = {}): PostRow {
     type: "diskusi",
     authorHandle: "budi",
     authorDisplayName: "Budi",
+    // Phase 3. `null` is the default because every post is a non-event until
+    // a test says otherwise; an event test overrides it.
+    event: null,
     ...overrides,
   };
 }
@@ -98,6 +101,7 @@ class FakePosts implements PostRepositoryPort {
     visibility?: string;
     communityId?: string;
     type?: string;
+    event?: { title: string; startsAt: Date; endsAt?: Date; location?: string };
   }> = [];
   byCommunityRows: PostRow[] = [];
   byCommunityCalls: Array<{ communityId: string; limit: number; before: unknown }> = [];
@@ -108,6 +112,7 @@ class FakePosts implements PostRepositoryPort {
     visibility?: string;
     communityId?: string;
     type?: string;
+    event?: { title: string; startsAt: Date; endsAt?: Date; location?: string };
   }): Promise<PostRow> {
     this.created.push(input);
     return postRow({
@@ -116,6 +121,18 @@ class FakePosts implements PostRepositoryPort {
       visibility: input.visibility ?? "public",
       communityId: input.communityId ?? null,
       type: input.type ?? "diskusi",
+      // Mirrors the real repository: what `create` was handed comes back on
+      // the row it returns, so the composer's optimistic prepend has a
+      // complete card without a refetch.
+      event:
+        input.event === undefined
+          ? null
+          : {
+              title: input.event.title,
+              startsAt: input.event.startsAt,
+              endsAt: input.event.endsAt ?? null,
+              location: input.event.location ?? null,
+            },
     });
   }
   async listByCommunity(communityId: string, limit: number, before: unknown): Promise<PostRow[]> {
@@ -346,6 +363,49 @@ describe("CreateCommunityPost", () => {
     expect(posts.created[0]!.type).toBe("pengumuman");
     expect(posts.created[0]!.communityId).toBe(COMMUNITY_ID);
     expect(view.type).toBe("pengumuman");
+  });
+
+  /**
+   * Phase 3. `kegiatan` takes the branch `pengumuman` already takes — one
+   * more value in an existing condition, not a new rule — so it gets the same
+   * pair of tests, and a member being refused is asserted to write NOTHING
+   * rather than merely to throw.
+   */
+  test("a member may not post a kegiatan, and nothing is written", async () => {
+    const { posts, useCase } = createSubject();
+
+    await expect(
+      useCase.execute({
+        slug: "kelas-fisika",
+        authorId: MEMBER_ID,
+        body: "x",
+        type: "kegiatan",
+        event: { title: "Kelas tambahan", startsAt: new Date("2026-09-15T09:00:00.000Z") },
+      })
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    expect(posts.created).toEqual([]);
+  });
+
+  test("the owner may post a kegiatan, and the schedule reaches the repository", async () => {
+    const { posts, useCase } = createSubject();
+    const startsAt = new Date("2026-09-15T09:00:00.000Z");
+
+    const view = await useCase.execute({
+      slug: "kelas-fisika",
+      authorId: OWNER_ID,
+      body: "kelas tatap muka daring",
+      type: "kegiatan",
+      event: { title: "Trigonometri lanjutan", startsAt, location: "Online via Zoom" },
+    });
+
+    // The schedule must survive the delegation to `CreatePost`, not just the
+    // authorisation: an event that arrives here and is dropped on the way to
+    // `posts.create` is a kegiatan with no date, which is the one state the
+    // contract's refinement exists to prevent.
+    expect(posts.created[0]!.event?.title).toBe("Trigonometri lanjutan");
+    expect(posts.created[0]!.event?.startsAt).toEqual(startsAt);
+    expect(posts.created[0]!.event?.location).toBe("Online via Zoom");
+    expect(view.type).toBe("kegiatan");
   });
 
   test("an unknown slug is a NotFoundError, checked before membership", async () => {

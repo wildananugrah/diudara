@@ -5,8 +5,9 @@ import {
   DEFAULT_COMMUNITY_LIST_LIMIT,
   DEFAULT_COMMUNITY_MEMBER_LIMIT,
   MAX_COMMUNITY_SEARCH_LENGTH,
-  createCommunityPostSchema,
+  createCommunityPostFields,
   createCommunitySchema,
+  refineCommunityPostEvent,
 } from "@diudara/shared";
 import { ValidationError } from "../application/errors";
 import { validate } from "../http/validate";
@@ -111,6 +112,7 @@ export function communityRoutes(
     | "listCommunityMembers"
     | "createCommunityPost"
     | "listCommunityFeed"
+    | "listCommunityEvents"
     | "maxPostImages"
   >
 ) {
@@ -122,12 +124,19 @@ export function communityRoutes(
   // carries no `.max()` (the cap is a runtime env var, not a shared
   // constant), so an unbounded `mediaIds` array would otherwise reach the
   // media-claim path.
-  const communityPostBodySchema = createCommunityPostSchema.extend({
-    mediaIds: z
-      .array(z.string().uuid())
-      .max(deps.maxPostImages, `maksimal ${deps.maxPostImages} foto per kiriman`)
-      .optional(),
-  });
+  const communityPostBodySchema = createCommunityPostFields
+    .extend({
+      mediaIds: z
+        .array(z.string().uuid())
+        .max(deps.maxPostImages, `maksimal ${deps.maxPostImages} foto per kiriman`)
+        .optional(),
+    })
+    // RE-APPLIED, not re-implemented. `.extend()` returns a fresh ZodObject
+    // that carries none of the source's refinements, so without this line the
+    // one path that actually receives community posts would accept a
+    // `kegiatan` with no schedule. Sharing the function is what keeps the two
+    // schemas' rules from drifting.
+    .superRefine(refineCommunityPostEvent);
 
   app.post("/", requireAuth, validate(createCommunitySchema), async (c) => {
     const input = c.get("validated") as {
@@ -177,6 +186,7 @@ export function communityRoutes(
         body: string;
         type: string;
         mediaIds?: string[];
+        event?: { title: string; startsAt: string; endsAt?: string; location?: string };
       };
       const view = await deps.createCommunityPost.execute({
         slug: c.req.param("slug"),
@@ -184,10 +194,42 @@ export function communityRoutes(
         body: input.body,
         type: input.type,
         mediaIds: input.mediaIds,
+        // ISO strings in, `Date`s onward — the boundary where the wire's
+        // representation stops and the domain's begins, and the LAST place
+        // that conversion is cheap. Both timestamps already parsed cleanly:
+        // the schema's `isoInstant` refused anything `new Date()` reads as
+        // NaN, so these constructions cannot produce an Invalid Date.
+        ...(input.event === undefined
+          ? {}
+          : {
+              event: {
+                title: input.event.title,
+                startsAt: new Date(input.event.startsAt),
+                ...(input.event.endsAt === undefined
+                  ? {}
+                  : { endsAt: new Date(input.event.endsAt) }),
+                ...(input.event.location === undefined
+                  ? {}
+                  : { location: input.event.location }),
+              },
+            }),
       });
       return c.json(view, 201);
     }
   );
+
+  // DECLARED BEFORE `/:slug` for the same literal-wins reason `posts` above
+  // is. `?month=YYYY-MM` is a WIB month; absent or malformed means the WIB
+  // month containing the clock's now, and `wibMonthRange` owns both rules —
+  // the route does no date parsing of its own and reads no clock of its own.
+  app.get<"/:slug/events">("/:slug/events", async (c) => {
+    return c.json(
+      await deps.listCommunityEvents.execute({
+        slug: c.req.param("slug"),
+        month: c.req.query("month"),
+      })
+    );
+  });
 
   app.get<"/:slug">("/:slug", async (c) => {
     const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);

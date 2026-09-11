@@ -211,11 +211,12 @@ describe("DrizzlePostRepository.create", () => {
 
     const row = await repo.create({ authorId: author.id, body: "halo semua" });
 
-    // Phase 2 widened `postColumns` with `communityId` and `type`, so the
-    // exact key set widens with it — the same maintenance the Phase 6 note on
-    // `DrizzlePostRepository projection on every list path` below records for
-    // `authorId`/`visibility`: the assertion tracks the projection, it is not
-    // exempted from changing when the projection legitimately does.
+    // Phase 2 widened `postColumns` with `communityId` and `type`, and Phase 3
+    // with `event`, so the exact key set widens with them — the same
+    // maintenance the Phase 6 note on `DrizzlePostRepository projection on
+    // every list path` below records for `authorId`/`visibility`: the
+    // assertion tracks the projection, it is not exempted from changing when
+    // the projection legitimately does.
     expect(Object.keys(row).sort()).toEqual([
       "authorDisplayName",
       "authorHandle",
@@ -224,6 +225,7 @@ describe("DrizzlePostRepository.create", () => {
       "communityId",
       "createdAt",
       "editedAt",
+      "event",
       "id",
       "type",
       "visibility",
@@ -522,6 +524,13 @@ describe("DrizzlePostRepository projection on every list path", () => {
     "communityId",
     "createdAt",
     "editedAt",
+    // Phase 3. On these three PERSONAL paths it is always `null` — they filter
+    // `community_id IS NULL` and a personal post can carry no `community_event`
+    // row — but the KEY is present, because the projection is shared and a
+    // conditional key is what `post-views.ts` refuses on the wire for the same
+    // reason. Added deliberately: this guard exists to catch a path quietly
+    // selecting different columns, so it has to move when the projection does.
+    "event",
     "id",
     "type",
     "visibility",
@@ -743,5 +752,93 @@ describe("DrizzlePostRepository.create — community and type", () => {
     const row = await new DrizzlePostRepository(db).create({ authorId: ids.ownerId, body: "halo" });
     expect(row.communityId).toBeNull();
     expect(row.type).toBe("diskusi");
+  });
+});
+
+/** 15 September 2026, 16:00 WIB — and 18:00 WIB. */
+const EVENT_STARTS_AT = new Date("2026-09-15T09:00:00.000Z");
+const EVENT_ENDS_AT = new Date("2026-09-15T11:00:00.000Z");
+
+describe("DrizzlePostRepository — the event on a kegiatan post", () => {
+  test("create writes the event row and returns it on the post", async () => {
+    const ids = await seedCommunity();
+    const row = await new DrizzlePostRepository(db).create({
+      authorId: ids.ownerId,
+      body: "kelas tatap muka daring",
+      communityId: ids.communityId,
+      type: "kegiatan",
+      event: {
+        title: "Trigonometri lanjutan",
+        startsAt: EVENT_STARTS_AT,
+        endsAt: EVENT_ENDS_AT,
+        location: "Online via Zoom",
+      },
+    });
+
+    // Returned from `create` itself, not from a refetch: the composer's
+    // optimistic prepend renders this object and a null here is a card with
+    // no date on screen.
+    expect(row.event?.title).toBe("Trigonometri lanjutan");
+    expect(row.event?.startsAt).toEqual(EVENT_STARTS_AT);
+    expect(row.event?.endsAt).toEqual(EVENT_ENDS_AT);
+    expect(row.event?.location).toBe("Online via Zoom");
+  });
+
+  test("create leaves endsAt and location null when they are not given", async () => {
+    const ids = await seedCommunity();
+    const row = await new DrizzlePostRepository(db).create({
+      authorId: ids.ownerId,
+      body: "sesi motivasi",
+      communityId: ids.communityId,
+      type: "kegiatan",
+      event: { title: "Sesi motivasi", startsAt: EVENT_STARTS_AT },
+    });
+    expect(row.event?.endsAt).toBeNull();
+    expect(row.event?.location).toBeNull();
+  });
+
+  /**
+   * The LEFT JOIN, proven through the two read paths that can return an
+   * event. A missing join reads as `event: null`, which is indistinguishable
+   * on the wire from a discussion — so this asserts the populated case, not
+   * the absent one.
+   */
+  test("listByCommunity and getById both carry the event", async () => {
+    const ids = await seedCommunity();
+    const repository = new DrizzlePostRepository(db);
+    const created = await repository.create({
+      authorId: ids.ownerId,
+      body: "kelas tambahan",
+      communityId: ids.communityId,
+      type: "kegiatan",
+      event: { title: "Kelas tambahan", startsAt: EVENT_STARTS_AT },
+    });
+
+    const [listed] = await repository.listByCommunity(ids.communityId, 20, null);
+    expect(listed?.event?.title).toBe("Kelas tambahan");
+
+    const fetched = await repository.getById(created.id);
+    expect(fetched?.event?.title).toBe("Kelas tambahan");
+  });
+
+  test("a post with no event reads as event: null on every path", async () => {
+    const ids = await seedCommunity();
+    const repository = new DrizzlePostRepository(db);
+    const created = await repository.create({
+      authorId: ids.ownerId,
+      body: "diskusi biasa",
+      communityId: ids.communityId,
+    });
+
+    expect(created.event).toBeNull();
+    expect((await repository.getById(created.id))?.event).toBeNull();
+    expect((await repository.listByCommunity(ids.communityId, 20, null))[0]?.event).toBeNull();
+    // The personal paths cannot reach an event at all — they filter
+    // `community_id IS NULL` and a personal post can carry no event row — so
+    // `null` there is by construction, not by a projection remembering.
+    const personal = await repository.create({ authorId: ids.ownerId, body: "pribadi" });
+    expect((await repository.listGlobal(20, null))[0]?.event).toBeNull();
+    expect((await repository.listByAuthor(ids.ownerId, 20, null))[0]?.id).toBe(personal.id);
+    expect((await repository.listByAuthor(ids.ownerId, 20, null))[0]?.event).toBeNull();
   });
 });

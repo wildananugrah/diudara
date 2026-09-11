@@ -17,6 +17,7 @@ import {
   userStreams,
   communities,
   communityMembers,
+  communityEvents,
 } from "./schema";
 
 /**
@@ -66,6 +67,9 @@ export async function resetDatabase() {
   // follow references app_user twice (follower and followee), so it must
   // clear before app_user too — Task 1 of profiles-and-following.
   await db.delete(follows);
+  // communityEvents references post and community, so it must clear before
+  // both — Phase 3, same FK-ordering rule as every entry here.
+  await db.delete(communityEvents);
   // postComments references app_user (author) and post, so it must clear
   // before both — Phase 2.
   await db.delete(postComments);

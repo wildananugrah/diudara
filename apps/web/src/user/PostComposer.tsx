@@ -7,8 +7,14 @@ import {
   type FormEvent,
   type Ref,
 } from "react";
-import { MAX_POST_BODY_LENGTH } from "@diudara/shared";
+import {
+  EVENT_POST_TYPE,
+  MAX_EVENT_LOCATION_LENGTH,
+  MAX_EVENT_TITLE_LENGTH,
+  MAX_POST_BODY_LENGTH,
+} from "@diudara/shared";
 import { describeRequestFailure, describeUploadFailure } from "./errorCopy";
+import { wibWallClockToIso } from "./wibDate";
 import MediaStrip, { type MediaStripItem } from "./MediaStrip";
 import {
   getMaxPostImages,
@@ -81,7 +87,20 @@ export interface PostComposerProps {
   onSubmit: (
     body: string,
     mediaIds: string[],
-    visibility?: "public" | "members"
+    visibility?: "public" | "members",
+    /**
+     * **Phase 3, and ONLY ever set in community mode when the chosen type is
+     * `kegiatan`.** An OBJECT in slot four beside a STRING in slot three, so
+     * transposing the two is a compile error rather than a silent mis-store —
+     * the hazard `post-repository.port.ts` records when it rejected trailing
+     * positional strings. Reshaping this into an options bag would touch all
+     * three existing callers to serve one new one.
+     *
+     * `startsAt`/`endsAt` are UTC instants. The native inputs above produce a
+     * WIB wall clock and THIS component converts, so no caller has to know
+     * the form's timezone.
+     */
+    event?: { title: string; startsAt: string; endsAt?: string; location?: string }
   ) => Promise<void>;
   /** Renders a `Batal` button when present. Absent for the create composer, which has nothing to cancel back to. */
   onCancel?: () => void;
@@ -216,6 +235,17 @@ export default function PostComposer({
    */
   const communityMode = postTypeChoices !== undefined;
   const [postType, setPostType] = useState<string>(postTypeChoices?.[0] ?? "diskusi");
+  // Phase 3. Five fields, flat rather than one object, because each is a
+  // controlled input and an object would re-create every one of them on any
+  // keystroke. They are NOT cleared when the type changes away from
+  // `kegiatan`: switching to Pengumuman to check something and back must not
+  // wipe a half-typed schedule. `eventDraft` reads them only when the type
+  // is `kegiatan`, so a stale value cannot be sent.
+  const [eventTitle, setEventTitle] = useState("");
+  const [eventDate, setEventDate] = useState("");
+  const [eventStartTime, setEventStartTime] = useState("");
+  const [eventEndTime, setEventEndTime] = useState("");
+  const [eventLocation, setEventLocation] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A lazy initialiser, so the seed is built once rather than on every render
@@ -424,7 +454,49 @@ export default function PostComposer({
    * post hostage to a photo that will not upload is worse than sending the post
    * they can see they are sending.
    */
-  const canSubmit = trimmed.length > 0 && !overLimit && !submitting && !uploading;
+  /**
+   * Whether the type currently chosen needs a schedule. False for every
+   * non-community caller, so Beranda and profiles are untouched.
+   */
+  const isEvent = communityMode && postType === EVENT_POST_TYPE;
+
+  /**
+   * The `event` payload, or `null` when the form is not yet a valid one.
+   * `null` is what disables the submit button, so this is the single
+   * definition of "is this schedule complete" — a second copy in `canSubmit`
+   * is how a button enables for a payload this refuses to build.
+   *
+   * `endsAt` and `location` are OMITTED when blank, never sent as `""`: the
+   * route's schema requires at least one character after trimming, so an
+   * empty string would 400 a form the author thinks they left alone.
+   */
+  function eventDraft(): { title: string; startsAt: string; endsAt?: string; location?: string } | null {
+    const title = eventTitle.trim();
+    const startsAt = wibWallClockToIso(eventDate, eventStartTime);
+    if (title.length === 0 || startsAt === null) return null;
+
+    const endsAt = eventEndTime === "" ? null : wibWallClockToIso(eventDate, eventEndTime);
+    // A typed-but-unparseable or not-after end time refuses the whole draft
+    // rather than silently dropping the field — the client half of the
+    // `community_event_ends_after_starts` CHECK, so a violation is a disabled
+    // button instead of an opaque 400.
+    if (eventEndTime !== "" && (endsAt === null || endsAt <= startsAt)) return null;
+
+    const location = eventLocation.trim();
+    return {
+      title,
+      startsAt,
+      ...(endsAt === null ? {} : { endsAt }),
+      ...(location === "" ? {} : { location }),
+    };
+  }
+
+  const canSubmit =
+    trimmed.length > 0 &&
+    !overLimit &&
+    !submitting &&
+    !uploading &&
+    (!isEvent || eventDraft() !== null);
 
   /**
    * Whether "Khusus anggota" may be checked at all — at least one image is
@@ -483,7 +555,16 @@ export default function PostComposer({
           // every other caller — carries the post `type` string instead. No
           // existing caller (Beranda, EditComposer) reaches this branch;
           // `communityMode` is false for them.
-          await onSubmit(trimmed, attachedIds, postType as "public" | "members");
+          // The third slot carries the post TYPE here, not a visibility (see
+          // the TRAP note above). The fourth carries the schedule, and is
+          // `undefined` for every type but `kegiatan`.
+          const draft = isEvent ? eventDraft() : null;
+          await onSubmit(
+            trimmed,
+            attachedIds,
+            postType as "public" | "members",
+            draft ?? undefined
+          );
         } else {
           await onSubmit(trimmed, attachedIds);
         }
@@ -508,6 +589,11 @@ export default function PostComposer({
       setImages([]);
       setNotice(null);
       setMembersOnly(false);
+      setEventTitle("");
+      setEventDate("");
+      setEventStartTime("");
+      setEventEndTime("");
+      setEventLocation("");
     } catch (err: unknown) {
       setError(`${SUBMIT_FAILED_PREFIX} ${describeRequestFailure(err)}`);
     } finally {
@@ -572,6 +658,69 @@ export default function PostComposer({
           ) : null}
         </div>
       )}
+
+      {/* Phase 3. Shown only for `kegiatan`, so every other type and every
+          non-community caller renders exactly what it did before.
+
+          NATIVE `<input type="date">` and `<input type="time">` — a
+          date-picker dependency for a form with one date in it is the kind of
+          addition this repo does not make, and the native controls are
+          already keyboard- and screen-reader-correct, and localised by the
+          browser rather than by us.
+
+          The times are WIB wall clock; `eventDraft` converts. The hint says
+          so, because an input that silently means a timezone is an input
+          that schedules things seven hours out. */}
+      {isEvent ? (
+        <fieldset className="post-composer-event">
+          <legend>Jadwal kegiatan</legend>
+
+          <label htmlFor="post-composer-event-title">Judul kegiatan</label>
+          <input
+            id="post-composer-event-title"
+            type="text"
+            value={eventTitle}
+            maxLength={MAX_EVENT_TITLE_LENGTH}
+            onChange={(event) => setEventTitle(event.target.value)}
+          />
+
+          <label htmlFor="post-composer-event-date">Tanggal</label>
+          <input
+            id="post-composer-event-date"
+            type="date"
+            value={eventDate}
+            onChange={(event) => setEventDate(event.target.value)}
+          />
+
+          <label htmlFor="post-composer-event-start">Waktu mulai</label>
+          <input
+            id="post-composer-event-start"
+            type="time"
+            value={eventStartTime}
+            onChange={(event) => setEventStartTime(event.target.value)}
+          />
+
+          <label htmlFor="post-composer-event-end">Waktu selesai</label>
+          <input
+            id="post-composer-event-end"
+            type="time"
+            value={eventEndTime}
+            onChange={(event) => setEventEndTime(event.target.value)}
+          />
+
+          <label htmlFor="post-composer-event-location">Lokasi</label>
+          <input
+            id="post-composer-event-location"
+            type="text"
+            value={eventLocation}
+            maxLength={MAX_EVENT_LOCATION_LENGTH}
+            placeholder="Opsional — misalnya Online via Zoom"
+            onChange={(event) => setEventLocation(event.target.value)}
+          />
+
+          <p className="post-composer-hint">Semua waktu dalam WIB.</p>
+        </fieldset>
+      ) : null}
 
       <textarea
         className="post-composer-body"

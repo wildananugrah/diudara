@@ -34,6 +34,26 @@ export interface PostRow {
   type: string;
   authorHandle: string;
   authorDisplayName: string;
+  /**
+   * Phase 3. The `community_event` row joined in, or `null` on everything
+   * else — which is every personal post (they can carry no event row) and
+   * every community post whose `type` is not `kegiatan`.
+   *
+   * It rides on the row rather than arriving as a separate batched lookup the
+   * way `comments.countForPosts` does. The comment count is an aggregate over
+   * many rows per post and needs its own grouped query; this is a
+   * primary-key join returning at most one row, so a second round trip would
+   * fetch what the first query could have carried.
+   */
+  event: PostEventRow | null;
+}
+
+/** The `community_event` columns a reader needs. `postId` is the join key and is already on the post. */
+export interface PostEventRow {
+  title: string;
+  startsAt: Date;
+  endsAt: Date | null;
+  location: string | null;
 }
 
 /**
@@ -92,6 +112,22 @@ export interface PostRepositoryPort {
     visibility?: string;
     communityId?: string;
     type?: string;
+    /**
+     * Phase 3. When present, a `community_event` row is written in the SAME
+     * statement sequence as the post — and therefore in the same transaction,
+     * because `DrizzlePostWriteUnitOfWork` constructs this repository against
+     * the transaction handle. A failed event insert rolls the post back, so
+     * there is no window in which a `kegiatan` exists without its schedule.
+     *
+     * `communityId` must be present alongside it: `community_event` carries
+     * its own `community_id` and the column is NOT NULL.
+     */
+    event?: {
+      title: string;
+      startsAt: Date;
+      endsAt?: Date;
+      location?: string;
+    };
   }): Promise<PostRow>;
   /** `null` when the id has never existed. A soft-deleted post still resolves, with `isDeleted: true`. */
   ownershipOf(id: string): Promise<PostOwnership | null>;

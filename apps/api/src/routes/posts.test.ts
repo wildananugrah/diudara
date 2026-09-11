@@ -156,6 +156,7 @@ describe("POST /users/posts", () => {
       "commentCount",
       "createdAt",
       "editedAt",
+      "event",
       "id",
       "lockedMediaCount",
       "media",
@@ -692,6 +693,7 @@ describe("media on posts", () => {
       "commentCount",
       "createdAt",
       "editedAt",
+      "event",
       "id",
       "lockedMediaCount",
       "media",
@@ -731,12 +733,16 @@ describe("media on posts", () => {
     const feed = await (await a.request("/users/feed?tab=untuk-anda")).json();
     const profile = await (await a.request(`/users/${VALID.handle}/posts`)).json();
 
+    // Phase 3 added `event` to this set: `null` on every post that is not a
+    // `kegiatan`, present on all of them so the projection stays CLOSED —
+    // the property these guards exist to hold.
     const POST_KEYS = [
       "author",
       "body",
       "commentCount",
       "createdAt",
       "editedAt",
+      "event",
       "id",
       "lockedMediaCount",
       "media",
@@ -1253,12 +1259,16 @@ describe("members-only posts: the projection never sends a media id to a non-mem
       await (await a.request("/users/rina/posts", { headers: authed(token) })).json()
     ).posts[0];
 
+    // Phase 3 added `event` to this set: `null` on every post that is not a
+    // `kegiatan`, present on all of them so the projection stays CLOSED —
+    // the property these guards exist to hold.
     const POST_KEYS = [
       "author",
       "body",
       "commentCount",
       "createdAt",
       "editedAt",
+      "event",
       "id",
       "lockedMediaCount",
       "media",

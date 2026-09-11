@@ -2,7 +2,7 @@ import { useCallback, useRef } from "react";
 import { COMMUNITY_POST_TYPES } from "@diudara/shared";
 import PostComposer from "./PostComposer";
 import PostFeed, { type PostFeedHandle } from "./PostFeed";
-import { createCommunityPost, listCommunityPosts } from "./apiClient";
+import { createCommunityPost, listCommunityPosts, type EventDraft } from "./apiClient";
 
 interface Props {
   slug: string;
@@ -38,14 +38,25 @@ export default function CommunityFeed({ slug, viewerIsMember, viewerIsOwner }: P
   // on every render — see PostFeed's own note on the effect loop.
   const load = useCallback((before: string | null) => listCommunityPosts(slug, before), [slug]);
 
-  async function handleCreate(body: string, mediaIds: string[], type?: string): Promise<void> {
+  async function handleCreate(
+    body: string,
+    mediaIds: string[],
+    type?: string,
+    event?: EventDraft
+  ): Promise<void> {
     // `type` is the string PostComposer's owner-only <select> produces, handed
     // back in the argument slot a visibility normally uses. A plain member's
     // composer sends nothing here and the server defaults it to `diskusi`.
+    //
+    // `event` (Phase 3) is a fourth argument and an OBJECT, so it cannot be
+    // transposed with the string in slot three. The composer has already
+    // converted its WIB wall clock to instants and omitted the blank optional
+    // fields, so this passes it through untouched.
     const created = await createCommunityPost(slug, {
       body,
       ...(type !== undefined ? { type } : {}),
       ...(mediaIds.length > 0 ? { mediaIds } : {}),
+      ...(event !== undefined ? { event } : {}),
     });
     feed.current?.prepend(created);
   }
