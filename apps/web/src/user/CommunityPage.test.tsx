@@ -75,6 +75,19 @@ function stubFetch(overrides: Partial<typeof DETAIL> = {}, calls: string[] = [])
     // Phase 5's Keanggotaan tab. An empty offer keeps the tab quiet in the
     // banner/join tests, as the empty feed, month and library above do.
     if (url.includes("/tiers")) return jsonResponse({ tiers: [] });
+    // Phase 6's Statistik tab, owner-only.
+    if (url.includes("/stats")) {
+      return jsonResponse({
+        totalRevenue: 0,
+        memberCount: 4,
+        newMembersThisMonth: 0,
+        paymentSuccessRate: null,
+        churnRate: null,
+        revenueByMonth: [],
+        tierDistribution: [],
+        recentMembers: [],
+      });
+    }
     if (init?.method === "POST") return jsonResponse({ member: true });
     if (init?.method === "DELETE") return jsonResponse({ member: false });
     return jsonResponse({ ...DETAIL, ...overrides });
@@ -223,6 +236,29 @@ describe("CommunityPage — the Diskusi / Kegiatan / Anggota tab bar", () => {
     expect(calls.some((call) => call.includes("/events"))).toBe(false);
     expect(calls.some((call) => call.includes("/documents"))).toBe(false);
     expect(calls.some((call) => call.includes("/tiers"))).toBe(false);
+  });
+
+  /**
+   * ABSENT, not disabled — the rule Phase 1 set when it cut the tab bar
+   * rather than render tabs with nothing behind them. The server refuses a
+   * non-owner with 403 regardless; this is what stops it being offered.
+   */
+  it("hides the Statistik tab from everyone but the owner", async () => {
+    stubFetch({ viewerIsOwner: false });
+    renderPage();
+
+    await screen.findByText("4 anggota · Skill Digital");
+    expect(screen.queryAllByRole("button", { name: "Statistik" }).length).toBe(0);
+  });
+
+  it("shows the owner the Statistik tab, and its numbers at ?tab=statistik", async () => {
+    stubFetch({ viewerIsOwner: true });
+    renderPage("/komunitas/kelas-desain?tab=statistik");
+
+    await screen.findByText("Pendapatan");
+    expect(screen.getByRole("button", { name: "Statistik" }).getAttribute("aria-current")).toBe(
+      "true"
+    );
   });
 
   it("shows the membership offer and not the feed at ?tab=keanggotaan", async () => {

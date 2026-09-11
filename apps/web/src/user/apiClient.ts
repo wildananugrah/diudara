@@ -1308,6 +1308,35 @@ export interface CommunityTierRow {
   isActive: boolean;
 }
 
+/** The owner's dashboard — the server's `CommunityStatsView`. */
+export interface CommunityStats {
+  totalRevenue: number;
+  memberCount: number;
+  newMembersThisMonth: number;
+  /**
+   * 0–1, or `null` when there is nothing to measure. **`null` is not `0`** —
+   * a new community has no success rate, and rendering zero would say every
+   * payment failed.
+   */
+  paymentSuccessRate: number | null;
+  /** 0–1, or `null`. LIFETIME churn, not monthly — the screen says so. */
+  churnRate: number | null;
+  /** Six WIB months, oldest first, zero-filled. */
+  revenueByMonth: { month: string; amount: number }[];
+  tierDistribution: { tierId: string; name: string; subscriberCount: number }[];
+  recentMembers: {
+    handle: string;
+    displayName: string;
+    joinedAt: string;
+    standing: "member" | "lapsed" | "none";
+  }[];
+}
+
+/** `GET /communities/:slug/stats` — owner only; a non-owner gets 403. */
+export function getCommunityStats(slug: string): Promise<CommunityStats> {
+  return apiFetch<CommunityStats>(`/communities/${encodeURIComponent(slug)}/stats`);
+}
+
 /** `GET /communities/:slug/tiers` — PUBLIC, so a paid community stays evaluable. */
 export function listCommunityTiers(slug: string): Promise<{ tiers: CommunityTierRow[] }> {
   return publicGet<{ tiers: CommunityTierRow[] }>(

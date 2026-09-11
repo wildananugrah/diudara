@@ -54,6 +54,7 @@ import { ListCommunityMembers } from "./application/use-cases/list-community-mem
 import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
 import { ListCommunityEvents } from "./application/use-cases/community-events";
 import { ManageCommunityTiers } from "./application/use-cases/community-tiers";
+import { GetCommunityStats } from "./application/use-cases/community-stats";
 import { StartCommunitySubscription } from "./application/use-cases/start-community-subscription";
 import {
   DeleteCommunityDocument,
@@ -755,6 +756,35 @@ describe("Dependencies (composition root contract)", () => {
           fakeClock,
           { appBaseUrl: "http://localhost:5173" }
         )
+      ),
+      getCommunityStats: new GetCommunityStats(
+        fakeCommunityRepository,
+        // The dashboard is not exercised by these smoke tests; an empty
+        // community is a well-formed answer.
+        {
+          async totalRevenue() {
+            return 0;
+          },
+          async terminalTransactionCounts() {
+            return { paid: 0, expired: 0 };
+          },
+          async subscriptionLifecycleCounts() {
+            return { everActive: 0, ended: 0 };
+          },
+          async revenueByWibMonth() {
+            return new Map();
+          },
+          async tierDistribution() {
+            return [];
+          },
+          async membersJoinedBetween() {
+            return 0;
+          },
+          async recentMembers() {
+            return [];
+          },
+        },
+        fakeClock
       ),
       createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,

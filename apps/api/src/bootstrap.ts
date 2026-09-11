@@ -32,6 +32,8 @@ import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/
 import { CreateComment, DeleteComment, ListComments } from "./application/use-cases/comments";
 import { ListCommunityEvents } from "./application/use-cases/community-events";
 import { ManageCommunityTiers } from "./application/use-cases/community-tiers";
+import { GetCommunityStats } from "./application/use-cases/community-stats";
+import { DrizzleCommunityStatsRepository } from "./infrastructure/repositories/drizzle-community-stats.repository";
 import { StartCommunitySubscription } from "./application/use-cases/start-community-subscription";
 import {
   DeleteCommunityDocument,
@@ -266,6 +268,8 @@ export interface Dependencies {
   manageCommunityTiers: ManageCommunityTiers;
   /** `POST /communities/:slug/subscribe`. A member buys a community tier. */
   startCommunitySubscription: StartCommunitySubscription;
+  /** Phase 6's `GET /communities/:slug/stats` — the owner's dashboard, in one response. */
+  getCommunityStats: GetCommunityStats;
   /**
    * Task 2 of posts-and-feed's `POST /users/posts`. Behind `requireUserAuth` —
    * see `routes/posts.ts` for why `PATCH`/`DELETE /users/posts/:id` share the
@@ -1808,6 +1812,15 @@ export function bootstrap(): Dependencies {
     startUserSubscription
   );
 
+  // Phase 6. No new tables — every aggregate reads `user_transaction`,
+  // `user_subscription` and `community_member`, and only cheaply because
+  // Phase 5 put `community_id` on the subscription.
+  const getCommunityStats = new GetCommunityStats(
+    communityRepository,
+    new DrizzleCommunityStatsRepository(db),
+    clock
+  );
+
   // The streaming signing secret. Read directly off `process.env` here (rather
   // than derived from `streamingProvider`'s truthiness) for the exact reason
   // `mediamtxWebhookSecret` does this further down: by the
@@ -2044,6 +2057,7 @@ export function bootstrap(): Dependencies {
     deleteCommunityDocument,
     manageCommunityTiers,
     startCommunitySubscription,
+    getCommunityStats,
     createPost,
     maxPostImages,
     editPost,

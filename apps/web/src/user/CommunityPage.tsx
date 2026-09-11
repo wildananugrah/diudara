@@ -14,6 +14,7 @@ import CommunityFeed from "./CommunityFeed";
 import CommunityJoinControl from "./CommunityJoinControl";
 import CommunityTiers from "./CommunityTiers";
 import DokumenTab from "./DokumenTab";
+import StatistikTab from "./StatistikTab";
 import KegiatanTab from "./KegiatanTab";
 import { describeRequestFailure } from "./errorCopy";
 import Header from "./shell/Header";
@@ -107,7 +108,8 @@ export default function CommunityPage() {
     requestedTab === "anggota" ||
     requestedTab === "kegiatan" ||
     requestedTab === "dokumen" ||
-    requestedTab === "keanggotaan"
+    requestedTab === "keanggotaan" ||
+    requestedTab === "statistik"
       ? requestedTab
       : "diskusi";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
@@ -247,6 +249,19 @@ export default function CommunityPage() {
           >
             Anggota
           </button>
+          {/* OWNER ONLY, and absent rather than disabled for everyone else —
+              the rule Phase 1 set when it cut the tab bar rather than render
+              tabs with nothing behind them. The server refuses a non-owner
+              with 403 regardless; this is what stops the tab being offered. */}
+          {community.viewerIsOwner ? (
+            <button
+              type="button"
+              aria-current={tab === "statistik"}
+              onClick={() => setParams({ tab: "statistik" })}
+            >
+              Statistik
+            </button>
+          ) : null}
         </nav>
 
         {/* Only the active tab is mounted, so opening the calendar does not
@@ -260,6 +275,8 @@ export default function CommunityPage() {
           />
         ) : tab === "kegiatan" ? (
           <KegiatanTab slug={community.slug} />
+        ) : tab === "statistik" && community.viewerIsOwner ? (
+          <StatistikTab slug={community.slug} />
         ) : tab === "keanggotaan" ? (
           <CommunityTiers
             slug={community.slug}

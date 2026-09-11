@@ -178,6 +178,7 @@ export function communityRoutes(
     | "deleteCommunityDocument"
     | "manageCommunityTiers"
     | "startCommunitySubscription"
+    | "getCommunityStats"
     | "maxPostImages"
   >
 ) {
@@ -464,6 +465,18 @@ export function communityRoutes(
       );
     }
   );
+
+  // Phase 6. OWNER ONLY, and a non-owner gets 403 rather than the 404 every
+  // other refusal in this file answers — see `GetCommunityStats` for why that
+  // rule reverses here.
+  app.get<"/:slug/stats">("/:slug/stats", requireAuth, async (c) => {
+    return c.json(
+      await deps.getCommunityStats.execute({
+        slug: c.req.param("slug"),
+        viewerId: c.get("userId"),
+      })
+    );
+  });
 
   app.get<"/:slug">("/:slug", async (c) => {
     const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);

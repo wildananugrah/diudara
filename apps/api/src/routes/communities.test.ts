@@ -1033,3 +1033,81 @@ describe("POST /communities/:slug/documents — membersOnly", () => {
     expect((await res.json()).membersOnly).toBe(false);
   });
 });
+
+describe("GET /communities/:slug/stats (Phase 6)", () => {
+  it("the owner gets every panel in one response", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await a.request("/communities/kelas-desain/stats", { headers: authed(token) });
+
+    expect(res.status).toBe(200);
+    // ONE response, four panels — four endpoints would be four chances to
+    // render half a dashboard.
+    expect(Object.keys(await res.json()).sort()).toEqual([
+      "churnRate",
+      "memberCount",
+      "newMembersThisMonth",
+      "paymentSuccessRate",
+      "recentMembers",
+      "revenueByMonth",
+      "tierDistribution",
+      "totalRevenue",
+    ]);
+  });
+
+  it("a brand-new community reports null rates, not zero", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const body = await (
+      await a.request("/communities/kelas-desain/stats", { headers: authed(token) })
+    ).json();
+
+    // Telling an owner 0% of their payments succeed, on the day they opened,
+    // would be a lie.
+    expect(body.paymentSuccessRate).toBeNull();
+    expect(body.churnRate).toBeNull();
+    // Revenue of zero IS a measurement, so it stays a number.
+    expect(body.totalRevenue).toBe(0);
+    expect(body.revenueByMonth.length).toBe(6);
+  });
+
+  /**
+   * The one place this codebase answers 403 rather than 404: the community is
+   * already public, so nothing is concealed by hiding it, and a 403 tells an
+   * owner on the wrong account what is actually wrong.
+   */
+  it("a member gets 403, and no numbers", async () => {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    await createCommunity(a, ownerToken, KELAS);
+    const memberToken = await joinAs(a, "rina", "rina@example.com");
+
+    const res = await a.request("/communities/kelas-desain/stats", {
+      headers: authed(memberToken),
+    });
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).not.toHaveProperty("totalRevenue");
+  });
+
+  it("requires auth — 401", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    expect((await a.request("/communities/kelas-desain/stats")).status).toBe(401);
+  });
+
+  it("an unknown slug is 404", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    expect(
+      (await a.request("/communities/tidak-ada/stats", { headers: authed(token) })).status
+    ).toBe(404);
+  });
+});

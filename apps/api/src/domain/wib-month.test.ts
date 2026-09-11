@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { wibMonthRange } from "./wib-month";
+import { lastWibMonths, wibMonthRange } from "./wib-month";
 
 /**
  * Every assertion here is at or beside a boundary. A test at midday proves
@@ -61,5 +61,33 @@ describe("wibMonthRange", () => {
     for (const bad of ["", "2026", "2026-13", "2026-00", "besok", "2026-9", "20260-09"]) {
       expect(wibMonthRange(bad, now)).toEqual(expected);
     }
+  });
+});
+
+describe("lastWibMonths", () => {
+  test("is oldest first and ends with the month containing now", () => {
+    expect(lastWibMonths(new Date("2026-09-15T09:00:00.000Z"), 6)).toEqual([
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07",
+      "2026-08",
+      "2026-09",
+    ]);
+  });
+
+  test("rolls back across a year boundary", () => {
+    expect(lastWibMonths(new Date("2026-02-15T09:00:00.000Z"), 4)).toEqual([
+      "2025-11",
+      "2025-12",
+      "2026-01",
+      "2026-02",
+    ]);
+  });
+
+  /** At the boundary, because the WIB month is what decides the last entry. */
+  test("takes the WIB month at midnight, not the UTC one", () => {
+    // 1 September 2026, 00:30 WIB — August in UTC.
+    expect(lastWibMonths(new Date("2026-08-31T17:30:00.000Z"), 2)).toEqual(["2026-08", "2026-09"]);
   });
 });

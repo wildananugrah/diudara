@@ -56,3 +56,32 @@ function wibYearAndMonthOf(at: Date): [number, number] {
 function startOfWibMonth(year: number, monthIndex: number): Date {
   return new Date(Date.UTC(year, monthIndex, 1) - WIB_OFFSET_MS);
 }
+
+/**
+ * The last `count` WIB months ending with the one containing `now`, oldest
+ * first — `["2026-04", … , "2026-09"]` for six.
+ *
+ * The LABELS, not the ranges: a caller sums a whole span in one query and
+ * then reads this list to decide which keys must exist. That is what makes
+ * zero-filling a decision about presentation rather than a second query per
+ * month.
+ *
+ * `now` IS A PARAMETER, the injected clock's — the rule this module already
+ * follows, and what makes the December roll-over testable at the boundary.
+ */
+export function lastWibMonths(now: Date, count: number): string[] {
+  // A TUPLE, not an object — see `wibYearAndMonthOf`.
+  const [year, month] = wibYearAndMonthOf(now);
+  const months: string[] = [];
+  for (let back = count - 1; back >= 0; back -= 1) {
+    // `Date.UTC` normalises a negative month index across the year, so
+    // January minus five needs no special case.
+    const at = new Date(Date.UTC(year, month - back, 1));
+    months.push(`${at.getUTCFullYear()}-${pad(at.getUTCMonth() + 1)}`);
+  }
+  return months;
+}
+
+function pad(value: number): string {
+  return String(value).padStart(2, "0");
+}
