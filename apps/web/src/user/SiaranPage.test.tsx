@@ -95,13 +95,17 @@ function renderSiaran() {
  * has to offer a way to watch, and it still must not be a lock.
  */
 describe("SiaranPage — a public stream offers a way to watch, not a lock", () => {
-  it("offers a watch link to the broadcaster's profile for an unlocked row", async () => {
+  it("offers a watch link to the live room for an unlocked row", async () => {
     mockStreams([PUBLIC_STREAM]);
 
     renderSiaran();
 
     const watch = await screen.findByTestId("stream-watch");
-    expect(watch.getAttribute("href")).toBe(`/@${PUBLIC_STREAM.owner.handle}`);
+    // Phase 7 pointed this at the dedicated watch page. It used to lead to the
+    // broadcaster's PROFILE, which contained a player among everything else a
+    // profile holds; the row itself still mounts no player, which is what this
+    // page's own comment is about.
+    expect(watch.getAttribute("href")).toBe(`/siaran/${PUBLIC_STREAM.id}`);
     expect(screen.queryAllByTestId("stream-lock").length).toBe(0);
   });
 

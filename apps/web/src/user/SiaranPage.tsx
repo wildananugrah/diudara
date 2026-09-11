@@ -179,7 +179,12 @@ export default function SiaranPage() {
               told what watching it would take.
             */
             <Link
-              to={`/@${stream.owner.handle}`}
+              // Phase 7: the dedicated watch page, not the broadcaster's
+              // profile. This row still mounts NO player — the reason above
+              // is unchanged — it just now leads somewhere built for
+              // watching rather than somewhere that happens to contain a
+              // player among a profile's other content.
+              to={`/siaran/${stream.id}`}
               className="stream-watch"
               data-testid="stream-watch"
             >
