@@ -2730,3 +2730,165 @@ button:disabled {
     flex-basis: 100%;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 6 — the creator dashboard.
+
+   ONE hue for every mark. Both "charts" here are single-series magnitude, so
+   there is no categorical palette to get colourblind-separation wrong: the
+   bars are --langit against the card surface, and identity comes from the
+   label beside each one rather than from colour.
+   --------------------------------------------------------------------------- */
+
+.stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+}
+
+.stat-tile {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.stat-tile dt {
+  font-size: 0.75rem;
+  color: var(--ink-500);
+}
+
+.stat-tile dd {
+  margin: 0.25rem 0 0;
+  /* `tnum` so the digits line up across tiles — the body already sets it, and
+     this is the place it matters most. */
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--ink-900);
+}
+
+.stat-panel {
+  margin-bottom: 1.5rem;
+}
+
+.stat-panel h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.revenue-chart {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  align-items: end;
+  gap: 0.5rem;
+  height: 9rem;
+  margin: 0;
+  padding: 0 0 1.25rem;
+  list-style: none;
+  /* A recessive baseline rather than a full axis: the bars are anchored to it
+     and the grid lines a full chart would carry are furniture at six points. */
+  border-bottom: 1px solid var(--border);
+}
+
+.revenue-chart li {
+  position: relative;
+  display: flex;
+  height: 100%;
+  align-items: flex-end;
+}
+
+.revenue-bar {
+  width: 100%;
+  /* Rounded at the DATA end only — the baseline end stays square so the bar
+     reads as anchored rather than floating. */
+  border-radius: 4px 4px 0 0;
+  background: var(--langit);
+}
+
+.revenue-month {
+  position: absolute;
+  bottom: -1.125rem;
+  width: 100%;
+  text-align: center;
+  font-size: 0.6875rem;
+  color: var(--ink-500);
+}
+
+.revenue-table {
+  width: 100%;
+  margin-top: 0.75rem;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.revenue-table caption {
+  text-align: left;
+  font-size: 0.75rem;
+  padding-bottom: 0.25rem;
+}
+
+.revenue-table th,
+.revenue-table td {
+  padding: 0.25rem 0;
+  text-align: left;
+  border-bottom: 1px solid var(--ink-100);
+  font-weight: 400;
+}
+
+.revenue-table td {
+  text-align: right;
+}
+
+.tier-bars {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tier-bars li {
+  display: grid;
+  grid-template-columns: minmax(4rem, 8rem) 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+}
+
+.tier-bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tier-bar-track {
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--ink-100);
+}
+
+.tier-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--langit);
+}
+
+.recent-member {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.625rem 0.875rem;
+}
+
+.recent-member-name {
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .recent-member {
+    flex-wrap: wrap;
+  }
+}
