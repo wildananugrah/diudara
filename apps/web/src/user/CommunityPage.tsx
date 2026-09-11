@@ -12,6 +12,7 @@ import {
 import { communityColor, communityInk } from "./communityColor";
 import CommunityFeed from "./CommunityFeed";
 import CommunityJoinControl from "./CommunityJoinControl";
+import DokumenTab from "./DokumenTab";
 import KegiatanTab from "./KegiatanTab";
 import { describeRequestFailure } from "./errorCopy";
 import Header from "./shell/Header";
@@ -102,7 +103,9 @@ export default function CommunityPage() {
   // — a link with a typo shows the community rather than nothing.
   const requestedTab = params.get("tab");
   const tab =
-    requestedTab === "anggota" || requestedTab === "kegiatan" ? requestedTab : "diskusi";
+    requestedTab === "anggota" || requestedTab === "kegiatan" || requestedTab === "dokumen"
+      ? requestedTab
+      : "diskusi";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const signedIn = getSessionUser() !== null;
 
@@ -221,6 +224,13 @@ export default function CommunityPage() {
           </button>
           <button
             type="button"
+            aria-current={tab === "dokumen"}
+            onClick={() => setParams({ tab: "dokumen" })}
+          >
+            Dokumen
+          </button>
+          <button
+            type="button"
             aria-current={tab === "anggota"}
             onClick={() => setParams({ tab: "anggota" })}
           >
@@ -239,6 +249,12 @@ export default function CommunityPage() {
           />
         ) : tab === "kegiatan" ? (
           <KegiatanTab slug={community.slug} />
+        ) : tab === "dokumen" ? (
+          <DokumenTab
+            slug={community.slug}
+            viewerIsOwner={community.viewerIsOwner}
+            viewerIsMember={community.viewerIsMember}
+          />
         ) : (
           <AnggotaTab slug={community.slug} />
         )}

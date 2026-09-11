@@ -2564,3 +2564,78 @@ button:disabled {
     padding: 1px 2px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 4a — the document library.
+   --------------------------------------------------------------------------- */
+
+.dokumen-upload {
+  display: grid;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.dokumen-upload label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink-700);
+}
+
+.dokumen-upload input {
+  font: inherit;
+  font-size: 0.8125rem;
+}
+
+.dokumen-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.875rem;
+}
+
+.dokumen-detail {
+  /* `min-width: 0` lets the flex child shrink so a long filename ellipsises
+     instead of pushing the row wider than the card. */
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.dokumen-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dokumen-locked {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+}
+
+.dokumen-row button {
+  flex-shrink: 0;
+  padding: 0.25rem 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--red);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  /* The row wraps rather than squeezing the filename to nothing: on a phone
+     the name matters more than keeping the action on the same line. */
+  .dokumen-row {
+    flex-wrap: wrap;
+  }
+
+  .dokumen-detail {
+    flex-basis: 100%;
+  }
+}

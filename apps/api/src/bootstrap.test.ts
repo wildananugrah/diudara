@@ -53,6 +53,13 @@ import { BrowseCommunities } from "./application/use-cases/browse-communities";
 import { ListCommunityMembers } from "./application/use-cases/list-community-members";
 import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
 import { ListCommunityEvents } from "./application/use-cases/community-events";
+import {
+  DeleteCommunityDocument,
+  DownloadCommunityDocument,
+  ListCommunityDocuments,
+  UploadCommunityDocument,
+} from "./application/use-cases/community-documents";
+import { FakeDocumentStorageAdapter } from "./infrastructure/storage/fake-document-storage.adapter";
 import { CreateComment, DeleteComment, ListComments } from "./application/use-cases/comments";
 import type { CommentRepositoryPort } from "./application/ports/comment-repository.port";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
@@ -668,6 +675,42 @@ describe("Dependencies (composition root contract)", () => {
         { async listBetween() { return []; } },
         fakeClock
       ),
+      ...(() => {
+        // Phase 4a. One fake repository and one in-memory bucket shared by all
+        // four use cases, so the smoke test drives them the way bootstrap
+        // wires them — not four independent stubs that could disagree.
+        const documents = {
+          async create() {
+            throw new Error("not used in these smoke tests");
+          },
+          async listByCommunity() {
+            return [];
+          },
+          async findById() {
+            return null;
+          },
+          async softDelete() {},
+        };
+        const storage = new FakeDocumentStorageAdapter();
+        return {
+          uploadCommunityDocument: new UploadCommunityDocument(
+            fakeCommunityRepository,
+            documents,
+            storage
+          ),
+          listCommunityDocuments: new ListCommunityDocuments(fakeCommunityRepository, documents),
+          downloadCommunityDocument: new DownloadCommunityDocument(
+            fakeCommunityRepository,
+            documents,
+            storage
+          ),
+          deleteCommunityDocument: new DeleteCommunityDocument(
+            fakeCommunityRepository,
+            documents,
+            storage
+          ),
+        };
+      })(),
       createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,
       editPost: new EditPost(fakePostWriteUnitOfWork),

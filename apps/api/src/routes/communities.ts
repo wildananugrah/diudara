@@ -1,15 +1,19 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import {
   COMMUNITY_CATEGORIES,
   DEFAULT_COMMUNITY_LIST_LIMIT,
   DEFAULT_COMMUNITY_MEMBER_LIMIT,
   MAX_COMMUNITY_SEARCH_LENGTH,
+  DOCUMENT_ERROR_CODE,
+  MAX_DOCUMENT_BYTES,
   createCommunityPostFields,
   createCommunitySchema,
   refineCommunityPostEvent,
 } from "@diudara/shared";
 import { ValidationError } from "../application/errors";
+import { DocumentRejectedError, contentDispositionFor } from "../domain/document";
 import { validate } from "../http/validate";
 import {
   requireUserAuth,
@@ -59,6 +63,26 @@ function parseBrowseQuery(raw: {
     limit: parsed.data.limit ?? DEFAULT_COMMUNITY_LIST_LIMIT,
   };
 }
+
+/** Bahasa, like every other member-facing refusal — `errorCopy.ts`'s rule. */
+const NO_DOCUMENT_MESSAGE = "berkas wajib disertakan";
+
+/**
+ * Multipart framing costs bytes beyond the file itself — boundaries, part
+ * headers, the trailing terminator. Without this allowance a file at exactly
+ * `MAX_DOCUMENT_BYTES` is refused by the body limit before the handler can
+ * give the honest answer. The same constant and reason as `routes/media.ts`.
+ */
+const MULTIPART_ENVELOPE_ALLOWANCE = 64 * 1024;
+
+/**
+ * Every document is member-gated, so there is no ungated variant of this
+ * header to pick between — unlike media, which serves public and gated images
+ * from one route. `no-store` rather than a max-age: a document is small
+ * enough that re-fetching costs little, and a cached copy surviving a
+ * membership ending is a worse trade.
+ */
+const GATED_DOCUMENT_CACHE_CONTROL = "private, no-store";
 
 const memberListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(DEFAULT_COMMUNITY_MEMBER_LIMIT).optional(),
@@ -113,6 +137,10 @@ export function communityRoutes(
     | "createCommunityPost"
     | "listCommunityFeed"
     | "listCommunityEvents"
+    | "uploadCommunityDocument"
+    | "listCommunityDocuments"
+    | "downloadCommunityDocument"
+    | "deleteCommunityDocument"
     | "maxPostImages"
   >
 ) {
@@ -227,6 +255,109 @@ export function communityRoutes(
       await deps.listCommunityEvents.execute({
         slug: c.req.param("slug"),
         month: c.req.query("month"),
+      })
+    );
+  });
+
+  // ---- Phase 4a, the document library -------------------------------------
+  //
+  // EVERY route sits under `/:slug/documents…`, so `documents` never appears
+  // as the first segment after `/communities` and a community slugged
+  // `documents` shadows nothing. That is why `RESERVED_COMMUNITY_SLUGS` needs
+  // no new entry, unlike the `comments` literal Phase 2 had to reserve under
+  // `/users/`.
+
+  app.get<"/:slug/documents">("/:slug/documents", async (c) => {
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    return c.json(
+      await deps.listCommunityDocuments.execute({ slug: c.req.param("slug"), viewerId })
+    );
+  });
+
+  app.post<"/:slug/documents">(
+    "/:slug/documents",
+    // AUTH FIRST, deliberately, the ordering `POST /users/media` documents: a
+    // body ceiling is a resource guard, and a stranger with no session should
+    // be turned away before this process reasons about their body at all.
+    requireAuth,
+    bodyLimit({ maxSize: MAX_DOCUMENT_BYTES + MULTIPART_ENVELOPE_ALLOWANCE }),
+    async (c) => {
+      let form: FormData;
+      try {
+        form = await c.req.formData();
+      } catch {
+        // A body that is not multipart at all. Without this it reaches
+        // `errorHandler` as an unhandled TypeError and becomes a 500 — a
+        // caller error answered as if the server broke.
+        throw new ValidationError(NO_DOCUMENT_MESSAGE, DOCUMENT_ERROR_CODE.missingFile);
+      }
+      const file = form.get("file");
+      if (!(file instanceof File)) {
+        throw new ValidationError(NO_DOCUMENT_MESSAGE, DOCUMENT_ERROR_CODE.missingFile);
+      }
+
+      try {
+        const view = await deps.uploadCommunityDocument.execute({
+          slug: c.req.param("slug"),
+          uploaderId: c.get("userId"),
+          name: file.name,
+          contentType: file.type,
+          bytes: new Uint8Array(await file.arrayBuffer()),
+        });
+        return c.json(view, 201);
+      } catch (err) {
+        // `DocumentRejectedError` is a plain Error, not an AppError — only
+        // this layer knows to render it, and it carries the domain's own code
+        // onto the wire. Matched on the BASE class so a later refusal added in
+        // `domain/document.ts` reaches the client correctly labelled without
+        // this route changing. The shape `routes/media.ts` established for
+        // `ImageRejectedError`.
+        if (err instanceof DocumentRejectedError) {
+          throw new ValidationError(err.message, err.code);
+        }
+        throw err;
+      }
+    }
+  );
+
+  // Spec §"The security decision". This handler reads the bytes and writes
+  // them into the response BY HAND, on purpose — a redirect to a signed URL
+  // would hand the caller something that outlives the check that produced it,
+  // and the member gate would become a decision made once that the internet
+  // keeps forever. `routes/media.ts` carries the same warning at length.
+  // DO NOT "optimise" this into a redirect.
+  app.get<"/:slug/documents/:id">("/:slug/documents/:id", async (c) => {
+    const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);
+    // Throws NotFoundError for absent, deleted, wrong-community AND refused —
+    // one answer for all four, so none is distinguishable by probing.
+    const document = await deps.downloadCommunityDocument.execute({
+      slug: c.req.param("slug"),
+      id: c.req.param("id"),
+      viewerId,
+    });
+
+    return c.body(new Uint8Array(document.bytes), 200, {
+      // The row's stored type, which is what the CLIENT declared on upload and
+      // is untrusted as a claim about the bytes. The two headers below are
+      // what make serving it safe, and they are not optional extras — see the
+      // spec. They hold as a SET; removing any one defeats the others.
+      "Content-Type": document.contentType,
+      "Content-Disposition": contentDispositionFor(document.name),
+      "X-Content-Type-Options": "nosniff",
+      // Decided by the SAME check that decided the bytes, never computed
+      // separately: computed apart the two can disagree, and a shared cache
+      // then holds gated documents and serves them to strangers — a failure
+      // no assertion on this route's status code would ever catch.
+      "Cache-Control": GATED_DOCUMENT_CACHE_CONTROL,
+    });
+  });
+
+  app.delete<"/:slug/documents/:id">("/:slug/documents/:id", requireAuth, async (c) => {
+    return c.json(
+      await deps.deleteCommunityDocument.execute({
+        slug: c.req.param("slug"),
+        id: c.req.param("id"),
+        viewerId: c.get("userId"),
       })
     );
   });

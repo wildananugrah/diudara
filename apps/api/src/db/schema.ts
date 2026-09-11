@@ -763,3 +763,54 @@ export const communityEvents = pgTable(
     ),
   ]
 );
+
+/**
+ * Phase 4a. One file in a community's Dokumen library.
+ *
+ * `content_type` lives HERE rather than in bucket metadata, and that single
+ * choice is what keeps `DocumentStoragePort` trivial — no variant, no content
+ * type on write, no metadata read on delivery. The delivery route has to read
+ * this row anyway (to check the community and the member gate), so the type
+ * comes free with a lookup that was already happening.
+ *
+ * `uploader_id` is kept even though only an owner may upload today: owners can
+ * change, so "who put this here" is not answerable from `community_id`
+ * afterwards, and a future member-upload rule needs no migration.
+ */
+export const communityDocuments = pgTable(
+  "community_document",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    communityId: uuid("community_id")
+      .notNull()
+      .references(() => communities.id),
+    uploaderId: uuid("uploader_id")
+      .notNull()
+      .references(() => appUsers.id),
+    // The original filename, SANITISED on the way in (see `domain/document.ts`):
+    // never a path, never containing a control character. It is display text
+    // and the download's suggested filename, and it is never part of a bucket
+    // key — the key is the id alone.
+    name: varchar("name", { length: 255 }).notNull(),
+    // What the client declared, checked against the shared allowlist by the
+    // write path. UNTRUSTED as a statement about the bytes — see the spec's
+    // "The security decision" for the three measures that make that safe.
+    contentType: varchar("content_type", { length: 128 }).notNull(),
+    // Measured from the bytes actually received, never taken from the client.
+    byteSize: integer("byte_size").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // SOFT delete, matching `post`. Every read path must filter it. Unlike a
+    // post's images, the BYTES are removed from the bucket on delete: a
+    // document has exactly one referent and no second surface that might
+    // still want it.
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (table) => [
+    // The library listing. PARTIAL, so deleted rows leave the index entirely
+    // rather than being filtered out of every scan — `post_live_created_idx`'s
+    // shape and reasoning.
+    index("community_document_community_created_idx")
+      .on(table.communityId, table.createdAt.desc())
+      .where(sql`${table.deletedAt} is null`),
+  ]
+);

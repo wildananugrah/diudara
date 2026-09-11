@@ -31,6 +31,16 @@ import { GetPost, ListFeed, ListUserPosts } from "./application/use-cases/read-p
 import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
 import { CreateComment, DeleteComment, ListComments } from "./application/use-cases/comments";
 import { ListCommunityEvents } from "./application/use-cases/community-events";
+import {
+  DeleteCommunityDocument,
+  DownloadCommunityDocument,
+  ListCommunityDocuments,
+  UploadCommunityDocument,
+} from "./application/use-cases/community-documents";
+import { DrizzleDocumentRepository } from "./infrastructure/repositories/drizzle-document.repository";
+import { FakeDocumentStorageAdapter } from "./infrastructure/storage/fake-document-storage.adapter";
+import { S3DocumentStorageAdapter } from "./infrastructure/storage/s3-document-storage.adapter";
+import type { DocumentStoragePort } from "./application/ports/document-storage.port";
 import { DrizzleCommentRepository } from "./infrastructure/repositories/drizzle-comment.repository";
 import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
@@ -242,6 +252,14 @@ export interface Dependencies {
    * a feed is not.
    */
   listCommunityEvents: ListCommunityEvents;
+  /** Phase 4a's `POST /communities/:slug/documents`. Owner only. */
+  uploadCommunityDocument: UploadCommunityDocument;
+  /** `GET /communities/:slug/documents` — PUBLIC; the bytes are not. */
+  listCommunityDocuments: ListCommunityDocuments;
+  /** `GET /communities/:slug/documents/:id` — member-gated, and the first gated surface. */
+  downloadCommunityDocument: DownloadCommunityDocument;
+  /** `DELETE /communities/:slug/documents/:id`. Owner only; removes the bytes too. */
+  deleteCommunityDocument: DeleteCommunityDocument;
   /**
    * Task 2 of posts-and-feed's `POST /users/posts`. Behind `requireUserAuth` —
    * see `routes/posts.ts` for why `PATCH`/`DELETE /users/posts/:id` share the
@@ -1177,6 +1195,42 @@ const MEDIA_STORAGE_ENV_VAR_NAMES = {
  *      an API that quietly eats uploads — the same call `selectMessagingProviders`
  *      makes for an invite nobody can be told about.
  */
+/**
+ * Document storage, DERIVED from the media decision rather than made again.
+ *
+ * Both live in the same bucket under different prefixes and read the same five
+ * `S3_*` variables, so running the selection twice would mean two places that
+ * could disagree — and the disagreement that matters (real images, in-memory
+ * documents, or the reverse) is exactly the state nobody would notice until a
+ * download 404ed in production. Keying off the chosen media adapter makes
+ * "they agree" structural instead of remembered.
+ *
+ * `selectMediaStorage` has already validated the env and thrown on a
+ * half-configured set by the time this runs, so re-reading those values here
+ * needs no second guard.
+ */
+export function selectDocumentStorage(
+  mediaStorage: MediaStoragePort,
+  env: {
+    accessKeyId: string | undefined;
+    secretAccessKey: string | undefined;
+    bucket: string | undefined;
+    endpoint: string | undefined;
+    region: string | undefined;
+  }
+): DocumentStoragePort {
+  if (!(mediaStorage instanceof S3MediaStorageAdapter)) {
+    return new FakeDocumentStorageAdapter();
+  }
+  return new S3DocumentStorageAdapter({
+    accessKeyId: env.accessKeyId as string,
+    secretAccessKey: env.secretAccessKey as string,
+    bucket: env.bucket as string,
+    endpoint: env.endpoint as string,
+    region: env.region as string,
+  });
+}
+
 export function selectMediaStorage(env: {
   accessKeyId: string | undefined;
   secretAccessKey: string | undefined;
@@ -1790,6 +1844,33 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
+  // Phase 4a. Same bucket, different prefix, and the same decision — see
+  // `selectDocumentStorage` for why it is derived rather than made twice.
+  const documentStorage = selectDocumentStorage(mediaStorage, {
+    accessKeyId: process.env.S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
+    bucket: process.env.S3_BUCKET,
+    endpoint: process.env.S3_ENDPOINT,
+    region: process.env.S3_REGION,
+  });
+  const documentRepository = new DrizzleDocumentRepository(db);
+  const uploadCommunityDocument = new UploadCommunityDocument(
+    communityRepository,
+    documentRepository,
+    documentStorage
+  );
+  const listCommunityDocuments = new ListCommunityDocuments(communityRepository, documentRepository);
+  const downloadCommunityDocument = new DownloadCommunityDocument(
+    communityRepository,
+    documentRepository,
+    documentStorage
+  );
+  const deleteCommunityDocument = new DeleteCommunityDocument(
+    communityRepository,
+    documentRepository,
+    documentStorage
+  );
+
   // Task 4's `POST /users/media`. `mediaRepository` itself is constructed up
   // with `postRepository` (Task 6 needs it there); this is where it meets
   // `mediaStorage`, the use case's other dependency. The SAME instance backs
@@ -1930,6 +2011,10 @@ export function bootstrap(): Dependencies {
     createCommunityPost,
     listCommunityFeed,
     listCommunityEvents,
+    uploadCommunityDocument,
+    listCommunityDocuments,
+    downloadCommunityDocument,
+    deleteCommunityDocument,
     createPost,
     maxPostImages,
     editPost,

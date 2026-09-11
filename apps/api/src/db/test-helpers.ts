@@ -18,6 +18,7 @@ import {
   communities,
   communityMembers,
   communityEvents,
+  communityDocuments,
 } from "./schema";
 
 /**
@@ -67,6 +68,9 @@ export async function resetDatabase() {
   // follow references app_user twice (follower and followee), so it must
   // clear before app_user too — Task 1 of profiles-and-following.
   await db.delete(follows);
+  // communityDocuments references community and app_user, so it must clear
+  // before both — Phase 4a, same FK-ordering rule as every entry here.
+  await db.delete(communityDocuments);
   // communityEvents references post and community, so it must clear before
   // both — Phase 3, same FK-ordering rule as every entry here.
   await db.delete(communityEvents);

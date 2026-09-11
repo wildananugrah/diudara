@@ -1273,6 +1273,114 @@ export interface EventDraft {
   location?: string;
 }
 
+/** One row of a community's document library — the server's `CommunityDocumentView`. */
+export interface CommunityDocumentRow {
+  id: string;
+  name: string;
+  contentType: string;
+  byteSize: number;
+  createdAt: string;
+  uploader: { handle: string; displayName: string };
+}
+
+export interface CommunityDocumentsPage {
+  documents: CommunityDocumentRow[];
+  /**
+   * Whether THIS viewer may fetch bytes. Read straight off the response rather
+   * than derived from a membership flag fetched separately: a download control
+   * must never be rendered for an action that would fail.
+   */
+  viewerMayDownload: boolean;
+}
+
+/**
+ * `GET /communities/:slug/documents` — PUBLIC. Names, sizes and dates are
+ * visible to anyone, so a community stays evaluable before joining; the BYTES
+ * are member-gated and come from `documentDownloadHref` below.
+ */
+export function listCommunityDocuments(slug: string): Promise<CommunityDocumentsPage> {
+  return publicGet<CommunityDocumentsPage>(
+    `/communities/${encodeURIComponent(slug)}/documents`,
+    "gagal memuat dokumen"
+  );
+}
+
+/**
+ * The path a document's bytes come from. Derived from the id, never sent by
+ * the server — the rule `MediaView` records, which is what keeps a bucket URL
+ * unable to reach a response.
+ */
+export function documentDownloadPath(slug: string, id: string): string {
+  return `/communities/${encodeURIComponent(slug)}/documents/${encodeURIComponent(id)}`;
+}
+
+/**
+ * Fetches a document and hands it to the browser as a save.
+ *
+ * **A FETCH, not a plain `<a href>`, and the reason is this app's auth.** The
+ * download is member-gated, and membership is proved by an `Authorization:
+ * Bearer` header built from the token in localStorage. A plain navigation
+ * cannot carry that header, so every member's click would reach the route as
+ * an anonymous caller and be refused — the exact failure
+ * `http/media-session.ts` was written to solve for `<img src>`.
+ *
+ * **And that cookie cannot be reused here.** It is scoped `Path=/users/media`,
+ * and its own docstring states that widening it "is not a refactor — it turns
+ * a media credential into an ambient session". A second cookie scoped to
+ * `/communities` would be exactly that, over a far wider surface.
+ *
+ * So the bytes come back through the authenticated client and are handed over
+ * as a blob. The cost is holding the file in memory briefly — bounded by
+ * `MAX_DOCUMENT_BYTES`, which is 25 MB — and the filename comes from the row
+ * we already have rather than from parsing `Content-Disposition`.
+ */
+export async function downloadCommunityDocument(
+  slug: string,
+  id: string,
+  name: string
+): Promise<void> {
+  const response = await apiRequest(documentDownloadPath(slug, id));
+  if (!response.ok) {
+    throw new UserApiError("gagal mengunduh dokumen", response.status);
+  }
+  const url = URL.createObjectURL(await response.blob());
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    // The row's own name — already sanitised server-side, and the same string
+    // the `Content-Disposition` carries.
+    anchor.download = name;
+    anchor.click();
+  } finally {
+    // Revoked whatever happened: a blob URL that is never revoked holds the
+    // whole file alive for the life of the document.
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
+ * `POST /communities/:slug/documents` (201) — owner only, multipart.
+ *
+ * `FormData` is passed to `apiFetch` as-is with NO `Content-Type` header: the
+ * browser has to set it itself so it can append the multipart boundary, and a
+ * hand-set header produces a body the server cannot parse.
+ */
+export function uploadCommunityDocument(slug: string, file: File): Promise<CommunityDocumentRow> {
+  const form = new FormData();
+  form.set("file", file);
+  return apiFetch<CommunityDocumentRow>(`/communities/${encodeURIComponent(slug)}/documents`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+/** `DELETE /communities/:slug/documents/:id` — owner only, resolves at 200. */
+export function deleteCommunityDocument(slug: string, id: string): Promise<void> {
+  return apiFetch<{ deleted: true }>(documentDownloadPath(slug, id), {
+    method: "DELETE",
+  }).then(() => undefined);
+}
+
 /**
  * `GET /communities/:slug/events?month=YYYY-MM` — PUBLIC, backs the Kegiatan
  * tab. Unpaginated: one WIB month, ascending, and the grid needs all of it to
