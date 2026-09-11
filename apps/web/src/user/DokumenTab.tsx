@@ -41,9 +41,31 @@ type LoadState =
  *
  * The owner additionally gets an upload input and a delete on each row.
  */
+/**
+ * Why THIS viewer cannot open THIS document. Three different answers, because
+ * three different actions fix them: sign in, join, or subscribe. One generic
+ * "tidak tersedia" would leave a member who only needs to subscribe with
+ * nothing to do.
+ *
+ * Driven by `membersOnly` and the viewer's relationship — never by guessing
+ * from `mayDownload` alone, which says only that the answer was no.
+ */
+function lockReason(
+  document: CommunityDocumentRow,
+  viewerIsMember: boolean | null
+): string {
+  if (viewerIsMember === null) return "Masuk untuk unduh";
+  if (!viewerIsMember) return "Gabung untuk unduh";
+  // A member who still cannot open it: the document is paid and their
+  // subscription is missing or lapsed.
+  return document.membersOnly ? "Khusus anggota berbayar" : "Tidak tersedia";
+}
+
 export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }: Props) {
   const [documents, setDocuments] = useState<CommunityDocumentRow[]>([]);
-  const [mayDownload, setMayDownload] = useState(false);
+  // Phase 5. The owner's choice for the NEXT upload, not a property of the
+  // list — it seeds the checkbox and rides out on the next file chosen.
+  const [nextMembersOnly, setNextMembersOnly] = useState(false);
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   // Separate from `load`: a failed upload or delete must not replace the list
   // with an error page — the library is still there and still readable.
@@ -58,7 +80,6 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
       .then((page) => {
         if (cancelled) return;
         setDocuments(page.documents);
-        setMayDownload(page.viewerMayDownload);
         setLoad({ status: "ready" });
       })
       .catch((error: unknown) => {
@@ -96,7 +117,7 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
     setBusy(true);
     setActionError(null);
     try {
-      const created = await uploadCommunityDocument(slug, file);
+      const created = await uploadCommunityDocument(slug, file, nextMembersOnly);
       // Prepended, not refetched — the list is newest-first and this is the
       // newest. The pattern `PostFeed.prepend` uses.
       setDocuments((current) => [created, ...current]);
@@ -162,6 +183,16 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
             accept={ALLOWED_DOCUMENT_TYPES.join(",")}
             onChange={handleUpload}
           />
+          <label htmlFor="dokumen-members-only">
+            <input
+              id="dokumen-members-only"
+              type="checkbox"
+              checked={nextMembersOnly}
+              disabled={busy}
+              onChange={(event) => setNextMembersOnly(event.target.checked)}
+            />
+            Khusus anggota berbayar
+          </label>
           <p className="muted">Maksimal {formatBytes(MAX_DOCUMENT_BYTES)} per berkas.</p>
         </div>
       ) : null}
@@ -184,7 +215,7 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
                   {formatBytes(document.byteSize)} · {formatRelativeTime(document.createdAt, clock)}
                 </span>
               </span>
-              {mayDownload ? (
+              {document.mayDownload ? (
                 // A BUTTON, not a link — see `downloadCommunityDocument`. The
                 // bytes are member-gated behind an `Authorization` header that
                 // a plain navigation cannot carry, and the media cookie that
@@ -194,9 +225,7 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
                   Unduh
                 </button>
               ) : (
-                <span className="muted dokumen-locked">
-                  {viewerIsMember === null ? "Masuk untuk unduh" : "Gabung untuk unduh"}
-                </span>
+                <span className="muted dokumen-locked">{lockReason(document, viewerIsMember)}</span>
               )}
               {viewerIsOwner ? (
                 <button type="button" disabled={busy} onClick={() => handleDelete(document)}>

@@ -2639,3 +2639,94 @@ button:disabled {
     flex-basis: 100%;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 5 — community membership tiers.
+   --------------------------------------------------------------------------- */
+
+.tier-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.875rem;
+}
+
+.tier-detail {
+  /* `min-width: 0` so a long tier name ellipsises rather than pushing the row
+     wider than the card. */
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.tier-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tier-row button {
+  flex-shrink: 0;
+  padding: 0.375rem 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.tier-form {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.tier-form label {
+  font-size: 0.75rem;
+  color: var(--ink-500);
+}
+
+.tier-form input {
+  padding: 0.375rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 0.875rem;
+}
+
+.tier-form button {
+  justify-self: start;
+  margin-top: 0.25rem;
+  padding: 0.375rem 0.875rem;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--sinyal);
+  /* --ink-900, NOT --surface. White on --sinyal is 2.64:1 and fails AA —
+     contrast.test.ts named the rule and the ratio. .btn-primary already pairs
+     these two for the same reason; this matches it rather than inventing a
+     third combination. */
+  color: var(--ink-900);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tier-form button:disabled {
+  background: var(--ink-150);
+  color: var(--ink-700);
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .tier-row {
+    flex-wrap: wrap;
+  }
+
+  .tier-detail {
+    flex-basis: 100%;
+  }
+}

@@ -12,6 +12,7 @@ import {
 import { communityColor, communityInk } from "./communityColor";
 import CommunityFeed from "./CommunityFeed";
 import CommunityJoinControl from "./CommunityJoinControl";
+import CommunityTiers from "./CommunityTiers";
 import DokumenTab from "./DokumenTab";
 import KegiatanTab from "./KegiatanTab";
 import { describeRequestFailure } from "./errorCopy";
@@ -103,7 +104,10 @@ export default function CommunityPage() {
   // — a link with a typo shows the community rather than nothing.
   const requestedTab = params.get("tab");
   const tab =
-    requestedTab === "anggota" || requestedTab === "kegiatan" || requestedTab === "dokumen"
+    requestedTab === "anggota" ||
+    requestedTab === "kegiatan" ||
+    requestedTab === "dokumen" ||
+    requestedTab === "keanggotaan"
       ? requestedTab
       : "diskusi";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
@@ -231,6 +235,13 @@ export default function CommunityPage() {
           </button>
           <button
             type="button"
+            aria-current={tab === "keanggotaan"}
+            onClick={() => setParams({ tab: "keanggotaan" })}
+          >
+            Keanggotaan
+          </button>
+          <button
+            type="button"
             aria-current={tab === "anggota"}
             onClick={() => setParams({ tab: "anggota" })}
           >
@@ -249,6 +260,12 @@ export default function CommunityPage() {
           />
         ) : tab === "kegiatan" ? (
           <KegiatanTab slug={community.slug} />
+        ) : tab === "keanggotaan" ? (
+          <CommunityTiers
+            slug={community.slug}
+            viewerIsOwner={community.viewerIsOwner}
+            viewerIsMember={community.viewerIsMember}
+          />
         ) : tab === "dokumen" ? (
           <DokumenTab
             slug={community.slug}

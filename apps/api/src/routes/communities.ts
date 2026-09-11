@@ -340,6 +340,12 @@ export function communityRoutes(
           name: file.name,
           contentType: file.type,
           bytes: new Uint8Array(await file.arrayBuffer()),
+          // Multipart carries no booleans, so ONLY the literal "true"
+          // counts. Anything else — absent, "false", "1", a stray file
+          // part — leaves the document open to every member, which is the
+          // safe direction: a mis-parsed flag must never accidentally UNLOCK
+          // something, and here it cannot accidentally LOCK one either.
+          membersOnly: form.get("membersOnly") === "true",
         });
         return c.json(view, 201);
       } catch (err) {

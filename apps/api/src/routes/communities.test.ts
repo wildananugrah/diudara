@@ -996,3 +996,40 @@ describe("community tiers and checkout (Phase 5)", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("POST /communities/:slug/documents — membersOnly", () => {
+  it("stores the flag when the form says exactly true", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+    const form = documentForm();
+    form.set("membersOnly", "true");
+
+    const res = await uploadDocument(a, token, "kelas-desain", form);
+
+    expect((await res.json()).membersOnly).toBe(true);
+  });
+
+  /**
+   * Multipart carries no booleans. Everything that is not the literal `"true"`
+   * leaves the document OPEN — asserted rather than assumed, because a
+   * mis-parsed flag that silently locked a document would look like a bug in
+   * the gate rather than in the parse.
+   */
+  it.each([
+    ["absent", undefined],
+    ["the string false", "false"],
+    ["a truthy-looking 1", "1"],
+    ["an empty string", ""],
+  ])("leaves it open when the flag is %s", async (_label, value) => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+    const form = documentForm();
+    if (value !== undefined) form.set("membersOnly", value);
+
+    const res = await uploadDocument(a, token, "kelas-desain", form);
+
+    expect((await res.json()).membersOnly).toBe(false);
+  });
+});
