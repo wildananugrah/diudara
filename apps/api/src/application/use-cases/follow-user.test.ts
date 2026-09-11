@@ -7,6 +7,25 @@ import type {
   FollowListRow,
   FollowRepositoryPort,
 } from "../ports/follow-repository.port";
+import { NotifyOf } from "./notify";
+
+/**
+ * A real `NotifyOf` over an in-memory repository, so these tests exercise the
+ * hook rather than stubbing it away — including the rule that a notification
+ * failure must NOT fail the action.
+ */
+function silentNotifier(): NotifyOf {
+  return new NotifyOf({
+    async create() {},
+    async listFor() {
+      return [];
+    },
+    async unreadCountFor() {
+      return 0;
+    },
+    async markAllRead() {},
+  });
+}
 
 function record(overrides: Partial<UserRecord> = {}): UserRecord {
   return {
@@ -152,7 +171,7 @@ describe("FollowUser.execute", () => {
   it("follow returns { following: true }", async () => {
     const users = fakeUserRepository([record(), record({ id: "user-2", handle: "rina" })]);
     const follows = new FakeFollowRepository();
-    const useCase = new FollowUser(users, follows);
+    const useCase = new FollowUser(users, follows, silentNotifier());
 
     const result = await useCase.execute({ followerId: "user-1", handle: "rina", action: "follow" });
     expect(result).toEqual({ following: true });
@@ -161,7 +180,7 @@ describe("FollowUser.execute", () => {
   it("following again returns the same state and creates no second row", async () => {
     const users = fakeUserRepository([record(), record({ id: "user-2", handle: "rina" })]);
     const follows = new FakeFollowRepository();
-    const useCase = new FollowUser(users, follows);
+    const useCase = new FollowUser(users, follows, silentNotifier());
 
     const first = await useCase.execute({ followerId: "user-1", handle: "rina", action: "follow" });
     const second = await useCase.execute({ followerId: "user-1", handle: "rina", action: "follow" });
@@ -175,7 +194,7 @@ describe("FollowUser.execute", () => {
   it("unfollow returns { following: false }", async () => {
     const users = fakeUserRepository([record(), record({ id: "user-2", handle: "rina" })]);
     const follows = new FakeFollowRepository();
-    const useCase = new FollowUser(users, follows);
+    const useCase = new FollowUser(users, follows, silentNotifier());
 
     await useCase.execute({ followerId: "user-1", handle: "rina", action: "follow" });
     const result = await useCase.execute({ followerId: "user-1", handle: "rina", action: "unfollow" });
@@ -187,7 +206,7 @@ describe("FollowUser.execute", () => {
   it("unfollowing someone you never followed returns the same state, no error", async () => {
     const users = fakeUserRepository([record(), record({ id: "user-2", handle: "rina" })]);
     const follows = new FakeFollowRepository();
-    const useCase = new FollowUser(users, follows);
+    const useCase = new FollowUser(users, follows, silentNotifier());
 
     const result = await useCase.execute({ followerId: "user-1", handle: "rina", action: "unfollow" });
     expect(result).toEqual({ following: false });
@@ -197,7 +216,7 @@ describe("FollowUser.execute", () => {
   it("404s for an unknown handle", async () => {
     const users = fakeUserRepository([record()]);
     const follows = new FakeFollowRepository();
-    const useCase = new FollowUser(users, follows);
+    const useCase = new FollowUser(users, follows, silentNotifier());
 
     await expect(
       useCase.execute({ followerId: "user-1", handle: "nobody", action: "follow" })
@@ -210,7 +229,7 @@ describe("FollowUser.execute", () => {
   it("following yourself 409s with the exact Indonesian message, and never reaches the repository", async () => {
     const users = fakeUserRepository([record()]);
     const follows = new FakeFollowRepository();
-    const useCase = new FollowUser(users, follows);
+    const useCase = new FollowUser(users, follows, silentNotifier());
 
     const attempt = useCase.execute({ followerId: "user-1", handle: "wildan", action: "follow" });
     await expect(attempt).rejects.toBeInstanceOf(ConflictError);
@@ -225,7 +244,7 @@ describe("FollowUser.execute", () => {
   it("unfollowing yourself also 409s, before ever reaching the repository", async () => {
     const users = fakeUserRepository([record()]);
     const follows = new FakeFollowRepository();
-    const useCase = new FollowUser(users, follows);
+    const useCase = new FollowUser(users, follows, silentNotifier());
 
     await expect(
       useCase.execute({ followerId: "user-1", handle: "wildan", action: "unfollow" })
@@ -236,7 +255,7 @@ describe("FollowUser.execute", () => {
   it("a handle sent with a leading @ still resolves", async () => {
     const users = fakeUserRepository([record(), record({ id: "user-2", handle: "rina" })]);
     const follows = new FakeFollowRepository();
-    const useCase = new FollowUser(users, follows);
+    const useCase = new FollowUser(users, follows, silentNotifier());
 
     const result = await useCase.execute({ followerId: "user-1", handle: "@rina", action: "follow" });
     expect(result).toEqual({ following: true });

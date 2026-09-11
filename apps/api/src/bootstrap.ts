@@ -30,6 +30,12 @@ import { MediaEntitlement } from "./application/use-cases/media-entitlement";
 import { GetPost, ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
 import { CreateComment, DeleteComment, ListComments } from "./application/use-cases/comments";
+import { NotifyOf } from "./application/use-cases/notify";
+import {
+  ListNotifications,
+  MarkNotificationsRead,
+} from "./application/use-cases/read-notifications";
+import { DrizzleNotificationRepository } from "./infrastructure/repositories/drizzle-notification.repository";
 import { ListCommunityEvents } from "./application/use-cases/community-events";
 import { ManageCommunityTiers } from "./application/use-cases/community-tiers";
 import { GetCommunityStats } from "./application/use-cases/community-stats";
@@ -268,6 +274,10 @@ export interface Dependencies {
   manageCommunityTiers: ManageCommunityTiers;
   /** `POST /communities/:slug/subscribe`. A member buys a community tier. */
   startCommunitySubscription: StartCommunitySubscription;
+  /** Phase 8a's `GET /users/me/notifications` — the bell's list and its unread count. */
+  listNotifications: ListNotifications;
+  /** `POST /users/me/notifications/read` — marks everything read. */
+  markNotificationsRead: MarkNotificationsRead;
   /** Phase 6's `GET /communities/:slug/stats` — the owner's dashboard, in one response. */
   getCommunityStats: GetCommunityStats;
   /**
@@ -1600,7 +1610,14 @@ export function bootstrap(): Dependencies {
     userSubscriptionRepository
   );
   const updateUserProfile = new UpdateUserProfile(userRepository);
-  const followUser = new FollowUser(userRepository, followRepository);
+  // Phase 8a. ONE instance, shared by every hook — the never-throw and
+  // never-self-notify rules live in this class, so a second one would be a
+  // second place for them to drift.
+  const notificationRepository = new DrizzleNotificationRepository(db);
+  const notifyOf = new NotifyOf(notificationRepository);
+  const listNotifications = new ListNotifications(notificationRepository);
+  const markNotificationsRead = new MarkNotificationsRead(notificationRepository);
+  const followUser = new FollowUser(userRepository, followRepository, notifyOf);
   const listFollows = new ListFollows(userRepository, followRepository);
   // Task 3 (Jelajah). The three READ methods live on `userRepository` —
   // `searchPublic`/`newestPublic`/`mostFollowedPublic` all query `app_user`
@@ -1619,7 +1636,7 @@ export function bootstrap(): Dependencies {
   const communityRepository = new DrizzleCommunityRepository(db);
   const createCommunity = new CreateCommunity(userRepository, communityRepository);
   const getCommunity = new GetCommunity(userRepository, communityRepository);
-  const joinCommunity = new JoinCommunity(communityRepository);
+  const joinCommunity = new JoinCommunity(communityRepository, notifyOf);
   const browseCommunities = new BrowseCommunities(communityRepository);
   const listCommunityMembers = new ListCommunityMembers(communityRepository);
   // Task 6 of community-feed. ONE `DrizzleCommentRepository`, shared by
@@ -1696,7 +1713,12 @@ export function bootstrap(): Dependencies {
   // (comments, posts, communities) for the two that take all three — see
   // `application/use-cases/comments.ts`.
   const listComments = new ListComments(commentRepository);
-  const createComment = new CreateComment(commentRepository, postRepository, communityRepository);
+  const createComment = new CreateComment(
+    commentRepository,
+    postRepository,
+    communityRepository,
+    notifyOf
+  );
   const deleteComment = new DeleteComment(commentRepository, postRepository, communityRepository);
   // BARRIER TWO (spec §6.2), built from the very same four collaborators the
   // feed's gate above reads — the same `userSubscriptionRepository` and the
@@ -2057,6 +2079,8 @@ export function bootstrap(): Dependencies {
     deleteCommunityDocument,
     manageCommunityTiers,
     startCommunitySubscription,
+    listNotifications,
+    markNotificationsRead,
     getCommunityStats,
     createPost,
     maxPostImages,

@@ -850,6 +850,57 @@ export const communityEvents = pgTable(
 );
 
 /**
+ * Phase 8a. One thing that happened TO somebody.
+ *
+ * Written AFTER the action that caused it has committed, and best-effort — a
+ * failure to write one is logged, never thrown. The alternative, sharing the
+ * action's transaction, makes a bug in notifications fail COMMENTING. Losing
+ * a notification is undetectable; losing a comment is data loss. So a
+ * notification can be lost, and nothing in the product depends on one having
+ * arrived: the bell is a convenience over state already readable elsewhere.
+ */
+export const notifications = pgTable(
+  "notification",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // THE RECIPIENT, not the actor. Named plainly because every read path
+    // filters on it, and swapping the two would deliver every notification to
+    // the person who caused it.
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => appUsers.id),
+    // `comment` | `join` | `subscribe` | `follow`. VARCHAR, not an enum — the
+    // reasoning `subscription.status` and `post.type` already record.
+    kind: varchar("kind", { length: 32 }).notNull(),
+    actorId: uuid("actor_id")
+      .notNull()
+      .references(() => appUsers.id),
+    // TWO nullable subject columns rather than one polymorphic id with a
+    // type discriminator. Both are real foreign keys, so a notification
+    // cannot point at a row that never existed; a single `subject_id` would
+    // buy one column and lose that guarantee.
+    //
+    // NO STORED URL. The client builds the link from the kind and these ids —
+    // storing an href is the mistake `MediaView` records about bucket URLs:
+    // routes change, and the id is the identifier.
+    postId: uuid("post_id").references(() => posts.id),
+    communityId: uuid("community_id").references(() => communities.id),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // The list.
+    index("notification_user_created_idx").on(table.userId, table.createdAt.desc()),
+    // The unread COUNT, which is the query that runs every sixty seconds for
+    // every signed-in tab. PARTIAL, so read notifications leave it entirely —
+    // and they are the overwhelming majority over time.
+    index("notification_user_unread_idx")
+      .on(table.userId, table.createdAt.desc())
+      .where(sql`${table.readAt} is null`),
+  ]
+);
+
+/**
  * Phase 4a. One file in a community's Dokumen library.
  *
  * `content_type` lives HERE rather than in bucket metadata, and that single

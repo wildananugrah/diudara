@@ -76,7 +76,7 @@ its own green test run before the next begins.
 | 5 | Per-community checkout | Tier selection, payment, success | adapt existing Xendit path |
 | 6 | Creator dashboard | Metrics, revenue chart, tier distribution, activity log | new aggregate queries |
 | 7 | Live rooms | **Scoping decision required** — see below | likely new SFU |
-| 8 | DMs, Pulse-ID, notifications | FloatingChat, AI onboarding, the bell | new realtime; `ai_conversation` tables exist unused |
+| 8 | DMs, Pulse-ID, notifications | FloatingChat, AI onboarding, the bell | new realtime; **split into 8a/8b/8c — see below** |
 
 Phase 0 is first because it is the phase that makes the app *look* like the
 reference, it is independently shippable, and it touches no schema — so it can
@@ -89,6 +89,21 @@ land and be judged on its own.
 separate identity from `app_user` with no foreign key, no shared id, and no
 login path since it was deleted. Every one of the eighteen dormant tables hangs
 off that root.
+
+**Correction, made during Phase 8's scoping.** The Phase 8 row above said
+`ai_conversation` tables "exist unused". They do not: `ai_conversation` and
+`ai_message` were dropped in migration `0034` with the rest of the dormant
+set, and no AI provider survives either — the adapter directory is gone and
+the `/ai` routes went with retire-telegram. Pulse-ID is therefore a build from
+nothing, including choosing an LLM provider.
+
+**Phase 8 is also split, for size.** It is four subsystems — a realtime layer,
+DMs, notifications and Pulse-ID — and together they exceed Phases 3 to 7
+combined. DMs, notifications and Phase 7's deferred live chat all want the
+same realtime layer, so whichever is built first shapes it. The split is
+therefore 8a notifications (on polling, no new infrastructure), 8b the
+realtime layer and DMs (designed for all three consumers), 8c Pulse-ID. See
+`2026-09-12-notifications-design.md`.
 
 Phase 1 therefore **drops** the dormant set and builds fresh user-scoped tables,
 with the repo owner's explicit authorisation for the data loss. Later phases add

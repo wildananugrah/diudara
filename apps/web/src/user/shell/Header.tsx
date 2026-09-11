@@ -1,6 +1,5 @@
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faBell } from "@fortawesome/free-solid-svg-icons";
 import { Link } from "react-router-dom";
+import NotificationBell from "../NotificationBell";
 
 export type Crumb = { label: string; to?: string };
 
@@ -9,10 +8,12 @@ export type Crumb = { label: string; to?: string };
  *
  * Two deliberate departures from the reference's version:
  *
- * `notificationCount` renders NOTHING when it is absent or zero. The
- * reference hardcodes `notificationCount={3}` on every page and wires no
- * click handler, so its bell permanently claims three notifications that do
- * not exist. Notifications are Phase 8; until then this must not lie.
+ * The bell is a LIVE component (Phase 8a), not a prop. It used to be a
+ * `notificationCount` number that nothing in this app ever passed — ported
+ * from the reference, which hardcodes `notificationCount={3}` on every page
+ * and wires no click handler, so its bell permanently claims three
+ * notifications that do not exist. `NotificationBell` owns its own polling
+ * and renders nothing at all when signed out, so it still cannot lie.
  *
  * The `actions` slot is dead in every reference page but is kept, because
  * Phase 1's CommunityHome puts its invite / share / Posting controls there.
@@ -26,13 +27,11 @@ export default function Header({
   title,
   subtitle,
   breadcrumb,
-  notificationCount,
   actions,
 }: {
   title: string;
   subtitle?: string;
   breadcrumb?: readonly Crumb[];
-  notificationCount?: number;
   actions?: React.ReactNode;
 }) {
   return (
@@ -53,14 +52,11 @@ export default function Header({
       </div>
       <div className="app-header-actions">
         {actions}
-        {notificationCount !== undefined && notificationCount > 0 && (
-          <span className="app-header-bell">
-            <FontAwesomeIcon icon={faBell} />
-            <span className="app-header-bell-count">
-              {notificationCount > 9 ? "9+" : notificationCount}
-            </span>
-          </span>
-        )}
+        {/* Phase 8a. The bell used to be a `notificationCount` PROP that
+            nothing ever passed — ported from the mockup with a hardcoded 3
+            and never wired. It is now a live component that owns its own
+            polling and renders nothing at all when signed out. */}
+        <NotificationBell />
       </div>
     </header>
   );

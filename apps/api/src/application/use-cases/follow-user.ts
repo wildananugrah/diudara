@@ -1,4 +1,5 @@
 import { DEFAULT_FOLLOW_LIST_LIMIT } from "@diudara/shared";
+import { NOTIFICATION_KIND, type NotifyOf } from "./notify";
 import { ConflictError, NotFoundError } from "../errors";
 import { normalizeHandle } from "../../domain/handle";
 import type { UserRepositoryPort } from "../ports/user-repository.port";
@@ -48,7 +49,8 @@ const SELF_FOLLOW_MESSAGE = "tidak bisa mengikuti akun sendiri";
 export class FollowUser {
   constructor(
     private readonly users: UserRepositoryPort,
-    private readonly follows: FollowRepositoryPort
+    private readonly follows: FollowRepositoryPort,
+    private readonly notify: NotifyOf
   ) {}
 
   async execute(input: {
@@ -72,6 +74,14 @@ export class FollowUser {
 
     if (input.action === "follow") {
       await this.follows.follow(input.followerId, target.id);
+      // AFTER the follow, best-effort — see `NotifyOf`. Self-follow is
+      // already a ConflictError above, so the self-notify guard never fires
+      // here; it is still the one place that rule lives.
+      await this.notify.record({
+        userId: target.id,
+        kind: NOTIFICATION_KIND.follow,
+        actorId: input.followerId,
+      });
       return { following: true };
     }
 

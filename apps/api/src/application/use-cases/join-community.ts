@@ -1,4 +1,5 @@
 import { ConflictError, NotFoundError } from "../errors";
+import { NOTIFICATION_KIND, type NotifyOf } from "./notify";
 import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 
 /**
@@ -24,7 +25,10 @@ const OWNER_LEAVE_MESSAGE = "pemilik tidak bisa keluar dari komunitasnya sendiri
  * response usable straight off the client's optimistic button state.
  */
 export class JoinCommunity {
-  constructor(private readonly communities: CommunityRepositoryPort) {}
+  constructor(
+    private readonly communities: CommunityRepositoryPort,
+    private readonly notify: NotifyOf
+  ) {}
 
   async execute(input: {
     userId: string;
@@ -38,6 +42,14 @@ export class JoinCommunity {
 
     if (input.action === "join") {
       await this.communities.join(community.id, input.userId);
+      // AFTER the join, best-effort — see `NotifyOf`. The owner joining their
+      // own community reports nothing, which that class decides.
+      await this.notify.record({
+        userId: community.ownerId,
+        kind: NOTIFICATION_KIND.join,
+        actorId: input.userId,
+        communityId: community.id,
+      });
       return { member: true };
     }
 

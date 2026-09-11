@@ -1337,6 +1337,36 @@ export function getCommunityStats(slug: string): Promise<CommunityStats> {
   return apiFetch<CommunityStats>(`/communities/${encodeURIComponent(slug)}/stats`);
 }
 
+/** One row of the bell — the server's `NotificationView`. */
+export interface NotificationRow {
+  id: string;
+  /** `"comment"` | `"join"` | `"follow"`. A plain string: the column is a widened varchar. */
+  kind: string;
+  actor: { handle: string; displayName: string };
+  postId: string | null;
+  communitySlug: string | null;
+  read: boolean;
+  createdAt: string;
+}
+
+export interface NotificationsPage {
+  notifications: NotificationRow[];
+  /** In the SAME response as the list, so the badge can never disagree with it. */
+  unreadCount: number;
+}
+
+/** `GET /users/me/notifications`. */
+export function listNotifications(): Promise<NotificationsPage> {
+  return apiFetch<NotificationsPage>("/users/me/notifications");
+}
+
+/** `POST /users/me/notifications/read` — marks everything read. */
+export function markNotificationsRead(): Promise<void> {
+  return apiFetch<{ read: true }>("/users/me/notifications/read", { method: "POST" }).then(
+    () => undefined
+  );
+}
+
 /** `GET /communities/:slug/tiers` — PUBLIC, so a paid community stays evaluable. */
 export function listCommunityTiers(slug: string): Promise<{ tiers: CommunityTierRow[] }> {
   return publicGet<{ tiers: CommunityTierRow[] }>(

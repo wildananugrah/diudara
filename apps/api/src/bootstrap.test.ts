@@ -54,6 +54,11 @@ import { ListCommunityMembers } from "./application/use-cases/list-community-mem
 import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
 import { ListCommunityEvents } from "./application/use-cases/community-events";
 import { ManageCommunityTiers } from "./application/use-cases/community-tiers";
+import { NotifyOf } from "./application/use-cases/notify";
+import {
+  ListNotifications,
+  MarkNotificationsRead,
+} from "./application/use-cases/read-notifications";
 import { GetCommunityStats } from "./application/use-cases/community-stats";
 import { StartCommunitySubscription } from "./application/use-cases/start-community-subscription";
 import {
@@ -384,6 +389,22 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
   },
 };
 
+/**
+ * Phase 8a. A real `NotifyOf` over an in-memory repository — the never-throw
+ * and never-self-notify rules are its own, and stubbing it out would mean
+ * these smoke tests exercised neither.
+ */
+const fakeNotifyOf = new NotifyOf({
+  async create() {},
+  async listFor() {
+    return [];
+  },
+  async unreadCountFor() {
+    return 0;
+  },
+  async markAllRead() {},
+});
+
 /** Task 2 of posts-and-feed's repository, faked the same shallow way `fakeFollowRepository` is above. */
 const fakePostRepository: PostRepositoryPort = {
   async create(input) {
@@ -664,13 +685,13 @@ describe("Dependencies (composition root contract)", () => {
         fakeUserSubscriptionRepository
       ),
       updateUserProfile: new UpdateUserProfile(fakeUserRepository),
-      followUser: new FollowUser(fakeUserRepository, fakeFollowRepository),
+      followUser: new FollowUser(fakeUserRepository, fakeFollowRepository, fakeNotifyOf),
       listFollows: new ListFollows(fakeUserRepository, fakeFollowRepository),
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
       communityRepository: fakeCommunityRepository,
       createCommunity: new CreateCommunity(fakeUserRepository, fakeCommunityRepository),
       getCommunity: new GetCommunity(fakeUserRepository, fakeCommunityRepository),
-      joinCommunity: new JoinCommunity(fakeCommunityRepository),
+      joinCommunity: new JoinCommunity(fakeCommunityRepository, fakeNotifyOf),
       browseCommunities: new BrowseCommunities(fakeCommunityRepository),
       listCommunityMembers: new ListCommunityMembers(fakeCommunityRepository),
       createCommunityPost: new CreateCommunityPost(
@@ -786,6 +807,24 @@ describe("Dependencies (composition root contract)", () => {
         },
         fakeClock
       ),
+      ...(() => {
+        // Phase 8a. One in-memory repository behind all three, so the smoke
+        // test drives them the way bootstrap wires them.
+        const notifications = {
+          async create() {},
+          async listFor() {
+            return [];
+          },
+          async unreadCountFor() {
+            return 0;
+          },
+          async markAllRead() {},
+        };
+        return {
+          listNotifications: new ListNotifications(notifications),
+          markNotificationsRead: new MarkNotificationsRead(notifications),
+        };
+      })(),
       createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,
       editPost: new EditPost(fakePostWriteUnitOfWork),
@@ -813,7 +852,8 @@ describe("Dependencies (composition root contract)", () => {
       createComment: new CreateComment(
         fakeCommentRepository,
         fakePostRepository,
-        fakeCommunityRepository
+        fakeCommunityRepository,
+        fakeNotifyOf
       ),
       deleteComment: new DeleteComment(
         fakeCommentRepository,
