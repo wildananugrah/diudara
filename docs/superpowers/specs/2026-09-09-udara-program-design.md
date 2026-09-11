@@ -97,6 +97,24 @@ set, and no AI provider survives either — the adapter directory is gone and
 the `/ai` routes went with retire-telegram. Pulse-ID is therefore a build from
 nothing, including choosing an LLM provider.
 
+**Pulse-ID (8c) is NOT AI, and is deliberately unbuilt.** Recorded 2026-09-12,
+by the repo owner, after reading the reference rather than the row.
+
+`PulseOnboarding.tsx` is a hardcoded four-question script with fixed
+multiple-choice answers, followed by four fake progress lines ("Menyusun
+struktur komunitas...", "Menghasilkan halaman checkout..."). Nothing
+generates, nothing branches on an answer, and no model is involved. It is a
+setup wizard wearing a chat costume, and the word "AI" in the row above is
+the only place the idea appears.
+
+Building it as a real LLM integration would mean choosing a vendor, adding a
+key, designing prompts, storing conversations and handling a model that
+suggests something the product cannot create — a new dependency with a
+per-use cost, for a screen that does not ask for one. Building it as the
+wizard it actually is would be worthwhile (four questions ending in a real
+`POST /communities` and `POST /:slug/tiers`, both of which ship), but it is
+the least valuable remaining thing and was not started.
+
 **Phase 8 is also split, for size.** It is four subsystems — a realtime layer,
 DMs, notifications and Pulse-ID — and together they exceed Phases 3 to 7
 combined. DMs, notifications and Phase 7's deferred live chat all want the
