@@ -190,6 +190,13 @@ export class CreatePost {
      * default way `communityId` is.
      */
     type?: string;
+    /**
+     * Phase 3. The schedule for a `kegiatan`, passed straight through to
+     * `posts.create`, which writes the `community_event` row inside this
+     * method's transaction. Set only by `CreateCommunityPost`, exactly as
+     * `communityId` and `type` are.
+     */
+    event?: { title: string; startsAt: Date; endsAt?: Date; location?: string };
   }): Promise<PostView> {
     const body = requireBody(input.body);
     const mediaIds = input.mediaIds ?? [];
@@ -211,6 +218,7 @@ export class CreatePost {
         // is the only caller that passes either.
         ...(input.communityId === undefined ? {} : { communityId: input.communityId }),
         ...(input.type === undefined ? {} : { type: input.type }),
+        ...(input.event === undefined ? {} : { event: input.event }),
       });
       // `locked: false` — NEVER copy this to a read path. Every `toPostView` in
       // this file answers the post's OWN AUTHOR, who is the one person the

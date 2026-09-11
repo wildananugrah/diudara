@@ -112,6 +112,7 @@ export function communityRoutes(
     | "listCommunityMembers"
     | "createCommunityPost"
     | "listCommunityFeed"
+    | "listCommunityEvents"
     | "maxPostImages"
   >
 ) {
@@ -185,6 +186,7 @@ export function communityRoutes(
         body: string;
         type: string;
         mediaIds?: string[];
+        event?: { title: string; startsAt: string; endsAt?: string; location?: string };
       };
       const view = await deps.createCommunityPost.execute({
         slug: c.req.param("slug"),
@@ -192,10 +194,42 @@ export function communityRoutes(
         body: input.body,
         type: input.type,
         mediaIds: input.mediaIds,
+        // ISO strings in, `Date`s onward — the boundary where the wire's
+        // representation stops and the domain's begins, and the LAST place
+        // that conversion is cheap. Both timestamps already parsed cleanly:
+        // the schema's `isoInstant` refused anything `new Date()` reads as
+        // NaN, so these constructions cannot produce an Invalid Date.
+        ...(input.event === undefined
+          ? {}
+          : {
+              event: {
+                title: input.event.title,
+                startsAt: new Date(input.event.startsAt),
+                ...(input.event.endsAt === undefined
+                  ? {}
+                  : { endsAt: new Date(input.event.endsAt) }),
+                ...(input.event.location === undefined
+                  ? {}
+                  : { location: input.event.location }),
+              },
+            }),
       });
       return c.json(view, 201);
     }
   );
+
+  // DECLARED BEFORE `/:slug` for the same literal-wins reason `posts` above
+  // is. `?month=YYYY-MM` is a WIB month; absent or malformed means the WIB
+  // month containing the clock's now, and `wibMonthRange` owns both rules —
+  // the route does no date parsing of its own and reads no clock of its own.
+  app.get<"/:slug/events">("/:slug/events", async (c) => {
+    return c.json(
+      await deps.listCommunityEvents.execute({
+        slug: c.req.param("slug"),
+        month: c.req.query("month"),
+      })
+    );
+  });
 
   app.get<"/:slug">("/:slug", async (c) => {
     const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);

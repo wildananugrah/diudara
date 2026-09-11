@@ -52,6 +52,7 @@ import { JoinCommunity } from "./application/use-cases/join-community";
 import { BrowseCommunities } from "./application/use-cases/browse-communities";
 import { ListCommunityMembers } from "./application/use-cases/list-community-members";
 import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
+import { ListCommunityEvents } from "./application/use-cases/community-events";
 import { CreateComment, DeleteComment, ListComments } from "./application/use-cases/comments";
 import type { CommentRepositoryPort } from "./application/ports/comment-repository.port";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
@@ -659,6 +660,13 @@ describe("Dependencies (composition root contract)", () => {
         fakeUserSubscriptionRepository,
         fakeClock,
         fakeCommentRepository
+      ),
+      listCommunityEvents: new ListCommunityEvents(
+        fakeCommunityRepository,
+        // The calendar is not exercised by these smoke tests; an empty month
+        // is a well-formed answer, so the fake needs no rows.
+        { async listBetween() { return []; } },
+        fakeClock
       ),
       createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,

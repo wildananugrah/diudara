@@ -10,7 +10,16 @@ import { paginate } from "./read-posts";
 import type { FeedPage, PostView } from "./post-views";
 import type { CreatePost } from "./write-post";
 
-const ANNOUNCEMENT_TYPE = "pengumuman";
+/**
+ * The types a plain member may NOT post. `pengumuman` is the owner speaking
+ * for the community; `kegiatan` (Phase 3) is the owner committing it to a
+ * date. The reference agrees — `PostEditorModal`'s type selector offers a
+ * non-admin `diskusi` and nothing else.
+ *
+ * A SET rather than a chain of `===`, so Phase 4's `materi` and `dokumen`
+ * join by adding a value here instead of by growing the condition below.
+ */
+const OWNER_ONLY_TYPES = new Set(["pengumuman", "kegiatan"]);
 
 /**
  * The fallback when a caller passes no limit. `routes/communities.ts` (Task 7)
@@ -47,14 +56,21 @@ export class CreateCommunityPost {
     body: string;
     type: string;
     mediaIds?: string[];
+    /**
+     * Phase 3. Present exactly when `type` is `kegiatan` — the contract's
+     * refinement (`refineCommunityPostEvent`) is what guarantees that, on
+     * both the shared schema and the route's `maxPostImages`-capped
+     * extension of it, so this use case does not re-check the pairing.
+     */
+    event?: { title: string; startsAt: Date; endsAt?: Date; location?: string };
   }): Promise<PostView> {
     const community = await this.communities.findBySlug(input.slug);
     if (community === null) throw new NotFoundError("komunitas tidak ditemukan");
 
-    if (input.type === ANNOUNCEMENT_TYPE) {
-      // A `pengumuman` is the owner's alone — membership does not earn it.
+    if (OWNER_ONLY_TYPES.has(input.type)) {
+      // The owner's alone — membership does not earn either of them.
       if (community.ownerId !== input.authorId) {
-        throw new ForbiddenError("hanya pemilik komunitas yang boleh membuat pengumuman");
+        throw new ForbiddenError("hanya pemilik komunitas yang boleh membuat kiriman ini");
       }
     } else if (!(await this.communities.isMember(community.id, input.authorId))) {
       // Any other `type` is a member's to start.
@@ -67,6 +83,7 @@ export class CreateCommunityPost {
       mediaIds: input.mediaIds,
       communityId: community.id,
       type: input.type,
+      ...(input.event === undefined ? {} : { event: input.event }),
     });
   }
 }

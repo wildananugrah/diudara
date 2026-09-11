@@ -30,7 +30,9 @@ import { MediaEntitlement } from "./application/use-cases/media-entitlement";
 import { GetPost, ListFeed, ListUserPosts } from "./application/use-cases/read-posts";
 import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
 import { CreateComment, DeleteComment, ListComments } from "./application/use-cases/comments";
+import { ListCommunityEvents } from "./application/use-cases/community-events";
 import { DrizzleCommentRepository } from "./infrastructure/repositories/drizzle-comment.repository";
+import { DrizzleEventRepository } from "./infrastructure/repositories/drizzle-event.repository";
 import { RequestPasswordReset } from "./application/use-cases/request-password-reset";
 import { CompletePasswordReset } from "./application/use-cases/complete-password-reset";
 import { DrizzlePasswordResetRepository } from "./infrastructure/repositories/drizzle-password-reset.repository";
@@ -234,6 +236,12 @@ export interface Dependencies {
   createCommunityPost: CreateCommunityPost;
   /** `GET /communities/:slug/posts` — the community's chronological feed. Public, keyset-paged. */
   listCommunityFeed: ListCommunityFeed;
+  /**
+   * Phase 3's `GET /communities/:slug/events?month=YYYY-MM` — one WIB month of
+   * a community's calendar. Public, and UNPAGINATED: a month is bounded where
+   * a feed is not.
+   */
+  listCommunityEvents: ListCommunityEvents;
   /**
    * Task 2 of posts-and-feed's `POST /users/posts`. Behind `requireUserAuth` —
    * see `routes/posts.ts` for why `PATCH`/`DELETE /users/posts/:id` share the
@@ -1611,6 +1619,15 @@ export function bootstrap(): Dependencies {
     clock,
     commentRepository
   );
+  // Phase 3's `GET /communities/:slug/events`. Its own repository rather than
+  // a method on the post repository: the row it returns is the calendar's
+  // shape (no body, author joined) and it ranges on `community_event`'s own
+  // index, not on any of `post`'s.
+  const listCommunityEvents = new ListCommunityEvents(
+    communityRepository,
+    new DrizzleEventRepository(db),
+    clock
+  );
   // Task 6's comment endpoints on `/users`. Constructor arg order is
   // (comments, posts, communities) for the two that take all three — see
   // `application/use-cases/comments.ts`.
@@ -1912,6 +1929,7 @@ export function bootstrap(): Dependencies {
     listCommunityMembers,
     createCommunityPost,
     listCommunityFeed,
+    listCommunityEvents,
     createPost,
     maxPostImages,
     editPost,

@@ -339,3 +339,178 @@ describe("GET and POST /communities/:slug/posts", () => {
     expect(postRes.status).toBe(404);
   });
 });
+
+/** 15 September 2026, 16:00 WIB — and 18:00 WIB. */
+const STARTS_AT = "2026-09-15T09:00:00.000Z";
+const ENDS_AT = "2026-09-15T11:00:00.000Z";
+
+const AN_EVENT = {
+  body: "kelas tatap muka daring",
+  type: "kegiatan",
+  event: { title: "Trigonometri lanjutan", startsAt: STARTS_AT },
+};
+
+describe("POST /communities/:slug/posts — kegiatan", () => {
+  it("the owner may post one, and the schedule comes back on the post", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await postToCommunity(a, token, "kelas-desain", {
+      ...AN_EVENT,
+      event: { ...AN_EVENT.event, endsAt: ENDS_AT, location: "Online via Zoom" },
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.type).toBe("kegiatan");
+    expect(body.event).toEqual({
+      title: "Trigonometri lanjutan",
+      startsAt: STARTS_AT,
+      endsAt: ENDS_AT,
+      location: "Online via Zoom",
+    });
+  });
+
+  it("a plain member may not — 403, the same rule pengumuman takes", async () => {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    await createCommunity(a, ownerToken, KELAS);
+    const memberToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    await a.request("/communities/kelas-desain/join", {
+      method: "POST",
+      headers: authed(memberToken),
+    });
+
+    const res = await postToCommunity(a, memberToken, "kelas-desain", AN_EVENT);
+
+    expect(res.status).toBe(403);
+  });
+
+  /**
+   * The refinement reaching the ROUTE's schema, not just the shared one. The
+   * route `.extend()`s the fields to inject the `maxPostImages` cap, which
+   * returns a fresh ZodObject carrying none of the source's refinements — so
+   * without the explicit re-apply, this request would 201 and write a
+   * kegiatan with no schedule. That is the exact regression this asserts.
+   */
+  it("a kegiatan with no schedule is 400, not a dateless event", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await postToCommunity(a, token, "kelas-desain", {
+      body: "kelas tanpa tanggal",
+      type: "kegiatan",
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("a diskusi carrying a schedule is 400 — the other half of the same rule", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await postToCommunity(a, token, "kelas-desain", {
+      body: "diskusi biasa",
+      type: "diskusi",
+      event: { title: "Menyelinap", startsAt: STARTS_AT },
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("an endsAt before its startsAt is 400, not a constraint violation", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await postToCommunity(a, token, "kelas-desain", {
+      ...AN_EVENT,
+      event: { ...AN_EVENT.event, endsAt: "2026-09-15T08:00:00.000Z" },
+    });
+
+    // 400 and not 500: the CHECK would also refuse this, but a constraint
+    // violation reaches the client as an opaque server error it cannot act on.
+    expect(res.status).toBe(400);
+  });
+
+  it("a diskusi still comes back with event: null — the key set stays closed", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await postToCommunity(a, token, "kelas-desain", { body: "halo" });
+
+    expect((await res.json()).event).toBeNull();
+  });
+});
+
+describe("GET /communities/:slug/events", () => {
+  it("is readable signed out, and lists the month ascending", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+    await postToCommunity(a, token, "kelas-desain", {
+      body: "kedua",
+      type: "kegiatan",
+      event: { title: "Kedua", startsAt: "2026-09-20T13:00:00.000Z" },
+    });
+    await postToCommunity(a, token, "kelas-desain", AN_EVENT);
+
+    const res = await a.request("/communities/kelas-desain/events?month=2026-09");
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.events.map((e: { title: string }) => e.title)).toEqual([
+      "Trigonometri lanjutan",
+      "Kedua",
+    ]);
+    expect(body.events[0].author.handle).toBe("wildan");
+  });
+
+  it("another month is empty rather than a 404", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+    await postToCommunity(a, token, "kelas-desain", AN_EVENT);
+
+    const res = await a.request("/communities/kelas-desain/events?month=2026-10");
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).events).toEqual([]);
+  });
+
+  /**
+   * A user can edit this query string, so a malformed one must not be an
+   * error page — it falls back to the current WIB month.
+   */
+  it("a malformed month falls back rather than erroring", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await a.request("/communities/kelas-desain/events?month=besok");
+
+    expect(res.status).toBe(200);
+  });
+
+  it("an unknown slug is 404", async () => {
+    const a = app();
+
+    expect((await a.request("/communities/tidak-ada/events")).status).toBe(404);
+  });
+
+  /** The literal segment must win over `:slug` — the ordering the route file relies on. */
+  it("does not collide with GET /communities/:slug", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await a.request("/communities/kelas-desain/events");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toHaveProperty("events");
+  });
+});
