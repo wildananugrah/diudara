@@ -39,7 +39,7 @@ export class RevokeMembership {
     // media routes and the membership-request queue already follow.
     if (!member) throw new NotFoundError("anggota tidak ditemukan");
 
-    const active = await this.subscriptions.findActiveFor(member.id, input.ownerId);
+    const active = await this.subscriptions.findActiveFor(member.id, input.ownerId, null /* personal membership — see the port's note on this argument */);
     if (!active) throw new NotFoundError("anggota tidak ditemukan");
 
     if (active.kind !== "free") {

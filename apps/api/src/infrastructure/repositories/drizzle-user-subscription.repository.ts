@@ -63,6 +63,19 @@ const pendingRequestProjection = {
  */
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * `community_id IS NULL` for a personal membership, `= $1` for a community
+ * one. The same `null` means "personal" everywhere, and a caller that forgot
+ * to say which would otherwise be answered about whichever row came back
+ * first — see the port's note on why that argument is required and nullable
+ * rather than optional.
+ */
+function communityScope(communityId: string | null) {
+  return communityId === null
+    ? isNull(userSubscriptions.communityId)
+    : eq(userSubscriptions.communityId, communityId);
+}
+
 export class DrizzleUserSubscriptionRepository implements UserSubscriptionRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
 
@@ -125,6 +138,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     tierId: string;
     ownerId: string;
     kind?: string;
+    communityId?: string;
   }): Promise<PendingSubscriptionClaim> {
     const [row] = await this.db
       .insert(userSubscriptions)
@@ -135,16 +149,47 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         // Omitted when absent so the column's own DEFAULT 'paid' fires — one
         // place spells the default, not two that could drift.
         ...(input.kind === undefined ? {} : { kind: input.kind }),
+        ...(input.communityId === undefined ? {} : { communityId: input.communityId }),
       })
       .onConflictDoNothing({
-        target: [userSubscriptions.subscriberId, userSubscriptions.ownerId],
-        where: sql`${userSubscriptions.status} = 'pending'`,
+        // THE TARGET MUST MATCH `user_subscription_one_pending` EXACTLY,
+        // coalesce and all. Postgres infers the index from this list, and an
+        // inference that misses answers "there is no unique or exclusion
+        // constraint matching the ON CONFLICT specification" — a 500 on the
+        // checkout path, which is how Phase 5 found out the index had changed
+        // under it.
+        // THE TARGET MUST NAME THE INDEX THAT ACTUALLY GUARDS THIS ROW.
+        // Phase 5 split the pending slot into two partial unique indexes —
+        // `(subscriber, owner, community)` for a community purchase and
+        // `(subscriber, owner) WHERE community_id IS NULL` for a personal one
+        // — because Postgres treats NULLs as distinct and one index cannot
+        // hold both cases. Postgres infers which index from this column list,
+        // and an inference that misses answers "there is no unique or
+        // exclusion constraint matching the ON CONFLICT specification": a 500
+        // on the checkout path, which is exactly how Phase 5 discovered the
+        // index had changed under `claimPending`.
+        target:
+          input.communityId === undefined
+            ? [userSubscriptions.subscriberId, userSubscriptions.ownerId]
+            : [
+                userSubscriptions.subscriberId,
+                userSubscriptions.ownerId,
+                userSubscriptions.communityId,
+              ],
+        where:
+          input.communityId === undefined
+            ? sql`${userSubscriptions.status} = 'pending' and ${userSubscriptions.communityId} is null`
+            : sql`${userSubscriptions.status} = 'pending'`,
       })
       .returning();
     if (row) {
       return { subscription: row, created: true };
     }
-    const existing = await this.findPendingFor(input.subscriberId, input.ownerId);
+    const existing = await this.findPendingFor(
+      input.subscriberId,
+      input.ownerId,
+      input.communityId ?? null
+    );
     if (!existing) {
       // The holder settled or released between the conflict and this read.
       // Failing is the honest answer — the caller retries and claims it —
@@ -169,7 +214,11 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
    * never actually have more than one (`user_subscription_one_pending`), but
    * if it somehow did, the freshest one is the honest answer.
    */
-  async findPendingFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null> {
+  async findPendingFor(
+    subscriberId: string,
+    ownerId: string,
+    communityId: string | null
+  ): Promise<UserSubscriptionRow | null> {
     if (!UUID_PATTERN.test(subscriberId) || !UUID_PATTERN.test(ownerId)) {
       return null;
     }
@@ -180,6 +229,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         and(
           eq(userSubscriptions.subscriberId, subscriberId),
           eq(userSubscriptions.ownerId, ownerId),
+          communityScope(communityId),
           eq(userSubscriptions.status, "pending")
         )
       )
@@ -244,7 +294,12 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
    * `current_period_end` matches `NOW` at the exact boundary, which is
    * deliberate: a period that ends AT `now` is over, not still running.
    */
-  async retireExpired(subscriberId: string, ownerId: string, now: Date): Promise<boolean> {
+  async retireExpired(
+    subscriberId: string,
+    ownerId: string,
+    communityId: string | null,
+    now: Date
+  ): Promise<boolean> {
     const rows = await this.db
       .update(userSubscriptions)
       .set({ status: "expired" })
@@ -252,6 +307,11 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         and(
           eq(userSubscriptions.subscriberId, subscriberId),
           eq(userSubscriptions.ownerId, ownerId),
+          // SCOPED (Phase 5): retiring a lapsed row is what frees the
+          // `one_active` slot, and that slot is now per-community. Unscoped,
+          // a community purchase would retire a lapsed PERSONAL row, and
+          // vice versa.
+          communityScope(communityId),
           eq(userSubscriptions.status, "active"),
           lte(userSubscriptions.currentPeriodEnd, now)
         )
@@ -469,7 +529,7 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
    * free row's `kind` correctly — `.select()` with no column list was never
    * narrower than the schema, and Task 1 added `kind` to that schema.
    */
-  activeMembershipQuery(subscriberId: string, ownerId: string) {
+  activeMembershipQuery(subscriberId: string, ownerId: string, communityId: string | null) {
     return this.db
       .select()
       .from(userSubscriptions)
@@ -477,6 +537,11 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         and(
           eq(userSubscriptions.subscriberId, subscriberId),
           eq(userSubscriptions.ownerId, ownerId),
+          // SCOPED (Phase 5). Without this a personal membership answers a
+          // question about a community and vice versa — the conflation
+          // `findActiveForCommunity` documents, of which this is the other
+          // half.
+          communityScope(communityId),
           eq(userSubscriptions.status, "active"),
         ),
       )
@@ -517,11 +582,15 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
     return row?.subscription ?? null;
   }
 
-  async findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null> {
+  async findActiveFor(
+    subscriberId: string,
+    ownerId: string,
+    communityId: string | null
+  ): Promise<UserSubscriptionRow | null> {
     if (!UUID_PATTERN.test(subscriberId) || !UUID_PATTERN.test(ownerId)) {
       return null;
     }
-    const [row] = await this.activeMembershipQuery(subscriberId, ownerId);
+    const [row] = await this.activeMembershipQuery(subscriberId, ownerId, communityId);
     return row ?? null;
   }
 
@@ -767,8 +836,20 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
         .returning();
       return row ?? null;
     } catch (err) {
+      // BOTH index names map to the same rule. Phase 5 split the one-active
+      // guarantee into two partial unique indexes — `(subscriber, owner,
+      // community)` and `(subscriber, owner) WHERE community_id IS NULL` —
+      // because Postgres treats NULLs as distinct and one index cannot hold
+      // both cases. A free approval is always personal, so it raises the
+      // `_personal` one; mapping only the original name let the raw driver
+      // error escape as a 500, which is exactly what this translation exists
+      // to prevent.
       rethrowUniqueViolation(err, {
         user_subscription_one_active: {
+          rule: UniqueRule.userSubscriptionOneActive,
+          message: "orang ini sudah menjadi anggota aktif Anda",
+        },
+        user_subscription_one_active_personal: {
           rule: UniqueRule.userSubscriptionOneActive,
           message: "orang ini sudah menjadi anggota aktif Anda",
         },

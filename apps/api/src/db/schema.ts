@@ -389,6 +389,13 @@ export const userTiers = pgTable(
     // (id, owner_id), which is what makes its denormalised `owner_id`
     // impossible to falsify. Do not remove it as "duplicate".
     uniqueIndex("user_tier_id_owner_unique").on(table.id, table.ownerId),
+    // Phase 5, and redundant on its own for the same reason the index above
+    // is: `id` is already unique. It exists ONLY so `user_subscription` can
+    // carry a composite foreign key against (id, community_id), which is what
+    // makes ITS denormalised `community_id` impossible to falsify — the exact
+    // trick `user_tier_id_owner_unique` plays for `owner_id`. Do not remove it
+    // as "duplicate".
+    uniqueIndex("user_tier_id_community_unique").on(table.id, table.communityId),
   ]
 );
 
@@ -426,6 +433,18 @@ export const userSubscriptions = pgTable(
     // this migration additive and leaves every existing row paid, which is what
     // every existing row is.
     kind: varchar("kind", { length: 16 }).notNull().default("paid"),
+    // Phase 5. NULL means a PERSONAL membership — a subscription to the person
+    // named by `owner_id`, which is every row predating this column. Non-null
+    // means a membership OF THAT COMMUNITY.
+    //
+    // DENORMALISED from `user_tier.community_id`, and this one is not a
+    // judgement call: `user_subscription_one_active` is a partial unique index
+    // and an index cannot reach through a join. Without the column here, a
+    // community tier's owner being a person who also sells personal tiers made
+    // a perfectly reasonable second purchase violate that index. It is kept
+    // honest by `user_subscription_tier_community_fk` below rather than by
+    // anyone remembering to write it.
+    communityId: uuid("community_id").references(() => communities.id),
     currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -438,14 +457,45 @@ export const userSubscriptions = pgTable(
       foreignColumns: [userTiers.id, userTiers.ownerId],
       name: "user_subscription_tier_owner_fk",
     }),
+    // Phase 5's equivalent for the community. A row whose `community_id`
+    // disagrees with its tier's CANNOT BE INSERTED — including a PERSONAL
+    // tier (community_id NULL) sold as a community membership, which fails
+    // because no `user_tier` row has that (id, community_id) pair.
+    //
+    // A NULL in either column makes a MATCH SIMPLE foreign key unenforced,
+    // which is exactly right here: a personal subscription to a personal tier
+    // is (NULL, NULL) and has nothing to falsify.
+    foreignKey({
+      columns: [table.tierId, table.communityId],
+      foreignColumns: [userTiers.id, userTiers.communityId],
+      name: "user_subscription_tier_community_fk",
+    }),
     // You cannot subscribe to yourself, exactly as `follow_no_self` forbids
     // following yourself.
     check("user_subscription_no_self", sql`${table.subscriberId} <> ${table.ownerId}`),
     // Nobody holds two live memberships to the same person — which is the
     // shape of accidentally paying twice.
+    // `community_id` JOINS THE KEY (Phase 5) — a community tier's owner is a
+    // person who may also sell personal tiers, so without it a perfectly
+    // reasonable second purchase violated this index. READ THE INDEX BELOW
+    // TOO: this one alone does not hold the personal case.
     uniqueIndex("user_subscription_one_active")
-      .on(table.subscriberId, table.ownerId)
+      .on(table.subscriberId, table.ownerId, table.communityId)
       .where(sql`${table.status} = 'active'`),
+    // AND ITS OTHER HALF, which is not optional. Postgres treats NULLs as
+    // DISTINCT in a unique index, so the index above does NOT constrain
+    // personal rows at all — two of them, each with a NULL community, both
+    // pass it. `NULLS NOT DISTINCT` says what is meant and needs PG 15, but
+    // drizzle 0.45's pg builder does not expose it, and an expression index
+    // (coalescing the NULL to a sentinel) cannot be named as an `ON CONFLICT`
+    // target, which `claimPending` depends on.
+    //
+    // So the personal case gets its own partial index. Two plain indexes,
+    // each targetable, together meaning exactly "one live membership per
+    // (subscriber, scope)".
+    uniqueIndex("user_subscription_one_active_personal")
+      .on(table.subscriberId, table.ownerId)
+      .where(sql`${table.status} = 'active' and ${table.communityId} is null`),
     /**
      * AND NOBODY HOLDS TWO PENDING ONES EITHER — the same shape, one step
      * earlier, and the one that actually happens.
@@ -465,9 +515,24 @@ export const userSubscriptions = pgTable(
      * above, so a settled or cancelled subscription never blocks a later
      * purchase.
      */
+    // Scoped the same way and for the same reason — see the active pair above.
     uniqueIndex("user_subscription_one_pending")
-      .on(table.subscriberId, table.ownerId)
+      .on(table.subscriberId, table.ownerId, table.communityId)
       .where(sql`${table.status} = 'pending'`),
+    // AND ITS OTHER HALF, which is not optional. Postgres treats NULLs as
+    // DISTINCT in a unique index, so the index above does NOT constrain
+    // personal rows at all — two of them, each with a NULL community, both
+    // pass it. `NULLS NOT DISTINCT` says what is meant and needs PG 15, but
+    // drizzle 0.45's pg builder does not expose it, and an expression index
+    // (coalescing the NULL to a sentinel) cannot be named as an `ON CONFLICT`
+    // target, which `claimPending` depends on.
+    //
+    // So the personal case gets its own partial index. Two plain indexes,
+    // each targetable, together meaning exactly "one live membership per
+    // (subscriber, scope)".
+    uniqueIndex("user_subscription_one_pending_personal")
+      .on(table.subscriberId, table.ownerId)
+      .where(sql`${table.status} = 'pending' and ${table.communityId} is null`),
     index("user_subscription_owner_idx").on(table.ownerId),
     /**
      * Task 3 of Phase 5b (the retirement sweep): the covering index Task 1's review

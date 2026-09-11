@@ -148,6 +148,7 @@ function subscriptionRow(overrides: Partial<UserSubscriptionRow> = {}): UserSubs
     status: "active",
     kind: "paid",
     currentPeriodEnd: new Date("2026-09-21T09:00:00.000Z"),
+    communityId: null,
     createdAt: new Date("2026-08-01T09:00:00.000Z"),
     ...overrides,
   };

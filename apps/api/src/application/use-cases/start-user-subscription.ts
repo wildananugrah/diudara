@@ -257,7 +257,7 @@ export class StartUserSubscription {
       // one. What is NOT acceptable is the SENTENCE — see that method's own
       // docstring for why it must say the membership ended, never "you are
       // already an active member".
-      const existing = await this.subscriptions.findActiveFor(subscriber.id, owner.id);
+      const existing = await this.subscriptions.findActiveFor(subscriber.id, owner.id, null /* personal membership — see the port's note on this argument */);
       if (existing) {
         this.refuseExistingMembership(existing);
       }
@@ -361,7 +361,12 @@ export class StartUserSubscription {
     // `UserPurchaseUnitOfWorkPort`, and `claimPending` for the one thing that
     // had to change to survive being called in here.
     const claim = await this.purchase.run(async ({ subscriptions }) => {
-      await subscriptions.retireExpired(subscriber.id, owner.id, this.clock.now());
+      await subscriptions.retireExpired(
+        subscriber.id,
+        owner.id,
+        null /* personal membership — see the port's note on this argument */,
+        this.clock.now()
+      );
 
       // The CLEAN refusal of a double purchase. `user_subscription_one_active`
       // (the partial unique index) would reject the second ACTIVE row anyway, but
@@ -382,7 +387,7 @@ export class StartUserSubscription {
       // 5b did not narrow it and did not need to: `retireExpired` above has
       // already moved the lapsed row out of `active`, so this read no longer
       // SEES one. The guard kept its predicate; the row stopped matching it.
-      const existing = await subscriptions.findActiveFor(subscriber.id, owner.id);
+      const existing = await subscriptions.findActiveFor(subscriber.id, owner.id, null /* personal membership — see the port's note on this argument */);
       if (existing) {
         // See `refuseExistingMembership`'s own docstring for the full
         // "one refusal, two different pieces of news" reasoning — shared with

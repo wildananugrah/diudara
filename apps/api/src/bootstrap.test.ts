@@ -228,6 +228,13 @@ const fakeUserTierRepository: UserTierRepositoryPort = {
   async deactivate() {
     return null;
   },
+  /**
+   * Phase 5. Not reached by these tests — community tiers have their own
+   * suite. Present so this fake satisfies the port.
+   */
+  async listActiveByCommunity() {
+    return [];
+  },
 };
 
 /** Task 2 of Phase 5a's `user_subscription`/`user_transaction` tables, faked the same shallow way `fakeUserTierRepository` above is. */

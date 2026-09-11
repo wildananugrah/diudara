@@ -222,7 +222,7 @@ describe("DrizzleUserSubscriptionRepository", () => {
     });
     await subs.activate(created.id, new Date("2026-09-18T00:00:00.000Z"));
 
-    const found = await subs.findActiveFor(bob.id, alice.id);
+    const found = await subs.findActiveFor(bob.id, alice.id, null /* personal membership — Phase 5 scope */);
 
     expect(found?.id).toBe(created.id);
   });
@@ -239,7 +239,7 @@ describe("DrizzleUserSubscriptionRepository", () => {
     // Created but never activated — still 'pending'.
     await subs.create({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id });
 
-    expect(await subs.findActiveFor(bob.id, alice.id)).toBe(null);
+    expect(await subs.findActiveFor(bob.id, alice.id, null /* personal membership — Phase 5 scope */)).toBe(null);
   });
 
   /**
@@ -258,7 +258,7 @@ describe("DrizzleUserSubscriptionRepository", () => {
   it("findActiveFor returns the free row, and reports kind", async () => {
     const { subscriberId, ownerId } = await seedFreeSubscription();
 
-    const row = await subs.findActiveFor(subscriberId, ownerId);
+    const row = await subs.findActiveFor(subscriberId, ownerId, null /* personal membership — Phase 5 scope */);
 
     expect(row?.kind).toBe("free");
     expect(row?.currentPeriodEnd).toBe(null);
@@ -381,7 +381,7 @@ describe("DrizzleUserSubscriptionRepository", () => {
       expect(await subs.findTransactionById(junk)).toBe(null);
       expect(await subs.findById(junk)).toBe(null);
       expect(await subs.attachGatewayReference(junk, "inv-1", "https://x/inv-1")).toBe(false);
-      expect(await subs.findActiveFor(junk, junk)).toBe(null);
+      expect(await subs.findActiveFor(junk, junk, null /* personal membership — Phase 5 scope */)).toBe(null);
     }
   });
 
@@ -724,26 +724,26 @@ describe("DrizzleUserSubscriptionRepository", () => {
   it("retires an ACTIVE subscription whose period has passed, and frees the active slot", async () => {
     const { subscriberId, ownerId, tierId } = await seedActiveSubscription({ periodEnd: PAST });
 
-    expect(await subs.retireExpired(subscriberId, ownerId, NOW)).toBe(true);
+    expect(await subs.retireExpired(subscriberId, ownerId, null /* personal membership — Phase 5 scope */, NOW)).toBe(true);
 
     // The whole point: the partial unique index no longer holds the slot —
     // a brand new subscription for the same pair can be created AND activated.
     const fresh = await subs.create({ subscriberId, tierId, ownerId });
     await subs.activate(fresh.id, FUTURE);
-    expect((await subs.findActiveFor(subscriberId, ownerId))?.id).toBe(fresh.id);
+    expect((await subs.findActiveFor(subscriberId, ownerId, null /* personal membership — Phase 5 scope */))?.id).toBe(fresh.id);
   });
 
   it("does NOT retire a subscription whose period is still running", async () => {
     const { subscriberId, ownerId } = await seedActiveSubscription({ periodEnd: FUTURE });
 
-    expect(await subs.retireExpired(subscriberId, ownerId, NOW)).toBe(false);
-    expect(await subs.findActiveFor(subscriberId, ownerId)).not.toBe(null);
+    expect(await subs.retireExpired(subscriberId, ownerId, null /* personal membership — Phase 5 scope */, NOW)).toBe(false);
+    expect(await subs.findActiveFor(subscriberId, ownerId, null /* personal membership — Phase 5 scope */)).not.toBe(null);
   });
 
   it("lists expired active subscriptions for the sweep, and excludes live ones", async () => {
     const expired = await seedActiveSubscription({ periodEnd: PAST });
     await seedActiveSubscription({ periodEnd: FUTURE });
-    const expiredRow = await subs.findActiveFor(expired.subscriberId, expired.ownerId);
+    const expiredRow = await subs.findActiveFor(expired.subscriberId, expired.ownerId, null /* personal membership — Phase 5 scope */);
 
     const result = await subs.listExpiredActive(NOW, 10);
 
@@ -758,7 +758,7 @@ describe("DrizzleUserSubscriptionRepository", () => {
   it("does NOT retire a CANCELLED subscription whose period has passed", async () => {
     const { subscriberId, ownerId, id } = await seedCancelledSubscription({ periodEnd: PAST });
 
-    expect(await subs.retireExpired(subscriberId, ownerId, NOW)).toBe(false);
+    expect(await subs.retireExpired(subscriberId, ownerId, null /* personal membership — Phase 5 scope */, NOW)).toBe(false);
 
     const row = await subs.findById(id);
     expect(row?.status).toBe("cancelled");
@@ -865,7 +865,7 @@ describe("DrizzleUserSubscriptionRepository.findPendingFor", () => {
       kind: "free",
     });
 
-    const found = await subs.findPendingFor(bob.id, alice.id);
+    const found = await subs.findPendingFor(bob.id, alice.id, null /* personal membership — Phase 5 scope */);
 
     expect(found?.id).toBe(claim.subscription.id);
     expect(found?.status).toBe("pending");
@@ -883,7 +883,7 @@ describe("DrizzleUserSubscriptionRepository.findPendingFor", () => {
   it("finds a PENDING PAID checkout for the pair too — this read is kind-agnostic on purpose", async () => {
     const { subscriberId, ownerId, id } = await seedPendingSubscription();
 
-    const found = await subs.findPendingFor(subscriberId, ownerId);
+    const found = await subs.findPendingFor(subscriberId, ownerId, null /* personal membership — Phase 5 scope */);
 
     expect(found?.id).toBe(id);
     expect(found?.kind).toBe("paid");
@@ -893,7 +893,7 @@ describe("DrizzleUserSubscriptionRepository.findPendingFor", () => {
     const alice = await createUser("alice");
     const bob = await createUser("bob");
 
-    expect(await subs.findPendingFor(bob.id, alice.id)).toBe(null);
+    expect(await subs.findPendingFor(bob.id, alice.id, null /* personal membership — Phase 5 scope */)).toBe(null);
   });
 
   /**
@@ -907,7 +907,7 @@ describe("DrizzleUserSubscriptionRepository.findPendingFor", () => {
   it("returns null for an ACTIVE membership — status-only, an active row is not pending", async () => {
     const { subscriberId, ownerId } = await seedFreeSubscription();
 
-    expect(await subs.findPendingFor(subscriberId, ownerId)).toBe(null);
+    expect(await subs.findPendingFor(subscriberId, ownerId, null /* personal membership — Phase 5 scope */)).toBe(null);
   });
 
   it("never matches the wrong pair — a pending request for a different owner or subscriber", async () => {
@@ -922,8 +922,8 @@ describe("DrizzleUserSubscriptionRepository.findPendingFor", () => {
     });
     await subs.claimPending({ subscriberId: bob.id, tierId: tier.id, ownerId: alice.id, kind: "free" });
 
-    expect(await subs.findPendingFor(stranger.id, alice.id)).toBe(null);
-    expect(await subs.findPendingFor(bob.id, stranger.id)).toBe(null);
+    expect(await subs.findPendingFor(stranger.id, alice.id, null /* personal membership — Phase 5 scope */)).toBe(null);
+    expect(await subs.findPendingFor(bob.id, stranger.id, null /* personal membership — Phase 5 scope */)).toBe(null);
   });
 });
 

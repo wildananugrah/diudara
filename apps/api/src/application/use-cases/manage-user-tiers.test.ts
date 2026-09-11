@@ -29,6 +29,7 @@ function fakeTierRepository(seed: UserTierRow[] = []) {
         billingCycle: input.billingCycle,
         isActive: true,
         createdAt: new Date("2026-08-20T00:00:00Z"),
+        communityId: null,
       };
       rows.push(row);
       return { ...row };
@@ -49,6 +50,13 @@ function fakeTierRepository(seed: UserTierRow[] = []) {
       row.isActive = false;
       return { ...row };
     },
+  /**
+   * Phase 5. Not reached by these tests — community tiers have their own
+   * suite. Present so this fake satisfies the port.
+   */
+  async listActiveByCommunity() {
+    return [];
+  },
   };
   return { repository, rows };
 }
@@ -272,6 +280,7 @@ describe("ManageUserTiers.list", () => {
         billingCycle: "monthly",
         isActive: true,
         createdAt: new Date(),
+        communityId: null,
       },
       {
         id: "tier-2",
@@ -281,6 +290,7 @@ describe("ManageUserTiers.list", () => {
         billingCycle: "monthly",
         isActive: false,
         createdAt: new Date(),
+        communityId: null,
       },
       {
         id: "tier-3",
@@ -290,6 +300,7 @@ describe("ManageUserTiers.list", () => {
         billingCycle: "monthly",
         isActive: true,
         createdAt: new Date(),
+        communityId: null,
       },
     ]);
     const { repository: payouts } = fakePayoutRepository();
@@ -311,6 +322,7 @@ describe("ManageUserTiers.deactivate", () => {
         billingCycle: "monthly",
         isActive: true,
         createdAt: new Date(),
+        communityId: null,
       },
     ]);
   }

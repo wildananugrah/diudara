@@ -103,6 +103,7 @@ function tierRow(overrides: Partial<UserTierRow> = {}): UserTierRow {
     billingCycle: "monthly",
     isActive: true,
     createdAt: new Date("2026-08-20T00:00:00Z"),
+    communityId: null,
     ...overrides,
   };
 }
@@ -126,6 +127,13 @@ function fakeTierRepository(seed: UserTierRow[]) {
     async deactivate() {
       throw new Error("StartUserSubscription must never deactivate a tier");
     },
+  /**
+   * Phase 5. Not reached by these tests — community tiers have their own
+   * suite. Present so this fake satisfies the port.
+   */
+  async listActiveByCommunity() {
+    return [];
+  },
   };
   return repository;
 }
@@ -180,7 +188,12 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
    * be resolved — is part of this task's contract, not an implementation
    * detail. A row-count assertion alone cannot see either.
    */
-  const retireExpiredCalls: { subscriberId: string; ownerId: string; now: Date }[] = [];
+  const retireExpiredCalls: {
+    subscriberId: string;
+    ownerId: string;
+    communityId: string | null;
+    now: Date;
+  }[] = [];
   const repository: UserSubscriptionRepositoryPort = {
     /**
      * Only `SweepStalePendingCheckouts` reads this (final review, I-1) — nothing on
@@ -213,6 +226,7 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
         // to the schema's own `DEFAULT 'paid'` (Task 1).
         kind: input.kind ?? "paid",
         currentPeriodEnd: null,
+        communityId: null,
         createdAt: new Date("2026-08-20T00:00:00Z"),
       };
       subscriptions.push(row);
@@ -244,12 +258,16 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
      * NOT match — SQL's `NULL <= now` is not true either, and that is what
      * leaves the "ended" refusal reachable for such a row.
      */
-    async retireExpired(subscriberId, ownerId, now) {
-      retireExpiredCalls.push({ subscriberId, ownerId, now });
+    async retireExpired(subscriberId, ownerId, communityId, now) {
+      retireExpiredCalls.push({ subscriberId, ownerId, communityId, now });
       const row = subscriptions.find(
         (r) =>
           r.subscriberId === subscriberId &&
           r.ownerId === ownerId &&
+          // Scoped exactly as the real query is (Phase 5) — a fake that
+          // ignored this would let a community purchase retire a personal row
+          // and the test would never notice.
+          r.communityId === communityId &&
           r.status === "active" &&
           r.currentPeriodEnd !== null &&
           r.currentPeriodEnd <= now
@@ -714,6 +732,7 @@ describe("StartUserSubscription — the refusals", () => {
           status: "active",
           kind: "paid",
           currentPeriodEnd: new Date("2099-01-01T00:00:00Z"),
+          communityId: null,
           createdAt: new Date("2026-08-20T00:00:00Z"),
         },
       ],
@@ -741,6 +760,7 @@ describe("StartUserSubscription — the refusals", () => {
           status: "cancelled",
           kind: "paid",
           currentPeriodEnd: new Date("2026-01-01T00:00:00Z"),
+          communityId: null,
           createdAt: new Date("2025-12-01T00:00:00Z"),
         },
       ],
@@ -763,6 +783,7 @@ describe("StartUserSubscription — the refusals", () => {
           status: "active",
           kind: "paid",
           currentPeriodEnd: new Date("2099-01-01T00:00:00Z"),
+          communityId: null,
           createdAt: new Date("2026-08-20T00:00:00Z"),
         },
       ],
@@ -843,6 +864,7 @@ describe("StartUserSubscription — a second tap must not mint a second invoice"
           status: "pending",
           kind: "paid",
           currentPeriodEnd: null,
+          communityId: null,
           createdAt: new Date("2026-08-20T00:00:00Z"),
         },
       ],
@@ -1001,6 +1023,7 @@ describe("StartUserSubscription — a LAPSED membership is retired, and the purc
       status: "active",
       kind: "paid",
       currentPeriodEnd: new Date("2026-08-19T12:00:00.000Z"),
+      communityId: null,
       createdAt: new Date("2026-07-19T12:00:00.000Z"),
     };
   }
@@ -1032,7 +1055,7 @@ describe("StartUserSubscription — a LAPSED membership is retired, and the purc
     // The read the guard itself makes, and the read `user_subscription_one_active`
     // arbitrates on. If the old row were still `active` here, Task 7's webhook
     // would hit the index instead of activating this purchase.
-    expect(await repository.findActiveFor(SUBSCRIBER_ID, OWNER_ID)).toBeNull();
+    expect(await repository.findActiveFor(SUBSCRIBER_ID, OWNER_ID, null /* personal membership — Phase 5 scope */)).toBeNull();
   });
 
   /**
@@ -1114,7 +1137,10 @@ describe("StartUserSubscription — a LAPSED membership is retired, and the purc
     await buy(useCase);
 
     expect(retireExpiredCalls).toEqual([
-      { subscriberId: SUBSCRIBER_ID, ownerId: OWNER_ID, now: NOW },
+      // `communityId: null` is Phase 5's scope argument, and asserting it
+      // here is what would catch a personal purchase retiring a community
+      // row: the slot this frees is per-community now.
+      { subscriberId: SUBSCRIBER_ID, ownerId: OWNER_ID, communityId: null, now: NOW },
     ]);
   });
 
@@ -1167,6 +1193,7 @@ describe("StartUserSubscription — an `active` row with no period end", () => {
       status: "active",
       kind: "paid",
       currentPeriodEnd: null,
+      communityId: null,
       createdAt: new Date("2026-07-19T12:00:00.000Z"),
     };
   }
@@ -1415,6 +1442,7 @@ describe("StartUserSubscription — requesting a FREE tier (Task 4)", () => {
       status: "pending",
       kind: "free",
       currentPeriodEnd: null,
+      communityId: null,
     });
     // THE POINT OF THE TASK, asserted rather than assumed: nothing is ever
     // owed for a free membership, so nothing past the pending row itself is
@@ -1466,6 +1494,7 @@ describe("StartUserSubscription — requesting a FREE tier (Task 4)", () => {
       status: "active",
       kind: "paid",
       currentPeriodEnd: new Date("2026-08-19T12:00:00.000Z"),
+      communityId: null,
       createdAt: new Date("2026-07-19T12:00:00.000Z"),
     };
     const { useCase, subscriptions, retireExpiredCalls } = build({

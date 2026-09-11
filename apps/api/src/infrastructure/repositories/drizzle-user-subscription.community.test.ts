@@ -112,7 +112,7 @@ describe("findActiveForCommunity — the conflation this phase must not have", (
     // `findActiveFor` is keyed on (subscriber, owner) and the owner is the
     // same person, so this is the assertion that proves the two lookups are
     // genuinely different questions rather than one question twice.
-    const row = await repository.findActiveFor(communityBuyer.id, owner.id);
+    const row = await repository.findActiveFor(communityBuyer.id, owner.id, null /* personal membership — Phase 5 scope */);
 
     // It DOES find the row — the subscription really is owned by this person.
     // That is exactly why the community gate cannot use this method, and why

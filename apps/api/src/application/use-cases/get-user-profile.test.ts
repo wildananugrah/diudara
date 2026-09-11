@@ -110,6 +110,7 @@ function tierRow(overrides: Partial<UserTierRow> = {}): UserTierRow {
     billingCycle: "monthly",
     isActive: true,
     createdAt: new Date("2026-01-02T00:00:00Z"),
+    communityId: null,
     ...overrides,
   };
 }
@@ -149,6 +150,13 @@ function fakeUserTierRepository(rows: UserTierRow[]): UserTierRepositoryPort & {
     async deactivate() {
       throw new Error("not used in these tests");
     },
+  /**
+   * Phase 5. Not reached by these tests — community tiers have their own
+   * suite. Present so this fake satisfies the port.
+   */
+  async listActiveByCommunity() {
+    return [];
+  },
   };
 }
 
@@ -197,6 +205,7 @@ function fakeSubscriptions(
         // Task 1's own predicate test, not this profile-read fake's concern.
         kind: "paid",
         currentPeriodEnd: row.currentPeriodEnd,
+        communityId: null,
         createdAt: new Date("2026-08-01T00:00:00.000Z"),
       };
     },
@@ -652,6 +661,7 @@ describe("GetUserProfile.execute — viewerRequestPending wiring (Task 6)", () =
       status: "pending",
       kind: "free",
       currentPeriodEnd: null,
+      communityId: null,
       createdAt: new Date("2026-08-19T00:00:00.000Z"),
     };
   }
@@ -771,6 +781,11 @@ describe("GetUserProfile.executeOwn (authenticated, by id)", () => {
         throw new Error("must not be called");
       },
       async listActiveByOwner() {
+        throw new Error("must not be called");
+      },
+      // Phase 5. Same contract as every other method on this fake: GET
+      // /users/me is not any offer, personal or community.
+      async listActiveByCommunity() {
         throw new Error("must not be called");
       },
       async deactivate() {

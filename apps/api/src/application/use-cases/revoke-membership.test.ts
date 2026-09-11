@@ -65,7 +65,7 @@ describe("RevokeMembership", () => {
 
     await revoke.execute({ ownerId: rina.id, handle: budi.handle });
 
-    expect(await subs.findActiveFor(budi.id, rina.id)).toBeNull();
+    expect(await subs.findActiveFor(budi.id, rina.id, null /* personal membership — Phase 5 scope */)).toBeNull();
   });
 
   /**
@@ -83,7 +83,7 @@ describe("RevokeMembership", () => {
       ConflictError
     );
 
-    const still = await subs.findActiveFor(budi.id, rina.id);
+    const still = await subs.findActiveFor(budi.id, rina.id, null /* personal membership — Phase 5 scope */);
     expect(still?.status).toBe("active");
   });
 
@@ -101,7 +101,7 @@ describe("RevokeMembership", () => {
 
     const second = await memberOf(rina.id, budi.id, "free");
 
-    expect((await subs.findActiveFor(budi.id, rina.id))?.id).toBe(second);
+    expect((await subs.findActiveFor(budi.id, rina.id, null /* personal membership — Phase 5 scope */))?.id).toBe(second);
   });
 
   /**
@@ -126,7 +126,7 @@ describe("RevokeMembership", () => {
       revoke.execute({ ownerId: stranger.id, handle: budi.handle })
     ).rejects.toThrow(NotFoundError);
 
-    expect((await subs.findActiveFor(budi.id, rina.id))?.status).toBe("active");
+    expect((await subs.findActiveFor(budi.id, rina.id, null /* personal membership — Phase 5 scope */))?.status).toBe("active");
   });
 
   /**

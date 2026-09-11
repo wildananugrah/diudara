@@ -696,7 +696,13 @@ describe("SweepOrphanMedia", () => {
 class FakeExpiredMembershipRepository {
   readonly rows = new Map<
     string,
-    { subscriberId: string; ownerId: string; status: string; currentPeriodEnd: Date }
+    {
+      subscriberId: string;
+      ownerId: string;
+      status: string;
+      currentPeriodEnd: Date;
+      communityId: string | null;
+    }
   >();
   readonly failFor = new Set<string>();
 
@@ -706,12 +712,15 @@ class FakeExpiredMembershipRepository {
     ownerId: string;
     status: string;
     currentPeriodEnd: Date;
+    /** Phase 5. Defaults to a PERSONAL membership, which is what every case here is. */
+    communityId?: string | null;
   }): void {
     this.rows.set(row.id, {
       subscriberId: row.subscriberId,
       ownerId: row.ownerId,
       status: row.status,
       currentPeriodEnd: row.currentPeriodEnd,
+      communityId: row.communityId ?? null,
     });
   }
 
@@ -722,17 +731,33 @@ class FakeExpiredMembershipRepository {
   async listExpiredActive(
     now: Date,
     limit: number
-  ): Promise<{ id: string; subscriberId: string; ownerId: string }[]> {
+  ): Promise<{ id: string; subscriberId: string; ownerId: string; communityId: string | null }[]> {
     return [...this.rows.entries()]
       .filter(([, row]) => row.status === "active" && row.currentPeriodEnd.getTime() <= now.getTime())
       .sort((a, b) => a[1].currentPeriodEnd.getTime() - b[1].currentPeriodEnd.getTime())
       .slice(0, limit)
-      .map(([id, row]) => ({ id, subscriberId: row.subscriberId, ownerId: row.ownerId }));
+      .map(([id, row]) => ({
+        id,
+        subscriberId: row.subscriberId,
+        ownerId: row.ownerId,
+        communityId: row.communityId,
+      }));
   }
 
-  async retireExpired(subscriberId: string, ownerId: string, now: Date): Promise<boolean> {
+  async retireExpired(
+    subscriberId: string,
+    ownerId: string,
+    communityId: string | null,
+    now: Date
+  ): Promise<boolean> {
     const entry = [...this.rows.entries()].find(
-      ([, row]) => row.subscriberId === subscriberId && row.ownerId === ownerId
+      ([, row]) =>
+        row.subscriberId === subscriberId &&
+        row.ownerId === ownerId &&
+        // Scoped as the real query is (Phase 5): unscoped, this fake would
+        // retire whichever row matched the pair first and the sweep's own
+        // per-community behaviour would go untested.
+        row.communityId === communityId
     );
     if (entry === undefined) return false;
     const [id, row] = entry;
