@@ -3292,3 +3292,154 @@ button:disabled {
   color: var(--ink-700);
   cursor: not-allowed;
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 4b — the syllabus.
+
+   Two panes wide, ONE narrow. The `data-viewing` attribute on the container
+   is what swaps them on a phone: the syllabus is the screen until a lesson is
+   chosen, then the lesson is, with a way back — the same shape the chat panel
+   uses rather than two layouts to keep in sync.
+   --------------------------------------------------------------------------- */
+
+.materi-tab {
+  display: grid;
+  grid-template-columns: minmax(12rem, 18rem) 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.materi-section {
+  margin-bottom: 1rem;
+}
+
+.materi-section h4 {
+  margin: 0 0 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.materi-section ul {
+  display: grid;
+  gap: 0.125rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.materi-section li {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.materi-section li > button:first-child {
+  flex: 1;
+  min-width: 0;
+  padding: 0.375rem 0.5rem;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-700);
+  font-size: 0.8125rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.materi-section li > button:first-child:hover {
+  background: var(--awan);
+}
+
+/* The selected lesson. `aria-current` carries it for assistive technology;
+   the tint and weight are what a sighted reader sees — never colour alone. */
+.materi-section li > button[aria-current="true"] {
+  background: var(--awan);
+  color: var(--langit);
+  font-weight: 700;
+}
+
+.materi-viewer {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.materi-viewer h4 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.materi-body {
+  /* Preserves the line breaks somebody typed without parsing anything as
+     markup — the rule `.post-card-body` follows. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.875rem;
+  color: var(--ink-700);
+}
+
+.materi-back {
+  /* Only ever needed in the one-column layout — hidden wide, where both panes
+     are visible and there is nothing to go back from. */
+  display: none;
+  margin-bottom: 0.5rem;
+  border: none;
+  background: none;
+  color: var(--ink-500);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.materi-form {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.materi-form label {
+  font-size: 0.75rem;
+  color: var(--ink-500);
+}
+
+.materi-form input,
+.materi-form textarea {
+  padding: 0.375rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 0.8125rem;
+}
+
+.materi-form button {
+  justify-self: start;
+  padding: 0.25rem 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+@media (max-width: 720px) {
+  .materi-tab {
+    grid-template-columns: 1fr;
+  }
+
+  /* One pane at a time: the syllabus IS the screen until a lesson is chosen. */
+  .materi-tab[data-viewing="lesson"] .materi-syllabus {
+    display: none;
+  }
+
+  .materi-tab:not([data-viewing="lesson"]) .materi-viewer {
+    display: none;
+  }
+
+  .materi-back {
+    display: block;
+  }
+}

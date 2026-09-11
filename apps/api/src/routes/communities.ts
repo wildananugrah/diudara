@@ -98,6 +98,20 @@ const createCommunityTierSchema = z.object({
 
 const subscribeToCommunitySchema = z.object({ tierId: z.string().uuid() });
 
+/** Phase 4b. SHAPE only — the trim, the length and the owner rule are the use case's. */
+const createSectionSchema = z.object({
+  title: z.string().trim().min(1).max(160),
+  position: z.number().int().min(0),
+});
+
+const createLessonSchema = z.object({
+  sectionId: z.string().uuid(),
+  title: z.string().trim().min(1).max(160),
+  body: z.string().min(1),
+  position: z.number().int().min(0),
+  documentId: z.string().uuid().optional(),
+});
+
 /**
  * A community tier as the wire sees it. `ownerId` and `communityId` are
  * DROPPED here: the first is a payout destination and nobody's business, and
@@ -179,6 +193,8 @@ export function communityRoutes(
     | "manageCommunityTiers"
     | "startCommunitySubscription"
     | "getCommunityStats"
+    | "getSyllabus"
+    | "manageSyllabus"
     | "maxPostImages"
   >
 ) {
@@ -474,6 +490,75 @@ export function communityRoutes(
       await deps.getCommunityStats.execute({
         slug: c.req.param("slug"),
         viewerId: c.get("userId"),
+      })
+    );
+  });
+
+  // ---- Phase 4b, the syllabus ---------------------------------------------
+
+  app.get<"/:slug/syllabus">("/:slug/syllabus", async (c) => {
+    // PUBLIC, like every other read on this router. The paid material is the
+    // attached document, whose gate is Phase 4a's.
+    return c.json(await deps.getSyllabus.execute({ slug: c.req.param("slug") }));
+  });
+
+  app.post<"/:slug/sections">(
+    "/:slug/sections",
+    requireAuth,
+    validate(createSectionSchema),
+    async (c) => {
+      const input = c.get("validated") as { title: string; position: number };
+      return c.json(
+        await deps.manageSyllabus.createSection({
+          slug: c.req.param("slug"),
+          ownerId: c.get("userId"),
+          title: input.title,
+          position: input.position,
+        }),
+        201
+      );
+    }
+  );
+
+  app.post<"/:slug/lessons">(
+    "/:slug/lessons",
+    requireAuth,
+    validate(createLessonSchema),
+    async (c) => {
+      const input = c.get("validated") as {
+        sectionId: string;
+        title: string;
+        body: string;
+        position: number;
+        documentId?: string;
+      };
+      return c.json(
+        await deps.manageSyllabus.createLesson({
+          slug: c.req.param("slug"),
+          ownerId: c.get("userId"),
+          ...input,
+        }),
+        201
+      );
+    }
+  );
+
+  app.delete<"/:slug/sections/:id">("/:slug/sections/:id", requireAuth, async (c) => {
+    return c.json(
+      await deps.manageSyllabus.deleteSection({
+        slug: c.req.param("slug"),
+        ownerId: c.get("userId"),
+        sectionId: c.req.param("id"),
+      })
+    );
+  });
+
+  app.delete<"/:slug/lessons/:id">("/:slug/lessons/:id", requireAuth, async (c) => {
+    return c.json(
+      await deps.manageSyllabus.deleteLesson({
+        slug: c.req.param("slug"),
+        ownerId: c.get("userId"),
+        lessonId: c.req.param("id"),
       })
     );
   });
