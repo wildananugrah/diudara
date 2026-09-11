@@ -268,6 +268,13 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
   async findActiveFor() {
     return null;
   },
+  /**
+   * Phase 5. Not reached by these smoke tests — the community gate has its
+   * own suite. Present so this fake satisfies the port.
+   */
+  async findActiveForCommunity() {
+    return null;
+  },
   async findPendingFor() {
     return null;
   },

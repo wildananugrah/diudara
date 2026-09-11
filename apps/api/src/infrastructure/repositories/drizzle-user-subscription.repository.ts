@@ -483,6 +483,40 @@ export class DrizzleUserSubscriptionRepository implements UserSubscriptionReposi
       .limit(1);
   }
 
+  /**
+   * See the port's docstring for why this exists rather than reusing
+   * `findActiveFor`. The JOIN is what keys it on the community instead of on
+   * the owner, and it is the whole of the difference between the two
+   * questions.
+   *
+   * STATUS-ONLY, matching `activeMembershipQuery` above and for the identical
+   * reason: the caller passes the row to `membershipStanding`, which needs
+   * `kind` and `current_period_end` to tell "member" from "lapsed". Filtering
+   * the period here would hide a lapsed paid row that a second-purchase
+   * refusal still has to see.
+   */
+  async findActiveForCommunity(
+    subscriberId: string,
+    communityId: string
+  ): Promise<UserSubscriptionRow | null> {
+    if (!UUID_PATTERN.test(subscriberId) || !UUID_PATTERN.test(communityId)) {
+      return null;
+    }
+    const [row] = await this.db
+      .select({ subscription: userSubscriptions })
+      .from(userSubscriptions)
+      .innerJoin(userTiers, eq(userTiers.id, userSubscriptions.tierId))
+      .where(
+        and(
+          eq(userSubscriptions.subscriberId, subscriberId),
+          eq(userTiers.communityId, communityId),
+          eq(userSubscriptions.status, "active"),
+        ),
+      )
+      .limit(1);
+    return row?.subscription ?? null;
+  }
+
   async findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null> {
     if (!UUID_PATTERN.test(subscriberId) || !UUID_PATTERN.test(ownerId)) {
       return null;

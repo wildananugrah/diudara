@@ -361,9 +361,29 @@ export const userTiers = pgTable(
     // unaffected — see the spec's §4.
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Phase 5. NULL means a PERSONAL tier — a tier on somebody's profile,
+    // which is what every row predating this column is, and what nothing in
+    // this phase changes. Non-null means a COMMUNITY tier.
+    //
+    // One column rather than a `community_tier` table, for the reason Phase 2
+    // recorded when community posts reused `post`: the invoice path, the
+    // webhook, `user_transaction`, the five renewal passes and
+    // `membership_reminder` are reused untouched, and the alternative is
+    // Phases 5a and 5b rebuilt beside themselves.
+    //
+    // `ownerId` stays the PAYOUT destination either way; for a community tier
+    // it is the community's owner, which is what keeps
+    // `user_subscription_tier_owner_fk` holding unchanged.
+    communityId: uuid("community_id").references(() => communities.id),
   },
   (table) => [
     index("user_tier_owner_idx").on(table.ownerId),
+    // The community's offer — `GET /communities/:slug/tiers`. PARTIAL on
+    // non-null, so every personal tier (which is every row today) stays out
+    // of this index entirely.
+    index("user_tier_community_idx")
+      .on(table.communityId)
+      .where(sql`${table.communityId} is not null`),
     // Redundant on its own — `id` is already unique. It exists ONLY so
     // `user_subscription` can carry a composite foreign key against
     // (id, owner_id), which is what makes its denormalised `owner_id`
@@ -804,6 +824,15 @@ export const communityDocuments = pgTable(
     // document has exactly one referent and no second surface that might
     // still want it.
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    // Phase 5. `false` means any member may download it — Phase 4a's rule, and
+    // what every row uploaded before this column keeps. `true` means an ACTIVE
+    // SUBSCRIPTION TO THIS COMMUNITY is required, which is the one thing a
+    // paid tier buys this phase.
+    //
+    // Per DOCUMENT and not per community: an owner marks the material worth
+    // paying for and leaves the rest open, which is what keeps a community
+    // with paid tiers still evaluable before joining.
+    membersOnly: boolean("members_only").notNull().default(false),
   },
   (table) => [
     // The library listing. PARTIAL, so deleted rows leave the index entirely

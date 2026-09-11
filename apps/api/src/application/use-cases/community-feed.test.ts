@@ -252,6 +252,13 @@ class FakeSubscriptions implements UserSubscriptionRepositoryPort {
   async findActiveFor(): Promise<never> {
     return this.unused();
   }
+  /**
+   * Phase 5. Not reached by these tests — the community gate has its own
+   * suite. Present so this fake still satisfies the port.
+   */
+  async findActiveForCommunity() {
+    return null;
+  }
   async findPendingFor(): Promise<never> {
     return this.unused();
   }

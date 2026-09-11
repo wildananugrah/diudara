@@ -304,6 +304,13 @@ function fakeSubscriptionRepository(seed: UserSubscriptionRow[] = []) {
       );
       return row ? { ...row } : null;
     },
+    /**
+     * Phase 5. Not reached by these tests — a community purchase has its own
+     * use case and its own suite. Present so this fake satisfies the port.
+     */
+    async findActiveForCommunity() {
+      return null;
+    },
     async findPendingFor() {
       throw new Error("StartUserSubscription must never read the pending-request flag — GetUserProfile does");
     },

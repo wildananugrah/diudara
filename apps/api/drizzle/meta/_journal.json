@@ -281,6 +281,13 @@
       "when": 1789113311101,
       "tag": "0039_silly_night_thrasher",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1789116427105,
+      "tag": "0040_sour_eternals",
+      "breakpoints": true
     }
   ]
 }

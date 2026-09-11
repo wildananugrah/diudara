@@ -420,6 +420,34 @@ export interface UserSubscriptionRepositoryPort {
    * empty `IN ()` is a SQL error in some drivers and a pointless round trip
    * in all of them.
    */
+  /**
+   * **Phase 5, and it exists BECAUSE `findActiveFor` cannot answer this
+   * question.**
+   *
+   * `findActiveFor` is keyed on (subscriber, OWNER). A community tier's owner
+   * is a person who may also sell personal tiers on their own profile, so
+   * asking it with `community.ownerId` answers TRUE for somebody who
+   * subscribed to that person on their profile and never paid the community —
+   * and, symmetrically, treats a community subscriber as a personal member.
+   *
+   * Neither direction is visible in a test that creates only one kind of
+   * subscription. `drizzle-user-subscription.community.test.ts` holds a single
+   * fixture with both.
+   *
+   * Keyed on the COMMUNITY, reached by joining `user_tier` on `tier_id` — a
+   * join rather than a denormalised `community_id` on this table, because the
+   * tier already names the community and this is only ever an equality match
+   * on a row already being joined. (`community_event.community_id` in Phase 3
+   * IS denormalised, for the opposite reason: the calendar ranges over it.)
+   *
+   * Returns the WHOLE row so the caller decides "member" vs "lapsed" through
+   * `membershipStanding`, exactly as `findActiveFor`'s own docstring requires
+   * — which is also why this is status-only and carries no period filter.
+   */
+  findActiveForCommunity(
+    subscriberId: string,
+    communityId: string
+  ): Promise<UserSubscriptionRow | null>;
   listActiveOwnersAmong(subscriberId: string, ownerIds: string[], now: Date): Promise<string[]>;
   createTransaction(input: {
     userSubscriptionId: string;
