@@ -69,6 +69,36 @@ export interface PostView {
    * not distinguished, because no surface needs to tell them apart.
    */
   commentCount: number;
+  /**
+   * Phase 3. The schedule on a `kegiatan`, `null` on every other post —
+   * which is every personal post and every community `diskusi` or
+   * `pengumuman`.
+   *
+   * Present on EVERY post rather than only events, the stable key set
+   * `membersOnly`, `type` and `lockedMediaCount` already keep: a conditional
+   * key leaves the client unable to tell "this is not an event" from "I was
+   * not told whether this is an event".
+   *
+   * NOT gated by `locked`. A gated post hides its IMAGES (see `media`), and
+   * `visibility` cannot be `members` on a community post at all — the
+   * `post_community_is_public` CHECK forbids it — so an event is never behind
+   * the personal paywall and there is no case where this should be withheld.
+   */
+  event: EventView | null;
+}
+
+/**
+ * The schedule on a `kegiatan`, as the wire sees it. `endsAt` and `location`
+ * are explicitly `null` rather than absent, one level down, for the same
+ * reason `event` itself is always present.
+ */
+export interface EventView {
+  title: string;
+  /** ISO-8601. */
+  startsAt: string;
+  /** ISO-8601, or null on an event with no stated end. */
+  endsAt: string | null;
+  location: string | null;
 }
 
 export interface FeedPage {
@@ -162,6 +192,18 @@ export function toPostView(
     lockedMediaCount: locked ? media.length : 0,
     type: row.type,
     commentCount,
+    // Read straight off the row: the repository's LEFT JOIN already resolved
+    // it, and `null` here means "no `community_event` row", never "not
+    // fetched" — there is no lazy path that could leave it unset.
+    event:
+      row.event === null
+        ? null
+        : {
+            title: row.event.title,
+            startsAt: row.event.startsAt.toISOString(),
+            endsAt: row.event.endsAt === null ? null : row.event.endsAt.toISOString(),
+            location: row.event.location,
+          },
   };
 }
 

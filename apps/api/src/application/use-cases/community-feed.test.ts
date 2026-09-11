@@ -82,6 +82,9 @@ function postRow(overrides: Partial<PostRow> = {}): PostRow {
     type: "diskusi",
     authorHandle: "budi",
     authorDisplayName: "Budi",
+    // Phase 3. `null` is the default because every post is a non-event until
+    // a test says otherwise; an event test overrides it.
+    event: null,
     ...overrides,
   };
 }

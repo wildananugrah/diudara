@@ -374,6 +374,7 @@ const fakePostRepository: PostRepositoryPort = {
       type: "diskusi",
       authorHandle: "fake",
       authorDisplayName: "Fake",
+      event: null,
     };
   },
   async ownershipOf() {
