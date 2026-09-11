@@ -514,3 +514,309 @@ describe("GET /communities/:slug/events", () => {
     expect(await res.json()).toHaveProperty("events");
   });
 });
+
+const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+
+function documentForm(
+  name = "Rangkuman Trigonometri.pdf",
+  type = "application/pdf",
+  bytes: Uint8Array = PDF_BYTES
+) {
+  const form = new FormData();
+  form.set("file", new File([bytes as BlobPart], name, { type }));
+  return form;
+}
+
+async function uploadDocument(
+  a: ReturnType<typeof app>,
+  token: string,
+  slug: string,
+  form = documentForm()
+) {
+  return a.request(`/communities/${slug}/documents`, {
+    method: "POST",
+    headers: authed(token),
+    body: form,
+  });
+}
+
+async function joinAs(a: ReturnType<typeof app>, handle: string, email: string) {
+  const token = await tokenForValidUser(a, { handle, email });
+  await a.request("/communities/kelas-desain/join", { method: "POST", headers: authed(token) });
+  return token;
+}
+
+describe("POST /communities/:slug/documents", () => {
+  it("the owner uploads and gets the row back, with no URL on it", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await uploadDocument(a, token, "kelas-desain");
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(Object.keys(body).sort()).toEqual([
+      "byteSize",
+      "contentType",
+      "createdAt",
+      "id",
+      "name",
+      "uploader",
+    ]);
+    expect(body.name).toBe("Rangkuman Trigonometri.pdf");
+    expect(body.byteSize).toBe(5);
+  });
+
+  it("a plain member may not — 403", async () => {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    await createCommunity(a, ownerToken, KELAS);
+    const memberToken = await joinAs(a, "rina", "rina@example.com");
+
+    expect((await uploadDocument(a, memberToken, "kelas-desain")).status).toBe(403);
+  });
+
+  it("requires auth — 401", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await a.request("/communities/kelas-desain/documents", {
+      method: "POST",
+      body: documentForm(),
+    });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("a body with no file part is 400 with the missing-file code", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await a.request("/communities/kelas-desain/documents", {
+      method: "POST",
+      headers: authed(token),
+      body: new FormData(),
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("document_missing_file");
+  });
+
+  it("a JSON body is 400, not a 500 from formData() throwing", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await a.request("/communities/kelas-desain/documents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ file: "nope" }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it.each([
+    ["an executable type", "text/html", "document_unsupported_format"],
+    ["a scriptable image", "image/svg+xml", "document_unsupported_format"],
+    ["an archive", "application/zip", "document_unsupported_format"],
+  ])("%s is refused with its code", async (_label, type, code) => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await uploadDocument(a, token, "kelas-desain", documentForm("x.html", type));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe(code);
+  });
+
+  it("a name that sanitises to nothing is 400 with the invalid-name code", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await uploadDocument(a, token, "kelas-desain", documentForm("../.."));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("document_invalid_name");
+  });
+
+  it("an unknown slug is 404", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    expect((await uploadDocument(a, token, "tidak-ada")).status).toBe(404);
+  });
+});
+
+describe("GET /communities/:slug/documents", () => {
+  it("is readable signed out, and says the visitor may not download", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+    await uploadDocument(a, token, "kelas-desain");
+
+    const res = await a.request("/communities/kelas-desain/documents");
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.documents.map((d: { name: string }) => d.name)).toEqual([
+      "Rangkuman Trigonometri.pdf",
+    ]);
+    // So the client never renders a download control that would fail.
+    expect(body.viewerMayDownload).toBe(false);
+  });
+
+  it("tells a member they may download", async () => {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    await createCommunity(a, ownerToken, KELAS);
+    await uploadDocument(a, ownerToken, "kelas-desain");
+    const memberToken = await joinAs(a, "rina", "rina@example.com");
+
+    const res = await a.request("/communities/kelas-desain/documents", {
+      headers: authed(memberToken),
+    });
+
+    expect((await res.json()).viewerMayDownload).toBe(true);
+  });
+
+  it("an unknown slug is 404", async () => {
+    expect((await app().request("/communities/tidak-ada/documents")).status).toBe(404);
+  });
+});
+
+describe("GET /communities/:slug/documents/:id", () => {
+  async function withDocument() {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    await createCommunity(a, ownerToken, KELAS);
+    const created = await (await uploadDocument(a, ownerToken, "kelas-desain")).json();
+    return { a, ownerToken, id: created.id as string };
+  }
+
+  /**
+   * **The three security headers, asserted together on one response.**
+   *
+   * They work as a SET: the allowlist without `nosniff` is defeated by the
+   * browser's own sniffing, and `nosniff` without `attachment` still renders
+   * a correctly-labelled HTML file. Three separate tests would each pass
+   * while the set was broken.
+   */
+  it("serves the bytes with attachment, nosniff and a private cache", async () => {
+    const { a, ownerToken, id } = await withDocument();
+
+    const res = await a.request(`/communities/kelas-desain/documents/${id}`, {
+      headers: authed(ownerToken),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/pdf");
+    expect(res.headers.get("Content-Disposition")).toStartWith("attachment; ");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    // Decided by the same check that decided the bytes — a shared cache must
+    // never hold a gated document.
+    expect(res.headers.get("Cache-Control")).toContain("private");
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(PDF_BYTES);
+  });
+
+  it("the filename survives in both Content-Disposition forms", async () => {
+    const { a, ownerToken, id } = await withDocument();
+
+    const res = await a.request(`/communities/kelas-desain/documents/${id}`, {
+      headers: authed(ownerToken),
+    });
+
+    const disposition = res.headers.get("Content-Disposition") ?? "";
+    expect(disposition).toContain('filename="Rangkuman Trigonometri.pdf"');
+    expect(disposition).toContain("filename*=UTF-8''Rangkuman%20Trigonometri.pdf");
+  });
+
+  it("a member may download", async () => {
+    const { a, id } = await withDocument();
+    const memberToken = await joinAs(a, "rina", "rina@example.com");
+
+    const res = await a.request(`/communities/kelas-desain/documents/${id}`, {
+      headers: authed(memberToken),
+    });
+
+    expect(res.status).toBe(200);
+  });
+
+  it.each([
+    ["a signed-out visitor", false],
+    ["a signed-in non-member", true],
+  ])("%s gets 404, never 403", async (_label, signedIn) => {
+    const { a, id } = await withDocument();
+    const headers = signedIn
+      ? authed(await tokenForValidUser(a, { handle: "asing", email: "asing@example.com" }))
+      : undefined;
+
+    const res = await a.request(`/communities/kelas-desain/documents/${id}`, { headers });
+
+    // 404 and not 403: a 403 confirms the document exists to somebody who may
+    // not have it.
+    expect(res.status).toBe(404);
+  });
+
+  it("an unknown id is 404", async () => {
+    const { a, ownerToken } = await withDocument();
+    const res = await a.request(
+      "/communities/kelas-desain/documents/ffffffff-0000-4000-8000-000000000000",
+      { headers: authed(ownerToken) }
+    );
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("DELETE /communities/:slug/documents/:id", () => {
+  it("the owner deletes, and the document leaves the list", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+    const created = await (await uploadDocument(a, token, "kelas-desain")).json();
+
+    const res = await a.request(`/communities/kelas-desain/documents/${created.id}`, {
+      method: "DELETE",
+      headers: authed(token),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ deleted: true });
+    const list = await (await a.request("/communities/kelas-desain/documents")).json();
+    expect(list.documents).toEqual([]);
+  });
+
+  it("a member may not — 403", async () => {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    await createCommunity(a, ownerToken, KELAS);
+    const created = await (await uploadDocument(a, ownerToken, "kelas-desain")).json();
+    const memberToken = await joinAs(a, "rina", "rina@example.com");
+
+    const res = await a.request(`/communities/kelas-desain/documents/${created.id}`, {
+      method: "DELETE",
+      headers: authed(memberToken),
+    });
+
+    expect(res.status).toBe(403);
+  });
+
+  it("deleting twice is 404 the second time", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+    const created = await (await uploadDocument(a, token, "kelas-desain")).json();
+    const del = () =>
+      a.request(`/communities/kelas-desain/documents/${created.id}`, {
+        method: "DELETE",
+        headers: authed(token),
+      });
+
+    expect((await del()).status).toBe(200);
+    expect((await del()).status).toBe(404);
+  });
+});
