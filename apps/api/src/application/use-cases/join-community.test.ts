@@ -80,6 +80,10 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
   async listMembers(): Promise<never> {
     throw new Error("not used in these tests");
   }
+  /** Phase 8b. Not reached by these tests — direct messages have their own suite. */
+  async sharesCommunityWith() {
+    return false;
+  }
 }
 
 function subject() {

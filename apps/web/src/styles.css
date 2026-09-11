@@ -3086,3 +3086,209 @@ button:disabled {
 .bell-actor {
   font-weight: 600;
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 8b — the chat panel.
+   --------------------------------------------------------------------------- */
+
+/* Visible to a screen reader, not on screen. The chat composer's label is the
+   only place this app needs it: the input carries a placeholder, and a
+   placeholder is not a label. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.chat-panel {
+  position: fixed;
+  right: 1rem;
+  /* Clear of the bottom navigation, which is fixed at the foot on a phone —
+     a launcher sitting on top of it would cover a destination. */
+  bottom: 5rem;
+  /* BELOW the navigation's z-index of 10. AppShell.test.tsx asserts the nav
+     outranks everything else in this sheet, because a badge once painted over
+     the only way off a page. */
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+.chat-launcher {
+  position: relative;
+  width: 3rem;
+  height: 3rem;
+  border: none;
+  border-radius: 50%;
+  background: var(--langit);
+  color: var(--awan);
+  font-size: 1.125rem;
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+}
+
+.chat-badge {
+  position: absolute;
+  top: -0.125rem;
+  right: -0.125rem;
+  min-width: 1.125rem;
+  padding: 0 0.25rem;
+  border-radius: 999px;
+  background: var(--merah-senja);
+  color: var(--surface);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  line-height: 1.125rem;
+}
+
+.chat-sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(20rem, calc(100vw - 2rem));
+  max-height: min(26rem, 60vh);
+  overflow: hidden;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.chat-list {
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.chat-list button {
+  position: relative;
+  display: grid;
+  width: 100%;
+  gap: 0.125rem;
+  padding: 0.5rem;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-list button:hover {
+  background: var(--awan);
+}
+
+.chat-list-name {
+  font-weight: 600;
+  font-size: 0.8125rem;
+  color: var(--ink-900);
+}
+
+.chat-list-preview {
+  font-size: 0.75rem;
+  /* One line, ellipsised: a preview that wrapped would make rows different
+     heights and the list hard to scan. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-thread-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.chat-thread-header button {
+  border: none;
+  background: none;
+  color: var(--ink-500);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.chat-thread {
+  flex: 1;
+  display: grid;
+  gap: 0.375rem;
+  margin: 0;
+  padding: 0.5rem 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.chat-thread li {
+  display: grid;
+  justify-items: start;
+  font-size: 0.6875rem;
+  color: var(--ink-500);
+}
+
+/* Your own messages sit right. Alignment carries the identity, and the bubble
+   colour reinforces it — never colour alone. */
+.chat-thread li[data-mine="true"] {
+  justify-items: end;
+}
+
+.chat-bubble {
+  max-width: 85%;
+  padding: 0.375rem 0.625rem;
+  border-radius: var(--radius-sm);
+  background: var(--ink-100);
+  color: var(--ink-900);
+  font-size: 0.8125rem;
+  /* Preserves the line breaks somebody typed, without parsing anything as
+     markup — the same rule `.post-card-body` follows. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-thread li[data-mine="true"] .chat-bubble {
+  background: var(--langit);
+  color: var(--awan);
+}
+
+.chat-composer {
+  display: flex;
+  gap: 0.375rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.chat-composer input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 0.8125rem;
+}
+
+.chat-composer button {
+  flex-shrink: 0;
+  padding: 0.375rem 0.75rem;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--langit);
+  color: var(--awan);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.chat-composer button:disabled {
+  background: var(--ink-150);
+  color: var(--ink-700);
+  cursor: not-allowed;
+}

@@ -59,6 +59,13 @@ export const DEFAULT_COMMENT_LIMIT = 50;
 export const MAX_COMMENT_BODY_LENGTH = 2000;
 
 /**
+ * Phase 8b. A direct message, capped at the same length a comment is: both
+ * are a remark rather than a document, and one number is easier to explain
+ * than two that differ for no reason.
+ */
+export const MAX_MESSAGE_BODY_LENGTH = 2000;
+
+/**
  * `type` DEFAULTS rather than being required, so a member's ordinary "start a
  * discussion" submission need not name it. The route still enforces that only
  * an owner may send `pengumuman` — a default is not an authorisation.
