@@ -22,6 +22,8 @@ import {
   notifications,
   conversations,
   directMessages,
+  courseSections,
+  courseLessons,
 } from "./schema";
 
 /**
@@ -71,6 +73,11 @@ export async function resetDatabase() {
   // follow references app_user twice (follower and followee), so it must
   // clear before app_user too — Task 1 of profiles-and-following.
   await db.delete(follows);
+  // courseLessons references course_section and community_document, so both
+  // it and its section must clear before those — Phase 4b, same FK-ordering
+  // rule as every entry here.
+  await db.delete(courseLessons);
+  await db.delete(courseSections);
   // directMessages references conversation and app_user, so it must clear
   // before both — Phase 8b, same FK-ordering rule as every entry here.
   await db.delete(directMessages);

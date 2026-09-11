@@ -14,6 +14,7 @@ import CommunityFeed from "./CommunityFeed";
 import CommunityJoinControl from "./CommunityJoinControl";
 import CommunityTiers from "./CommunityTiers";
 import DokumenTab from "./DokumenTab";
+import MateriTab from "./MateriTab";
 import StatistikTab from "./StatistikTab";
 import KegiatanTab from "./KegiatanTab";
 import { describeRequestFailure } from "./errorCopy";
@@ -109,6 +110,7 @@ export default function CommunityPage() {
     requestedTab === "kegiatan" ||
     requestedTab === "dokumen" ||
     requestedTab === "keanggotaan" ||
+    requestedTab === "materi" ||
     requestedTab === "statistik"
       ? requestedTab
       : "diskusi";
@@ -230,6 +232,13 @@ export default function CommunityPage() {
           </button>
           <button
             type="button"
+            aria-current={tab === "materi"}
+            onClick={() => setParams({ tab: "materi" })}
+          >
+            Materi
+          </button>
+          <button
+            type="button"
             aria-current={tab === "dokumen"}
             onClick={() => setParams({ tab: "dokumen" })}
           >
@@ -283,6 +292,8 @@ export default function CommunityPage() {
             viewerIsOwner={community.viewerIsOwner}
             viewerIsMember={community.viewerIsMember}
           />
+        ) : tab === "materi" ? (
+          <MateriTab slug={community.slug} viewerIsOwner={community.viewerIsOwner} />
         ) : tab === "dokumen" ? (
           <DokumenTab
             slug={community.slug}

@@ -850,6 +850,67 @@ export const communityEvents = pgTable(
 );
 
 /**
+ * Phase 4b. One week, module or chapter of a community's syllabus.
+ *
+ * `position` is supplied by the AUTHOR, not computed from `created_at`: a
+ * syllabus is ordered by whoever wrote it, and a creation-time order would
+ * make inserting a week between two others impossible without rewriting
+ * timestamps.
+ */
+export const courseSections = pgTable(
+  "course_section",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    communityId: uuid("community_id")
+      .notNull()
+      .references(() => communities.id),
+    title: varchar("title", { length: 160 }).notNull(),
+    position: integer("position").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("course_section_community_position_idx").on(table.communityId, table.position),
+  ]
+);
+
+/**
+ * Phase 4b. One lesson: a title, a body, and optionally ONE document from the
+ * community's Phase 4a library.
+ *
+ * **No `type` column.** There is exactly one kind of lesson. A column whose
+ * only value is `"text"` is a column that invites somebody to add `"video"`
+ * before anything can serve one — and hosted video is still the unresolved
+ * large-file decision Phase 4a deferred. When it arrives it brings its own
+ * column and its own migration.
+ *
+ * The attachment is where every rule about files already lives: the 25 MB
+ * cap, the format allowlist, the `attachment`/`nosniff` headers and the
+ * members-only gate are all `community_document`'s, and a lesson inherits
+ * them rather than restating any of them.
+ */
+export const courseLessons = pgTable(
+  "course_lesson",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sectionId: uuid("section_id")
+      .notNull()
+      .references(() => courseSections.id),
+    title: varchar("title", { length: 160 }).notNull(),
+    body: text("body").notNull(),
+    // A REAL foreign key, so a lesson cannot reference a document that never
+    // existed. A document soft-deleted after being attached still resolves —
+    // the read path sees `deleted_at` and renders the lesson without its
+    // attachment rather than with a broken one.
+    documentId: uuid("document_id").references(() => communityDocuments.id),
+    position: integer("position").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("course_lesson_section_position_idx").on(table.sectionId, table.position),
+  ]
+);
+
+/**
  * Phase 8b. One direct-message thread between exactly two people.
  *
  * **THE PARTICIPANTS ARE STORED IN A CANONICAL ORDER**, lower uuid first, and

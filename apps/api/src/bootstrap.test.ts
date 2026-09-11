@@ -67,6 +67,7 @@ import {
   StartConversation,
 } from "./application/use-cases/direct-messages";
 import { GetCommunityStats } from "./application/use-cases/community-stats";
+import { GetSyllabus, ManageSyllabus } from "./application/use-cases/syllabus";
 import { StartCommunitySubscription } from "./application/use-cases/start-community-subscription";
 import {
   DeleteCommunityDocument,
@@ -870,6 +871,36 @@ describe("Dependencies (composition root contract)", () => {
           listDirectMessages: new ListDirectMessages(conversations),
           sendDirectMessage: new SendDirectMessage(conversations),
           markConversationRead: new MarkConversationRead(conversations),
+        };
+      })(),
+      ...(() => {
+        // Phase 4b. One in-memory syllabus repository behind both, so the
+        // smoke test drives them the way bootstrap wires them.
+        const syllabus = {
+          async listSections() {
+            return [];
+          },
+          async listLessons() {
+            return [];
+          },
+          async createSection() {
+            throw new Error("not used in these smoke tests");
+          },
+          async createLesson() {
+            throw new Error("not used in these smoke tests");
+          },
+          async findSectionIn() {
+            return null;
+          },
+          async findLessonIn() {
+            return null;
+          },
+          async deleteSection() {},
+          async deleteLesson() {},
+        };
+        return {
+          getSyllabus: new GetSyllabus(fakeCommunityRepository, syllabus),
+          manageSyllabus: new ManageSyllabus(fakeCommunityRepository, syllabus),
         };
       })(),
       createPost: new CreatePost(fakePostWriteUnitOfWork),

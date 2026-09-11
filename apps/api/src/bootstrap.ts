@@ -47,6 +47,8 @@ import { DrizzleNotificationRepository } from "./infrastructure/repositories/dri
 import { ListCommunityEvents } from "./application/use-cases/community-events";
 import { ManageCommunityTiers } from "./application/use-cases/community-tiers";
 import { GetCommunityStats } from "./application/use-cases/community-stats";
+import { GetSyllabus, ManageSyllabus } from "./application/use-cases/syllabus";
+import { DrizzleSyllabusRepository } from "./infrastructure/repositories/drizzle-syllabus.repository";
 import { DrizzleCommunityStatsRepository } from "./infrastructure/repositories/drizzle-community-stats.repository";
 import { StartCommunitySubscription } from "./application/use-cases/start-community-subscription";
 import {
@@ -294,6 +296,10 @@ export interface Dependencies {
   markConversationRead: MarkConversationRead;
   /** Phase 6's `GET /communities/:slug/stats` — the owner's dashboard, in one response. */
   getCommunityStats: GetCommunityStats;
+  /** Phase 4b's `GET /communities/:slug/syllabus` — the whole tree, public. */
+  getSyllabus: GetSyllabus;
+  /** Phase 4b's authoring. Owner only. */
+  manageSyllabus: ManageSyllabus;
   /**
    * Task 2 of posts-and-feed's `POST /users/posts`. Behind `requireUserAuth` —
    * see `routes/posts.ts` for why `PATCH`/`DELETE /users/posts/:id` share the
@@ -1864,6 +1870,13 @@ export function bootstrap(): Dependencies {
   // Phase 6. No new tables — every aggregate reads `user_transaction`,
   // `user_subscription` and `community_member`, and only cheaply because
   // Phase 5 put `community_id` on the subscription.
+  // Phase 4b. One repository behind both — the ordering and the attachment
+  // join live in it, so a second instance would be a second place for them to
+  // drift.
+  const syllabusRepository = new DrizzleSyllabusRepository(db);
+  const getSyllabus = new GetSyllabus(communityRepository, syllabusRepository);
+  const manageSyllabus = new ManageSyllabus(communityRepository, syllabusRepository);
+
   const getCommunityStats = new GetCommunityStats(
     communityRepository,
     new DrizzleCommunityStatsRepository(db),
@@ -2114,6 +2127,8 @@ export function bootstrap(): Dependencies {
     sendDirectMessage,
     markConversationRead,
     getCommunityStats,
+    getSyllabus,
+    manageSyllabus,
     createPost,
     maxPostImages,
     editPost,

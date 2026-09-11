@@ -309,6 +309,13 @@
       "when": 1789164256788,
       "tag": "0043_past_captain_cross",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1789167453766,
+      "tag": "0044_living_husk",
+      "breakpoints": true
     }
   ]
 }

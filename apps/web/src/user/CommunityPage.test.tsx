@@ -75,6 +75,9 @@ function stubFetch(overrides: Partial<typeof DETAIL> = {}, calls: string[] = [])
     // Phase 5's Keanggotaan tab. An empty offer keeps the tab quiet in the
     // banner/join tests, as the empty feed, month and library above do.
     if (url.includes("/tiers")) return jsonResponse({ tiers: [] });
+    // Phase 4b's Materi tab. An empty syllabus keeps the tab quiet in the
+    // banner/join tests, as every other empty payload above does.
+    if (url.includes("/syllabus")) return jsonResponse({ sections: [] });
     // Phase 6's Statistik tab, owner-only.
     if (url.includes("/stats")) {
       return jsonResponse({
@@ -215,7 +218,7 @@ describe("CommunityPage", () => {
  * half mounted (the inactive one issues no request).
  */
 describe("CommunityPage — the Diskusi / Kegiatan / Anggota tab bar", () => {
-  it("has the five tabs, with Diskusi current by default, and reads no roster", async () => {
+  it("has the six tabs, with Diskusi current by default, and reads no roster", async () => {
     const calls = stubFetch();
     renderPage();
 
@@ -224,11 +227,13 @@ describe("CommunityPage — the Diskusi / Kegiatan / Anggota tab bar", () => {
     const kegiatan = screen.getByRole("button", { name: "Kegiatan" });
     const dokumen = screen.getByRole("button", { name: "Dokumen" });
     const keanggotaan = screen.getByRole("button", { name: "Keanggotaan" });
+    const materi = screen.getByRole("button", { name: "Materi" });
     const anggota = screen.getByRole("button", { name: "Anggota" });
     expect(diskusi.getAttribute("aria-current")).toBe("true");
     expect(kegiatan.getAttribute("aria-current")).toBe("false");
     expect(dokumen.getAttribute("aria-current")).toBe("false");
     expect(keanggotaan.getAttribute("aria-current")).toBe("false");
+    expect(materi.getAttribute("aria-current")).toBe("false");
     expect(anggota.getAttribute("aria-current")).toBe("false");
     // Symmetric with the tab tests below: only the active tab mounts, so the
     // default view reads neither the roster, nor the calendar, nor the library.
@@ -236,6 +241,18 @@ describe("CommunityPage — the Diskusi / Kegiatan / Anggota tab bar", () => {
     expect(calls.some((call) => call.includes("/events"))).toBe(false);
     expect(calls.some((call) => call.includes("/documents"))).toBe(false);
     expect(calls.some((call) => call.includes("/tiers"))).toBe(false);
+    expect(calls.some((call) => call.includes("/syllabus"))).toBe(false);
+  });
+
+  it("shows the syllabus and not the feed at ?tab=materi", async () => {
+    const calls = stubFetch();
+    renderPage("/komunitas/kelas-desain?tab=materi");
+
+    await screen.findByText(/Belum ada materi/);
+    expect(screen.getByRole("button", { name: "Materi" }).getAttribute("aria-current")).toBe(
+      "true"
+    );
+    expect(calls.some((call) => call.includes("/posts"))).toBe(false);
   });
 
   /**

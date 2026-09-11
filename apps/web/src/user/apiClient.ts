@@ -1422,6 +1422,82 @@ export function markNotificationsRead(): Promise<void> {
   );
 }
 
+export interface LessonRow {
+  id: string;
+  title: string;
+  body: string;
+  position: number;
+  /** `null` when there is nothing attached, or when the document was deleted since. */
+  attachment: {
+    documentId: string;
+    name: string;
+    byteSize: number;
+    /** `true` when an active subscription is needed — the gate is the DOCUMENT's. */
+    membersOnly: boolean;
+  } | null;
+}
+
+export interface SectionRow {
+  id: string;
+  title: string;
+  position: number;
+  lessons: LessonRow[];
+  /** The real count, computed server-side — never a stored number that could drift. */
+  lessonCount: number;
+}
+
+/** `GET /communities/:slug/syllabus` — PUBLIC; the paid material is the attachment. */
+export function getSyllabus(slug: string): Promise<{ sections: SectionRow[] }> {
+  return publicGet<{ sections: SectionRow[] }>(
+    `/communities/${encodeURIComponent(slug)}/syllabus`,
+    "gagal memuat materi"
+  );
+}
+
+/** `POST /communities/:slug/sections` (201) — owner only. */
+export function createSection(
+  slug: string,
+  input: { title: string; position: number }
+): Promise<SectionRow> {
+  return apiFetch<SectionRow>(`/communities/${encodeURIComponent(slug)}/sections`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** `POST /communities/:slug/lessons` (201) — owner only. */
+export function createLesson(
+  slug: string,
+  input: {
+    sectionId: string;
+    title: string;
+    body: string;
+    position: number;
+    documentId?: string;
+  }
+): Promise<LessonRow> {
+  return apiFetch<LessonRow>(`/communities/${encodeURIComponent(slug)}/lessons`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** `DELETE /communities/:slug/sections/:id` — takes its lessons with it. */
+export function deleteSection(slug: string, id: string): Promise<void> {
+  return apiFetch<{ deleted: true }>(
+    `/communities/${encodeURIComponent(slug)}/sections/${encodeURIComponent(id)}`,
+    { method: "DELETE" }
+  ).then(() => undefined);
+}
+
+/** `DELETE /communities/:slug/lessons/:id`. */
+export function deleteLesson(slug: string, id: string): Promise<void> {
+  return apiFetch<{ deleted: true }>(
+    `/communities/${encodeURIComponent(slug)}/lessons/${encodeURIComponent(id)}`,
+    { method: "DELETE" }
+  ).then(() => undefined);
+}
+
 /** `GET /communities/:slug/tiers` — PUBLIC, so a paid community stays evaluable. */
 export function listCommunityTiers(slug: string): Promise<{ tiers: CommunityTierRow[] }> {
   return publicGet<{ tiers: CommunityTierRow[] }>(
