@@ -8,6 +8,9 @@ import { sanitiseDocumentName } from "../../domain/document";
 import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 import type { DocumentRepositoryPort, DocumentRow } from "../ports/document-repository.port";
 import type { DocumentStoragePort } from "../ports/document-storage.port";
+import type { ClockPort } from "../ports/clock.port";
+import type { UserSubscriptionRepositoryPort } from "../ports/user-subscription-repository.port";
+import { membershipStanding } from "./is-member-of";
 
 /**
  * One document as the wire sees it. Nested HERE, the one place this projection
@@ -26,20 +29,25 @@ export interface CommunityDocumentView {
   /** ISO-8601. */
   createdAt: string;
   uploader: { handle: string; displayName: string };
+  /** Phase 5. `true` when this document needs an active subscription, not merely membership. */
+  membersOnly: boolean;
+  /**
+   * Whether THIS viewer may fetch these bytes. PER DOCUMENT, because a
+   * community can hold both open and paid material and the answer differs row
+   * by row — Phase 4a's single page-level flag could not say that.
+   *
+   * It decides what CONTROL is rendered. It does not decide what is served:
+   * `DownloadCommunityDocument` applies the same rule again, because a client
+   * can ask for any id regardless of what it was shown.
+   */
+  mayDownload: boolean;
 }
 
 export interface CommunityDocumentsPage {
   documents: CommunityDocumentView[];
-  /**
-   * Whether THIS viewer may fetch bytes. On the page rather than left to the
-   * client to infer from a membership flag it would have to fetch separately:
-   * a download control must never be rendered for an action that would fail,
-   * the rule Phase 1 set when it cut the tab bar.
-   */
-  viewerMayDownload: boolean;
 }
 
-function toDocumentView(row: DocumentRow): CommunityDocumentView {
+function toDocumentView(row: DocumentRow, mayDownload: boolean): CommunityDocumentView {
   return {
     id: row.id,
     name: row.name,
@@ -47,7 +55,52 @@ function toDocumentView(row: DocumentRow): CommunityDocumentView {
     byteSize: row.byteSize,
     createdAt: row.createdAt.toISOString(),
     uploader: { handle: row.uploaderHandle, displayName: row.uploaderDisplayName },
+    membersOnly: row.membersOnly,
+    // REQUIRED, never defaulted, for the reason `toPostView`'s `locked`
+    // records with a worse outcome: a forgotten default here renders a
+    // download control for an action that will 404, or hides one that would
+    // have worked. The caller works it out because only the caller has the
+    // viewer.
+    mayDownload,
   };
+}
+
+/**
+ * **The one place "may this viewer have these bytes" is decided**, shared by
+ * the listing (which renders a control from it) and the download (which
+ * serves bytes from it). Two copies of this rule is how a control gets
+ * rendered for an action that fails, or worse, how bytes get served for a
+ * control that was never rendered.
+ *
+ * The OWNER is entitled without a subscription: `user_subscription_no_self`
+ * forbids subscribing to yourself, so a community's owner can never hold one
+ * to their own tier, and asking about subscriptions first would lock them out
+ * of their own library.
+ *
+ * `findActiveForCommunity` and NOT `findActiveFor` — see that method's own
+ * docstring for the conflation this avoids. `membershipStanding` then decides
+ * member vs lapsed off the row, the same pure function `IsMemberOf` uses, so
+ * "active" means exactly one thing across the app.
+ */
+async function decideDownload(input: {
+  row: DocumentRow;
+  viewerId: string | null;
+  ownerId: string;
+  communityId: string;
+  communities: CommunityRepositoryPort;
+  subscriptions: UserSubscriptionRepositoryPort;
+  clock: ClockPort;
+}): Promise<boolean> {
+  if (input.viewerId === null) return false;
+  if (input.viewerId === input.ownerId) return true;
+  if (!(await input.communities.isMember(input.communityId, input.viewerId))) return false;
+  if (!input.row.membersOnly) return true;
+
+  const active = await input.subscriptions.findActiveForCommunity(
+    input.viewerId,
+    input.communityId
+  );
+  return membershipStanding(active, input.clock.now()) === "member";
 }
 
 /**
@@ -77,6 +130,8 @@ export class UploadCommunityDocument {
     name: string;
     contentType: string;
     bytes: Uint8Array;
+    /** Phase 5. Omitted means open to every member — Phase 4a's behaviour. */
+    membersOnly?: boolean;
   }): Promise<CommunityDocumentView> {
     // The slug resolves FIRST, before the owner check, so an unknown slug is
     // always a 404 and never a 403 — a 403 on a slug that does not exist
@@ -124,6 +179,7 @@ export class UploadCommunityDocument {
         // MEASURED, never taken from the caller. A client-supplied size is a
         // number that can disagree with what is in the bucket.
         byteSize: input.bytes.byteLength,
+        ...(input.membersOnly === undefined ? {} : { membersOnly: input.membersOnly }),
       });
     } catch (error) {
       // Take the bytes back. Without this, every failed insert leaves an
@@ -134,7 +190,10 @@ export class UploadCommunityDocument {
       throw error;
     }
 
-    return toDocumentView(row);
+    // `true`: the uploader is the owner (checked above), and the owner may
+    // always download. Passed rather than recomputed — the one rule is
+    // `decideDownload`, and this call site already knows its answer.
+    return toDocumentView(row, true);
   }
 }
 
@@ -148,7 +207,9 @@ export class UploadCommunityDocument {
 export class ListCommunityDocuments {
   constructor(
     private readonly communities: CommunityRepositoryPort,
-    private readonly documents: DocumentRepositoryPort
+    private readonly documents: DocumentRepositoryPort,
+    private readonly subscriptions: UserSubscriptionRepositoryPort,
+    private readonly clock: ClockPort
   ) {}
 
   async execute(input: { slug: string; viewerId: string | null }): Promise<CommunityDocumentsPage> {
@@ -156,13 +217,29 @@ export class ListCommunityDocuments {
     if (community === null) throw new NotFoundError("komunitas tidak ditemukan");
 
     const rows = await this.documents.listByCommunity(community.id);
-    return {
-      documents: rows.map(toDocumentView),
-      // A signed-out viewer is never a member and is not asked about — the
-      // repository is not consulted for a `null` id.
-      viewerMayDownload:
-        input.viewerId !== null && (await this.communities.isMember(community.id, input.viewerId)),
-    };
+    // SEQUENTIAL and not `Promise.all`: the gate reads membership and, at
+    // most, one subscription — both of which are the SAME answer for every row
+    // on the page. Firing one pair of queries per document would be twenty
+    // round trips for two facts. The short-circuits in `decideDownload` mean a
+    // signed-out viewer issues none at all.
+    const decided: CommunityDocumentView[] = [];
+    for (const row of rows) {
+      decided.push(
+        toDocumentView(
+          row,
+          await decideDownload({
+            row,
+            viewerId: input.viewerId,
+            ownerId: community.ownerId,
+            communityId: community.id,
+            communities: this.communities,
+            subscriptions: this.subscriptions,
+            clock: this.clock,
+          })
+        )
+      );
+    }
+    return { documents: decided };
   }
 }
 
@@ -183,7 +260,9 @@ export class DownloadCommunityDocument {
   constructor(
     private readonly communities: CommunityRepositoryPort,
     private readonly documents: DocumentRepositoryPort,
-    private readonly storage: DocumentStoragePort
+    private readonly storage: DocumentStoragePort,
+    private readonly subscriptions: UserSubscriptionRepositoryPort,
+    private readonly clock: ClockPort
   ) {}
 
   async execute(input: {
@@ -201,12 +280,19 @@ export class DownloadCommunityDocument {
       throw new NotFoundError("dokumen tidak ditemukan");
     }
 
-    if (
-      input.viewerId === null ||
-      !(await this.communities.isMember(community.id, input.viewerId))
-    ) {
-      throw new NotFoundError("dokumen tidak ditemukan");
-    }
+    // THE SAME FUNCTION the listing renders its control from. A second copy
+    // of this rule is how bytes get served for a control that was never
+    // rendered — and a client can ask for any id regardless of what it saw.
+    const mayDownload = await decideDownload({
+      row,
+      viewerId: input.viewerId,
+      ownerId: community.ownerId,
+      communityId: community.id,
+      communities: this.communities,
+      subscriptions: this.subscriptions,
+      clock: this.clock,
+    });
+    if (!mayDownload) throw new NotFoundError("dokumen tidak ditemukan");
 
     const bytes = await this.storage.get(row.id);
     // A row with no bytes behind it (an interrupted upload, manual bucket

@@ -12,6 +12,7 @@ function tierRow(overrides: Partial<UserTierRow> = {}): UserTierRow {
     billingCycle: "monthly",
     isActive: true,
     createdAt: new Date("2026-08-18T02:00:00.000Z"),
+    communityId: null,
     ...overrides,
   };
 }
@@ -26,6 +27,7 @@ function pendingRow(overrides: Partial<UserSubscriptionRow> = {}): UserSubscript
     status: "pending",
     kind: "free",
     currentPeriodEnd: null,
+    communityId: null,
     createdAt: new Date("2026-08-18T02:00:00.000Z"),
     ...overrides,
   };

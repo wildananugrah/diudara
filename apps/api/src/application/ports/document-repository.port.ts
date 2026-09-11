@@ -16,6 +16,11 @@ export interface DocumentRow {
   contentType: string;
   byteSize: number;
   createdAt: Date;
+  /**
+   * Phase 5. `false` means any member may download it — Phase 4a's rule.
+   * `true` means an ACTIVE SUBSCRIPTION to this community is required.
+   */
+  membersOnly: boolean;
   uploaderHandle: string;
   uploaderDisplayName: string;
 }
@@ -35,6 +40,8 @@ export interface DocumentRepositoryPort {
     name: string;
     contentType: string;
     byteSize: number;
+    /** Phase 5. Omitted leaves the column at `false` — Phase 4a's behaviour. */
+    membersOnly?: boolean;
   }): Promise<DocumentRow>;
   /**
    * Newest first — a library reads most-recent-first, like the feed and unlike

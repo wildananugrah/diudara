@@ -19,6 +19,7 @@ const documentColumns = {
   contentType: communityDocuments.contentType,
   byteSize: communityDocuments.byteSize,
   createdAt: communityDocuments.createdAt,
+  membersOnly: communityDocuments.membersOnly,
   uploaderHandle: appUsers.handle,
   uploaderDisplayName: appUsers.displayName,
 } as const;
@@ -33,6 +34,7 @@ export class DrizzleDocumentRepository implements DocumentRepositoryPort {
     name: string;
     contentType: string;
     byteSize: number;
+    membersOnly?: boolean;
   }): Promise<DocumentRow> {
     const [inserted] = await this.db
       .insert(communityDocuments)

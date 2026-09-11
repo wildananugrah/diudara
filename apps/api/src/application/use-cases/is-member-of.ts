@@ -131,7 +131,7 @@ export class IsMemberOf {
       return "none";
     }
 
-    const active = await this.subscriptions.findActiveFor(viewerId, ownerId);
+    const active = await this.subscriptions.findActiveFor(viewerId, ownerId, null /* personal membership — see the port's note on this argument */);
     return membershipStanding(active, this.clock.now());
   }
 }

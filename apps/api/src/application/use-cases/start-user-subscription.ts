@@ -170,7 +170,25 @@ export class StartUserSubscription {
     /** The seller's handle, as it appears in the profile URL. */
     handle: string;
     tierId: string;
+    /**
+     * **Phase 5. Omitted is a PERSONAL purchase** — a subscription to the
+     * person at `handle`, which is what every caller before that phase makes.
+     * Set by `StartCommunitySubscription`, which has already resolved the
+     * slug, checked the buyer is a member and checked the tier belongs to
+     * that community.
+     *
+     * It threads into every guard below rather than being merely recorded:
+     * the double-purchase refusals and the lapsed-row retirement are all
+     * per-scope now, because `user_subscription_one_active` is. Passing it
+     * only to the INSERT would leave a community purchase refused by a
+     * personal membership the buyer already holds.
+     */
+    communityId?: string;
   }): Promise<StartUserSubscriptionResult> {
+    // `null` and not `undefined` from here down: the repository's scope
+    // argument is required-and-nullable on purpose, so one conversion here
+    // beats five call sites each deciding what an absent value means.
+    const communityScope = input.communityId ?? null;
     // `normalizeHandle` for the same forgiveness `GetUserProfile` gives: the
     // `@` is a web URL convention, and a client that sends it should not get a
     // 404 for it.
@@ -196,7 +214,12 @@ export class StartUserSubscription {
     // privacy one — charging THIS owner's account for THAT owner's tier is
     // precisely what the composite foreign key exists to make impossible, and
     // this refuses it before the row is even attempted.
-    if (!tier || tier.ownerId !== owner.id) {
+    // A tier from the WRONG SCOPE is a 404, exactly as another owner's tier
+    // is. Without this line a personal tier could be bought through the
+    // community endpoint — and a community tier through the profile one,
+    // which is how somebody pays for a membership of something they were
+    // never shown.
+    if (!tier || tier.ownerId !== owner.id || tier.communityId !== communityScope) {
       throw new NotFoundError("tier not found");
     }
     if (!tier.isActive) {
@@ -257,7 +280,7 @@ export class StartUserSubscription {
       // one. What is NOT acceptable is the SENTENCE — see that method's own
       // docstring for why it must say the membership ended, never "you are
       // already an active member".
-      const existing = await this.subscriptions.findActiveFor(subscriber.id, owner.id);
+      const existing = await this.subscriptions.findActiveFor(subscriber.id, owner.id, communityScope);
       if (existing) {
         this.refuseExistingMembership(existing);
       }
@@ -281,6 +304,9 @@ export class StartUserSubscription {
         // for why this keeps the two equal by construction.
         ownerId: tier.ownerId,
         kind: "free",
+        // The scope this purchase is in. The pending slot is per-community
+        // now, and the INSERT is what records which one this row occupies.
+        ...(communityScope === null ? {} : { communityId: communityScope }),
       });
       // WHOLE-BRANCH REVIEW, M-1. `user_subscription_one_pending` is scoped to
       // (subscriber, owner) and says NOTHING about `kind`, so this claim can
@@ -361,7 +387,12 @@ export class StartUserSubscription {
     // `UserPurchaseUnitOfWorkPort`, and `claimPending` for the one thing that
     // had to change to survive being called in here.
     const claim = await this.purchase.run(async ({ subscriptions }) => {
-      await subscriptions.retireExpired(subscriber.id, owner.id, this.clock.now());
+      await subscriptions.retireExpired(
+        subscriber.id,
+        owner.id,
+        communityScope,
+        this.clock.now()
+      );
 
       // The CLEAN refusal of a double purchase. `user_subscription_one_active`
       // (the partial unique index) would reject the second ACTIVE row anyway, but
@@ -382,7 +413,7 @@ export class StartUserSubscription {
       // 5b did not narrow it and did not need to: `retireExpired` above has
       // already moved the lapsed row out of `active`, so this read no longer
       // SEES one. The guard kept its predicate; the row stopped matching it.
-      const existing = await subscriptions.findActiveFor(subscriber.id, owner.id);
+      const existing = await subscriptions.findActiveFor(subscriber.id, owner.id, communityScope);
       if (existing) {
         // See `refuseExistingMembership`'s own docstring for the full
         // "one refusal, two different pieces of news" reasoning — shared with
@@ -418,6 +449,9 @@ export class StartUserSubscription {
         // checks. They are equal — the tier was just matched against `owner.id` —
         // and taking it from here keeps them equal by construction.
         ownerId: tier.ownerId,
+        // The scope this purchase is in. The pending slot is per-community
+        // now, and the INSERT is what records which one this row occupies.
+        ...(communityScope === null ? {} : { communityId: communityScope }),
       });
     });
     // ---- The transaction has COMMITTED. Everything below is on the pool: the

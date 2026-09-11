@@ -69,7 +69,7 @@ describe("LeaveMembership", () => {
       ownerHandle: rina.handle,
     });
 
-    expect(await subs.findActiveFor(budi.id, rina.id)).toBeNull();
+    expect(await subs.findActiveFor(budi.id, rina.id, null /* personal membership — Phase 5 scope */)).toBeNull();
   });
 
   /**
@@ -87,7 +87,7 @@ describe("LeaveMembership", () => {
       ownerHandle: rina.handle,
     });
 
-    expect(await subs.findActiveFor(budi.id, rina.id)).toBeNull();
+    expect(await subs.findActiveFor(budi.id, rina.id, null /* personal membership — Phase 5 scope */)).toBeNull();
   });
 
   /**
@@ -104,7 +104,7 @@ describe("LeaveMembership", () => {
     await memberOf(rina.id, budi.id, "paid", new Date("2026-01-01T00:00:00.000Z"));
     // The trap: the row is lapsed, so it grants nothing — and it still holds
     // the one-active slot, so nothing new can be created for this pair.
-    expect((await subs.findActiveFor(budi.id, rina.id))?.status).toBe("active");
+    expect((await subs.findActiveFor(budi.id, rina.id, null /* personal membership — Phase 5 scope */))?.status).toBe("active");
 
     await new LeaveMembership(users, subs).execute({
       subscriberId: budi.id,
@@ -113,7 +113,7 @@ describe("LeaveMembership", () => {
 
     // The slot is free, so they can be a member again. Proven by doing it.
     const second = await memberOf(rina.id, budi.id, "free");
-    expect((await subs.findActiveFor(budi.id, rina.id))?.id).toBe(second);
+    expect((await subs.findActiveFor(budi.id, rina.id, null /* personal membership — Phase 5 scope */))?.id).toBe(second);
   });
 
   it("cannot end somebody else's membership", async () => {
@@ -129,7 +129,7 @@ describe("LeaveMembership", () => {
       })
     ).rejects.toThrow(NotFoundError);
 
-    expect((await subs.findActiveFor(budi.id, rina.id))?.status).toBe("active");
+    expect((await subs.findActiveFor(budi.id, rina.id, null /* personal membership — Phase 5 scope */))?.status).toBe("active");
   });
 
   it("answers the same NotFoundError for an unknown creator as for a non-membership", async () => {

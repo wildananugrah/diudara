@@ -43,7 +43,7 @@ export class LeaveMembership {
     // exist.
     if (!owner) throw new NotFoundError("keanggotaan tidak ditemukan");
 
-    const active = await this.subscriptions.findActiveFor(input.subscriberId, owner.id);
+    const active = await this.subscriptions.findActiveFor(input.subscriberId, owner.id, null /* personal membership — see the port's note on this argument */);
     if (!active) throw new NotFoundError("keanggotaan tidak ditemukan");
 
     // No `kind` check, deliberately — see this class's docstring. A member may

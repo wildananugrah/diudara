@@ -222,7 +222,7 @@ describe("the query isMemberOf issues", () => {
     // returns, so it flows into the EXPLAIN below automatically — unlike a
     // hand-copied literal, which would keep passing regardless.
     const { sql: queryText, params } = subs
-      .activeMembershipQuery(subscriber!.id, owner!.id)
+      .activeMembershipQuery(subscriber!.id, owner!.id, null)
       .toSQL();
 
     const plan = await pgClient.unsafe<{ "QUERY PLAN": string }[]>(

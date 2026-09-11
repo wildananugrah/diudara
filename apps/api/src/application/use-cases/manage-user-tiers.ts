@@ -56,6 +56,16 @@ export class ManageUserTiers {
     name: string;
     priceAmount: number;
     billingCycle?: string;
+    /**
+     * Phase 5. Omitted makes a PERSONAL tier, which is what every caller
+     * before that phase does. `ManageCommunityTiers` is the only caller that
+     * passes one, and it has already checked the caller owns that community.
+     *
+     * The validation below — name, price, billing cycle, and the connected
+     * payout account a PAID tier needs — is identical either way, which is
+     * the whole reason the community path wraps this rather than repeating it.
+     */
+    communityId?: string;
   }): Promise<UserTierRow> {
     const name = input.name.trim();
     if (name.length === 0) {
@@ -114,6 +124,9 @@ export class ManageUserTiers {
       name,
       priceAmount: input.priceAmount,
       billingCycle,
+      // Spread in ONLY when present, so an omitted value leaves the column at
+      // its NULL default rather than being written as an explicit NULL.
+      ...(input.communityId === undefined ? {} : { communityId: input.communityId }),
     });
   }
 

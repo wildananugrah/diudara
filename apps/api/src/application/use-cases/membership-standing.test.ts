@@ -26,6 +26,7 @@ describe("membershipStanding", () => {
     status: "active",
     kind: "paid",
     createdAt: new Date(0),
+    communityId: null,
   };
 
   const NOW = new Date("2026-08-25T00:00:00Z");

@@ -53,6 +53,8 @@ import { BrowseCommunities } from "./application/use-cases/browse-communities";
 import { ListCommunityMembers } from "./application/use-cases/list-community-members";
 import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
 import { ListCommunityEvents } from "./application/use-cases/community-events";
+import { ManageCommunityTiers } from "./application/use-cases/community-tiers";
+import { StartCommunitySubscription } from "./application/use-cases/start-community-subscription";
 import {
   DeleteCommunityDocument,
   DownloadCommunityDocument,
@@ -228,6 +230,13 @@ const fakeUserTierRepository: UserTierRepositoryPort = {
   async deactivate() {
     return null;
   },
+  /**
+   * Phase 5. Not reached by these tests — community tiers have their own
+   * suite. Present so this fake satisfies the port.
+   */
+  async listActiveByCommunity() {
+    return [];
+  },
 };
 
 /** Task 2 of Phase 5a's `user_subscription`/`user_transaction` tables, faked the same shallow way `fakeUserTierRepository` above is. */
@@ -266,6 +275,13 @@ const fakeUserSubscriptionRepository: UserSubscriptionRepositoryPort = {
     return [];
   },
   async findActiveFor() {
+    return null;
+  },
+  /**
+   * Phase 5. Not reached by these smoke tests — the community gate has its
+   * own suite. Present so this fake satisfies the port.
+   */
+  async findActiveForCommunity() {
     return null;
   },
   async findPendingFor() {
@@ -698,11 +714,18 @@ describe("Dependencies (composition root contract)", () => {
             documents,
             storage
           ),
-          listCommunityDocuments: new ListCommunityDocuments(fakeCommunityRepository, documents),
+          listCommunityDocuments: new ListCommunityDocuments(
+            fakeCommunityRepository,
+            documents,
+            fakeUserSubscriptionRepository,
+            fakeClock
+          ),
           downloadCommunityDocument: new DownloadCommunityDocument(
             fakeCommunityRepository,
             documents,
-            storage
+            storage,
+            fakeUserSubscriptionRepository,
+            fakeClock
           ),
           deleteCommunityDocument: new DeleteCommunityDocument(
             fakeCommunityRepository,
@@ -711,6 +734,28 @@ describe("Dependencies (composition root contract)", () => {
           ),
         };
       })(),
+      // Phase 5's two authorisation wrappers, built over the same fakes the
+      // personal paths above use — the point of the wrappers is that they add
+      // no machinery of their own.
+      manageCommunityTiers: new ManageCommunityTiers(
+        fakeCommunityRepository,
+        fakeUserTierRepository,
+        new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository)
+      ),
+      startCommunitySubscription: new StartCommunitySubscription(
+        fakeCommunityRepository,
+        fakeUserRepository,
+        new StartUserSubscription(
+          fakeUserRepository,
+          fakeUserTierRepository,
+          fakeUserPayoutRepository,
+          fakeUserSubscriptionRepository,
+          fakeUserPurchaseUnitOfWork,
+          null,
+          fakeClock,
+          { appBaseUrl: "http://localhost:5173" }
+        )
+      ),
       createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,
       editPost: new EditPost(fakePostWriteUnitOfWork),

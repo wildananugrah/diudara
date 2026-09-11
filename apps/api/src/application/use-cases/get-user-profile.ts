@@ -203,7 +203,7 @@ export class GetUserProfile {
       // `IsMemberOf.describe`'s identical short-circuit above).
       viewerId === null || viewingOwnProfile
         ? Promise.resolve(null)
-        : this.subscriptions.findPendingFor(viewerId, user.id),
+        : this.subscriptions.findPendingFor(viewerId, user.id, null /* personal membership — see the port's note on this argument */),
     ]);
 
     return {

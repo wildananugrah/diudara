@@ -119,6 +119,7 @@ function userSubscriptionRow(overrides: Partial<UserSubscriptionRow> = {}): User
     status: "pending",
     kind: "paid",
     currentPeriodEnd: null,
+    communityId: null,
     createdAt: new Date("2026-08-09T09:00:00Z"),
     ...overrides,
   };
@@ -133,6 +134,7 @@ function userTierRow(overrides: Partial<UserTierRow> = {}): UserTierRow {
     billingCycle: "monthly",
     isActive: true,
     createdAt: new Date("2026-08-01T09:00:00Z"),
+    communityId: null,
     ...overrides,
   };
 }

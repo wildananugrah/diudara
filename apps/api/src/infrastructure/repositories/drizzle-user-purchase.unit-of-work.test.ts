@@ -62,7 +62,7 @@ describe("DrizzleUserPurchaseUnitOfWork", () => {
     await expect(
       unitOfWork().run(async (repositories) => {
         expect(
-          await repositories.subscriptions.retireExpired(seeded.subscriberId, seeded.ownerId, NOW)
+          await repositories.subscriptions.retireExpired(seeded.subscriberId, seeded.ownerId, null /* personal membership — Phase 5 scope */, NOW)
         ).toBe(true);
         throw new Error("boom, after the retirement");
       })
@@ -82,7 +82,7 @@ describe("DrizzleUserPurchaseUnitOfWork", () => {
     const seeded = await seedLapsedMembership();
 
     const claim = await unitOfWork().run(async (repositories) => {
-      await repositories.subscriptions.retireExpired(seeded.subscriberId, seeded.ownerId, NOW);
+      await repositories.subscriptions.retireExpired(seeded.subscriberId, seeded.ownerId, null /* personal membership — Phase 5 scope */, NOW);
       return repositories.subscriptions.claimPending({
         subscriberId: seeded.subscriberId,
         tierId: seeded.tierId,
@@ -100,7 +100,7 @@ describe("DrizzleUserPurchaseUnitOfWork", () => {
 
     let statusMidTransaction = "";
     await unitOfWork().run(async (repositories) => {
-      await repositories.subscriptions.retireExpired(seeded.subscriberId, seeded.ownerId, NOW);
+      await repositories.subscriptions.retireExpired(seeded.subscriberId, seeded.ownerId, null /* personal membership — Phase 5 scope */, NOW);
       const [row] = await db
         .select()
         .from(userSubscriptions)
@@ -149,7 +149,7 @@ describe("DrizzleUserPurchaseUnitOfWork", () => {
       expect(claim.created).toBe(false);
       // The statement AFTER the losing claim. With a caught 23505 this throws
       // 25P02 instead of answering.
-      return repositories.subscriptions.findActiveFor(seeded.subscriberId, seeded.ownerId);
+      return repositories.subscriptions.findActiveFor(seeded.subscriberId, seeded.ownerId, null /* personal membership — Phase 5 scope */);
     });
 
     expect(seen?.id).toBe(seeded.id);

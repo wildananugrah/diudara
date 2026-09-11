@@ -3210,7 +3210,7 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
       expect((await subscriptions.findById(body.subscriptionId))?.status).toBe("pending");
       // The slot is genuinely free: this is the read the guard makes and the
       // predicate the partial unique index arbitrates on.
-      expect(await subscriptions.findActiveFor(buyer.userId, owner.userId)).toBeNull();
+      expect(await subscriptions.findActiveFor(buyer.userId, owner.userId, null /* personal membership — Phase 5 scope */)).toBeNull();
       expect(await db.select().from(userSubscriptions)).toHaveLength(2);
       expect(await db.select().from(userTransactions)).toHaveLength(2);
       expect((deps.payments as FakePaymentAdapter).invoices).toHaveLength(2);
@@ -3416,7 +3416,7 @@ describe("POST /users/:handle/subscribe (Task 6)", () => {
       }
       expect(invoiceUrls.size).toBe(1);
       expect([...invoiceUrls][0]).toBe("https://fake-checkout.local/fake-inv-2");
-      expect(await subscriptions.findActiveFor(buyer.userId, owner.userId)).toBeNull();
+      expect(await subscriptions.findActiveFor(buyer.userId, owner.userId, null /* personal membership — Phase 5 scope */)).toBeNull();
     });
   });
 

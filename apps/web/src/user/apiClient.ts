@@ -1281,16 +1281,75 @@ export interface CommunityDocumentRow {
   byteSize: number;
   createdAt: string;
   uploader: { handle: string; displayName: string };
+  /** Phase 5. `true` when an active subscription is needed, not merely membership. */
+  membersOnly: boolean;
+  /**
+   * Whether THIS viewer may fetch these bytes. PER DOCUMENT since Phase 5 — a
+   * community can hold both open and paid material, so one page-level flag
+   * could not say it.
+   *
+   * Read straight off the response, never derived here from a membership flag
+   * the client fetched separately: two sources for one answer is how a
+   * download control gets rendered for an action that fails.
+   */
+  mayDownload: boolean;
 }
 
 export interface CommunityDocumentsPage {
   documents: CommunityDocumentRow[];
-  /**
-   * Whether THIS viewer may fetch bytes. Read straight off the response rather
-   * than derived from a membership flag fetched separately: a download control
-   * must never be rendered for an action that would fail.
-   */
-  viewerMayDownload: boolean;
+}
+
+/** One community membership tier — the server's community tier view. */
+export interface CommunityTierRow {
+  id: string;
+  name: string;
+  priceAmount: number;
+  billingCycle: string;
+  isActive: boolean;
+}
+
+/** `GET /communities/:slug/tiers` — PUBLIC, so a paid community stays evaluable. */
+export function listCommunityTiers(slug: string): Promise<{ tiers: CommunityTierRow[] }> {
+  return publicGet<{ tiers: CommunityTierRow[] }>(
+    `/communities/${encodeURIComponent(slug)}/tiers`,
+    "gagal memuat tingkatan"
+  );
+}
+
+/** `POST /communities/:slug/tiers` (201) — owner only. */
+export function createCommunityTier(
+  slug: string,
+  input: { name: string; priceAmount: number }
+): Promise<CommunityTierRow> {
+  return apiFetch<CommunityTierRow>(`/communities/${encodeURIComponent(slug)}/tiers`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** `PATCH /communities/:slug/tiers/:tierId` — owner only; deactivates. */
+export function deactivateCommunityTier(slug: string, tierId: string): Promise<CommunityTierRow> {
+  return apiFetch<CommunityTierRow>(
+    `/communities/${encodeURIComponent(slug)}/tiers/${encodeURIComponent(tierId)}`,
+    { method: "PATCH" }
+  );
+}
+
+/**
+ * `POST /communities/:slug/subscribe` (201).
+ *
+ * `invoiceUrl` is absent for exactly one reason — a FREE tier, where no money
+ * moves and there is nothing to follow. The same contract `startSubscription`
+ * carries for personal tiers, and `MembershipOffer` already branches on it.
+ */
+export function subscribeToCommunity(
+  slug: string,
+  tierId: string
+): Promise<{ subscriptionId: string; invoiceUrl?: string }> {
+  return apiFetch<{ subscriptionId: string; invoiceUrl?: string }>(
+    `/communities/${encodeURIComponent(slug)}/subscribe`,
+    { method: "POST", body: JSON.stringify({ tierId }) }
+  );
 }
 
 /**
@@ -1365,9 +1424,16 @@ export async function downloadCommunityDocument(
  * browser has to set it itself so it can append the multipart boundary, and a
  * hand-set header produces a body the server cannot parse.
  */
-export function uploadCommunityDocument(slug: string, file: File): Promise<CommunityDocumentRow> {
+export function uploadCommunityDocument(
+  slug: string,
+  file: File,
+  membersOnly = false
+): Promise<CommunityDocumentRow> {
   const form = new FormData();
   form.set("file", file);
+  // Sent as a STRING because multipart carries no booleans — the route parses
+  // it, and only the literal "true" counts.
+  if (membersOnly) form.set("membersOnly", "true");
   return apiFetch<CommunityDocumentRow>(`/communities/${encodeURIComponent(slug)}/documents`, {
     method: "POST",
     body: form,

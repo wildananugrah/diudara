@@ -74,6 +74,10 @@ describe("DrizzleDocumentRepository", () => {
       "contentType",
       "createdAt",
       "id",
+      // Phase 5 widened the projection with `membersOnly`, so this guard moves
+      // with it — it catches a path quietly selecting different columns, and is
+      // not exempt from the ones that legitimately change.
+      "membersOnly",
       "name",
       "uploaderDisplayName",
       "uploaderHandle",

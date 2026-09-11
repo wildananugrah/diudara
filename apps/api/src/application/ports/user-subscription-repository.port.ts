@@ -9,6 +9,17 @@ export interface UserSubscriptionRow {
   kind: string;
   currentPeriodEnd: Date | null;
   createdAt: Date;
+  /**
+   * Phase 5. `null` on a PERSONAL membership — a subscription to the person
+   * named by `ownerId`, which is every row predating that phase. Non-null on
+   * a membership OF THAT COMMUNITY.
+   *
+   * Denormalised from the tier and kept honest by
+   * `user_subscription_tier_community_fk`; it exists because
+   * `user_subscription_one_active` is an index and an index cannot reach
+   * through a join.
+   */
+  communityId: string | null;
 }
 
 /**
@@ -187,6 +198,13 @@ export interface UserSubscriptionRepositoryPort {
      * "Minta jadi anggota" into a 23505 and a 500.
      */
     kind?: string;
+    /**
+     * Phase 5. Omitted for a PERSONAL purchase, which leaves the column NULL.
+     * A community purchase passes its community, and
+     * `user_subscription_tier_community_fk` refuses a value that disagrees
+     * with the tier own community — so this cannot be set to the wrong one.
+     */
+    communityId?: string;
   }): Promise<PendingSubscriptionClaim>;
   findById(id: string): Promise<UserSubscriptionRow | null>;
   /**
@@ -229,7 +247,12 @@ export interface UserSubscriptionRepositoryPort {
    * Returns whether a row actually moved: false when there is nothing active
    * for the pair, or its period has not lapsed yet.
    */
-  retireExpired(subscriberId: string, ownerId: string, now: Date): Promise<boolean>;
+  retireExpired(
+    subscriberId: string,
+    ownerId: string,
+    communityId: string | null,
+    now: Date
+  ): Promise<boolean>;
   /**
    * ACTIVE subscriptions whose period has already lapsed — what Task 3's
    * worker sweep pages through, retiring each one by calling `retireExpired`
@@ -335,7 +358,11 @@ export interface UserSubscriptionRepositoryPort {
     after?: { currentPeriodEnd: Date; id: string };
   }): Promise<UserSubscriptionRow[]>;
   /** Task 8's membership check: is this subscriber an active member of this owner. */
-  findActiveFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null>;
+  findActiveFor(
+    subscriberId: string,
+    ownerId: string,
+    communityId: string | null
+  ): Promise<UserSubscriptionRow | null>;
   /**
    * Task 6 of "free memberships": is there a `status = 'pending'` row for
    * this (subscriber, owner) pair, whatever put it there — a PAID checkout
@@ -356,7 +383,11 @@ export interface UserSubscriptionRepositoryPort {
    * The most recent such row, when a pair somehow has more than one (it
    * should not: `user_subscription_one_pending` allows only one).
    */
-  findPendingFor(subscriberId: string, ownerId: string): Promise<UserSubscriptionRow | null>;
+  findPendingFor(
+    subscriberId: string,
+    ownerId: string,
+    communityId: string | null
+  ): Promise<UserSubscriptionRow | null>;
   /**
    * A creator's OWN subscriber list — Task 6 of Phase 5b, spec §8. Only
    * CURRENTLY subscribed members: `status = 'active'` AND (`kind = 'free'`
@@ -420,6 +451,34 @@ export interface UserSubscriptionRepositoryPort {
    * empty `IN ()` is a SQL error in some drivers and a pointless round trip
    * in all of them.
    */
+  /**
+   * **Phase 5, and it exists BECAUSE `findActiveFor` cannot answer this
+   * question.**
+   *
+   * `findActiveFor` is keyed on (subscriber, OWNER). A community tier's owner
+   * is a person who may also sell personal tiers on their own profile, so
+   * asking it with `community.ownerId` answers TRUE for somebody who
+   * subscribed to that person on their profile and never paid the community —
+   * and, symmetrically, treats a community subscriber as a personal member.
+   *
+   * Neither direction is visible in a test that creates only one kind of
+   * subscription. `drizzle-user-subscription.community.test.ts` holds a single
+   * fixture with both.
+   *
+   * Keyed on the COMMUNITY, reached by joining `user_tier` on `tier_id` — a
+   * join rather than a denormalised `community_id` on this table, because the
+   * tier already names the community and this is only ever an equality match
+   * on a row already being joined. (`community_event.community_id` in Phase 3
+   * IS denormalised, for the opposite reason: the calendar ranges over it.)
+   *
+   * Returns the WHOLE row so the caller decides "member" vs "lapsed" through
+   * `membershipStanding`, exactly as `findActiveFor`'s own docstring requires
+   * — which is also why this is status-only and carries no period filter.
+   */
+  findActiveForCommunity(
+    subscriberId: string,
+    communityId: string
+  ): Promise<UserSubscriptionRow | null>;
   listActiveOwnersAmong(subscriberId: string, ownerIds: string[], now: Date): Promise<string[]>;
   createTransaction(input: {
     userSubscriptionId: string;

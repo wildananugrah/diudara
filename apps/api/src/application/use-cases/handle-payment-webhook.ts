@@ -343,7 +343,11 @@ export class HandlePaymentWebhook {
       // takes this path and is answered without a 500.
       const active = await repositories.userSubscriptions.findActiveFor(
         subscription.subscriberId,
-        subscription.ownerId
+        subscription.ownerId,
+        // The scope THIS subscription is in, taken off the row being
+        // activated — never `null`, which would ask about the personal
+        // membership while activating a community one.
+        subscription.communityId
       );
       if (active !== null && active.id !== subscription.id) {
         // The money ARRIVED, so the transaction settles: hiding that would hide a

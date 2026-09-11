@@ -284,8 +284,22 @@ export class SweepOrphanMedia {
  * (the arbiter) and never a read followed by a write.
  */
 export interface ExpiredMembershipRepository {
-  listExpiredActive(now: Date, limit: number): Promise<{ id: string; subscriberId: string; ownerId: string }[]>;
-  retireExpired(subscriberId: string, ownerId: string, now: Date): Promise<boolean>;
+  listExpiredActive(
+    now: Date,
+    limit: number
+  ): Promise<{ id: string; subscriberId: string; ownerId: string; communityId: string | null }[]>;
+  /**
+   * `communityId` is the ROW'S OWN scope, not a filter this sweep chooses.
+   * Phase 5 made `user_subscription_one_active` per-community, so retiring a
+   * lapsed row is what frees that community's slot — passing `null` here
+   * would retire a personal membership while sweeping a community one.
+   */
+  retireExpired(
+    subscriberId: string,
+    ownerId: string,
+    communityId: string | null,
+    now: Date
+  ): Promise<boolean>;
 }
 
 export interface MembershipSweepResult {
@@ -390,12 +404,21 @@ export class SweepExpiredMemberships {
 
   /** One expired-active row. Never throws — a per-row failure lands on `result.failed`, not on the pass. */
   private async retireOne(
-    row: { id: string; subscriberId: string; ownerId: string },
+    row: { id: string; subscriberId: string; ownerId: string; communityId: string | null },
     now: Date,
     result: MembershipSweepResult
   ): Promise<void> {
     try {
-      if (await this.subscriptions.retireExpired(row.subscriberId, row.ownerId, now)) {
+      if (
+        await this.subscriptions.retireExpired(
+          row.subscriberId,
+          row.ownerId,
+          // The row's OWN scope. `null` here would retire a personal
+          // membership while sweeping a community one, and vice versa.
+          row.communityId,
+          now
+        )
+      ) {
         result.retired += 1;
         return;
       }

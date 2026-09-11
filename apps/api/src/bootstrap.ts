@@ -31,6 +31,8 @@ import { GetPost, ListFeed, ListUserPosts } from "./application/use-cases/read-p
 import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
 import { CreateComment, DeleteComment, ListComments } from "./application/use-cases/comments";
 import { ListCommunityEvents } from "./application/use-cases/community-events";
+import { ManageCommunityTiers } from "./application/use-cases/community-tiers";
+import { StartCommunitySubscription } from "./application/use-cases/start-community-subscription";
 import {
   DeleteCommunityDocument,
   DownloadCommunityDocument,
@@ -260,6 +262,10 @@ export interface Dependencies {
   downloadCommunityDocument: DownloadCommunityDocument;
   /** `DELETE /communities/:slug/documents/:id`. Owner only; removes the bytes too. */
   deleteCommunityDocument: DeleteCommunityDocument;
+  /** Phase 5's `/communities/:slug/tiers` — the offer is public, managing it is the owner's. */
+  manageCommunityTiers: ManageCommunityTiers;
+  /** `POST /communities/:slug/subscribe`. A member buys a community tier. */
+  startCommunitySubscription: StartCommunitySubscription;
   /**
    * Task 2 of posts-and-feed's `POST /users/posts`. Behind `requireUserAuth` —
    * see `routes/posts.ts` for why `PATCH`/`DELETE /users/posts/:id` share the
@@ -1788,6 +1794,20 @@ export function bootstrap(): Dependencies {
     { appBaseUrl }
   );
 
+  // Phase 5. Both are AUTHORISATION WRAPPERS — see their own docstrings. The
+  // tier rules and the whole of taking money stay in the two use cases
+  // constructed above, reached through a `communityId`.
+  const manageCommunityTiers = new ManageCommunityTiers(
+    communityRepository,
+    userTierRepository,
+    manageUserTiers
+  );
+  const startCommunitySubscription = new StartCommunitySubscription(
+    communityRepository,
+    userRepository,
+    startUserSubscription
+  );
+
   // The streaming signing secret. Read directly off `process.env` here (rather
   // than derived from `streamingProvider`'s truthiness) for the exact reason
   // `mediamtxWebhookSecret` does this further down: by the
@@ -1859,11 +1879,18 @@ export function bootstrap(): Dependencies {
     documentRepository,
     documentStorage
   );
-  const listCommunityDocuments = new ListCommunityDocuments(communityRepository, documentRepository);
+  const listCommunityDocuments = new ListCommunityDocuments(
+    communityRepository,
+    documentRepository,
+    userSubscriptionRepository,
+    clock
+  );
   const downloadCommunityDocument = new DownloadCommunityDocument(
     communityRepository,
     documentRepository,
-    documentStorage
+    documentStorage,
+    userSubscriptionRepository,
+    clock
   );
   const deleteCommunityDocument = new DeleteCommunityDocument(
     communityRepository,
@@ -2015,6 +2042,8 @@ export function bootstrap(): Dependencies {
     listCommunityDocuments,
     downloadCommunityDocument,
     deleteCommunityDocument,
+    manageCommunityTiers,
+    startCommunitySubscription,
     createPost,
     maxPostImages,
     editPost,
