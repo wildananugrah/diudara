@@ -35,6 +35,14 @@ import {
   ListNotifications,
   MarkNotificationsRead,
 } from "./application/use-cases/read-notifications";
+import {
+  ListConversations,
+  ListDirectMessages,
+  MarkConversationRead,
+  SendDirectMessage,
+  StartConversation,
+} from "./application/use-cases/direct-messages";
+import { DrizzleConversationRepository } from "./infrastructure/repositories/drizzle-conversation.repository";
 import { DrizzleNotificationRepository } from "./infrastructure/repositories/drizzle-notification.repository";
 import { ListCommunityEvents } from "./application/use-cases/community-events";
 import { ManageCommunityTiers } from "./application/use-cases/community-tiers";
@@ -278,6 +286,12 @@ export interface Dependencies {
   listNotifications: ListNotifications;
   /** `POST /users/me/notifications/read` — marks everything read. */
   markNotificationsRead: MarkNotificationsRead;
+  /** Phase 8b's direct messages. Polled, not pushed — see the spec for why. */
+  listConversations: ListConversations;
+  startConversation: StartConversation;
+  listDirectMessages: ListDirectMessages;
+  sendDirectMessage: SendDirectMessage;
+  markConversationRead: MarkConversationRead;
   /** Phase 6's `GET /communities/:slug/stats` — the owner's dashboard, in one response. */
   getCommunityStats: GetCommunityStats;
   /**
@@ -1637,6 +1651,19 @@ export function bootstrap(): Dependencies {
   const createCommunity = new CreateCommunity(userRepository, communityRepository);
   const getCommunity = new GetCommunity(userRepository, communityRepository);
   const joinCommunity = new JoinCommunity(communityRepository, notifyOf);
+  // Phase 8b. One repository behind all five — the canonical pair ordering
+  // lives in it, so a second instance would be a second place for it to drift.
+  const conversationRepository = new DrizzleConversationRepository(db);
+  const listConversations = new ListConversations(conversationRepository);
+  const startConversation = new StartConversation(
+    conversationRepository,
+    userRepository,
+    communityRepository
+  );
+  const listDirectMessages = new ListDirectMessages(conversationRepository);
+  const sendDirectMessage = new SendDirectMessage(conversationRepository);
+  const markConversationRead = new MarkConversationRead(conversationRepository);
+
   const browseCommunities = new BrowseCommunities(communityRepository);
   const listCommunityMembers = new ListCommunityMembers(communityRepository);
   // Task 6 of community-feed. ONE `DrizzleCommentRepository`, shared by
@@ -2081,6 +2108,11 @@ export function bootstrap(): Dependencies {
     startCommunitySubscription,
     listNotifications,
     markNotificationsRead,
+    listConversations,
+    startConversation,
+    listDirectMessages,
+    sendDirectMessage,
+    markConversationRead,
     getCommunityStats,
     createPost,
     maxPostImages,

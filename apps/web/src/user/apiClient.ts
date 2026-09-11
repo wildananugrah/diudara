@@ -1355,6 +1355,61 @@ export interface NotificationsPage {
   unreadCount: number;
 }
 
+export interface ConversationRow {
+  id: string;
+  other: { handle: string; displayName: string };
+  lastMessageBody: string | null;
+  lastMessageAt: string | null;
+  unreadCount: number;
+}
+
+export interface DirectMessageRow {
+  id: string;
+  senderHandle: string;
+  body: string;
+  createdAt: string;
+}
+
+/** `GET /users/me/conversations` — most recently active first. */
+export function listConversations(): Promise<{ conversations: ConversationRow[] }> {
+  return apiFetch<{ conversations: ConversationRow[] }>("/users/me/conversations");
+}
+
+/**
+ * `POST /users/me/conversations` (201). Idempotent — opening a chat with
+ * somebody you already have a thread with returns it, so the client never has
+ * to know whether one exists.
+ */
+export function startConversation(handle: string): Promise<{ id: string }> {
+  return apiFetch<{ id: string }>("/users/me/conversations", {
+    method: "POST",
+    body: JSON.stringify({ handle }),
+  });
+}
+
+/** `GET /users/me/conversations/:id/messages` — oldest first. */
+export function listDirectMessages(id: string): Promise<{ messages: DirectMessageRow[] }> {
+  return apiFetch<{ messages: DirectMessageRow[] }>(
+    `/users/me/conversations/${encodeURIComponent(id)}/messages`
+  );
+}
+
+/** `POST /users/me/conversations/:id/messages` (201). */
+export function sendDirectMessage(id: string, body: string): Promise<DirectMessageRow> {
+  return apiFetch<DirectMessageRow>(
+    `/users/me/conversations/${encodeURIComponent(id)}/messages`,
+    { method: "POST", body: JSON.stringify({ body }) }
+  );
+}
+
+/** `POST /users/me/conversations/:id/read` — moves only this viewer's mark. */
+export function markConversationRead(id: string): Promise<void> {
+  return apiFetch<{ read: true }>(
+    `/users/me/conversations/${encodeURIComponent(id)}/read`,
+    { method: "POST" }
+  ).then(() => undefined);
+}
+
 /** `GET /users/me/notifications`. */
 export function listNotifications(): Promise<NotificationsPage> {
   return apiFetch<NotificationsPage>("/users/me/notifications");

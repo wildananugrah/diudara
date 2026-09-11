@@ -850,6 +850,89 @@ export const communityEvents = pgTable(
 );
 
 /**
+ * Phase 8b. One direct-message thread between exactly two people.
+ *
+ * **THE PARTICIPANTS ARE STORED IN A CANONICAL ORDER**, lower uuid first, and
+ * `conversation_ordered_pair` is what makes the unique index below mean
+ * anything. Stored in whatever order the opener happened to be, the same pair
+ * yields TWO rows depending on who spoke first — and neither participant
+ * would see the other's messages, which is the worst failure this feature
+ * has: it looks exactly like being ignored.
+ *
+ * Sorting by uuid is arbitrary but total, which is all a canonical form
+ * needs.
+ *
+ * There is no `conversation_no_self` check: `x < x` is false, so the ordering
+ * check already makes a self-conversation impossible to store.
+ */
+export const conversations = pgTable(
+  "conversation",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    lowerUserId: uuid("lower_user_id")
+      .notNull()
+      .references(() => appUsers.id),
+    higherUserId: uuid("higher_user_id")
+      .notNull()
+      .references(() => appUsers.id),
+    // READ STATE, two columns rather than a table. The unread count is
+    // "messages newer than my timestamp that I did not send"; a per-message
+    // read table would be a row per message per reader for a feature whose
+    // whole job is showing one number.
+    //
+    // NULL means never opened, which reads as "everything is unread" — which
+    // is exactly right, and falls out rather than needing a special case.
+    lowerLastReadAt: timestamp("lower_last_read_at", { withTimezone: true }),
+    higherLastReadAt: timestamp("higher_last_read_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // Exactly one conversation per pair — and it only holds because the pair
+    // is canonically ordered by the CHECK below.
+    uniqueIndex("conversation_pair_unique").on(table.lowerUserId, table.higherUserId),
+    // "my conversations", from either side.
+    index("conversation_lower_idx").on(table.lowerUserId),
+    index("conversation_higher_idx").on(table.higherUserId),
+    check(
+      "conversation_ordered_pair",
+      sql`${table.lowerUserId} < ${table.higherUserId}`
+    ),
+  ]
+);
+
+/**
+ * Phase 8b. One message in a conversation.
+ *
+ * NO soft delete. A post or a comment has one because it is public and
+ * removing it is moderation; a message is between two people and this phase
+ * ships no way to delete one. The column would be something nothing writes,
+ * whose meaning the first person to use it would decide.
+ */
+export const directMessages = pgTable(
+  "direct_message",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id),
+    senderId: uuid("sender_id")
+      .notNull()
+      .references(() => appUsers.id),
+    body: text("body").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // OLDEST first, matching the comment thread and unlike the feed — a
+    // conversation reads top to bottom. The same index serves the unread
+    // count, which ranges on `created_at` within one conversation.
+    index("direct_message_conversation_created_idx").on(
+      table.conversationId,
+      table.createdAt
+    ),
+  ]
+);
+
+/**
  * Phase 8a. One thing that happened TO somebody.
  *
  * Written AFTER the action that caused it has committed, and best-effort — a

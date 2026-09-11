@@ -169,6 +169,12 @@ function parsePatchUserTierBody(raw: unknown): { isActive: false } {
  */
 const subscribeSchema = z.object({ tierId: uuidParam });
 
+/** `POST /users/me/conversations` — SHAPE only; the shared-community rule is the use case's. */
+const startConversationSchema = z.object({ handle: z.string().trim().min(1).max(64) });
+
+/** `POST /users/me/conversations/:id/messages`. The length cap is the use case's, from @diudara/shared. */
+const sendMessageSchema = z.object({ body: z.string().min(1) });
+
 function parseSubscribeBody(raw: unknown): { tierId: string } {
   const parsed = subscribeSchema.safeParse(raw);
   if (!parsed.success) {
@@ -266,6 +272,11 @@ export function userRoutes(
     | "leaveMembership"
     | "listNotifications"
     | "markNotificationsRead"
+    | "listConversations"
+    | "startConversation"
+    | "listDirectMessages"
+    | "sendDirectMessage"
+    | "markConversationRead"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -547,6 +558,77 @@ export function userRoutes(
    * requires is safe). See `app.test.ts`'s route table for the guard that
    * keeps these three paths pinned.
    */
+  // ---- Phase 8b, direct messages -----------------------------------------
+  //
+  // Under `/me` like the notifications above, so no RESERVED_HANDLES entry is
+  // needed — that reservation is for literal segments DIRECTLY under
+  // `/users`, and the guard test derives its list from this table.
+
+  app.get<"/me/conversations">("/me/conversations", requireAuth, async (c) => {
+    return c.json(await deps.listConversations.execute({ viewerId: c.get("userId") }));
+  });
+
+  app.post<"/me/conversations">(
+    "/me/conversations",
+    requireAuth,
+    validate(startConversationSchema),
+    async (c) => {
+      const input = c.get("validated") as { handle: string };
+      return c.json(
+        await deps.startConversation.execute({
+          viewerId: c.get("userId"),
+          handle: input.handle,
+        }),
+        201
+      );
+    }
+  );
+
+  // The three `:id` routes all answer 404 for a non-participant rather than
+  // 403 — a 403 confirms the id exists.
+  app.get<"/me/conversations/:id/messages">(
+    "/me/conversations/:id/messages",
+    requireAuth,
+    async (c) => {
+      return c.json(
+        await deps.listDirectMessages.execute({
+          viewerId: c.get("userId"),
+          conversationId: c.req.param("id"),
+        })
+      );
+    }
+  );
+
+  app.post<"/me/conversations/:id/messages">(
+    "/me/conversations/:id/messages",
+    requireAuth,
+    validate(sendMessageSchema),
+    async (c) => {
+      const input = c.get("validated") as { body: string };
+      return c.json(
+        await deps.sendDirectMessage.execute({
+          viewerId: c.get("userId"),
+          conversationId: c.req.param("id"),
+          body: input.body,
+        }),
+        201
+      );
+    }
+  );
+
+  app.post<"/me/conversations/:id/read">(
+    "/me/conversations/:id/read",
+    requireAuth,
+    async (c) => {
+      return c.json(
+        await deps.markConversationRead.execute({
+          viewerId: c.get("userId"),
+          conversationId: c.req.param("id"),
+        })
+      );
+    }
+  );
+
   // Phase 8a. Under `/me`, joining the literal set `me/tiers`, `me/payout`
   // and `me/subscribers` already form — the reserved-handle guard test
   // derives its list from this table, so it is the authority on whether a new

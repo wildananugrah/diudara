@@ -60,6 +60,10 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
   async listMembers(_communityId: string, limit: number): Promise<CommunityMemberRow[]> {
     return this.rows.slice(0, limit);
   }
+  /** Phase 8b. Not reached by these tests — direct messages have their own suite. */
+  async sharesCommunityWith() {
+    return false;
+  }
 }
 
 function subject() {

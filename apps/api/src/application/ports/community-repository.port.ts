@@ -72,4 +72,12 @@ export interface CommunityRepositoryPort {
 
   /** Owner first, then newest joiners. The caller clamps `limit`. */
   listMembers(communityId: string, limit: number): Promise<CommunityMemberRow[]>;
+  /**
+   * Phase 8b. Whether these two people are members of at least one community
+   * in common — the gate on STARTING a direct-message conversation.
+   *
+   * A single EXISTS rather than two membership lists intersected in the app:
+   * the answer is a boolean and the database can stop at the first match.
+   */
+  sharesCommunityWith(a: string, b: string): Promise<boolean>;
 }

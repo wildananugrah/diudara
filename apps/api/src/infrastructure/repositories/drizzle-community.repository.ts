@@ -1,4 +1,4 @@
-import { and, count, desc, eq, ilike, sql } from "drizzle-orm";
+import { aliasedTable, and, count, desc, eq, ilike, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import { appUsers, communities, communityMembers } from "../../db/schema";
 import { UniqueRule } from "../../application/errors";
@@ -233,4 +233,25 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
       )
       .limit(clampLimit(limit));
   }
+  /**
+   * One `EXISTS` over a self-join of `community_member`: is there a community
+   * that both of these people are in.
+   *
+   * Rides `community_member_user_idx` from the `a` side and the unique
+   * `(community_id, user_id)` index from the `b` side, so it is two index
+   * lookups rather than two lists to intersect — and it stops at the first
+   * match, which is all a boolean needs.
+   */
+  async sharesCommunityWith(a: string, b: string): Promise<boolean> {
+    const mine = aliasedTable(communityMembers, "mine");
+    const theirs = aliasedTable(communityMembers, "theirs");
+    const [row] = await this.db
+      .select({ one: sql<number>`1` })
+      .from(mine)
+      .innerJoin(theirs, eq(theirs.communityId, mine.communityId))
+      .where(and(eq(mine.userId, a), eq(theirs.userId, b)))
+      .limit(1);
+    return row !== undefined;
+  }
+
 }

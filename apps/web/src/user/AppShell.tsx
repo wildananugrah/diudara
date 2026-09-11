@@ -2,6 +2,7 @@ import { useState, useSyncExternalStore } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { isUserSignedIn, subscribeToUserAuth } from "./apiClient";
 import Sidebar from "./shell/Sidebar";
+import ChatPanel from "./ChatPanel";
 
 /**
  * The three destinations that never change — see
@@ -101,6 +102,10 @@ export default function AppShell() {
       <div className="app-shell-main">
         <Outlet />
       </div>
+      {/* Phase 8b. Floating, outside the scrolling page so it survives
+          navigation — and it renders nothing at all when signed out, which
+          also means no authenticated endpoint is polled by a visitor. */}
+      <ChatPanel />
       <nav className="bottom-nav" aria-label="Navigasi utama">
         <Destinations destinations={destinations} />
       </nav>

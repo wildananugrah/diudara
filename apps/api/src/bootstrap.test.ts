@@ -59,6 +59,13 @@ import {
   ListNotifications,
   MarkNotificationsRead,
 } from "./application/use-cases/read-notifications";
+import {
+  ListConversations,
+  ListDirectMessages,
+  MarkConversationRead,
+  SendDirectMessage,
+  StartConversation,
+} from "./application/use-cases/direct-messages";
 import { GetCommunityStats } from "./application/use-cases/community-stats";
 import { StartCommunitySubscription } from "./application/use-cases/start-community-subscription";
 import {
@@ -386,6 +393,10 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
   },
   async listMembers() {
     return [];
+  },
+  /** Phase 8b. Not reached by these tests — direct messages have their own suite. */
+  async sharesCommunityWith() {
+    return false;
   },
 };
 
@@ -823,6 +834,42 @@ describe("Dependencies (composition root contract)", () => {
         return {
           listNotifications: new ListNotifications(notifications),
           markNotificationsRead: new MarkNotificationsRead(notifications),
+        };
+      })(),
+      ...(() => {
+        // Phase 8b. One in-memory conversation repository behind all five, so
+        // the smoke test drives them the way bootstrap wires them.
+        const conversations = {
+          async findOrCreateBetween() {
+            return { id: "conversation-1" };
+          },
+          async findBetween() {
+            return null;
+          },
+          async listFor() {
+            return [];
+          },
+          async findParticipating() {
+            return null;
+          },
+          async listMessages() {
+            return [];
+          },
+          async send() {
+            throw new Error("not used in these smoke tests");
+          },
+          async markRead() {},
+        };
+        return {
+          listConversations: new ListConversations(conversations),
+          startConversation: new StartConversation(
+            conversations,
+            fakeUserRepository,
+            fakeCommunityRepository
+          ),
+          listDirectMessages: new ListDirectMessages(conversations),
+          sendDirectMessage: new SendDirectMessage(conversations),
+          markConversationRead: new MarkConversationRead(conversations),
         };
       })(),
       createPost: new CreatePost(fakePostWriteUnitOfWork),

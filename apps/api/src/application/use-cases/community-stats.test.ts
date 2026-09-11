@@ -60,6 +60,10 @@ class FakeCommunities implements CommunityRepositoryPort {
   async listMembers(): Promise<never> {
     return this.unused();
   }
+  /** Phase 8b. Not reached by these tests — direct messages have their own suite. */
+  async sharesCommunityWith() {
+    return false;
+  }
 }
 
 class FakeStats implements CommunityStatsRepositoryPort {
