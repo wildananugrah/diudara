@@ -264,6 +264,8 @@ export function userRoutes(
     | "membershipRequests"
     | "revokeMembership"
     | "leaveMembership"
+    | "listNotifications"
+    | "markNotificationsRead"
   >
 ) {
   const app = new Hono<{ Variables: UserAuthVariables }>();
@@ -545,6 +547,18 @@ export function userRoutes(
    * requires is safe). See `app.test.ts`'s route table for the guard that
    * keeps these three paths pinned.
    */
+  // Phase 8a. Under `/me`, joining the literal set `me/tiers`, `me/payout`
+  // and `me/subscribers` already form — the reserved-handle guard test
+  // derives its list from this table, so it is the authority on whether a new
+  // segment needs reserving.
+  app.get<"/me/notifications">("/me/notifications", requireAuth, async (c) => {
+    return c.json(await deps.listNotifications.execute({ userId: c.get("userId") }));
+  });
+
+  app.post<"/me/notifications/read">("/me/notifications/read", requireAuth, async (c) => {
+    return c.json(await deps.markNotificationsRead.execute({ userId: c.get("userId") }));
+  });
+
   app.get<"/me/membership-requests">("/me/membership-requests", requireAuth, async (c) => {
     const result = await deps.membershipRequests.list(c.get("userId"));
     return c.json(result);

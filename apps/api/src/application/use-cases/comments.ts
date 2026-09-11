@@ -4,6 +4,7 @@ import type { CommentRepositoryPort } from "../ports/comment-repository.port";
 import type { CommunityRepositoryPort } from "../ports/community-repository.port";
 import type { PostRepositoryPort } from "../ports/post-repository.port";
 import { toCommentView, type CommentView } from "./post-views";
+import { NOTIFICATION_KIND, type NotifyOf } from "./notify";
 
 /**
  * The thread under one community post, oldest first — the repository's
@@ -45,7 +46,8 @@ export class CreateComment {
   constructor(
     private readonly comments: CommentRepositoryPort,
     private readonly posts: PostRepositoryPort,
-    private readonly communities: CommunityRepositoryPort
+    private readonly communities: CommunityRepositoryPort,
+    private readonly notify: NotifyOf
   ) {}
 
   async execute(input: {
@@ -64,9 +66,21 @@ export class CreateComment {
       throw new ForbiddenError("hanya anggota komunitas yang boleh berkomentar");
     }
 
-    return toCommentView(
-      await this.comments.create(input.postId, input.authorId, input.body)
-    );
+    const created = await this.comments.create(input.postId, input.authorId, input.body);
+
+    // Phase 8a, and its position is the whole design: AFTER the comment has
+    // been written, and `NotifyOf` never throws. A bug here must not fail
+    // commenting — losing a notification is undetectable, losing a comment is
+    // data loss. `NotifyOf` also refuses to notify somebody of their own
+    // action, so commenting on your own post reports nothing.
+    await this.notify.record({
+      userId: post.authorId,
+      kind: NOTIFICATION_KIND.comment,
+      actorId: input.authorId,
+      postId: input.postId,
+    });
+
+    return toCommentView(created);
   }
 }
 

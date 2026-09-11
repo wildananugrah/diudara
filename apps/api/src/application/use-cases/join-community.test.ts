@@ -5,6 +5,25 @@ import type {
   CommunityRecord,
   CommunityRepositoryPort,
 } from "../ports/community-repository.port";
+import { NotifyOf } from "./notify";
+
+/**
+ * A real `NotifyOf` over an in-memory repository, so these tests exercise the
+ * hook rather than stubbing it away — including the rule that a notification
+ * failure must NOT fail the action.
+ */
+function silentNotifier(): NotifyOf {
+  return new NotifyOf({
+    async create() {},
+    async listFor() {
+      return [];
+    },
+    async unreadCountFor() {
+      return 0;
+    },
+    async markAllRead() {},
+  });
+}
 
 const community: CommunityRecord = {
   id: "community-1",
@@ -65,7 +84,7 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
 
 function subject() {
   const communities = new FakeCommunityRepository([community]);
-  return { communities, useCase: new JoinCommunity(communities) };
+  return { communities, useCase: new JoinCommunity(communities, silentNotifier()) };
 }
 
 describe("JoinCommunity", () => {

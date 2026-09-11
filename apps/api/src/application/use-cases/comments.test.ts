@@ -15,6 +15,26 @@ import type {
   PostRow,
 } from "../ports/post-repository.port";
 import { CreateComment, DeleteComment, ListComments } from "./comments";
+import { NotifyOf } from "./notify";
+
+/**
+ * A real `NotifyOf` over an in-memory repository, so these tests exercise the
+ * hook rather than stubbing it away — including the rule that a notification
+ * failure must NOT fail the action.
+ */
+function silentNotifier(): NotifyOf {
+  return new NotifyOf({
+    async create() {},
+    async listFor() {
+      return [];
+    },
+    async unreadCountFor() {
+      return 0;
+    },
+    async markAllRead() {},
+  });
+}
+
 
 const POST_ID = "aaaaaaaa-0000-4000-8000-000000000000";
 const COMMUNITY_ID = "cccccccc-0000-4000-8000-000000000000";
@@ -182,7 +202,7 @@ describe("CreateComment", () => {
       communityId: COMMUNITY_ID,
     };
 
-    const view = await new CreateComment(comments, posts, communities).execute({
+    const view = await new CreateComment(comments, posts, communities, silentNotifier()).execute({
       postId: POST_ID,
       authorId: MEMBER_ID,
       body: "halo",
@@ -204,7 +224,7 @@ describe("CreateComment", () => {
     };
 
     await expect(
-      new CreateComment(comments, posts, communities).execute({
+      new CreateComment(comments, posts, communities, silentNotifier()).execute({
         postId: POST_ID,
         authorId: STRANGER_ID,
         body: "halo",
@@ -226,7 +246,7 @@ describe("CreateComment", () => {
     };
 
     await expect(
-      new CreateComment(comments, posts, communities).execute({
+      new CreateComment(comments, posts, communities, silentNotifier()).execute({
         postId: POST_ID,
         authorId: MEMBER_ID,
         body: "halo",
@@ -246,7 +266,7 @@ describe("CreateComment", () => {
     };
 
     await expect(
-      new CreateComment(comments, posts, communities).execute({
+      new CreateComment(comments, posts, communities, silentNotifier()).execute({
         postId: POST_ID,
         authorId: MEMBER_ID,
         body: "halo",
@@ -260,7 +280,7 @@ describe("CreateComment", () => {
     posts.ownership = null;
 
     await expect(
-      new CreateComment(comments, posts, communities).execute({
+      new CreateComment(comments, posts, communities, silentNotifier()).execute({
         postId: POST_ID,
         authorId: MEMBER_ID,
         body: "halo",

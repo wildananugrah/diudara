@@ -45,7 +45,12 @@ interface Call {
 function mockFetch(handler: (url: string, init: RequestInit | undefined) => Response): Call[] {
   const calls: Call[] = [];
   global.fetch = mock(async (url: string, init: RequestInit | undefined) => {
-    calls.push({ url, init });
+    // Phase 8a's bell polls on every page that renders the header, and these
+    // tests are about THIS page's requests. The bell's poll is filtered out
+    // rather than the assertions being loosened to `.some(...)`: every
+    // `calls[0]` below still means "the first thing Beranda asked for", which
+    // is the property they were written to hold.
+    if (!url.startsWith("/users/me/notifications")) calls.push({ url, init });
     return handler(url, init);
   }) as unknown as typeof fetch;
   return calls;

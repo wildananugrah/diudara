@@ -43,8 +43,7 @@ So:
 ## Goal
 
 A bell in the header tells you what has happened to you: somebody commented
-on your post, joined your community, subscribed to one of your tiers, or
-followed you.
+on your post, joined your community, or followed you.
 
 ## The schema
 
@@ -89,14 +88,27 @@ The first serves the list, the second the unread count — partial, so read
 notifications leave it entirely. The count is the query that runs every sixty
 seconds for every signed-in user, and it is the one worth an index of its own.
 
-## The four kinds
+## The kinds
 
 | `kind` | Recipient | Written when |
 |---|---|---|
 | `comment` | the post's author | somebody comments on their post |
 | `join` | the community's owner | somebody joins their community |
-| `subscribe` | the community's owner | somebody's subscription becomes active |
 | `follow` | the followed user | somebody follows them |
+
+**`subscribe` was specified and then dropped, during implementation.** A
+subscription becomes active in two places: immediately for a free tier, and
+inside `HandlePaymentWebhook`'s unit of work for a paid one. Notifying after
+the commit — which is this phase's whole rule — would mean restructuring what
+`settleUserSubscription` returns so its caller learns who to notify, and that
+is an edit to the payment webhook. Phase 5's spec says plainly that a change
+which seems to require editing the invoice, webhook or renewal path is the
+signal to stop rather than the signal to be careful.
+
+Notifying on the FREE path only was considered and rejected: "you hear about
+free members but not paying ones" is a worse product than "not yet". The
+owner can already see subscribers on Phase 6's dashboard, so nothing is
+unreachable. It joins 8b, which will have a reason to be in that area anyway.
 
 **Narrow on purpose.** Every additional kind is a new way to be noisy, and a
 bell nobody trusts is a bell nobody opens. New events in a community — a post,
@@ -104,10 +116,9 @@ an event, a document — are deliberately absent: they would fire for every
 member of every community on every write, which is the shape of a
 notification system people mute.
 
-**Never notify yourself.** Commenting on your own post, joining your own
-community and subscribing to your own tier all generate nothing. The rule
-lives in one place, checked against `actor_id === user_id`, rather than in
-four call sites that each have to remember.
+**Never notify yourself.** Commenting on your own post and joining your own
+community both generate nothing. The rule lives in ONE place, checked against
+`actor_id === user_id`, rather than in each call site having to remember.
 
 ## Writing them: after the action, best-effort
 
@@ -144,10 +155,15 @@ count that disagrees with the list under it.
 bell is the act of reading them, and a per-row read state would be UI nobody
 asked for over a feature whose whole job is to stop nagging.
 
-**Under `/users/me`, which already exists** — `me/tiers`, `me/payout`,
-`me/subscribers`, `me/membership-requests` are all there, so `notifications`
-joins a literal segment set that `RESERVED_HANDLES`' guard test already
-covers. It must be added to that list, exactly as `comments` was in Phase 2.
+**Under `/users/me`, which already exists** — `me/tiers`, `me/payout` and
+`me/subscribers` are all there.
+
+**`RESERVED_HANDLES` needs NO new entry, and this spec originally said the
+opposite.** The reservation exists for a literal segment DIRECTLY under
+`/users`, which a registered handle could shadow; `notifications` sits under
+`me`, a level deeper, exactly as `tiers` and `payout` do — and neither of
+those is reserved either. The guard test derives its list from the route
+table and is the authority; it passed untouched.
 
 ## Polling
 
@@ -183,6 +199,7 @@ set when it cut the tab bar.
 ## Not in this phase
 
 - **Realtime delivery.** 8b.
+- **`subscribe` notifications** — see **The kinds** for why they are 8b's.
 - **Per-notification read state**, and notification preferences or muting.
 - **Email or WhatsApp delivery.** The messaging adapter exists but pushing
   notifications out of the app is a separate product decision about consent.
