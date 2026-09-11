@@ -66,6 +66,9 @@ function stubFetch(overrides: Partial<typeof DETAIL> = {}, calls: string[] = [])
     // The Diskusi tab's CommunityFeed reads this — an empty page keeps the
     // default view quiet in the banner/join tests below (Phase 2).
     if (url.includes("/posts")) return jsonResponse({ posts: [], nextCursor: null });
+    // Phase 3's Kegiatan tab. An empty month keeps the tab quiet in the
+    // banner/join tests, exactly as the empty feed page above does.
+    if (url.includes("/events")) return jsonResponse({ events: [] });
     if (init?.method === "POST") return jsonResponse({ member: true });
     if (init?.method === "DELETE") return jsonResponse({ member: false });
     return jsonResponse({ ...DETAIL, ...overrides });
@@ -192,19 +195,45 @@ describe("CommunityPage", () => {
  * markup, `aria-current`, the tab in the URL as `?tab=`, and only the active
  * half mounted (the inactive one issues no request).
  */
-describe("CommunityPage — the Diskusi / Anggota tab bar", () => {
-  it("has the two tabs, with Diskusi current by default, and reads no roster", async () => {
+describe("CommunityPage — the Diskusi / Kegiatan / Anggota tab bar", () => {
+  it("has the three tabs, with Diskusi current by default, and reads no roster", async () => {
     const calls = stubFetch();
     renderPage();
 
     await screen.findByText("4 anggota · Skill Digital");
     const diskusi = screen.getByRole("button", { name: "Diskusi" });
+    const kegiatan = screen.getByRole("button", { name: "Kegiatan" });
     const anggota = screen.getByRole("button", { name: "Anggota" });
     expect(diskusi.getAttribute("aria-current")).toBe("true");
+    expect(kegiatan.getAttribute("aria-current")).toBe("false");
     expect(anggota.getAttribute("aria-current")).toBe("false");
-    // Symmetric with the Anggota-tab test below: only the active half mounts,
-    // so the default view never calls listCommunityMembers.
+    // Symmetric with the tab tests below: only the active half mounts, so the
+    // default view calls neither listCommunityMembers nor the calendar.
     expect(calls.some((call) => call.includes("/members"))).toBe(false);
+    expect(calls.some((call) => call.includes("/events"))).toBe(false);
+  });
+
+  it("shows the calendar and not the feed at ?tab=kegiatan", async () => {
+    const calls = stubFetch();
+    renderPage("/komunitas/kelas-desain?tab=kegiatan");
+
+    await screen.findByText(/Belum ada kegiatan/);
+    expect(screen.getByRole("button", { name: "Kegiatan" }).getAttribute("aria-current")).toBe(
+      "true"
+    );
+    // Only the active half mounts — neither the feed nor the roster is read.
+    expect(calls.some((call) => call.includes("/posts"))).toBe(false);
+    expect(calls.some((call) => call.includes("/members"))).toBe(false);
+  });
+
+  it("an unknown ?tab= falls back to Diskusi rather than showing nothing", async () => {
+    stubFetch();
+    renderPage("/komunitas/kelas-desain?tab=entahlah");
+
+    await screen.findByText("4 anggota · Skill Digital");
+    expect(screen.getByRole("button", { name: "Diskusi" }).getAttribute("aria-current")).toBe(
+      "true"
+    );
   });
 
   it("shows the roster and not the feed at ?tab=anggota, and does not read the feed", async () => {

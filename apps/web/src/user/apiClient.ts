@@ -1043,6 +1043,40 @@ export interface PostView {
    * fixture reason as `type` above.
    */
   commentCount?: number;
+  /**
+   * Phase 3. The schedule on a `kegiatan`, `null` on every other post. The
+   * server sends it on EVERY post (`toPostView`), so `null` here always means
+   * "not an event" and never "not fetched".
+   *
+   * **OPTIONAL here, unlike the server's always-present field** — the same
+   * three predating `PostView` fixtures that made `type` and `commentCount`
+   * optional. `PostCard` reads it defensively for the same reason, which also
+   * keeps it safe across the seconds of a deploy where one side is still the
+   * previous release.
+   */
+  event?: EventView | null;
+}
+
+/**
+ * The schedule on a `kegiatan`, mirroring the server's `EventView`. `endsAt`
+ * and `location` are explicitly `null` rather than absent when unset.
+ */
+export interface EventView {
+  title: string;
+  startsAt: string;
+  endsAt: string | null;
+  location: string | null;
+}
+
+/** One row of a community's calendar — the server's `CommunityEventView`. */
+export interface CommunityEventRow {
+  /** The post the event hangs on. The detail link is built from it. */
+  postId: string;
+  title: string;
+  startsAt: string;
+  endsAt: string | null;
+  location: string | null;
+  author: { handle: string; displayName: string };
 }
 
 /**
@@ -1209,15 +1243,54 @@ export function listComments(postId: string): Promise<CommentView[]> {
  */
 export function createCommunityPost(
   slug: string,
-  input: { body: string; type?: string; mediaIds?: string[] }
+  input: { body: string; type?: string; mediaIds?: string[]; event?: EventDraft }
 ): Promise<PostView> {
-  const payload: { body: string; type?: string; mediaIds?: string[] } = { body: input.body };
+  const payload: { body: string; type?: string; mediaIds?: string[]; event?: EventDraft } = {
+    body: input.body,
+  };
   if (input.type !== undefined) payload.type = input.type;
   if (input.mediaIds !== undefined) payload.mediaIds = input.mediaIds;
+  // Omitted when absent, never sent as `event: undefined`: the route's schema
+  // REJECTS an event on any type but `kegiatan`, so a key that serialises
+  // away is fine but one that does not would 400 every discussion.
+  if (input.event !== undefined) payload.event = input.event;
   return apiFetch<PostView>(`/communities/${encodeURIComponent(slug)}/posts`, {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+/**
+ * What the composer sends for a `kegiatan`. `startsAt`/`endsAt` are ISO
+ * instants — the composer's native date and time inputs give WIB wall-clock
+ * strings, and `PostComposer` is what turns those into instants, so by the
+ * time a payload reaches here the conversion has already happened.
+ */
+export interface EventDraft {
+  title: string;
+  startsAt: string;
+  endsAt?: string;
+  location?: string;
+}
+
+/**
+ * `GET /communities/:slug/events?month=YYYY-MM` — PUBLIC, backs the Kegiatan
+ * tab. Unpaginated: one WIB month, ascending, and the grid needs all of it to
+ * render at all.
+ *
+ * `month` is a WIB month. Omitting it lets the server answer with the current
+ * one, which is what the tab does on first load before it knows which month
+ * to show.
+ */
+export function listCommunityEvents(
+  slug: string,
+  month?: string
+): Promise<{ events: CommunityEventRow[] }> {
+  const search = month === undefined ? "" : `?month=${encodeURIComponent(month)}`;
+  return publicGet<{ events: CommunityEventRow[] }>(
+    `/communities/${encodeURIComponent(slug)}/events${search}`,
+    "gagal memuat kegiatan"
+  );
 }
 
 /** `POST /users/posts/:id/comments` (201). */

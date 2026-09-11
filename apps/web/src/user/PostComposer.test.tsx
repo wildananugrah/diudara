@@ -1605,3 +1605,150 @@ describe("PostComposer — initialVisibility seeds the edit, and drives what is 
     expect(onSubmit).toHaveBeenCalledWith("isi lama", ["media-1"], "members");
   });
 });
+
+/**
+ * Phase 3 — the `kegiatan` fieldset. It appears only for the type that needs
+ * it, and only in community mode, so every other surface in the app renders
+ * exactly what it did before.
+ */
+describe("PostComposer — the kegiatan fieldset", () => {
+  const OWNER_CHOICES = ["diskusi", "pengumuman", "kegiatan"] as const;
+
+  function fillEvent(title = "Trigonometri lanjutan", date = "2026-09-15", time = "16:00") {
+    fireEvent.change(screen.getByLabelText("Judul kegiatan"), { target: { value: title } });
+    fireEvent.change(screen.getByLabelText("Tanggal"), { target: { value: date } });
+    fireEvent.change(screen.getByLabelText("Waktu mulai"), { target: { value: time } });
+  }
+
+  it("is hidden until the type is kegiatan", () => {
+    renderComposer({ postTypeChoices: OWNER_CHOICES });
+    expect(screen.queryAllByLabelText("Judul kegiatan").length).toBe(0);
+
+    fireEvent.change(screen.getByLabelText("Jenis kiriman"), { target: { value: "kegiatan" } });
+    expect(screen.getByLabelText("Judul kegiatan")).toBeTruthy();
+  });
+
+  it("never appears for a plain member, who has no type selector at all", () => {
+    renderComposer({ postTypeChoices: [] });
+    expect(screen.queryAllByLabelText("Judul kegiatan").length).toBe(0);
+  });
+
+  it("never appears on Beranda or a profile, where there is no community mode", () => {
+    renderComposer();
+    expect(screen.queryAllByLabelText("Judul kegiatan").length).toBe(0);
+  });
+
+  it("uses native date and time inputs rather than a picker dependency", () => {
+    renderComposer({ postTypeChoices: OWNER_CHOICES });
+    fireEvent.change(screen.getByLabelText("Jenis kiriman"), { target: { value: "kegiatan" } });
+
+    expect(screen.getByLabelText("Tanggal").getAttribute("type")).toBe("date");
+    expect(screen.getByLabelText("Waktu mulai").getAttribute("type")).toBe("time");
+  });
+
+  it("cannot be submitted until the title, date and time are all filled", () => {
+    renderComposer({ postTypeChoices: OWNER_CHOICES });
+    fireEvent.change(screen.getByLabelText("Jenis kiriman"), { target: { value: "kegiatan" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /apa yang/i }), {
+      target: { value: "kelas tatap muka" },
+    });
+
+    const submit = screen.getByRole("button", { name: "Kirim" });
+    // A body alone is enough for a diskusi and is NOT enough here.
+    expect((submit as HTMLButtonElement).disabled).toBe(true);
+
+    fillEvent();
+    expect((submit as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  /**
+   * The conversion this component owns: the native inputs give a WIB wall
+   * clock, and the API takes instants. 16:00 on 15 September in Jakarta is
+   * 09:00Z — a composer sending "2026-09-15T16:00:00.000Z" is one that
+   * silently moves every event seven hours.
+   */
+  it("sends the WIB wall clock as a UTC instant", async () => {
+    const { onSubmit } = renderComposer({ postTypeChoices: OWNER_CHOICES });
+    fireEvent.change(screen.getByLabelText("Jenis kiriman"), { target: { value: "kegiatan" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /apa yang/i }), {
+      target: { value: "kelas tatap muka" },
+    });
+    fillEvent();
+
+    fireEvent.click(screen.getByRole("button", { name: "Kirim" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    const [, , type, event] = (onSubmit as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(type).toBe("kegiatan");
+    expect(event).toEqual({
+      title: "Trigonometri lanjutan",
+      startsAt: "2026-09-15T09:00:00.000Z",
+    });
+  });
+
+  it("omits endsAt and location when they are left blank, rather than sending empties", async () => {
+    const { onSubmit } = renderComposer({ postTypeChoices: OWNER_CHOICES });
+    fireEvent.change(screen.getByLabelText("Jenis kiriman"), { target: { value: "kegiatan" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /apa yang/i }), {
+      target: { value: "kelas" },
+    });
+    fillEvent();
+
+    fireEvent.click(screen.getByRole("button", { name: "Kirim" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    const [, , , event] = (onSubmit as ReturnType<typeof mock>).mock.calls[0]!;
+    // The route REJECTS an empty-string location (min 1 after trim), so a
+    // blank field must be absent, never "".
+    expect(Object.keys(event as object).sort()).toEqual(["startsAt", "title"]);
+  });
+
+  it("sends endsAt and location when they are filled", async () => {
+    const { onSubmit } = renderComposer({ postTypeChoices: OWNER_CHOICES });
+    fireEvent.change(screen.getByLabelText("Jenis kiriman"), { target: { value: "kegiatan" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /apa yang/i }), {
+      target: { value: "kelas" },
+    });
+    fillEvent();
+    fireEvent.change(screen.getByLabelText("Waktu selesai"), { target: { value: "18:00" } });
+    fireEvent.change(screen.getByLabelText("Lokasi"), { target: { value: "Online via Zoom" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Kirim" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    const [, , , event] = (onSubmit as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(event).toEqual({
+      title: "Trigonometri lanjutan",
+      startsAt: "2026-09-15T09:00:00.000Z",
+      endsAt: "2026-09-15T11:00:00.000Z",
+      location: "Online via Zoom",
+    });
+  });
+
+  it("refuses an end time that is not after the start, before sending anything", async () => {
+    const { onSubmit } = renderComposer({ postTypeChoices: OWNER_CHOICES });
+    fireEvent.change(screen.getByLabelText("Jenis kiriman"), { target: { value: "kegiatan" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /apa yang/i }), {
+      target: { value: "kelas" },
+    });
+    fillEvent();
+    fireEvent.change(screen.getByLabelText("Waktu selesai"), { target: { value: "15:00" } });
+
+    expect((screen.getByRole("button", { name: "Kirim" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("a diskusi sends no event at all", async () => {
+    const { onSubmit } = renderComposer({ postTypeChoices: OWNER_CHOICES });
+    fireEvent.change(screen.getByRole("textbox", { name: /apa yang/i }), {
+      target: { value: "halo semua" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Kirim" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    const [, , type, event] = (onSubmit as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(type).toBe("diskusi");
+    expect(event).toBeUndefined();
+  });
+});

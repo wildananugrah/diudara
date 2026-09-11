@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { mediaThumbUrl, type PostView } from "./apiClient";
 import { formatRelativeTime } from "./relativeTime";
+import { wibDateLabel, wibTimeLabel } from "./wibDate";
 
 export interface PostCardProps {
   post: PostView;
@@ -53,6 +54,17 @@ export interface PostCardProps {
  * the reverse, so a single guard is the honest shape rather than two that
  * could drift apart.
  */
+/**
+ * The badge a community post's `type` earns. A MAP rather than a chain of
+ * ternaries so Phase 4's `materi` and `dokumen` join by adding a line. A
+ * `diskusi` and every personal post are deliberately absent — they carry no
+ * badge, and absence is how that is said.
+ */
+const TYPE_BADGES: Record<string, string | undefined> = {
+  pengumuman: "Pengumuman",
+  kegiatan: "Kegiatan",
+};
+
 export default function PostCard({
   post,
   isOwn,
@@ -66,6 +78,10 @@ export default function PostCard({
   // required and never absent — see the comment on the media slot below for
   // why a version-skew deploy window makes that guarantee occasionally false.
   const media = post.media ?? [];
+  // `?? null` for the reason `media`'s guard exists: the field is documented
+  // as always present and is not, for the seconds of a deploy where the new
+  // bundle is live against the old API.
+  const event = post.event ?? null;
   // Locked is `lockedMediaCount > 0`, NOT `membersOnly` and NOT
   // `media.length === 0`. `membersOnly` is `true` on every members-only post
   // including the ones THIS viewer can see (the author's own, and a paying
@@ -123,10 +139,32 @@ export default function PostCard({
 
       {/* Task 8: a `pengumuman` reads as a distinct card in the ordinary
           chronological feed (spec §"Announcements are not pinned") — a
-          `diskusi` and every personal post carry no badge. */}
-      {post.type === "pengumuman" ? (
-        <p className="post-card-type-badge">Pengumuman</p>
-      ) : null}
+          `diskusi` and every personal post carry no badge. Phase 3 added
+          `kegiatan` beside it, from the same `post.type`. */}
+      {TYPE_BADGES[post.type ?? ""] === undefined ? null : (
+        <p className="post-card-type-badge">{TYPE_BADGES[post.type ?? ""]}</p>
+      )}
+
+      {/* Phase 3. Driven by `post.event`, NOT by `post.type === "kegiatan"`:
+          the type is what the badge above reads, and a card whose type says
+          event but whose schedule never arrived must render no date rather
+          than throw on `.title`. That is the deploy window `PostView.media`'s
+          docstring describes — a new bundle against an API that has never
+          heard of this field — and there is no error boundary anywhere in
+          this app to catch it. */}
+      {event === null ? null : (
+        <div className="post-card-event" data-testid="post-card-event">
+          <p className="post-card-event-title">{event.title}</p>
+          <p className="post-card-event-meta">
+            <span>{wibDateLabel(event.startsAt)}</span>
+            <span>
+              {wibTimeLabel(event.startsAt)}
+              {event.endsAt === null ? "" : `–${wibTimeLabel(event.endsAt)}`}
+            </span>
+            {event.location === null ? null : <span>{event.location}</span>}
+          </p>
+        </div>
+      )}
 
       {/* Never dangerouslySetInnerHTML: post.body is untrusted input from any
           signed-up user. white-space: pre-wrap in styles.css preserves line

@@ -604,6 +604,68 @@ describe("PostCard — the community feed additions (Task 8)", () => {
   });
 });
 
+/** 15 September 2026, 16:00 WIB — and 18:00 WIB. */
+const STARTS_AT = "2026-09-15T09:00:00.000Z";
+const ENDS_AT = "2026-09-15T11:00:00.000Z";
+
+const AN_EVENT = { title: "Trigonometri lanjutan", startsAt: STARTS_AT, endsAt: null, location: null };
+
+describe("PostCard — a kegiatan (Phase 3)", () => {
+  it("shows the badge, the title and the WIB date and time", () => {
+    renderCard({ post: aPost({ type: "kegiatan", event: AN_EVENT }) });
+
+    expect(screen.getByText("Kegiatan")).toBeTruthy();
+    expect(screen.getByText("Trigonometri lanjutan")).toBeTruthy();
+    expect(screen.getByText(/15 September 2026/)).toBeTruthy();
+    // WIB, not UTC: 09:00Z is 16.00 in Jakarta. A card rendering "09.00"
+    // here is one reading the instant's UTC fields.
+    expect(screen.getByText(/16\.00 WIB/)).toBeTruthy();
+  });
+
+  it("shows an end time only when the event has one", () => {
+    const { unmount } = renderCard({
+      post: aPost({ type: "kegiatan", event: { ...AN_EVENT, endsAt: ENDS_AT } }),
+    });
+    expect(screen.getByText(/16\.00 WIB–18\.00 WIB/)).toBeTruthy();
+    unmount();
+
+    renderCard({ post: aPost({ type: "kegiatan", event: AN_EVENT }) });
+    expect(screen.queryAllByText(/–/).length).toBe(0);
+  });
+
+  it("shows a location only when the event has one", () => {
+    const { unmount } = renderCard({
+      post: aPost({ type: "kegiatan", event: { ...AN_EVENT, location: "Online via Zoom" } }),
+    });
+    expect(screen.getByText("Online via Zoom")).toBeTruthy();
+    unmount();
+
+    renderCard({ post: aPost({ type: "kegiatan", event: AN_EVENT }) });
+    expect(screen.queryAllByText("Online via Zoom").length).toBe(0);
+  });
+
+  /**
+   * The case that covers every other surface in the app — Beranda, profiles,
+   * and every community discussion. Nothing about them may change.
+   */
+  it("a post with no event renders no event meta and no badge", () => {
+    renderCard({ post: aPost({ type: "diskusi" }) });
+
+    expect(screen.queryAllByText("Kegiatan").length).toBe(0);
+    expect(screen.queryAllByTestId("post-card-event").length).toBe(0);
+  });
+
+  /**
+   * The deploy window `PostView.media`'s docstring describes: a new bundle
+   * against an API that has never heard of `event`. A bare `.title` read
+   * there is an uncaught render throw with no error boundary in this app.
+   */
+  it("survives an event field the API never sent", () => {
+    renderCard({ post: aPost({ type: "kegiatan" }) });
+    expect(screen.queryAllByTestId("post-card-event").length).toBe(0);
+  });
+});
+
 /**
  * **The judgement call the task brief asked to be made honestly, and the
  * behaviour this file deliberately does NOT test.**

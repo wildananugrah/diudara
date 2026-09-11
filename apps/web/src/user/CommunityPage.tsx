@@ -12,6 +12,7 @@ import {
 import { communityColor, communityInk } from "./communityColor";
 import CommunityFeed from "./CommunityFeed";
 import CommunityJoinControl from "./CommunityJoinControl";
+import KegiatanTab from "./KegiatanTab";
 import { describeRequestFailure } from "./errorCopy";
 import Header from "./shell/Header";
 
@@ -97,7 +98,11 @@ function AnggotaTab({ slug }: { slug: string }) {
 export default function CommunityPage() {
   const { slug } = useParams<{ slug: string }>();
   const [params, setParams] = useSearchParams();
-  const tab = params.get("tab") === "anggota" ? "anggota" : "diskusi";
+  // Phase 3 added `kegiatan`. An unknown `?tab=` still falls back to Diskusi
+  // — a link with a typo shows the community rather than nothing.
+  const requestedTab = params.get("tab");
+  const tab =
+    requestedTab === "anggota" || requestedTab === "kegiatan" ? requestedTab : "diskusi";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const signedIn = getSessionUser() !== null;
 
@@ -209,6 +214,13 @@ export default function CommunityPage() {
           </button>
           <button
             type="button"
+            aria-current={tab === "kegiatan"}
+            onClick={() => setParams({ tab: "kegiatan" })}
+          >
+            Kegiatan
+          </button>
+          <button
+            type="button"
             aria-current={tab === "anggota"}
             onClick={() => setParams({ tab: "anggota" })}
           >
@@ -216,12 +228,17 @@ export default function CommunityPage() {
           </button>
         </nav>
 
+        {/* Only the active tab is mounted, so opening the calendar does not
+            fetch a feed nobody asked for — and vice versa. The rule Phase 2
+            set when it added the first tab bar. */}
         {tab === "diskusi" ? (
           <CommunityFeed
             slug={community.slug}
             viewerIsMember={community.viewerIsMember}
             viewerIsOwner={community.viewerIsOwner}
           />
+        ) : tab === "kegiatan" ? (
+          <KegiatanTab slug={community.slug} />
         ) : (
           <AnggotaTab slug={community.slug} />
         )}

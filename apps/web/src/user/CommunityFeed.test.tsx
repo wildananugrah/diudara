@@ -115,7 +115,9 @@ describe("CommunityFeed", () => {
 
     await screen.findByRole("combobox", { name: "Jenis kiriman" });
     const options = screen.getAllByRole("option").map((option) => option.textContent);
-    expect(options).toEqual(["Diskusi", "Pengumuman"]);
+    // Phase 3 added Kegiatan to COMMUNITY_POST_TYPES, and this list is that
+    // constant rendered — so it moves when the constant does, deliberately.
+    expect(options).toEqual(["Diskusi", "Pengumuman", "Kegiatan"]);
 
     rerender(
       <MemoryRouter>

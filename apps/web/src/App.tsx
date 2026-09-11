@@ -100,6 +100,13 @@ export function AppRoutes() {
           never have claimed this three-segment path anyway.
         */}
         <Route path="/komunitas/:slug/diskusi/:postId" element={<DiscussionPage />} />
+        {/* Phase 3. The SAME component under its `kegiatan` variant — which
+            additionally 404s a post that carries no schedule. Declared beside
+            the discussion route and, like it, above `/:handleParam`. */}
+        <Route
+          path="/komunitas/:slug/kegiatan/:postId"
+          element={<DiscussionPage variant="kegiatan" />}
+        />
 
         {/*
           MOVED INSIDE THE SHELL on 2026-08-25, reversing an earlier ruling.
