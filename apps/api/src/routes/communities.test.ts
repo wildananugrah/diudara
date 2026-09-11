@@ -556,11 +556,15 @@ describe("POST /communities/:slug/documents", () => {
 
     expect(res.status).toBe(201);
     const body = await res.json();
+    // Phase 5 widened the view with `membersOnly` and the per-document
+    // `mayDownload`, so this closed-shape guard moves with it.
     expect(Object.keys(body).sort()).toEqual([
       "byteSize",
       "contentType",
       "createdAt",
       "id",
+      "mayDownload",
+      "membersOnly",
       "name",
       "uploader",
     ]);
@@ -666,8 +670,10 @@ describe("GET /communities/:slug/documents", () => {
     expect(body.documents.map((d: { name: string }) => d.name)).toEqual([
       "Rangkuman Trigonometri.pdf",
     ]);
-    // So the client never renders a download control that would fail.
-    expect(body.viewerMayDownload).toBe(false);
+    // So the client never renders a download control that would fail. PER
+    // DOCUMENT since Phase 5 — a community can hold both open and paid
+    // material, and one page-level flag could not say that.
+    expect(body.documents[0].mayDownload).toBe(false);
   });
 
   it("tells a member they may download", async () => {
@@ -681,7 +687,7 @@ describe("GET /communities/:slug/documents", () => {
       headers: authed(memberToken),
     });
 
-    expect((await res.json()).viewerMayDownload).toBe(true);
+    expect((await res.json()).documents[0].mayDownload).toBe(true);
   });
 
   it("an unknown slug is 404", async () => {
@@ -818,5 +824,175 @@ describe("DELETE /communities/:slug/documents/:id", () => {
 
     expect((await del()).status).toBe(200);
     expect((await del()).status).toBe(404);
+  });
+});
+
+describe("community tiers and checkout (Phase 5)", () => {
+  async function ownedCommunity() {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+    return { a, token };
+  }
+
+  async function addTier(
+    a: ReturnType<typeof app>,
+    token: string,
+    body: Record<string, unknown> = { name: "Premium", priceAmount: 0 }
+  ) {
+    return a.request("/communities/kelas-desain/tiers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("the owner creates a tier, and the view carries no payout owner", async () => {
+    const { a, token } = await ownedCommunity();
+
+    const res = await addTier(a, token);
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    // `ownerId` is the payout destination and nobody's business; `communityId`
+    // is already in the URL the caller used.
+    expect(Object.keys(body).sort()).toEqual([
+      "billingCycle",
+      "id",
+      "isActive",
+      "name",
+      "priceAmount",
+    ]);
+  });
+
+  it("the offer is readable signed out — that is what makes a paid community evaluable", async () => {
+    const { a, token } = await ownedCommunity();
+    await addTier(a, token);
+
+    const res = await a.request("/communities/kelas-desain/tiers");
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).tiers.map((t: { name: string }) => t.name)).toEqual(["Premium"]);
+  });
+
+  it("a member may not create one — 403", async () => {
+    const { a } = await ownedCommunity();
+    const memberToken = await joinAs(a, "rina", "rina@example.com");
+
+    expect((await addTier(a, memberToken)).status).toBe(403);
+  });
+
+  /**
+   * The separation the two offers depend on, through the REAL endpoints: a
+   * community tier must not surface on its owner's profile, and a personal
+   * tier must not surface on the community.
+   */
+  it("community tiers and personal tiers never appear in each other's offer", async () => {
+    const { a, token } = await ownedCommunity();
+    await addTier(a, token, { name: "Komunitas", priceAmount: 0 });
+    await a.request("/users/me/tiers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ name: "Pribadi", priceAmount: 0 }),
+    });
+
+    const communityOffer = await (await a.request("/communities/kelas-desain/tiers")).json();
+    const personalOffer = await (
+      await a.request("/users/me/tiers", { headers: authed(token) })
+    ).json();
+
+    expect(communityOffer.tiers.map((t: { name: string }) => t.name)).toEqual(["Komunitas"]);
+    // `/users/me/tiers` answers a BARE ARRAY, unlike the community offer's
+    // wrapper — a shipped shape this phase does not get to change.
+    expect(personalOffer.map((t: { name: string }) => t.name)).toEqual(["Pribadi"]);
+  });
+
+  it("the owner deactivates a tier, and it leaves the offer", async () => {
+    const { a, token } = await ownedCommunity();
+    const tier = await (await addTier(a, token)).json();
+
+    const res = await a.request(`/communities/kelas-desain/tiers/${tier.id}`, {
+      method: "PATCH",
+      headers: authed(token),
+    });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).isActive).toBe(false);
+    const offer = await (await a.request("/communities/kelas-desain/tiers")).json();
+    expect(offer.tiers).toEqual([]);
+  });
+
+  it("a member subscribes to a free community tier", async () => {
+    const { a, token } = await ownedCommunity();
+    const tier = await (await addTier(a, token)).json();
+    const memberToken = await joinAs(a, "rina", "rina@example.com");
+
+    const res = await a.request("/communities/kelas-desain/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(memberToken) },
+      body: JSON.stringify({ tierId: tier.id }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(await res.json()).toHaveProperty("subscriptionId");
+  });
+
+  /**
+   * Joining is free and one click, so this costs nothing — and it keeps one
+   * rule true elsewhere: every subscriber is a member, so the document gate
+   * never has to handle "paid but not joined".
+   */
+  it("a non-member must join before subscribing — 403", async () => {
+    const { a, token } = await ownedCommunity();
+    const tier = await (await addTier(a, token)).json();
+    const strangerToken = await tokenForValidUser(a, {
+      handle: "asing",
+      email: "asing@example.com",
+    });
+
+    const res = await a.request("/communities/kelas-desain/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(strangerToken) },
+      body: JSON.stringify({ tierId: tier.id }),
+    });
+
+    expect(res.status).toBe(403);
+  });
+
+  /**
+   * The scope check inside `StartUserSubscription`: a PERSONAL tier bought
+   * through the community endpoint is a 404, so nobody pays for a membership
+   * of something they were never shown.
+   */
+  it("a personal tier cannot be bought through the community endpoint", async () => {
+    const { a, token } = await ownedCommunity();
+    const personal = await (
+      await a.request("/users/me/tiers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authed(token) },
+        body: JSON.stringify({ name: "Pribadi", priceAmount: 0 }),
+      })
+    ).json();
+    const memberToken = await joinAs(a, "rina", "rina@example.com");
+
+    const res = await a.request("/communities/kelas-desain/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(memberToken) },
+      body: JSON.stringify({ tierId: personal.id }),
+    });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("an unknown slug is 404 on the offer and on checkout", async () => {
+    const { a, token } = await ownedCommunity();
+
+    expect((await a.request("/communities/tidak-ada/tiers")).status).toBe(404);
+    const res = await a.request("/communities/tidak-ada/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ tierId: "ffffffff-0000-4000-8000-000000000000" }),
+    });
+    expect(res.status).toBe(404);
   });
 });

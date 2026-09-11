@@ -53,6 +53,8 @@ import { BrowseCommunities } from "./application/use-cases/browse-communities";
 import { ListCommunityMembers } from "./application/use-cases/list-community-members";
 import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
 import { ListCommunityEvents } from "./application/use-cases/community-events";
+import { ManageCommunityTiers } from "./application/use-cases/community-tiers";
+import { StartCommunitySubscription } from "./application/use-cases/start-community-subscription";
 import {
   DeleteCommunityDocument,
   DownloadCommunityDocument,
@@ -712,11 +714,18 @@ describe("Dependencies (composition root contract)", () => {
             documents,
             storage
           ),
-          listCommunityDocuments: new ListCommunityDocuments(fakeCommunityRepository, documents),
+          listCommunityDocuments: new ListCommunityDocuments(
+            fakeCommunityRepository,
+            documents,
+            fakeUserSubscriptionRepository,
+            fakeClock
+          ),
           downloadCommunityDocument: new DownloadCommunityDocument(
             fakeCommunityRepository,
             documents,
-            storage
+            storage,
+            fakeUserSubscriptionRepository,
+            fakeClock
           ),
           deleteCommunityDocument: new DeleteCommunityDocument(
             fakeCommunityRepository,
@@ -725,6 +734,28 @@ describe("Dependencies (composition root contract)", () => {
           ),
         };
       })(),
+      // Phase 5's two authorisation wrappers, built over the same fakes the
+      // personal paths above use — the point of the wrappers is that they add
+      // no machinery of their own.
+      manageCommunityTiers: new ManageCommunityTiers(
+        fakeCommunityRepository,
+        fakeUserTierRepository,
+        new ManageUserTiers(fakeUserTierRepository, fakeUserPayoutRepository)
+      ),
+      startCommunitySubscription: new StartCommunitySubscription(
+        fakeCommunityRepository,
+        fakeUserRepository,
+        new StartUserSubscription(
+          fakeUserRepository,
+          fakeUserTierRepository,
+          fakeUserPayoutRepository,
+          fakeUserSubscriptionRepository,
+          fakeUserPurchaseUnitOfWork,
+          null,
+          fakeClock,
+          { appBaseUrl: "http://localhost:5173" }
+        )
+      ),
       createPost: new CreatePost(fakePostWriteUnitOfWork),
       maxPostImages: 5,
       editPost: new EditPost(fakePostWriteUnitOfWork),

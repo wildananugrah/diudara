@@ -84,6 +84,41 @@ const MULTIPART_ENVELOPE_ALLOWANCE = 64 * 1024;
  */
 const GATED_DOCUMENT_CACHE_CONTROL = "private, no-store";
 
+/**
+ * `POST /communities/:slug/tiers` — SHAPE only. Every business rule (a
+ * non-empty name, a non-negative price, a supported cycle, and the connected
+ * payout account a paid tier needs) lives in `ManageUserTiers`, which the
+ * community path wraps rather than repeats.
+ */
+const createCommunityTierSchema = z.object({
+  name: z.string().trim().min(1).max(128),
+  priceAmount: z.number().int().min(0),
+  billingCycle: z.string().min(1).max(16).optional(),
+});
+
+const subscribeToCommunitySchema = z.object({ tierId: z.string().uuid() });
+
+/**
+ * A community tier as the wire sees it. `ownerId` and `communityId` are
+ * DROPPED here: the first is a payout destination and nobody's business, and
+ * the second is already in the URL the caller used.
+ */
+function toCommunityTierView(tier: {
+  id: string;
+  name: string;
+  priceAmount: number;
+  billingCycle: string;
+  isActive: boolean;
+}) {
+  return {
+    id: tier.id,
+    name: tier.name,
+    priceAmount: tier.priceAmount,
+    billingCycle: tier.billingCycle,
+    isActive: tier.isActive,
+  };
+}
+
 const memberListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(DEFAULT_COMMUNITY_MEMBER_LIMIT).optional(),
 });
@@ -141,6 +176,8 @@ export function communityRoutes(
     | "listCommunityDocuments"
     | "downloadCommunityDocument"
     | "deleteCommunityDocument"
+    | "manageCommunityTiers"
+    | "startCommunitySubscription"
     | "maxPostImages"
   >
 ) {
@@ -361,6 +398,66 @@ export function communityRoutes(
       })
     );
   });
+
+  // ---- Phase 5, per-community checkout ------------------------------------
+
+  app.get<"/:slug/tiers">("/:slug/tiers", async (c) => {
+    // PUBLIC: the offer is what makes a paid community evaluable before
+    // joining, the same reason the feed and the document list are open.
+    const tiers = await deps.manageCommunityTiers.list({ slug: c.req.param("slug") });
+    return c.json({ tiers: tiers.map(toCommunityTierView) });
+  });
+
+  app.post<"/:slug/tiers">(
+    "/:slug/tiers",
+    requireAuth,
+    validate(createCommunityTierSchema),
+    async (c) => {
+      const input = c.get("validated") as {
+        name: string;
+        priceAmount: number;
+        billingCycle?: string;
+      };
+      const tier = await deps.manageCommunityTiers.create({
+        slug: c.req.param("slug"),
+        ownerId: c.get("userId"),
+        name: input.name,
+        priceAmount: input.priceAmount,
+        billingCycle: input.billingCycle,
+      });
+      return c.json(toCommunityTierView(tier), 201);
+    }
+  );
+
+  // `isActive` is the ONLY thing a tier's edit may touch, matching
+  // `PATCH /users/me/tiers/:tierId`. A tier's price never changes: a
+  // subscription's price is the tier's price at purchase, so an edited price
+  // would silently reprice everybody already on it.
+  app.patch<"/:slug/tiers/:tierId">("/:slug/tiers/:tierId", requireAuth, async (c) => {
+    const tier = await deps.manageCommunityTiers.deactivate({
+      slug: c.req.param("slug"),
+      ownerId: c.get("userId"),
+      tierId: c.req.param("tierId"),
+    });
+    return c.json(toCommunityTierView(tier));
+  });
+
+  app.post<"/:slug/subscribe">(
+    "/:slug/subscribe",
+    requireAuth,
+    validate(subscribeToCommunitySchema),
+    async (c) => {
+      const input = c.get("validated") as { tierId: string };
+      return c.json(
+        await deps.startCommunitySubscription.execute({
+          slug: c.req.param("slug"),
+          subscriberId: c.get("userId"),
+          tierId: input.tierId,
+        }),
+        201
+      );
+    }
+  );
 
   app.get<"/:slug">("/:slug", async (c) => {
     const viewerId = await resolveViewerId(c, deps.userTokenIssuer, deps.userRepository);

@@ -16,8 +16,9 @@ import type { Dependencies } from "./bootstrap";
  *
  * `/communities` IS BACK, and it is not the router that was deleted. Phase 1
  * (communities-core) mounts a new one — six routes at first, then eight with
- * community-feed's `GET`/`POST /communities/:slug/posts`, now thirteen with
- * Phase 3's `GET /communities/:slug/events` and Phase 4a's four document routes — for communities
+ * community-feed's `GET`/`POST /communities/:slug/posts`, now seventeen with
+ * Phase 3's `GET /communities/:slug/events`, Phase 4a's four document routes
+ * and Phase 5's four checkout routes — for communities
  * owned by an `app_user`; the creator-owned tables the old one read were
  * dropped in that phase's first task. EIGHT MOUNTS NOW, all of them new-world.
  * The exact-set assertions below are what make the distinction checkable: the
@@ -93,6 +94,7 @@ describe("the app's routing table", () => {
       "GET /communities/:slug/events",
       "GET /communities/:slug/members",
       "GET /communities/:slug/posts",
+      "GET /communities/:slug/tiers",
       "GET /health",
       "GET /streams",
       "GET /users/:handle/followers",
@@ -112,6 +114,7 @@ describe("the app's routing table", () => {
       "GET /users/posts/:id",
       "GET /users/posts/:id/comments",
       "GET /webhooks/mediamtx/auth-request",
+      "PATCH /communities/:slug/tiers/:tierId",
       "PATCH /users/me",
       "PATCH /users/me/tiers/:tierId",
       "PATCH /users/posts/:id",
@@ -119,6 +122,8 @@ describe("the app's routing table", () => {
       "POST /communities/:slug/documents",
       "POST /communities/:slug/join",
       "POST /communities/:slug/posts",
+      "POST /communities/:slug/subscribe",
+      "POST /communities/:slug/tiers",
       "POST /streams",
       "POST /streams/:id/watch-token",
       "POST /users/:handle/follow",
