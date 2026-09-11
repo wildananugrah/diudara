@@ -12,6 +12,7 @@ import FollowListPage from "./user/FollowListPage";
 import AppShell from "./user/AppShell";
 import RedirectIfSignedIn from "./user/RedirectIfSignedIn";
 import BerandaPage from "./user/BerandaPage";
+import LiveRoomPage from "./user/LiveRoomPage";
 import SiaranPage from "./user/SiaranPage";
 import JelajahPage from "./user/JelajahPage";
 import CommunityPage from "./user/CommunityPage";
@@ -75,6 +76,11 @@ export function AppRoutes() {
         <Route path="/beranda" element={<BerandaPage />} />
         <Route path="/jelajah" element={<JelajahPage />} />
         <Route path="/siaran" element={<SiaranPage />} />
+        {/* Phase 7. Declared AFTER the index and, like every route in this
+            block, above `/:handleParam` — `siaran` is a literal, so the two
+            cannot collide, but the ordering matches every other detail route
+            here. */}
+        <Route path="/siaran/:streamId" element={<LiveRoomPage />} />
         <Route path="/pengaturan" element={<SettingsPage />} />
 
         {/*

@@ -740,14 +740,15 @@ describe("routing — which pages turn a signed-in visitor away", () => {
 });
 
 describe("routing — the shell partition of the real route table", () => {
-  it("renders EXACTLY these eleven paths inside the AppShell layout route", () => {
+  it("renders EXACTLY these twelve paths inside the AppShell layout route", () => {
     const inside = flattenRouteTable()
       .filter((route) => route.insideShell)
       .map((route) => route.path)
       .sort();
 
     // Phase 1 added the two `/komunitas` paths; Task 9 added the discussion
-    // page; Phase 3 added the kegiatan page beside it. Spelled out rather
+    // page; Phase 3 added the kegiatan page beside it; Phase 7 added the
+    // live room. Spelled out rather
     // than counted, the same discipline the rest of this file keeps: a set
     // that gained a route nobody meant to add should fail here, naming it.
     expect(inside).toEqual([
@@ -762,6 +763,7 @@ describe("routing — the shell partition of the real route table", () => {
       "/komunitas/baru",
       "/pengaturan",
       "/siaran",
+      "/siaran/:streamId",
     ]);
   });
 

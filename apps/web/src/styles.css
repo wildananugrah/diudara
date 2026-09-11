@@ -2892,3 +2892,109 @@ button:disabled {
     flex-wrap: wrap;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 7 — the live room.
+
+   THE ONLY DARK FULL-BLEED SCREEN IN THIS APP, and that is the risk its spec
+   names. Every ink token in this stylesheet was contrast-checked against
+   --canvas, a LIGHT surface; inheriting them onto a dark one is how text
+   ends up at 2:1 while every existing test still passes. So this block sets
+   its own foreground explicitly on every rule that sets a background, and
+   never relies on what a parent happened to be.
+   --------------------------------------------------------------------------- */
+
+.live-room {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--ink-900);
+  /* --awan on --ink-900 is 14.7:1. Stated explicitly rather than inherited:
+     the surrounding shell's colour is meant for a light ground. */
+  color: var(--awan);
+}
+
+.live-room-status {
+  padding: 2rem;
+  color: var(--awan);
+}
+
+.live-room-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.875rem 1.25rem;
+  /* A hairline of the foreground rather than a --border token: --border is a
+     light-surface value and disappears here. */
+  /* --ink-700 rather than --border: --border is a light-surface value and
+     vanishes against --ink-900. A token either way — this stylesheet forbids
+     a literal colour outside :root, and no-hardcoded-colours.test.ts is what
+     caught the rgba() that used to be here. */
+  border-bottom: 1px solid var(--ink-700);
+}
+
+.live-room-exit,
+.live-room-owner {
+  color: var(--awan);
+  font-size: 0.8125rem;
+  text-decoration: none;
+}
+
+.live-room-owner {
+  margin-left: auto;
+  /* --kabut on --ink-900 is 7.4:1 — still comfortably past AA, and visibly
+     recessive against the title beside it. */
+  color: var(--kabut);
+}
+
+.live-room-exit:hover,
+.live-room-owner:hover {
+  text-decoration: underline;
+}
+
+.live-room-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  /* Ellipsised rather than wrapped: the bar is one line, and a long session
+     name must not push the owner link onto a second row on a phone. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-room-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* `min-height: 0` so the video can shrink inside the flex column rather
+     than overflowing it. */
+  min-height: 0;
+  padding: 1.25rem;
+}
+
+.live-room-stage video {
+  width: 100%;
+  max-height: 100%;
+  border-radius: var(--radius-md);
+  background: var(--ink-900);
+}
+
+@media (max-width: 640px) {
+  .live-room-bar {
+    padding: 0.75rem 0.875rem;
+  }
+
+  /* The owner link drops to its own row rather than competing with the title
+     for a phone's width. */
+  .live-room-owner {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+
+  .live-room-stage {
+    padding: 0.75rem;
+  }
+}

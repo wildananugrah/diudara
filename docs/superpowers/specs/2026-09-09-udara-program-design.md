@@ -106,6 +106,21 @@ whether the product needs real multi-party conferencing (an SFU: LiveKit,
 mediasoup, Janus) or whether the mockup's UI should be re-read as a broadcast
 studio over the existing pipeline. Do not start Phase 7 without that decision.
 
+**DECIDED, 2026-09-12, by the repo owner: a BROADCAST STUDIO.** Creators
+broadcast and members watch; there is no multi-party conferencing in this
+product. No SFU is adopted, no new server software is introduced, and no new
+operational cost is taken on. `LiveRoomPage` is therefore re-read as a watch
+page over the existing WHIP/MediaMTX/HLS pipeline, and the mockup's
+participant strip — the one element that only makes sense in a call — is not
+built, because in a broadcast there is exactly one person on camera and the
+strip would have nothing to show.
+
+Two further things the mockup shows do not follow from that decision and are
+recorded in `2026-09-12-live-room-design.md` rather than here: the chat panel
+(which needs the realtime layer Phase 8 owns) and the viewer count (which
+needs MediaMTX's control API enabled — infrastructure this phase declined to
+change).
+
 **Accessibility of the palette.** Measured, not assumed:
 
 | Pair | Ratio | WCAG AA (4.5:1 normal text) |
