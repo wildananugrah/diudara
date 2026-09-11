@@ -69,6 +69,11 @@ function stubFetch(overrides: Partial<typeof DETAIL> = {}, calls: string[] = [])
     // Phase 3's Kegiatan tab. An empty month keeps the tab quiet in the
     // banner/join tests, exactly as the empty feed page above does.
     if (url.includes("/events")) return jsonResponse({ events: [] });
+    // Phase 4a's Dokumen tab. An empty library keeps the tab quiet in the
+    // banner/join tests, as the empty feed and empty month above do.
+    if (url.includes("/documents")) {
+      return jsonResponse({ documents: [], viewerMayDownload: false });
+    }
     if (init?.method === "POST") return jsonResponse({ member: true });
     if (init?.method === "DELETE") return jsonResponse({ member: false });
     return jsonResponse({ ...DETAIL, ...overrides });
@@ -196,20 +201,35 @@ describe("CommunityPage", () => {
  * half mounted (the inactive one issues no request).
  */
 describe("CommunityPage — the Diskusi / Kegiatan / Anggota tab bar", () => {
-  it("has the three tabs, with Diskusi current by default, and reads no roster", async () => {
+  it("has the four tabs, with Diskusi current by default, and reads no roster", async () => {
     const calls = stubFetch();
     renderPage();
 
     await screen.findByText("4 anggota · Skill Digital");
     const diskusi = screen.getByRole("button", { name: "Diskusi" });
     const kegiatan = screen.getByRole("button", { name: "Kegiatan" });
+    const dokumen = screen.getByRole("button", { name: "Dokumen" });
     const anggota = screen.getByRole("button", { name: "Anggota" });
     expect(diskusi.getAttribute("aria-current")).toBe("true");
     expect(kegiatan.getAttribute("aria-current")).toBe("false");
+    expect(dokumen.getAttribute("aria-current")).toBe("false");
     expect(anggota.getAttribute("aria-current")).toBe("false");
-    // Symmetric with the tab tests below: only the active half mounts, so the
-    // default view calls neither listCommunityMembers nor the calendar.
+    // Symmetric with the tab tests below: only the active tab mounts, so the
+    // default view reads neither the roster, nor the calendar, nor the library.
     expect(calls.some((call) => call.includes("/members"))).toBe(false);
+    expect(calls.some((call) => call.includes("/events"))).toBe(false);
+    expect(calls.some((call) => call.includes("/documents"))).toBe(false);
+  });
+
+  it("shows the library and not the feed at ?tab=dokumen", async () => {
+    const calls = stubFetch();
+    renderPage("/komunitas/kelas-desain?tab=dokumen");
+
+    await screen.findByText(/Belum ada dokumen/);
+    expect(screen.getByRole("button", { name: "Dokumen" }).getAttribute("aria-current")).toBe(
+      "true"
+    );
+    expect(calls.some((call) => call.includes("/posts"))).toBe(false);
     expect(calls.some((call) => call.includes("/events"))).toBe(false);
   });
 

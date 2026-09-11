@@ -314,11 +314,30 @@ each row. Delete confirms first, then sends, then removes the row — the
 order `PostCard`'s `onDeleteRequested` docstring records, after that callback
 was once named as though the row were already gone.
 
-**The download is a real navigation, not `fetch`.** The response carries
-`Content-Disposition: attachment`, so letting the browser handle it is what
-produces a save dialogue with the right filename; fetching it into memory
-and building a blob URL would reimplement that badly and hold 25 MB in the
-tab. A member's download therefore goes through a plain link.
+**The download is an authenticated `fetch`, not a plain link.**
+
+This paragraph originally said the opposite — that a plain `<a href>` was
+better, because the response carries `Content-Disposition: attachment` and the
+browser would turn that into a save dialogue for free. **That was wrong, and
+it was wrong in a way that would have shipped broken.** The route is
+member-gated, membership is proved by an `Authorization: Bearer` header built
+from the token in localStorage, and a plain navigation cannot carry a header.
+Every member's click would have reached the API as an anonymous caller and
+been refused — with the 404 the gate is specified to answer, so it would have
+looked like the document was missing.
+
+This is the same problem `http/media-session.ts` exists to solve for
+`<img src>`, and its solution is not reusable here: that cookie is scoped
+`Path=/users/media`, and its own docstring states that widening it "is not a
+refactor — it turns a media credential into an ambient session". A second
+cookie scoped to `/communities` would be exactly that, over a wider surface.
+
+So the client fetches the bytes through the authenticated API client and hands
+them over as a blob with the row's own name. The cost is holding the file in
+memory briefly, bounded by `MAX_DOCUMENT_BYTES`.
+
+**The test for this asserts the request, not a rendered `href`.** An href
+assertion passes for precisely the broken implementation described above.
 
 **`formatBytes`** is new and shared — `"2,4 MB"`, Indonesian decimal comma,
 matching `api.ts`'s existing `id-ID` money formatting. It gets its own unit
