@@ -2119,6 +2119,10 @@ export interface CommunityDetail {
   description: string | null;
   memberCount: number;
   tags: string[];
+  /** Computed the same way `CommunityListRow.live` is — see that field's own docstring. */
+  live: { streamId: string; viewerCount: number } | null;
+  /** Computed the same way `CommunityListRow.price` is — see that field's own docstring. */
+  price: { amount: number; billingCycle: string } | null;
   ownerHandle: string;
   ownerDisplayName: string;
   viewerIsMember: boolean | null;

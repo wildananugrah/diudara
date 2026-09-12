@@ -94,12 +94,24 @@ export class CreateCommunity {
       throw err;
     }
 
-    // No queries for these three. The repository just wrote the owner's
-    // membership row in the same transaction as the community, so the count
-    // is one and the creator is both member and owner by construction.
+    // No queries for memberCount/viewerIsMember/viewerIsOwner. The repository
+    // just wrote the owner's membership row in the same transaction as the
+    // community, so the count is one and the creator is both member and
+    // owner by construction. `live`/`price` DO still need a real query each,
+    // computed the same way `GetCommunity` computes them rather than
+    // hardcoded to `null` — a brand-new community has no tiers yet, but its
+    // owner may already be live from an earlier community or a personal
+    // stream, and that must still show correctly here.
+    const [liveByOwner, prices] = await Promise.all([
+      this.communities.liveByOwner([input.ownerId]),
+      this.communities.cheapestActivePrices([community.id]),
+    ]);
+
     return toCommunityDetail({
       community,
       memberCount: 1,
+      live: liveByOwner.get(input.ownerId) ?? null,
+      price: prices.get(community.id) ?? null,
       ownerHandle: owner.handle,
       ownerDisplayName: owner.displayName,
       viewerIsMember: true,

@@ -108,6 +108,12 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
   async popularTags(): Promise<never> {
     throw new Error("not used in these tests");
   }
+  async liveByOwner() {
+    return new Map();
+  }
+  async cheapestActivePrices() {
+    return new Map();
+  }
   async memberCountFor(): Promise<number> {
     throw new Error("not used in these tests");
   }
@@ -166,6 +172,12 @@ describe("CreateCommunity", () => {
     expect(detail.memberCount).toBe(1);
     expect(detail.viewerIsMember).toBe(true);
     expect(detail.viewerIsOwner).toBe(true);
+    // A brand-new community has no tiers yet and (per this fake) no live
+    // stream — computed the same way `GetCommunity` computes it, not
+    // hardcoded, so an owner who happens to already be live elsewhere would
+    // still show correctly the moment this use case starts asking for real.
+    expect(detail.live).toBeNull();
+    expect(detail.price).toBeNull();
   });
 
   it("normalises and passes tags through to the repository", async () => {

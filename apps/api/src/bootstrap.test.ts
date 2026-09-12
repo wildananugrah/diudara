@@ -388,6 +388,12 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
   async popularTags() {
     return [];
   },
+  async liveByOwner() {
+    return new Map();
+  },
+  async cheapestActivePrices() {
+    return new Map();
+  },
   async memberCountFor() {
     return 0;
   },

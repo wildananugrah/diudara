@@ -76,6 +76,10 @@ const community: CommunityRecord = {
 class FakeCommunityRepository implements CommunityRepositoryPort {
   isMemberCalls = 0;
   members = new Set<string>();
+  live = new Map<string, { streamId: string; viewerCount: number }>();
+  prices = new Map<string, { amount: number; billingCycle: string }>();
+  liveByOwnerCalls: string[][] = [];
+  cheapestActivePricesCalls: string[][] = [];
 
   constructor(private readonly rows: CommunityRecord[]) {}
 
@@ -96,6 +100,16 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
   }
   async popularTags(): Promise<never> {
     throw new Error("not used in these tests");
+  }
+  async liveByOwner(ownerIds: string[]) {
+    this.liveByOwnerCalls.push(ownerIds);
+    return new Map(ownerIds.filter((id) => this.live.has(id)).map((id) => [id, this.live.get(id)!]));
+  }
+  async cheapestActivePrices(communityIds: string[]) {
+    this.cheapestActivePricesCalls.push(communityIds);
+    return new Map(
+      communityIds.filter((id) => this.prices.has(id)).map((id) => [id, this.prices.get(id)!])
+    );
   }
   async memberCountFor(): Promise<number> {
     return this.members.size;
@@ -162,6 +176,28 @@ describe("GetCommunity", () => {
     const detail = await useCase.execute({ slug: "kelas-desain", viewerId: null });
 
     expect(detail.tags).toEqual(["desain", "ui"]);
+  });
+
+  it("carries the owner's live status and the cheapest active price, keyed by this one community", async () => {
+    const { communities, useCase } = subject();
+    communities.live.set("owner-1", { streamId: "stream-1", viewerCount: 42 });
+    communities.prices.set("community-1", { amount: 50_000, billingCycle: "monthly" });
+
+    const detail = await useCase.execute({ slug: "kelas-desain", viewerId: null });
+
+    expect(detail.live).toEqual({ streamId: "stream-1", viewerCount: 42 });
+    expect(detail.price).toEqual({ amount: 50_000, billingCycle: "monthly" });
+    expect(communities.liveByOwnerCalls).toEqual([["owner-1"]]);
+    expect(communities.cheapestActivePricesCalls).toEqual([["community-1"]]);
+  });
+
+  it("reports null live and null price when there is neither", async () => {
+    const { useCase } = subject();
+
+    const detail = await useCase.execute({ slug: "kelas-desain", viewerId: null });
+
+    expect(detail.live).toBeNull();
+    expect(detail.price).toBeNull();
   });
 
   it("reports the owner as owner and as a member", async () => {

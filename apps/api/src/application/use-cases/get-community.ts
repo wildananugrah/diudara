@@ -29,9 +29,11 @@ export class GetCommunity {
       throw new NotFoundError("community not found");
     }
 
-    const [memberCount, owner] = await Promise.all([
+    const [memberCount, owner, liveByOwner, prices] = await Promise.all([
       this.communities.memberCountFor(community.id),
       this.users.findById(community.ownerId),
+      this.communities.liveByOwner([community.ownerId]),
+      this.communities.cheapestActivePrices([community.id]),
     ]);
     if (!owner) {
       // The foreign key makes this unreachable short of a manual delete;
@@ -46,6 +48,8 @@ export class GetCommunity {
     return toCommunityDetail({
       community,
       memberCount,
+      live: liveByOwner.get(community.ownerId) ?? null,
+      price: prices.get(community.id) ?? null,
       ownerHandle: owner.handle,
       ownerDisplayName: owner.displayName,
       viewerIsMember,

@@ -14,6 +14,10 @@ export interface CommunityDetail {
   description: string | null;
   memberCount: number;
   tags: string[];
+  /** Computed the same way `CommunityListRow.live` is — see that field's own docstring. */
+  live: { streamId: string; viewerCount: number } | null;
+  /** Computed the same way `CommunityListRow.price` is — see that field's own docstring. */
+  price: { amount: number; billingCycle: string } | null;
   ownerHandle: string;
   ownerDisplayName: string;
   /**
@@ -40,6 +44,8 @@ export interface CommunityDetail {
 export function toCommunityDetail(input: {
   community: CommunityRecord;
   memberCount: number;
+  live: { streamId: string; viewerCount: number } | null;
+  price: { amount: number; billingCycle: string } | null;
   ownerHandle: string;
   ownerDisplayName: string;
   viewerIsMember: boolean | null;
@@ -52,6 +58,8 @@ export function toCommunityDetail(input: {
     description: input.community.description,
     memberCount: input.memberCount,
     tags: input.community.tags,
+    live: input.live,
+    price: input.price,
     ownerHandle: input.ownerHandle,
     ownerDisplayName: input.ownerDisplayName,
     viewerIsMember: input.viewerIsMember,

@@ -12,6 +12,7 @@ import {
 import { communityColor, communityInk } from "./communityColor";
 import CommunityFeed from "./CommunityFeed";
 import CommunityJoinControl from "./CommunityJoinControl";
+import CommunitySidebar from "./CommunitySidebar";
 import CommunityTagsEditor from "./CommunityTagsEditor";
 import CommunityTiers from "./CommunityTiers";
 import DokumenTab from "./DokumenTab";
@@ -147,7 +148,7 @@ export default function CommunityPage() {
     return (
       <>
         <Header title="Komunitas" />
-        <main className="user-page community-page">
+        <main className="page-container community-page">
           <p>Memuat...</p>
         </main>
       </>
@@ -162,7 +163,7 @@ export default function CommunityPage() {
     return (
       <>
         <Header title="Komunitas" />
-        <main className="user-page community-page">
+        <main className="page-container community-page">
           <p className="form-error" role="alert">
             {load.message}
           </p>
@@ -175,8 +176,11 @@ export default function CommunityPage() {
 
   return (
     <>
-      <Header title={community.name} />
-      <main className="user-page community-page">
+      <Header
+        title={community.name}
+        breadcrumb={[{ label: "Komunitas", to: "/discover" }, { label: community.name }]}
+      />
+      <main className="page-container community-page">
         <section className="community-banner">
           <span
             className="community-banner-tile"
@@ -189,7 +193,18 @@ export default function CommunityPage() {
             {community.name.slice(0, 1).toUpperCase()}
           </span>
           <div className="community-banner-body">
-            <h1 className="community-banner-name">{community.name}</h1>
+            <div className="community-banner-heading">
+              <h1 className="community-banner-name">{community.name}</h1>
+              {community.live === null ? null : (
+                <Link
+                  to={`/siaran/${community.live.streamId}`}
+                  className="badge badge-pending community-banner-live"
+                >
+                  <span className="dot" />
+                  LIVE · {community.live.viewerCount} nonton
+                </Link>
+              )}
+            </div>
             {/* One line, one string: a screen reader reads "4 anggota, Skill
                 Digital" rather than three fragments it has to reassemble. */}
             <p className="community-banner-meta">
@@ -204,6 +219,7 @@ export default function CommunityPage() {
               slug={community.slug}
               viewerIsMember={community.viewerIsMember}
               viewerIsOwner={community.viewerIsOwner}
+              price={community.price}
               onChanged={(member) =>
                 setLoad({
                   status: "ready",
@@ -276,13 +292,22 @@ export default function CommunityPage() {
 
         {/* Only the active tab is mounted, so opening the calendar does not
             fetch a feed nobody asked for — and vice versa. The rule Phase 2
-            set when it added the first tab bar. */}
+            set when it added the first tab bar.
+
+            The sidebar ("Tentang komunitas" + "Event mendatang") is Diskusi-only,
+            matching `CommunityHome.tsx` in the design reference — the other tabs
+            stay one column, still inside the same wide frame. */}
         {tab === "diskusi" ? (
-          <CommunityFeed
-            slug={community.slug}
-            viewerIsMember={community.viewerIsMember}
-            viewerIsOwner={community.viewerIsOwner}
-          />
+          <div className="community-layout">
+            <div className="community-main">
+              <CommunityFeed
+                slug={community.slug}
+                viewerIsMember={community.viewerIsMember}
+                viewerIsOwner={community.viewerIsOwner}
+              />
+            </div>
+            <CommunitySidebar slug={community.slug} description={community.description} />
+          </div>
         ) : tab === "kegiatan" ? (
           <KegiatanTab slug={community.slug} />
         ) : tab === "statistik" && community.viewerIsOwner ? (

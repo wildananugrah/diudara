@@ -66,6 +66,12 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
   async popularTags(): Promise<never> {
     throw new Error("not used in these tests");
   }
+  async liveByOwner(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async cheapestActivePrices(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
   async memberCountFor(): Promise<number> {
     return this.members.size;
   }

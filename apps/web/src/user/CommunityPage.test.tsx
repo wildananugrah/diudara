@@ -20,6 +20,8 @@ const DETAIL = {
   description: "Belajar desain dari nol.",
   memberCount: 4,
   tags: [],
+  live: null as { streamId: string; viewerCount: number } | null,
+  price: null as { amount: number; billingCycle: string } | null,
   ownerHandle: "wildan",
   ownerDisplayName: "Wildan",
   viewerIsMember: null as boolean | null,
@@ -214,6 +216,83 @@ describe("CommunityPage", () => {
 });
 
 /**
+ * The community-detail redesign: a LIVE badge and a priced join button on the
+ * banner, a breadcrumb back to Discover, and a Diskusi-only sidebar ("Tentang
+ * komunitas" + "Event mendatang") — matching `CommunityHome.tsx` in the design
+ * reference repo, with the fabricated bits (a per-post "Aktif" badge, the
+ * konten library type) left out. See this session's own scoped-plan approval.
+ */
+describe("CommunityPage — live badge, priced join, breadcrumb, and the sidebar", () => {
+  it("shows a LIVE badge linking to the stream when the owner is live", async () => {
+    stubFetch({ live: { streamId: "stream-1", viewerCount: 12 } });
+    renderPage();
+
+    const badge = await screen.findByRole("link", { name: /LIVE/ });
+    expect(badge.getAttribute("href")).toBe("/siaran/stream-1");
+    expect(badge.textContent).toContain("12");
+  });
+
+  it("shows no LIVE badge when the owner is not live", async () => {
+    stubFetch({ live: null });
+    renderPage();
+
+    await screen.findByText("4 anggota · Skill Digital");
+    expect(screen.queryAllByRole("link", { name: /LIVE/ }).length).toBe(0);
+  });
+
+  it("prices the join button when the community has an active paid tier", async () => {
+    setUserSession("token-1", USER);
+    stubFetch({ viewerIsMember: false, price: { amount: 149000, billingCycle: "monthly" } });
+    renderPage();
+
+    expect(
+      await screen.findByRole("button", { name: "Gabung — Rp 149.000 per bulan" })
+    ).toBeTruthy();
+  });
+
+  it("marks the join button Gratis when the active tier costs nothing", async () => {
+    setUserSession("token-1", USER);
+    stubFetch({ viewerIsMember: false, price: { amount: 0, billingCycle: "monthly" } });
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: "Gabung — Gratis" })).toBeTruthy();
+  });
+
+  it("keeps the plain Gabung label when the community has no active tier at all", async () => {
+    setUserSession("token-1", USER);
+    stubFetch({ viewerIsMember: false, price: null });
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: "Gabung" })).toBeTruthy();
+  });
+
+  it("breadcrumbs back to Discover", async () => {
+    stubFetch();
+    renderPage();
+
+    const crumb = await screen.findByRole("link", { name: "Komunitas" });
+    expect(crumb.getAttribute("href")).toBe("/discover");
+    expect((await screen.findAllByText("Kelas Desain")).length).toBeGreaterThan(0);
+  });
+
+  it("shows the Tentang komunitas sidebar card on the Diskusi tab", async () => {
+    stubFetch();
+    renderPage();
+
+    await screen.findByText("Tentang komunitas");
+    expect(screen.getAllByText("Belajar desain dari nol.").length).toBeGreaterThan(0);
+  });
+
+  it("hides the sidebar on every other tab", async () => {
+    stubFetch();
+    renderPage("/komunitas/kelas-desain?tab=kegiatan");
+
+    await screen.findByText(/Belum ada kegiatan/);
+    expect(screen.queryAllByText("Tentang komunitas").length).toBe(0);
+  });
+});
+
+/**
  * Task 8 — the tab bar Phase 1 cut. Two tabs, Jelajah's pattern: `.feed-tabs`
  * markup, `aria-current`, the tab in the URL as `?tab=`, and only the active
  * half mounted (the inactive one issues no request).
@@ -237,9 +316,10 @@ describe("CommunityPage — the Diskusi / Kegiatan / Anggota tab bar", () => {
     expect(materi.getAttribute("aria-current")).toBe("false");
     expect(anggota.getAttribute("aria-current")).toBe("false");
     // Symmetric with the tab tests below: only the active tab mounts, so the
-    // default view reads neither the roster, nor the calendar, nor the library.
+    // default view reads neither the roster nor the library. It DOES read
+    // `/events` — the Diskusi tab's own sidebar ("Event mendatang") — which
+    // the tests below cover in more detail.
     expect(calls.some((call) => call.includes("/members"))).toBe(false);
-    expect(calls.some((call) => call.includes("/events"))).toBe(false);
     expect(calls.some((call) => call.includes("/documents"))).toBe(false);
     expect(calls.some((call) => call.includes("/tiers"))).toBe(false);
     expect(calls.some((call) => call.includes("/syllabus"))).toBe(false);

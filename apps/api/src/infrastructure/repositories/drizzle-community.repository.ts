@@ -196,8 +196,12 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
    * Regardless of `visibility`: a live badge is a discovery signal even for a
    * stream a visitor cannot watch yet, the same call `viewerCount` on
    * `StreamView` already makes.
+   *
+   * PUBLIC (part of `CommunityRepositoryPort`), not just `browse()`'s own
+   * helper: `GetCommunity`/`CreateCommunity` call it with a single owner id
+   * to answer the same question for one community's own detail page.
    */
-  private async liveByOwner(
+  async liveByOwner(
     ownerIds: string[]
   ): Promise<Map<string, { streamId: string; viewerCount: number }>> {
     if (ownerIds.length === 0) return new Map();
@@ -249,8 +253,12 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
     return new Set(rows.map((row) => row.communityId));
   }
 
-  /** The cheapest ACTIVE tier per community, for exactly the ids this browse page returned. */
-  private async cheapestActivePrices(
+  /**
+   * The cheapest ACTIVE tier per community. PUBLIC, for the same reason
+   * `liveByOwner` above is: `GetCommunity`/`CreateCommunity` call it with a
+   * single community id, not just `browse()`'s page of them.
+   */
+  async cheapestActivePrices(
     communityIds: string[]
   ): Promise<Map<string, { amount: number; billingCycle: string }>> {
     if (communityIds.length === 0) return new Map();

@@ -58,6 +58,12 @@ class FakeCommunities implements CommunityRepositoryPort {
   async popularTags(): Promise<never> {
     return this.unused();
   }
+  async liveByOwner(): Promise<never> {
+    return this.unused();
+  }
+  async cheapestActivePrices(): Promise<never> {
+    return this.unused();
+  }
   async join(): Promise<never> {
     return this.unused();
   }

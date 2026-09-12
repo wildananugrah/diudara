@@ -86,6 +86,21 @@ export interface CommunityRepositoryPort {
   /** The site's most-used tags across every community, most-frequent first. */
   popularTags(limit: number): Promise<string[]>;
 
+  /**
+   * Which of these owners currently has a `live` stream, and how many are
+   * watching it — see `CommunityListRow.live`'s own docstring for the full
+   * reasoning (at most one live row per owner, regardless of visibility).
+   * Keyed by owner id so a caller with a single community's `ownerId` reads
+   * its own entry with one `.get(id)`, the same shape `cheapestActivePrices`
+   * below has for community ids.
+   */
+  liveByOwner(ownerIds: string[]): Promise<Map<string, { streamId: string; viewerCount: number }>>;
+
+  /** The cheapest ACTIVE tier per community — see `CommunityListRow.price`'s own docstring. */
+  cheapestActivePrices(
+    communityIds: string[]
+  ): Promise<Map<string, { amount: number; billingCycle: string }>>;
+
   memberCountFor(communityId: string): Promise<number>;
 
   isMember(communityId: string, userId: string): Promise<boolean>;
