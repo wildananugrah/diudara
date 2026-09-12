@@ -11,7 +11,6 @@ import {
   deactivateOwnTier,
   deletePost,
   editPost,
-  exploreUsers,
   followUser,
   getMaxPostImages,
   getOwnProfile,
@@ -147,7 +146,6 @@ describe("apiClient — one place to reach the network (N6)", () => {
       ["getProfileByHandle", () => getProfileByHandle("wildan")],
       ["listFollowers", () => listFollowers("wildan")],
       ["listFollowing", () => listFollowing("wildan")],
-      ["exploreUsers", () => exploreUsers({ q: "budi" })],
       ["listCommunityPosts", () => listCommunityPosts("kelas-fisika")],
       ["getPost", () => getPost("post-1")],
       ["listComments", () => listComments("post-1")],
@@ -889,7 +887,7 @@ describe("follow", () => {
   });
 });
 
-describe("follow lists and Discover", () => {
+describe("follow lists", () => {
   /**
    * REWRITTEN BY THE FINAL REVIEW'S ITEM 1, and the old version is worth
    * recording: it asserted `Authorization` was ABSENT here even while signed in,
@@ -939,31 +937,6 @@ describe("follow lists and Discover", () => {
     expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
   });
 
-  it("sends the token on the Discover explore fetch too", async () => {
-    setUserSession("jwt-abc", USER);
-    const calls: Array<{ init: RequestInit | undefined }> = [];
-    global.fetch = mock(async (_url: string, init?: RequestInit) => {
-      calls.push({ init });
-      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
-    }) as unknown as typeof fetch;
-
-    await exploreUsers({ q: "budi" });
-
-    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
-  });
-
-  it("sends NO Authorization header on the explore fetch when signed out", async () => {
-    const calls: Array<{ init: RequestInit | undefined }> = [];
-    global.fetch = mock(async (_url: string, init?: RequestInit) => {
-      calls.push({ init });
-      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
-    }) as unknown as typeof fetch;
-
-    await exploreUsers({});
-
-    expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBeNull();
-  });
-
   it("appends ?limit= for followers when given a limit", async () => {
     const calls: string[] = [];
     global.fetch = mock(async (url: string) => {
@@ -997,32 +970,6 @@ describe("follow lists and Discover", () => {
     expect(err.status).toBe(404);
   });
 
-  it("calls /users/explore with no query string when q is omitted", async () => {
-    const calls: string[] = [];
-    global.fetch = mock(async (url: string) => {
-      calls.push(url);
-      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
-    }) as unknown as typeof fetch;
-
-    const result = await exploreUsers();
-
-    expect(calls[0]).toBe("/users/explore");
-    expect(result).toEqual({ results: [], newest: [], mostFollowed: [] });
-  });
-
-  it("calls /users/explore?q=... when a query is given, and never on an empty one", async () => {
-    const calls: string[] = [];
-    global.fetch = mock(async (url: string) => {
-      calls.push(url);
-      return jsonResponse({ results: [], newest: [], mostFollowed: [] });
-    }) as unknown as typeof fetch;
-
-    await exploreUsers({ q: "budi" });
-    await exploreUsers({ q: "" });
-
-    expect(calls[0]).toBe("/users/explore?q=budi");
-    expect(calls[1]).toBe("/users/explore");
-  });
 });
 
 const POST_VIEW = {

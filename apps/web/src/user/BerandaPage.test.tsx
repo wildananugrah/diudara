@@ -268,17 +268,13 @@ describe("BerandaPage — the two tabs", () => {
     await screen.findByText("Belum ada kiriman untuk ditampilkan.");
   });
 
-  it("shows Mengikuti's own empty message, which points at an empty follow graph", async () => {
+  it("shows Mengikuti's own empty message for an empty follow graph", async () => {
     setUserSession("jwt-abc", USER);
     mockFetch(() => jsonResponse({ posts: [], nextCursor: null }));
 
     renderBeranda("/beranda?tab=mengikuti");
 
     expect(await screen.findByText("Belum ada kiriman dari orang yang Anda ikuti.")).toBeTruthy();
-    // The only answer to an empty follow graph, and this is where it is needed.
-    const discover = screen.getAllByRole("link", { name: "Discover" });
-    expect(discover.length).toBe(1);
-    expect(discover[0]!.getAttribute("href")).toBe("/discover?tab=orang");
   });
 });
 

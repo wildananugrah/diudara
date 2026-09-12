@@ -190,14 +190,8 @@ describe("routing — the app shell", () => {
   });
 
   it("resolves /discover inside the shell", async () => {
-    // Phase 1 made KOMUNITAS the default tab, so bare `/discover` loads
-    // `GET /communities` rather than `/users/explore`. One mock answering both
-    // shapes, since which one is asked for is the page's business, not this
-    // routing test's.
-    global.fetch = mock(async (url: string) =>
-      url.startsWith("/communities")
-        ? jsonResponse({ communities: [], popularTags: [] })
-        : jsonResponse({ results: [], newest: [], mostFollowed: [] })
+    global.fetch = mock(async () =>
+      jsonResponse({ communities: [], popularTags: [] })
     ) as unknown as typeof fetch;
 
     renderAt("/discover");
@@ -207,18 +201,6 @@ describe("routing — the app shell", () => {
     // rather than after it — an unmocked `fetch` here previously hit the real
     // network and updated state outside any `act(...)`.
     await screen.findByText("Belum ada komunitas di sini.");
-  });
-
-  it("resolves /discover?tab=orang onto the people half", async () => {
-    global.fetch = mock(async (url: string) =>
-      url.startsWith("/communities")
-        ? jsonResponse({ communities: [], popularTags: [] })
-        : jsonResponse({ results: [], newest: [], mostFollowed: [] })
-    ) as unknown as typeof fetch;
-
-    renderAt("/discover?tab=orang");
-
-    await screen.findAllByText("Belum ada akun.");
   });
 
   it("resolves /siaran inside the shell, with Siaran's empty-state copy", async () => {

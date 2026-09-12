@@ -1007,21 +1007,10 @@ button:disabled {
   display: inline-block;
 }
 
-/* --- Discover's Orang tab (Jelajah's original content, moved and renamed):
-       section labels are small, tracked and upper-case so they read as
-       furniture rather than as content. Scoped to `.section` rather than
-       every `h2` under `.discover-page`, so the live-now and community-grid
-       headings below — real headings, not furniture — are unaffected. ------ */
-.discover-page .section h2 {
-  font-size: 0.75rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-  font-weight: 400;
-}
-
-/* Task 5: Jelajah's search bar, and the follow-row list shared with it by
-   FollowListPage (both screens render the same FollowListRow projection). */
+/* Task 5: Jelajah's search bar, reused by Discover's Komunitas search
+   (Discover's Orang tab, which also used it, is gone) and by the
+   follow-row list FollowListPage shares (both render the same
+   FollowListRow projection). */
 .jelajah-search {
   display: flex;
   gap: 8px;

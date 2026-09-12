@@ -725,11 +725,10 @@ export function completePasswordReset(token: string, newPassword: string): Promi
 }
 
 /**
- * A single row in a follower/following list or a Discover result — mirrors the
- * API's own `FollowListRowForViewer`
+ * A single row in a follower/following list — mirrors the API's own
+ * `FollowListRowForViewer`
  * (`apps/api/src/application/use-cases/viewer-follow-state.ts`) exactly: the
- * same shape backs `GET /:handle/followers`, `/:handle/following` and
- * `/explore`'s three lists.
+ * same shape backs `GET /:handle/followers` and `/:handle/following`.
  *
  * Still narrower than `PublicUserProfile` — no counts — but it DOES carry
  * `viewerFollows` as of the final review's item 1, with the identical contract:
@@ -778,25 +777,6 @@ export function listFollowing(handle: string, limit?: number): Promise<FollowLis
   );
 }
 
-/**
- * `GET /explore`. `q` omitted or empty is Discover's (Orang tab) DEFAULT state, not an
- * error — see `ExploreUsers`'s own docstring: `results` comes back `[]` and
- * `newest`/`mostFollowed` are still populated either way.
- */
-export interface ExploreResult {
-  results: FollowListRow[];
-  newest: FollowListRow[];
-  mostFollowed: FollowListRow[];
-}
-
-export function exploreUsers(input: { q?: string; limit?: number } = {}): Promise<ExploreResult> {
-  const params = new URLSearchParams();
-  if (input.q !== undefined && input.q.length > 0) params.set("q", input.q);
-  if (input.limit !== undefined) params.set("limit", String(input.limit));
-  const query = params.toString();
-  const search = query.length > 0 ? `?${query}` : "";
-  return publicGet<ExploreResult>(`/users/explore${search}`, "gagal memuat Discover");
-}
 
 /**
  * One image on a post, as the wire sees it — mirrors the API's own `MediaView`
