@@ -80,6 +80,16 @@ describe("POST /communities", () => {
     expect(body.viewerIsOwner).toBe(true);
   });
 
+  it("accepts tags, normalised", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await createCommunity(a, token, { ...KELAS, tags: ["  #Desain  ", "Desain"] });
+
+    expect(res.status).toBe(201);
+    expect((await res.json()).tags).toEqual(["desain"]);
+  });
+
   it("is 400 for a category outside the six", async () => {
     const a = app();
     const token = await tokenForValidUser(a);
@@ -135,6 +145,82 @@ describe("GET /communities", () => {
 
     const body = await res.json();
     expect(body.communities.map((c: { slug: string }) => c.slug)).toEqual(["bimbel-sbmptn"]);
+  });
+
+  it("answers with each community's tags/trending/price, and the site's popular tags", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, { ...KELAS, tags: ["desain"] });
+
+    const body = await (await a.request("/communities")).json();
+
+    expect(body.popularTags).toEqual(["desain"]);
+    expect(body.communities[0].tags).toEqual(["desain"]);
+    expect(body.communities[0].trending).toBe(false);
+    expect(body.communities[0].price).toBeNull();
+  });
+});
+
+describe("PATCH /communities/:slug/tags", () => {
+  it("is 401 without a token", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await a.request("/communities/kelas-desain/tags", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags: ["baru"] }),
+    });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("the owner replaces the tags", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, { ...KELAS, tags: ["lama"] });
+
+    const res = await a.request("/communities/kelas-desain/tags", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ tags: ["baru"] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).tags).toEqual(["baru"]);
+
+    const detail = await (await a.request("/communities/kelas-desain")).json();
+    expect(detail.tags).toEqual(["baru"]);
+  });
+
+  it("a non-owner gets 403", async () => {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    await createCommunity(a, ownerToken, KELAS);
+    const memberToken = await joinAs(a, "rina", "rina@example.com");
+
+    const res = await a.request("/communities/kelas-desain/tags", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(memberToken) },
+      body: JSON.stringify({ tags: ["baru"] }),
+    });
+
+    expect(res.status).toBe(403);
+  });
+
+  it("is 400 for too many tags", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, KELAS);
+
+    const res = await a.request("/communities/kelas-desain/tags", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({ tags: ["a", "b", "c", "d", "e", "f"] }),
+    });
+
+    expect(res.status).toBe(400);
   });
 });
 

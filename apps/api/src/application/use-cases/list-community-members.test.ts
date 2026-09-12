@@ -15,6 +15,7 @@ const community: CommunityRecord = {
   category: "Skill Digital",
   description: null,
   createdAt: new Date("2026-02-01T00:00:00Z"),
+  tags: [],
 };
 
 function member(handle: string): CommunityMemberRow {
@@ -43,6 +44,12 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
     return this.communities.find((c) => c.id === id) ?? null;
   }
   async browse(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async setTags(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async popularTags(): Promise<never> {
     throw new Error("not used in these tests");
   }
   async memberCountFor(): Promise<number> {

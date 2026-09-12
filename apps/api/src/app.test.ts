@@ -121,6 +121,7 @@ describe("the app's routing table", () => {
       "GET /users/posts/:id",
       "GET /users/posts/:id/comments",
       "GET /webhooks/mediamtx/auth-request",
+      "PATCH /communities/:slug/tags",
       "PATCH /communities/:slug/tiers/:tierId",
       "PATCH /users/me",
       "PATCH /users/me/tiers/:tierId",

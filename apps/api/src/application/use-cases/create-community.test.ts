@@ -75,6 +75,7 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
     name: string;
     category: string;
     description: string | null;
+    tags?: string[];
   }): Promise<CommunityRecord> {
     this.createCalls += 1;
     if (this.takenSlug === input.slug) {
@@ -88,6 +89,7 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
       category: input.category,
       description: input.description,
       createdAt: new Date("2026-02-01T00:00:00Z"),
+      tags: input.tags ?? [],
     };
   }
 
@@ -98,6 +100,12 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
     throw new Error("not used in these tests");
   }
   async browse(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async setTags(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async popularTags(): Promise<never> {
     throw new Error("not used in these tests");
   }
   async memberCountFor(): Promise<number> {
@@ -158,6 +166,48 @@ describe("CreateCommunity", () => {
     expect(detail.memberCount).toBe(1);
     expect(detail.viewerIsMember).toBe(true);
     expect(detail.viewerIsOwner).toBe(true);
+  });
+
+  it("normalises and passes tags through to the repository", async () => {
+    const { useCase } = subject();
+
+    const detail = await useCase.execute({
+      ownerId: "user-1",
+      name: "Kelas Desain",
+      category: "Skill Digital",
+      description: null,
+      tags: ["  #Desain  ", "Desain", "UI"],
+    });
+
+    expect(detail.tags).toEqual(["desain", "ui"]);
+  });
+
+  it("defaults to no tags when none are given", async () => {
+    const { useCase } = subject();
+
+    const detail = await useCase.execute({
+      ownerId: "user-1",
+      name: "Kelas Desain",
+      category: "Skill Digital",
+      description: null,
+    });
+
+    expect(detail.tags).toEqual([]);
+  });
+
+  it("refuses more tags than the cap WITHOUT reaching the repository", async () => {
+    const { communities, useCase } = subject();
+
+    await expect(
+      useCase.execute({
+        ownerId: "user-1",
+        name: "Kelas Desain",
+        category: "Skill Digital",
+        description: null,
+        tags: ["a", "b", "c", "d", "e", "f"],
+      })
+    ).rejects.toBeInstanceOf(ValidationError);
+    expect(communities.createCalls).toBe(0);
   });
 
   it("refuses a name with nothing sluggable WITHOUT reaching the repository", async () => {

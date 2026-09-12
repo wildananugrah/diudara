@@ -2101,6 +2101,10 @@ export function endOwnStream(id: string): Promise<{ ended: boolean }> {
  * One card in the browse grid — mirrors the API's `CommunityListRow`
  * (`apps/api/src/application/ports/community-repository.port.ts`). `memberCount`
  * is computed by the query, not stored, so a card never shows a stale total.
+ *
+ * `trending` and `price` are both computed GLOBALLY, independent of whatever
+ * search/category filter produced this row — see the port's own docstring.
+ * `price` is `null` when the community has no active tier (renders "Gratis").
  */
 export interface CommunityListRow {
   slug: string;
@@ -2108,6 +2112,9 @@ export interface CommunityListRow {
   category: string;
   description: string | null;
   memberCount: number;
+  tags: string[];
+  trending: boolean;
+  price: { amount: number; billingCycle: string } | null;
 }
 
 /**
@@ -2127,6 +2134,7 @@ export interface CommunityDetail {
   category: string;
   description: string | null;
   memberCount: number;
+  tags: string[];
   ownerHandle: string;
   ownerDisplayName: string;
   viewerIsMember: boolean | null;
@@ -2154,12 +2162,12 @@ export interface CommunityMemberRow {
 export function browseCommunities(input: {
   q?: string;
   category?: string;
-} = {}): Promise<{ communities: CommunityListRow[] }> {
+} = {}): Promise<{ communities: CommunityListRow[]; popularTags: string[] }> {
   const params = new URLSearchParams();
   if (input.q) params.set("q", input.q);
   if (input.category) params.set("category", input.category);
   const query = params.toString();
-  return publicGet<{ communities: CommunityListRow[] }>(
+  return publicGet<{ communities: CommunityListRow[]; popularTags: string[] }>(
     query === "" ? "/communities" : `/communities?${query}`,
     "gagal memuat komunitas"
   );
@@ -2198,15 +2206,25 @@ export function createCommunity(input: {
   name: string;
   category: string;
   description?: string;
+  tags?: string[];
 }): Promise<CommunityDetail> {
-  const payload: { name: string; category: string; description?: string } = {
+  const payload: { name: string; category: string; description?: string; tags?: string[] } = {
     name: input.name,
     category: input.category,
   };
   if (input.description) payload.description = input.description;
+  if (input.tags && input.tags.length > 0) payload.tags = input.tags;
   return apiFetch<CommunityDetail>("/communities", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+/** `PATCH /communities/:slug/tags` — owner-only, full replace. */
+export function updateCommunityTags(slug: string, tags: string[]): Promise<{ tags: string[] }> {
+  return apiFetch<{ tags: string[] }>(`/communities/${encodeURIComponent(slug)}/tags`, {
+    method: "PATCH",
+    body: JSON.stringify({ tags }),
   });
 }
 

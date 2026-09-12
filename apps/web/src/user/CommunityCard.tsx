@@ -1,6 +1,13 @@
 import { Link } from "react-router-dom";
 import type { CommunityListRow } from "./apiClient";
 import { communityColor, communityInk } from "./communityColor";
+import { billingCycleLabel, formatTierPrice } from "./tierCopy";
+
+/** `null` (no active tier) and a free (`amount === 0`) tier both read "Gratis". */
+function priceLabel(price: CommunityListRow["price"]): string {
+  if (price === null || price.amount === 0) return "Gratis";
+  return `${formatTierPrice(price.amount)} ${billingCycleLabel(price.billingCycle)}`;
+}
 
 /**
  * One community in the browse grid.
@@ -32,9 +39,17 @@ export default function CommunityCard({ community }: { community: CommunityListR
         {community.name.slice(0, 1).toUpperCase()}
       </span>
       <div className="community-card-body">
-        <h3 className="community-card-name">
-          <Link to={`/komunitas/${community.slug}`}>{community.name}</Link>
-        </h3>
+        <div className="community-card-heading">
+          <h3 className="community-card-name">
+            <Link to={`/komunitas/${community.slug}`}>{community.name}</Link>
+          </h3>
+          {community.trending ? (
+            <span className="badge badge-pending community-card-trending">
+              <span className="dot" />
+              Trending
+            </span>
+          ) : null}
+        </div>
         <p className="community-card-meta muted">
           <span className="community-card-category">{community.category}</span>
           <span className="community-card-members">{community.memberCount} anggota</span>
@@ -42,6 +57,16 @@ export default function CommunityCard({ community }: { community: CommunityListR
         {community.description === null ? null : (
           <p className="community-card-description">{community.description}</p>
         )}
+        {community.tags.length === 0 ? null : (
+          <p className="community-card-tags">
+            {community.tags.map((tag) => (
+              <span key={tag} className="badge badge-neutral">
+                #{tag}
+              </span>
+            ))}
+          </p>
+        )}
+        <p className="community-card-price">{priceLabel(community.price)}</p>
       </div>
     </article>
   );

@@ -462,6 +462,9 @@ describe("JelajahPage tabs", () => {
       category: "Skill Digital",
       description: null,
       memberCount: 3,
+      tags: [],
+      trending: false,
+      price: null,
     },
     {
       slug: "bimbel-sbmptn",
@@ -469,6 +472,9 @@ describe("JelajahPage tabs", () => {
       category: "Bimbel & Ujian",
       description: null,
       memberCount: 9,
+      tags: [],
+      trending: false,
+      price: null,
     },
   ];
 

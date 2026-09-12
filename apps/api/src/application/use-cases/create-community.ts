@@ -49,6 +49,7 @@ export class CreateCommunity {
     name: string;
     category: string;
     description: string | null;
+    tags?: string[];
   }): Promise<CommunityDetail> {
     // Parsed here as well as at the route: this use-case's contract is the
     // schema's, and a second caller (a seed script, a future import) must not
@@ -57,6 +58,7 @@ export class CreateCommunity {
       name: input.name,
       category: input.category,
       description: input.description ?? undefined,
+      tags: input.tags,
     });
     if (!parsed.success) {
       throw new ValidationError("data komunitas tidak valid");
@@ -83,6 +85,7 @@ export class CreateCommunity {
         name: parsed.data.name,
         category: parsed.data.category,
         description: parsed.data.description ?? null,
+        tags: parsed.data.tags ?? [],
       });
     } catch (err) {
       if (err instanceof ConflictError) {

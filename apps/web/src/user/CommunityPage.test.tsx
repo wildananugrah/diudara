@@ -19,6 +19,7 @@ const DETAIL = {
   category: "Skill Digital",
   description: "Belajar desain dari nol.",
   memberCount: 4,
+  tags: [],
   ownerHandle: "wildan",
   ownerDisplayName: "Wildan",
   viewerIsMember: null as boolean | null,

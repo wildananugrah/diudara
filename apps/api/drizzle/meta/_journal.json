@@ -316,6 +316,13 @@
       "when": 1789167453766,
       "tag": "0044_living_husk",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1789172354375,
+      "tag": "0045_lyrical_vertigo",
+      "breakpoints": true
     }
   ]
 }

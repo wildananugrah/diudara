@@ -2196,6 +2196,30 @@ button:disabled {
   overflow: hidden;
 }
 
+.community-card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.community-card-heading .community-card-name {
+  margin: 0;
+}
+
+.community-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin: 0.5rem 0 0;
+}
+
+.community-card-price {
+  margin: 0.5rem 0 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--langit);
+}
+
 /* --- A community's own page (Phase 1). The banner is the reference's own
        gradient. Its ink is declared here against the DARKER of the two stops,
        which is the honest measurement: `contrast.test.ts` cannot read a

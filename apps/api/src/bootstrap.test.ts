@@ -47,6 +47,7 @@ import { FollowUser, ListFollows } from "./application/use-cases/follow-user";
 import { ExploreUsers } from "./application/use-cases/explore-users";
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
 import { CreateCommunity } from "./application/use-cases/create-community";
+import { UpdateCommunityTags } from "./application/use-cases/update-community-tags";
 import { GetCommunity } from "./application/use-cases/get-community";
 import { JoinCommunity } from "./application/use-cases/join-community";
 import { BrowseCommunities } from "./application/use-cases/browse-communities";
@@ -369,6 +370,7 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
       category: "Skill Digital",
       description: null,
       createdAt: new Date("2026-02-01T00:00:00Z"),
+      tags: [],
     };
   },
   async findBySlug() {
@@ -378,6 +380,10 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
     return null;
   },
   async browse() {
+    return [];
+  },
+  async setTags() {},
+  async popularTags() {
     return [];
   },
   async memberCountFor() {
@@ -702,6 +708,7 @@ describe("Dependencies (composition root contract)", () => {
       exploreUsers: new ExploreUsers(fakeUserRepository, fakeFollowRepository),
       communityRepository: fakeCommunityRepository,
       createCommunity: new CreateCommunity(fakeUserRepository, fakeCommunityRepository),
+      updateCommunityTags: new UpdateCommunityTags(fakeCommunityRepository),
       getCommunity: new GetCommunity(fakeUserRepository, fakeCommunityRepository),
       joinCommunity: new JoinCommunity(fakeCommunityRepository, fakeNotifyOf),
       browseCommunities: new BrowseCommunities(fakeCommunityRepository),

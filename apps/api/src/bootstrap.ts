@@ -18,6 +18,7 @@ import { DrizzleFollowRepository } from "./infrastructure/repositories/drizzle-f
 import { DrizzleCommunityRepository } from "./infrastructure/repositories/drizzle-community.repository";
 import type { CommunityRepositoryPort } from "./application/ports/community-repository.port";
 import { CreateCommunity } from "./application/use-cases/create-community";
+import { UpdateCommunityTags } from "./application/use-cases/update-community-tags";
 import { GetCommunity } from "./application/use-cases/get-community";
 import { JoinCommunity } from "./application/use-cases/join-community";
 import { BrowseCommunities } from "./application/use-cases/browse-communities";
@@ -243,6 +244,7 @@ export interface Dependencies {
    * deliberately NOT among them.
    */
   createCommunity: CreateCommunity;
+  updateCommunityTags: UpdateCommunityTags;
   /**
    * `GET /communities/:slug`. Public, unauthenticated, resolving an optional
    * viewer — that is what lets one response distinguish an anonymous visitor
@@ -1655,6 +1657,7 @@ export function bootstrap(): Dependencies {
   // on `app_user` and not on `community`.
   const communityRepository = new DrizzleCommunityRepository(db);
   const createCommunity = new CreateCommunity(userRepository, communityRepository);
+  const updateCommunityTags = new UpdateCommunityTags(communityRepository);
   const getCommunity = new GetCommunity(userRepository, communityRepository);
   const joinCommunity = new JoinCommunity(communityRepository, notifyOf);
   // Phase 8b. One repository behind all five — the canonical pair ordering
@@ -2127,6 +2130,7 @@ export function bootstrap(): Dependencies {
     sendDirectMessage,
     markConversationRead,
     getCommunityStats,
+    updateCommunityTags,
     getSyllabus,
     manageSyllabus,
     createPost,

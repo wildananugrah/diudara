@@ -13,6 +13,7 @@ export interface CommunityDetail {
   category: string;
   description: string | null;
   memberCount: number;
+  tags: string[];
   ownerHandle: string;
   ownerDisplayName: string;
   /**
@@ -50,6 +51,7 @@ export function toCommunityDetail(input: {
     category: input.community.category,
     description: input.community.description,
     memberCount: input.memberCount,
+    tags: input.community.tags,
     ownerHandle: input.ownerHandle,
     ownerDisplayName: input.ownerDisplayName,
     viewerIsMember: input.viewerIsMember,

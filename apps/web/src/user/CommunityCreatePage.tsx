@@ -4,10 +4,26 @@ import {
   COMMUNITY_CATEGORIES,
   MAX_COMMUNITY_DESCRIPTION_LENGTH,
   MAX_COMMUNITY_NAME_LENGTH,
+  MAX_COMMUNITY_TAGS,
+  MAX_COMMUNITY_TAG_LENGTH,
 } from "@diudara/shared";
 import { createCommunity, getSessionUser } from "./apiClient";
 import { describeCommunityFailure } from "./errorCopy";
 import Header from "./shell/Header";
+
+/**
+ * The rest of the normalising (lowercase, dedupe, strip a leading "#") is the
+ * server's — `communityTagsSchema` owns that so create and edit agree. This
+ * only shapes the ONE input this page has that the schema does not: one text
+ * field of comma-separated tags rather than an array.
+ */
+function parseTags(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((tag) => tag.trim().slice(0, MAX_COMMUNITY_TAG_LENGTH))
+    .filter((tag) => tag !== "")
+    .slice(0, MAX_COMMUNITY_TAGS);
+}
 
 /**
  * `/komunitas/baru` — *Buat komunitas*.
@@ -30,6 +46,7 @@ export default function CommunityCreatePage() {
   const [name, setName] = useState("");
   const [category, setCategory] = useState("");
   const [description, setDescription] = useState("");
+  const [tags, setTags] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -46,6 +63,7 @@ export default function CommunityCreatePage() {
         name: name.trim(),
         category,
         description: description.trim() === "" ? undefined : description.trim(),
+        tags: parseTags(tags),
       });
       navigate(`/komunitas/${created.slug}`);
     } catch (err) {
@@ -106,6 +124,15 @@ export default function CommunityCreatePage() {
               onChange={(e) =>
                 setDescription(e.target.value.slice(0, MAX_COMMUNITY_DESCRIPTION_LENGTH))
               }
+            />
+          </Field>
+
+          <Field label="Tag" name="tags" hint="Pisahkan dengan koma. Opsional.">
+            <input
+              id="field-tags"
+              type="text"
+              value={tags}
+              onChange={(e) => setTags(e.target.value)}
             />
           </Field>
 

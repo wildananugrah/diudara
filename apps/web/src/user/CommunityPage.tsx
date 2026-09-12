@@ -12,6 +12,7 @@ import {
 import { communityColor, communityInk } from "./communityColor";
 import CommunityFeed from "./CommunityFeed";
 import CommunityJoinControl from "./CommunityJoinControl";
+import CommunityTagsEditor from "./CommunityTagsEditor";
 import CommunityTiers from "./CommunityTiers";
 import DokumenTab from "./DokumenTab";
 import MateriTab from "./MateriTab";
@@ -287,11 +288,16 @@ export default function CommunityPage() {
         ) : tab === "statistik" && community.viewerIsOwner ? (
           <StatistikTab slug={community.slug} />
         ) : tab === "keanggotaan" ? (
-          <CommunityTiers
-            slug={community.slug}
-            viewerIsOwner={community.viewerIsOwner}
-            viewerIsMember={community.viewerIsMember}
-          />
+          <>
+            {community.viewerIsOwner ? (
+              <CommunityTagsEditor slug={community.slug} initialTags={community.tags} />
+            ) : null}
+            <CommunityTiers
+              slug={community.slug}
+              viewerIsOwner={community.viewerIsOwner}
+              viewerIsMember={community.viewerIsMember}
+            />
+          </>
         ) : tab === "materi" ? (
           <MateriTab slug={community.slug} viewerIsOwner={community.viewerIsOwner} />
         ) : tab === "dokumen" ? (

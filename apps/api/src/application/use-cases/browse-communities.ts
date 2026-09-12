@@ -2,6 +2,7 @@ import {
   COMMUNITY_CATEGORIES,
   DEFAULT_COMMUNITY_LIST_LIMIT,
   MAX_COMMUNITY_SEARCH_LENGTH,
+  POPULAR_TAGS_LIMIT,
 } from "@diudara/shared";
 import { ValidationError } from "../errors";
 import type {
@@ -37,7 +38,7 @@ export class BrowseCommunities {
     search?: string;
     category?: string;
     limit?: number;
-  }): Promise<{ communities: CommunityListRow[] }> {
+  }): Promise<{ communities: CommunityListRow[]; popularTags: string[] }> {
     const category = input.category ?? "";
     if (category !== "" && !CATEGORIES.has(category)) {
       throw new ValidationError("kategori tidak dikenal");
@@ -51,7 +52,10 @@ export class BrowseCommunities {
         ? Math.min(Math.floor(requested), DEFAULT_COMMUNITY_LIST_LIMIT)
         : DEFAULT_COMMUNITY_LIST_LIMIT;
 
-    const rows = await this.communities.browse({ search, category, limit });
-    return { communities: rows };
+    const [rows, popularTags] = await Promise.all([
+      this.communities.browse({ search, category, limit }),
+      this.communities.popularTags(POPULAR_TAGS_LIMIT),
+    ]);
+    return { communities: rows, popularTags };
   }
 }

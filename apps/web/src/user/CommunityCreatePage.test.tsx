@@ -84,6 +84,43 @@ describe("CommunityCreatePage", () => {
     expect(await screen.findByText("path:/komunitas/kelas-desain")).toBeTruthy();
   });
 
+  it("splits and trims the tag field before sending it", async () => {
+    setUserSession("token-1", USER);
+    const fetchMock = mock(async (_url: string, _options?: RequestInit) =>
+      jsonResponse({ slug: "kelas-desain", name: "Kelas Desain" }, 201)
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+    renderPage();
+
+    fillForm();
+    fireEvent.change(screen.getByLabelText("Tag"), {
+      target: { value: "Desain, UI ,  , Belajar" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Buat komunitas" }));
+
+    await screen.findByText("path:/komunitas/kelas-desain");
+    const [, options] = fetchMock.mock.calls.find((call) => call[0] === "/communities")!;
+    const body = JSON.parse(options!.body as string);
+    expect(body.tags).toEqual(["Desain", "UI", "Belajar"]);
+  });
+
+  it("omits tags entirely when the field is left blank", async () => {
+    setUserSession("token-1", USER);
+    const fetchMock = mock(async (_url: string, _options?: RequestInit) =>
+      jsonResponse({ slug: "kelas-desain", name: "Kelas Desain" }, 201)
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+    renderPage();
+
+    fillForm();
+    fireEvent.click(screen.getByRole("button", { name: "Buat komunitas" }));
+
+    await screen.findByText("path:/komunitas/kelas-desain");
+    const [, options] = fetchMock.mock.calls.find((call) => call[0] === "/communities")!;
+    const body = JSON.parse(options!.body as string);
+    expect(body.tags).toBeUndefined();
+  });
+
   it("keeps what the user typed when the name is already taken", async () => {
     setUserSession("token-1", USER);
     global.fetch = mock(async () =>

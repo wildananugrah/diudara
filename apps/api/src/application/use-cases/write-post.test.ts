@@ -258,6 +258,12 @@ class FakeCommunities implements CommunityRepositoryPort {
   async browse(): Promise<never> {
     throw new Error("not used in these tests");
   }
+  async setTags(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async popularTags(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
   async memberCountFor(): Promise<never> {
     throw new Error("not used in these tests");
   }
@@ -288,6 +294,7 @@ function communityRecord(overrides: Partial<CommunityRecord> = {}): CommunityRec
     category: "Umum",
     description: null,
     createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    tags: [],
     ...overrides,
   };
 }

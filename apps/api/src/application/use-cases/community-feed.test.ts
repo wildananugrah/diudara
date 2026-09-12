@@ -28,6 +28,7 @@ function community(overrides: Partial<CommunityRecord> = {}): CommunityRecord {
     category: "Akademik",
     description: null,
     createdAt: new Date("2026-03-01T00:00:00.000Z"),
+    tags: [],
     ...overrides,
   };
 }
@@ -54,6 +55,12 @@ class FakeCommunities implements CommunityRepositoryPort {
     throw new Error("not used in these tests");
   }
   async browse(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async setTags(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async popularTags(): Promise<never> {
     throw new Error("not used in these tests");
   }
   async memberCountFor(): Promise<never> {

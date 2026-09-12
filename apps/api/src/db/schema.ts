@@ -756,6 +756,11 @@ export const communities = pgTable(
     category: varchar("category", { length: 64 }).notNull(),
     description: varchar("description", { length: 300 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Discover browse data. A native array, not a join table: nothing here
+    // needs a tag as its own row (no tag-scoped, paginated browse), only a
+    // membership check per community and a global frequency count, and
+    // `unnest()` answers both directly.
+    tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
   },
   (table) => [
     index("community_owner_idx").on(table.ownerId),

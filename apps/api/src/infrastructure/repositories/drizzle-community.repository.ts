@@ -1,6 +1,6 @@
-import { aliasedTable, and, count, desc, eq, ilike, sql } from "drizzle-orm";
+import { aliasedTable, and, count, desc, eq, gte, ilike, inArray, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { appUsers, communities, communityMembers } from "../../db/schema";
+import { appUsers, communities, communityMembers, userTiers } from "../../db/schema";
 import { UniqueRule } from "../../application/errors";
 import type {
   BrowseCommunitiesQuery,
@@ -28,7 +28,13 @@ const communityColumns = {
   category: communities.category,
   description: communities.description,
   createdAt: communities.createdAt,
+  tags: communities.tags,
 } as const;
+
+/** Discover browse data's trending rule: top 3, floor of 5, over the last 7 days. */
+const TRENDING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const TRENDING_FLOOR = 5;
+const TRENDING_LIMIT = 3;
 
 export class DrizzleCommunityRepository implements CommunityRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
@@ -55,6 +61,7 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
     name: string;
     category: string;
     description: string | null;
+    tags?: string[];
   }): Promise<CommunityRecord> {
     try {
       return await this.db.transaction(async (tx) => {
@@ -66,6 +73,7 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
             name: input.name,
             category: input.category,
             description: input.description,
+            tags: input.tags ?? [],
           })
           .returning(communityColumns);
 
@@ -130,12 +138,14 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
         : ilike(communities.name, `%${escapeLikePattern(query.search)}%`),
     ].filter((f) => f !== undefined);
 
-    return this.db
+    const rows = await this.db
       .select({
+        id: communities.id,
         slug: communities.slug,
         name: communities.name,
         category: communities.category,
         description: communities.description,
+        tags: communities.tags,
         memberCount: count(communityMembers.id),
       })
       .from(communities)
@@ -150,6 +160,76 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
       // order is not reproducible.
       .orderBy(desc(communities.createdAt), desc(communities.id))
       .limit(clampLimit(query.limit));
+
+    // Both computed GLOBALLY (see `CommunityListRow`'s own docstring), never
+    // scoped to `filters` above — two more queries rather than folding into
+    // the one above, which would need a correlated subquery per row.
+    const [trendingIds, prices] = await Promise.all([
+      this.trendingCommunityIds(),
+      this.cheapestActivePrices(rows.map((row) => row.id)),
+    ]);
+
+    return rows.map(({ id, ...row }) => ({
+      ...row,
+      trending: trendingIds.has(id),
+      price: prices.get(id) ?? null,
+    }));
+  }
+
+  /** The top `TRENDING_LIMIT` communities by joins in the last `TRENDING_WINDOW_MS`, at least `TRENDING_FLOOR` of them. */
+  private async trendingCommunityIds(): Promise<Set<string>> {
+    const since = new Date(Date.now() - TRENDING_WINDOW_MS);
+    const rows = await this.db
+      .select({ communityId: communityMembers.communityId })
+      .from(communityMembers)
+      .where(gte(communityMembers.joinedAt, since))
+      .groupBy(communityMembers.communityId)
+      .having(sql`count(${communityMembers.id}) >= ${TRENDING_FLOOR}`)
+      .orderBy(desc(sql`count(${communityMembers.id})`))
+      .limit(TRENDING_LIMIT);
+    return new Set(rows.map((row) => row.communityId));
+  }
+
+  /** The cheapest ACTIVE tier per community, for exactly the ids this browse page returned. */
+  private async cheapestActivePrices(
+    communityIds: string[]
+  ): Promise<Map<string, { amount: number; billingCycle: string }>> {
+    if (communityIds.length === 0) return new Map();
+
+    const rows = await this.db
+      .select({
+        communityId: userTiers.communityId,
+        priceAmount: userTiers.priceAmount,
+        billingCycle: userTiers.billingCycle,
+      })
+      .from(userTiers)
+      .where(and(inArray(userTiers.communityId, communityIds), eq(userTiers.isActive, true)));
+
+    const cheapest = new Map<string, { amount: number; billingCycle: string }>();
+    for (const row of rows) {
+      if (row.communityId === null) continue;
+      const current = cheapest.get(row.communityId);
+      if (current === undefined || row.priceAmount < current.amount) {
+        cheapest.set(row.communityId, { amount: row.priceAmount, billingCycle: row.billingCycle });
+      }
+    }
+    return cheapest;
+  }
+
+  async setTags(communityId: string, tags: string[]): Promise<void> {
+    await this.db.update(communities).set({ tags }).where(eq(communities.id, communityId));
+  }
+
+  /** `unnest()` over every community's `tags` — see the schema's own docstring for why this is not a join table. */
+  async popularTags(limit: number): Promise<string[]> {
+    const rows = await this.db.execute<{ tag: string }>(sql`
+      select tag, count(*) as tag_count
+        from ${communities}, unnest(${communities.tags}) as tag
+       group by tag
+       order by tag_count desc, tag
+       limit ${limit}
+    `);
+    return Array.from(rows).map((row) => row.tag);
   }
 
   async memberCountFor(communityId: string): Promise<number> {

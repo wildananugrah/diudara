@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { DEFAULT_COMMUNITY_LIST_LIMIT, MAX_COMMUNITY_SEARCH_LENGTH } from "@diudara/shared";
+import {
+  DEFAULT_COMMUNITY_LIST_LIMIT,
+  MAX_COMMUNITY_SEARCH_LENGTH,
+  POPULAR_TAGS_LIMIT,
+} from "@diudara/shared";
 import { BrowseCommunities } from "./browse-communities";
 import { ValidationError } from "../errors";
 import type {
@@ -19,6 +23,9 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
   browseCalls = 0;
   lastQuery: BrowseCommunitiesQuery | null = null;
   rows: CommunityListRow[] = [];
+  popularTagsCalls = 0;
+  lastPopularTagsLimit: number | null = null;
+  popular: string[] = [];
 
   async create(): Promise<never> {
     throw new Error("not used in these tests");
@@ -33,6 +40,14 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
     this.browseCalls += 1;
     this.lastQuery = query;
     return this.rows;
+  }
+  async setTags(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
+  async popularTags(limit: number): Promise<string[]> {
+    this.popularTagsCalls += 1;
+    this.lastPopularTagsLimit = limit;
+    return this.popular;
   }
   async memberCountFor(): Promise<number> {
     throw new Error("not used in these tests");
@@ -98,5 +113,15 @@ describe("BrowseCommunities", () => {
 
     await useCase.execute({ search: "", category: "", limit: 500 });
     expect(communities.lastQuery?.limit).toBe(DEFAULT_COMMUNITY_LIST_LIMIT);
+  });
+
+  it("answers with the site's popular tags alongside the communities, at the shared cap", async () => {
+    const { communities, useCase } = subject();
+    communities.popular = ["desain", "bisnis"];
+
+    const result = await useCase.execute({ search: "", category: "", limit: undefined });
+
+    expect(result.popularTags).toEqual(["desain", "bisnis"]);
+    expect(communities.lastPopularTagsLimit).toBe(POPULAR_TAGS_LIMIT);
   });
 });

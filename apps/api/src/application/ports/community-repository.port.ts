@@ -6,15 +6,27 @@ export interface CommunityRecord {
   category: string;
   description: string | null;
   createdAt: Date;
+  tags: string[];
 }
 
-/** One card in the browse grid. `memberCount` is computed, not stored. */
+/**
+ * One card in the browse grid. `memberCount` is computed, not stored.
+ *
+ * `trending` and `price` are both computed GLOBALLY, independent of whatever
+ * `search`/`category` filter produced this row — see `BrowseCommunitiesQuery`.
+ * `trending` means "one of the site's top 3 by recent joins this week," not
+ * "top 3 within this filter." `price` is the cheapest ACTIVE tier, or `null`
+ * when the community has none (renders "Gratis").
+ */
 export interface CommunityListRow {
   slug: string;
   name: string;
   category: string;
   description: string | null;
   memberCount: number;
+  tags: string[];
+  trending: boolean;
+  price: { amount: number; billingCycle: string } | null;
 }
 
 export interface CommunityMemberRow {
@@ -45,6 +57,7 @@ export interface CommunityRepositoryPort {
     name: string;
     category: string;
     description: string | null;
+    tags?: string[];
   }): Promise<CommunityRecord>;
 
   findBySlug(slug: string): Promise<CommunityRecord | null>;
@@ -59,6 +72,12 @@ export interface CommunityRepositoryPort {
   findById(id: string): Promise<CommunityRecord | null>;
 
   browse(query: BrowseCommunitiesQuery): Promise<CommunityListRow[]>;
+
+  /** Owner-only, full replace — see `updateCommunityTagsSchema`. */
+  setTags(communityId: string, tags: string[]): Promise<void>;
+
+  /** The site's most-used tags across every community, most-frequent first. */
+  popularTags(limit: number): Promise<string[]>;
 
   memberCountFor(communityId: string): Promise<number>;
 

@@ -11,6 +11,7 @@ import {
   createCommunityPostFields,
   createCommunitySchema,
   refineCommunityPostEvent,
+  updateCommunityTagsSchema,
 } from "@diudara/shared";
 import { ValidationError } from "../application/errors";
 import { DocumentRejectedError, contentDispositionFor } from "../domain/document";
@@ -179,6 +180,7 @@ export function communityRoutes(
     | "userTokenIssuer"
     | "userRepository"
     | "createCommunity"
+    | "updateCommunityTags"
     | "getCommunity"
     | "joinCommunity"
     | "browseCommunities"
@@ -225,15 +227,35 @@ export function communityRoutes(
       name: string;
       category: string;
       description?: string;
+      tags?: string[];
     };
     const created = await deps.createCommunity.execute({
       ownerId: c.get("userId"),
       name: input.name,
       category: input.category,
       description: input.description ?? null,
+      tags: input.tags,
     });
     return c.json(created, 201);
   });
+
+  // Owner-only, full replace — `UpdateCommunityTags` answers 403 for a
+  // non-owner and 404 for an unknown slug, so no guard lives here.
+  app.patch<"/:slug/tags">(
+    "/:slug/tags",
+    requireAuth,
+    validate(updateCommunityTagsSchema),
+    async (c) => {
+      const input = c.get("validated") as { tags: string[] };
+      return c.json(
+        await deps.updateCommunityTags.execute({
+          slug: c.req.param("slug"),
+          viewerId: c.get("userId"),
+          tags: input.tags,
+        })
+      );
+    }
+  );
 
   app.get("/", async (c) => {
     const { q, category, limit } = parseBrowseQuery({

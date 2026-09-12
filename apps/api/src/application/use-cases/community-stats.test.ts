@@ -21,6 +21,7 @@ function community(): CommunityRecord {
     category: "Akademik",
     description: null,
     createdAt: new Date("2026-03-01T00:00:00.000Z"),
+    tags: [],
   };
 }
 
@@ -49,6 +50,12 @@ class FakeCommunities implements CommunityRepositoryPort {
     return this.unused();
   }
   async browse(): Promise<never> {
+    return this.unused();
+  }
+  async setTags(): Promise<never> {
+    return this.unused();
+  }
+  async popularTags(): Promise<never> {
     return this.unused();
   }
   async join(): Promise<never> {
