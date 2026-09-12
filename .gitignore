@@ -14,6 +14,7 @@ dist
 # over anything git can see. Some also carry console screenshots with real
 # credentials in them.
 docs/tests/
+docs/references/
 docs/image.png
 
 # Claude Code personal overrides
