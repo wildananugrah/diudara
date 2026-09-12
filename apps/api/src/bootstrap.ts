@@ -95,6 +95,8 @@ import {
   MintUserWatchToken,
 } from "./application/use-cases/start-user-stream";
 import { DrizzleUserStreamRepository } from "./infrastructure/repositories/drizzle-user-stream.repository";
+import { DrizzleStreamViewerRepository } from "./infrastructure/repositories/drizzle-stream-viewer.repository";
+import { RecordStreamViewerHeartbeat } from "./application/use-cases/record-stream-viewer-heartbeat";
 import { AuthoriseStream } from "./application/use-cases/authorise-stream";
 import { EndUserStream } from "./application/use-cases/end-user-stream";
 import { FakeMediaStorageAdapter } from "./infrastructure/storage/fake-media-storage.adapter";
@@ -493,6 +495,7 @@ export interface Dependencies {
    * might not have.
    */
   listLiveStreams: ListLiveStreams;
+  recordStreamViewerHeartbeat: RecordStreamViewerHeartbeat;
   /**
    * Task 3's `DELETE /streams/:id` — a creator ends their own broadcast.
    * NEVER `undefined`, same reasoning as `listLiveStreams`: ending a row that
@@ -2034,6 +2037,8 @@ export function bootstrap(): Dependencies {
   // constructed here and shared by all of its use-cases rather than exposed on
   // `Dependencies`, the same rule `eventRepository` above follows.
   const userStreamRepository = new DrizzleUserStreamRepository(db);
+  const streamViewerRepository = new DrizzleStreamViewerRepository(db);
+  const recordStreamViewerHeartbeat = new RecordStreamViewerHeartbeat(streamViewerRepository);
   // Gated on `streamingProvider`: the constructor requires a real provider, and
   // "is streaming configured" is this file's decision, not the use-case's.
   const startUserStream = streamingProvider
@@ -2047,6 +2052,7 @@ export function bootstrap(): Dependencies {
   const listLiveStreams = new ListLiveStreams(
     userStreamRepository,
     userSubscriptionRepository,
+    streamViewerRepository,
     clock
   );
   const endOwnUserStream = new EndOwnUserStream(userStreamRepository, clock);
@@ -2161,6 +2167,7 @@ export function bootstrap(): Dependencies {
     streamingProvider,
     startUserStream,
     listLiveStreams,
+    recordStreamViewerHeartbeat,
     endOwnUserStream,
     mintUserWatchToken,
     authoriseStream,

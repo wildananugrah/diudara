@@ -122,14 +122,17 @@ codebase's routes call a use-case, never a repository directly; see
 from `viewerId` if present, else `anonymousViewerIdentity(X-Client-IP ??
 "unknown", User-Agent ?? "")`.
 
-**Not awaited.** The route responds to nginx first; the heartbeat write
-happens in the background, its rejection swallowed (`.catch(() => {})`) —
-fire-and-forget, the same posture `signOut`'s own docstring states and
-chooses for the identical reason: every HLS segment request already pays one
-extra round trip for this feature, and a lost heartbeat on a rare failure is
-nothing an approximate count needs to survive, but blocking every segment on
-it would be a latency tax paid by every viewer, always. A REFUSED request
-(`allowed: false`) records nothing — a refusal is not a viewer.
+**Awaited, not fire-and-forget** — a correction from this document's first
+draft, made during implementation for the reason the test-driven-development
+discipline this codebase follows names directly: a write nothing can
+deterministically observe is a write nothing can be honestly tested against.
+This endpoint already pays one database read to authorise the request; one
+more small upsert next to it is a modest addition, not a second latency
+class. A failed heartbeat is still swallowed (`try`/`catch`, never
+rethrown) so it can never turn an authorised read into a 500 — the
+resilience the fire-and-forget draft wanted, kept, without giving up
+testability to get it. A REFUSED request (`allowed: false`) records
+nothing — a refusal is not a viewer.
 
 ### Reading the count
 

@@ -15,6 +15,7 @@ import {
   userTransactions,
   membershipReminders,
   userStreams,
+  streamViewerHeartbeats,
   communities,
   communityMembers,
   communityEvents,
@@ -112,6 +113,8 @@ export async function resetDatabase() {
   // userTiers references app_user (owner) — Task 1 of Phase 5a — so it must
   // clear before app_user too.
   await db.delete(userTiers);
+  // streamViewerHeartbeats references user_stream, so it must clear before it.
+  await db.delete(streamViewerHeartbeats);
   // userStreams references app_user (owner) — Task 1 of Phase 7 — so it too
   // must clear before app_user.
   await db.delete(userStreams);

@@ -16,7 +16,7 @@
  * beats leaving them `pending` and unread. See `bootstrapWorker`, which records the
  * recommendation that this pass and the `outbox` table be retired together.
  *
- * It runs SIX loops, on two cadences:
+ * It runs SEVEN loops, on two cadences:
  *
  *   - the OUTBOX, every 5 seconds, because that interval WAS the delay a paying member
  *     saw between their payment settling and whatever the row promised them arriving.
@@ -24,20 +24,22 @@
  *     `bootstrapWorker`), so nothing new can arrive on it; the cadence is left alone
  *     rather than tuned, because a pass with nothing to claim costs one query;
  *   - the orphan MEDIA SWEEP, the MEMBERSHIP SWEEP, the MEMBERSHIP REMINDER pass, the
- *     PENDING-CHECKOUT CLEANUP and the USER-STREAM SWEEP, hourly. None is
- *     latency-sensitive the way the outbox is, and in every case the pass's OWN window
- *     is what protects the thing it sweeps rather than this cadence: spec §8's 24-hour
- *     orphan window (generous on purpose), the pending-checkout cleanup's two-hour one
+ *     PENDING-CHECKOUT CLEANUP, the USER-STREAM SWEEP, and Discover's
+ *     VIEWER-HEARTBEAT SWEEP, hourly. None is latency-sensitive the way the outbox
+ *     is, and in every case the pass's OWN window is what protects the thing it
+ *     sweeps rather than this cadence: spec §8's 24-hour orphan window (generous on
+ *     purpose), the pending-checkout cleanup's two-hour one
  *     (`STALE_PENDING_CHECKOUT_WINDOW_MS`), the user-stream sweep's 12-hour cap
- *     (`MAX_USER_STREAM_MS`), and the reminder pass's three-day warning — against which
- *     an hour of latency is a rounding error, while the claim in `membership_reminder`
- *     means the other 71 passes inside that window cost one conflicting insert each and
- *     send nothing. Retire-telegram Task 4 deleted the RENEWAL and CHURN loops this
- *     cadence was originally chosen for; see `DEFAULT_RENEWAL_INTERVAL_MS` for why its
- *     env var keeps their name.
+ *     (`MAX_USER_STREAM_MS`), the viewer-heartbeat sweep's one-hour one
+ *     (`VIEWER_HEARTBEAT_RETENTION_MS`), and the reminder pass's three-day warning —
+ *     against which an hour of latency is a rounding error, while the claim in
+ *     `membership_reminder` means the other 71 passes inside that window cost one
+ *     conflicting insert each and send nothing. Retire-telegram Task 4 deleted the
+ *     RENEWAL and CHURN loops this cadence was originally chosen for; see
+ *     `DEFAULT_RENEWAL_INTERVAL_MS` for why its env var keeps their name.
  *
- * All six are the same `PollLoop`, so all six inherit its two properties: passes of
- * one kind never overlap, and a signal wakes them out of their interval instead of
+ * All seven are the same `PollLoop`, so all seven inherit its two properties: passes
+ * of one kind never overlap, and a signal wakes them out of their interval instead of
  * letting it expire. They are separate loops rather than one pass doing everything so
  * that a sweep query that fails every time cannot also stop the outbox.
  *
@@ -77,6 +79,7 @@ import {
   SweepOrphanMedia,
   SweepStalePendingCheckouts,
   SweepStaleUserStreams,
+  SweepStaleViewerHeartbeats,
 } from "./scheduled-passes";
 
 // BEFORE the composition root is even imported. Bun auto-loads `.env` from the
@@ -106,6 +109,13 @@ const { DrizzleUserSubscriptionRepository } = await import(
 // this file, is defined in THIS package, not the API's.
 const { DrizzleUserStreamRepository } = await import(
   "../../api/src/infrastructure/repositories/drizzle-user-stream.repository"
+);
+// Discover's viewer-count sub-project. Same reasoning as
+// `DrizzleUserStreamRepository` above — constructed here rather than returned
+// from `bootstrapWorker()` because `SweepStaleViewerHeartbeats`, like the other
+// sweeps in this file, is defined in THIS package, not the API's.
+const { DrizzleStreamViewerRepository } = await import(
+  "../../api/src/infrastructure/repositories/drizzle-stream-viewer.repository"
 );
 // The SAME selector the API's own `bootstrap()` uses for `POST /users/media` and the
 // delivery routes — reused rather than re-derived so the worker and the API can never
@@ -177,6 +187,12 @@ const processStalePendingSweep = new SweepStalePendingCheckouts(
 // a cap on age, not a liveness check. Its own `DrizzleUserStreamRepository` instance,
 // same pattern as the sweeps above.
 const processUserStreamSweep = new SweepStaleUserStreams(new DrizzleUserStreamRepository(db));
+// Discover's viewer-count sub-project: keeps `stream_viewer_heartbeat` bounded —
+// see that table's own docstring in `db/schema.ts` for why it would otherwise
+// grow at the rate of every HLS request on the platform.
+const processViewerHeartbeatSweep = new SweepStaleViewerHeartbeats(
+  new DrizzleStreamViewerRepository(db)
+);
 const intervalMs = resolvePollIntervalMs(process.env.WORKER_POLL_INTERVAL_MS);
 const renewalIntervalMs = resolveRenewalIntervalMs(process.env.WORKER_RENEWAL_INTERVAL_MS);
 
@@ -209,16 +225,18 @@ const outboxLoop = new PollLoop({
   },
 });
 
-// Task 10's orphan sweep, Phase 5b's retirement sweep and reminder pass, and Phase
-// 7's user-stream sweep (Task 6), on their own much longer, shared cadence. Five
-// loops, not one: a sweep that throws every time must not stop the other four, and
-// none of them must stop the outbox.
+// Task 10's orphan sweep, Phase 5b's retirement sweep and reminder pass, Phase
+// 7's user-stream sweep (Task 6), and Discover's viewer-heartbeat sweep, on
+// their own much longer, shared cadence. Six loops, not one: a sweep that
+// throws every time must not stop the others, and none of them must stop the
+// outbox.
 const {
   orphanSweepLoop,
   membershipSweepLoop,
   membershipReminderLoop,
   stalePendingSweepLoop,
   userStreamSweepLoop,
+  viewerHeartbeatSweepLoop,
 } = createScheduledPassLoops({
   processOrphanSweep,
   processMembershipSweep,
@@ -229,28 +247,30 @@ const {
   processMembershipReminder: remindExpiringMemberships,
   processStalePendingSweep,
   processUserStreamSweep,
+  processViewerHeartbeatSweep,
   intervalMs: renewalIntervalMs,
 });
 
-// ONE handler for all SIX loops, so there is no ordering in which some are stopped
-// and others keep polling — and the process cannot exit while any of them holds the
-// pool open.
+// ONE handler for all SEVEN loops, so there is no ordering in which some are
+// stopped and others keep polling — and the process cannot exit while any of
+// them holds the pool open.
 const uninstallSignals = installShutdownSignals(
   outboxLoop,
   orphanSweepLoop,
   membershipSweepLoop,
   membershipReminderLoop,
   stalePendingSweepLoop,
-  userStreamSweepLoop
+  userStreamSweepLoop,
+  viewerHeartbeatSweepLoop
 );
 
 console.log(
   `[worker] polling the outbox every ${intervalMs}ms; running the media-sweep, ` +
-    `membership-sweep, membership-reminder, pending-checkout-cleanup and ` +
-    `user-stream-sweep passes every ${renewalIntervalMs}ms`
+    `membership-sweep, membership-reminder, pending-checkout-cleanup, ` +
+    `user-stream-sweep and viewer-heartbeat-sweep passes every ${renewalIntervalMs}ms`
 );
-// All six concurrently. `Promise.all` and not a sequential await: each loop runs
-// until it is stopped, so awaiting one would never start the others.
+// All seven concurrently. `Promise.all` and not a sequential await: each loop
+// runs until it is stopped, so awaiting one would never start the others.
 await Promise.all([
   outboxLoop.run(),
   orphanSweepLoop.run(),
@@ -258,6 +278,7 @@ await Promise.all([
   membershipReminderLoop.run(),
   stalePendingSweepLoop.run(),
   userStreamSweepLoop.run(),
+  viewerHeartbeatSweepLoop.run(),
 ]);
 uninstallSignals();
 

@@ -512,7 +512,7 @@ describe("AuthoriseStream — user world read by stream id (nginx auth_request)"
       now: NOW,
     });
 
-    expect(result).toEqual({ allowed: true, streamKey: stream.streamKey });
+    expect(result).toEqual({ allowed: true, streamKey: stream.streamKey, viewerId: null });
   });
 
   /**
@@ -573,7 +573,11 @@ describe("AuthoriseStream — user world read by stream id (nginx auth_request)"
       now: NOW,
     });
 
-    expect(result).toEqual({ allowed: true, streamKey: stream.streamKey });
+    expect(result).toEqual({
+      allowed: true,
+      streamKey: stream.streamKey,
+      viewerId: "55555555-5555-4555-8555-555555555555",
+    });
   });
 
   it("a token minted for ANOTHER stream does not open this one", async () => {
@@ -786,7 +790,7 @@ describe("AuthoriseStream — an ENDED user stream refuses every read", () => {
     const stream = await seedUserStream("public");
     expect(
       await useCase.authoriseUserReadByStreamId({ streamId: stream.id, query: "", now: NOW })
-    ).toEqual({ allowed: true, streamKey: stream.streamKey });
+    ).toEqual({ allowed: true, streamKey: stream.streamKey, viewerId: null });
 
     await end(stream.id);
 

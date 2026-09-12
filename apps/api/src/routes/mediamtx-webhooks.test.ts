@@ -10,6 +10,8 @@ import { AuthoriseStream } from "../application/use-cases/authorise-stream";
 import { EndUserStream } from "../application/use-cases/end-user-stream";
 import { SystemClock } from "../infrastructure/clock/system.clock";
 import { DrizzleUserStreamRepository } from "../infrastructure/repositories/drizzle-user-stream.repository";
+import { DrizzleStreamViewerRepository } from "../infrastructure/repositories/drizzle-stream-viewer.repository";
+import { RecordStreamViewerHeartbeat } from "../application/use-cases/record-stream-viewer-heartbeat";
 import {
   mintUserWatchToken,
   USER_WATCH_TOKEN_TTL_MS,
@@ -24,6 +26,8 @@ const HEADER = "X-Mediamtx-Secret";
 const userStreamRepository = new DrizzleUserStreamRepository(db);
 const authoriseStream = new AuthoriseStream(userStreamRepository, { streamTokenSecret: SECRET });
 const endUserStream = new EndUserStream(userStreamRepository, new SystemClock());
+const streamViewerRepository = new DrizzleStreamViewerRepository(db);
+const recordStreamViewerHeartbeat = new RecordStreamViewerHeartbeat(streamViewerRepository);
 
 /**
  * A REAL `AuthoriseStream`, subclassed only to make its decision methods
@@ -96,6 +100,7 @@ function app(
       authoriseStream: authorise,
       mediamtxWebhookSecret: SECRET,
       endUserStream: userLifecycle,
+      recordStreamViewerHeartbeat,
     })
   );
   return a;
@@ -427,7 +432,7 @@ describe("POST /webhooks/mediamtx/auth — end-to-end wiring", () => {
  */
 function getAuthRequest(
   a: Hono<any>,
-  params: { eventId?: string; streamId?: string; token?: string },
+  params: { eventId?: string; streamId?: string; token?: string; ip?: string },
   secret: string | null = SECRET
 ) {
   const headers: Record<string, string> = {};
@@ -436,6 +441,9 @@ function getAuthRequest(
   if (params.eventId !== undefined) headers["X-Mtx-Event-Id"] = params.eventId;
   if (params.streamId !== undefined) headers["X-Mtx-Stream-Id"] = params.streamId;
   if (params.token !== undefined) headers["X-Watch-Token"] = params.token;
+  // What `live-hls.conf.template`'s internal `/auth-request` location forwards
+  // from `$remote_addr` — see the viewer-heartbeat describe block below.
+  if (params.ip !== undefined) headers["X-Client-IP"] = params.ip;
   return a.request("/webhooks/mediamtx/auth-request", { headers });
 }
 
@@ -735,6 +743,78 @@ describe("GET /webhooks/mediamtx/auth-request — the user world", () => {
   });
 });
 
+/**
+ * Phase 9 (Discover's viewer counts). Recorded through THIS route, because it
+ * is the one already firing on every HLS request — see this route's own
+ * docstring. A REFUSED request is not a viewer and records nothing; an
+ * ALLOWED one always does, keyed by whichever identity `AuthoriseStream`
+ * surfaced (a token's `viewerId` for members-only, `null` for public).
+ */
+describe("GET /webhooks/mediamtx/auth-request — viewer heartbeats", () => {
+  async function recentCount(streamId: string) {
+    const counts = await streamViewerRepository.countRecentViewers(
+      [streamId],
+      new Date(Date.now() - 60_000)
+    );
+    return counts.get(streamId) ?? 0;
+  }
+
+  it("records a heartbeat for an allowed MEMBERS-only read, keyed by the token's viewerId", async () => {
+    const stream = await seedUserStream("members");
+    const token = mintUserWatchToken({
+      viewerId: "55555555-5555-4555-8555-555555555555",
+      streamId: stream.id,
+      now: Date.now(),
+      ttlMs: USER_WATCH_TOKEN_TTL_MS,
+      secret: SECRET,
+    });
+    const a = app();
+
+    await getAuthRequest(a, { streamId: stream.id, token });
+
+    expect(await recentCount(stream.id)).toBe(1);
+  });
+
+  it("records a heartbeat for an allowed PUBLIC read, keyed by its forwarded IP and User-Agent", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    await getAuthRequest(a, { streamId: stream.id, ip: "203.0.113.9" });
+
+    expect(await recentCount(stream.id)).toBe(1);
+  });
+
+  it("two public reads from the same ip collapse into one viewer; a different ip is a second", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    await getAuthRequest(a, { streamId: stream.id, ip: "203.0.113.9" });
+    await getAuthRequest(a, { streamId: stream.id, ip: "203.0.113.9" });
+    await getAuthRequest(a, { streamId: stream.id, ip: "203.0.113.10" });
+
+    expect(await recentCount(stream.id)).toBe(2);
+  });
+
+  it("still records a heartbeat when X-Client-IP is absent — degraded, not broken", async () => {
+    const stream = await seedUserStream("public");
+    const a = app();
+
+    const res = await getAuthRequest(a, { streamId: stream.id });
+
+    expect(isSuccessStatus(res.status)).toBe(true);
+    expect(await recentCount(stream.id)).toBe(1);
+  });
+
+  it("records nothing for a REFUSED request", async () => {
+    const stream = await seedUserStream("members");
+    const a = app();
+
+    await getAuthRequest(a, { streamId: stream.id });
+
+    expect(await recentCount(stream.id)).toBe(0);
+  });
+});
+
 describe("GET /webhooks/mediamtx/auth-request — end-to-end wiring", () => {
   it("authorises a read through the real bootstrap() when streaming is fully configured", async () => {
     const stream = await seedUserStream("members");
@@ -1031,6 +1111,7 @@ describe("POST /webhooks/mediamtx/lifecycle — the community world is gone", ()
         authoriseStream,
         mediamtxWebhookSecret: SECRET,
         endUserStream: undefined,
+        recordStreamViewerHeartbeat,
       })
     );
 
@@ -1051,6 +1132,7 @@ describe("POST /webhooks/mediamtx/lifecycle — the community world is gone", ()
         authoriseStream,
         mediamtxWebhookSecret: SECRET,
         endUserStream: undefined,
+        recordStreamViewerHeartbeat,
       })
     );
 

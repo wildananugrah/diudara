@@ -255,7 +255,14 @@ describe("GET /streams", () => {
     const { streams } = await (await a.request("/streams")).json();
     const [gated] = streams;
 
-    expect(Object.keys(gated).sort()).toEqual(["id", "locked", "owner", "title", "visibility"]);
+    expect(Object.keys(gated).sort()).toEqual([
+      "id",
+      "locked",
+      "owner",
+      "title",
+      "viewerCount",
+      "visibility",
+    ]);
     expect(gated.locked).toBe(true);
   });
 
@@ -275,6 +282,7 @@ describe("GET /streams", () => {
       "locked",
       "owner",
       "title",
+      "viewerCount",
       "visibility",
     ]);
     expect(open.locked).toBe(false);
@@ -720,7 +728,7 @@ describe("POST /streams/:id/watch-token", () => {
           query,
           now: Date.now(),
         })
-      ).toEqual({ allowed: true, streamKey: mine.streamKey });
+      ).toEqual({ allowed: true, streamKey: mine.streamKey, viewerId: rina.userId });
       expect(
         await deps.authoriseStream!.authoriseUserReadByStreamId({
           streamId: theirs.id,

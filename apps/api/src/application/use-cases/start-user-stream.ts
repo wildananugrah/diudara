@@ -10,9 +10,15 @@ import type {
   UserStreamRow,
 } from "../ports/user-stream-repository.port";
 import type { UserSubscriptionRepositoryPort } from "../ports/user-subscription-repository.port";
+import type { StreamViewerRepositoryPort } from "../ports/stream-viewer-repository.port";
 import type { IsMemberOf } from "./is-member-of";
 import { MEMBERS_ONLY } from "./post-views";
-import { toStreamView, userStreamPlaybackPath, type StreamView } from "./stream-views";
+import {
+  toStreamView,
+  userStreamPlaybackPath,
+  VIEWER_HEARTBEAT_WINDOW_MS,
+  type StreamView,
+} from "./stream-views";
 
 /** "this stream is not yours" — the DELETE refusal, Bahasa like every other 403 a person can hit. */
 const NOT_YOURS_MESSAGE = "siaran ini bukan milik Anda";
@@ -166,6 +172,7 @@ export class ListLiveStreams {
   constructor(
     private readonly streams: UserStreamRepositoryPort,
     private readonly subscriptions: UserSubscriptionRepositoryPort,
+    private readonly streamViewers: StreamViewerRepositoryPort,
     private readonly clock: ClockPort
   ) {}
 
@@ -176,6 +183,10 @@ export class ListLiveStreams {
     // `clock.now()` twice around a query, answering a membership whose period
     // ended between the two reads inconsistently.
     const now = this.clock.now();
+    const viewerCounts = await this.streamViewers.countRecentViewers(
+      rows.map((row) => row.id),
+      new Date(now.getTime() - VIEWER_HEARTBEAT_WINDOW_MS)
+    );
     // The owner of a gated stream is never locked out of it and is never
     // asked about either: nobody subscribes to themselves, so the query would
     // be a round trip whose answer cannot be yes.
@@ -206,7 +217,11 @@ export class ListLiveStreams {
     const lockedStreamIds = new Set(
       gated.filter((row) => lockedOwners.has(row.ownerId)).map((row) => row.id)
     );
-    return { streams: rows.map((row) => toStreamView(row, lockedStreamIds.has(row.id))) };
+    return {
+      streams: rows.map((row) =>
+        toStreamView(row, lockedStreamIds.has(row.id), viewerCounts.get(row.id) ?? 0)
+      ),
+    };
   }
 }
 

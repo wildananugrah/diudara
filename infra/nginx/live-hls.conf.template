@@ -509,4 +509,14 @@ location = /_internal/mediamtx-user-auth-request {
     proxy_set_header X-Mtx-Stream-Id "$mtx_stream";
     proxy_set_header X-Mtx-Event-Id "";
     proxy_set_header X-Watch-Token "$watch_token";
+    # Discover's viewer-count sub-project: `$remote_addr` is a connection-level
+    # variable, not a header, so it needs an explicit forward the way the API's
+    # own `api-proxy.conf.template` already forwards it as `X-Real-IP`. This is
+    # the one part of that sub-project NOT YET VERIFIED against a real
+    # MediaMTX/nginx box — see mediamtx-webhooks.ts's `/auth-request`
+    # docstring and `docs/superpowers/specs/2026-09-12-live-viewer-counts-design.md`.
+    # Confirm `X-Client-IP` actually arrives before relying on public-stream
+    # viewer counts in production; until then they degrade to one shared
+    # identity rather than breaking.
+    proxy_set_header X-Client-IP $remote_addr;
 }

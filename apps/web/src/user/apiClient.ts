@@ -1994,6 +1994,8 @@ export interface StreamView {
   owner: { handle: string; displayName: string };
   locked: boolean;
   hlsPlaybackPath?: string;
+  /** On every row, locked or not — a discovery signal, approximate by design. */
+  viewerCount: number;
 }
 
 /**

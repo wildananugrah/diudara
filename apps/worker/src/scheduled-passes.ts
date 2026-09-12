@@ -89,7 +89,8 @@ export function formatPassFailure(
     | "memberships"
     | "membership-reminders"
     | "pending-checkouts"
-    | "user-streams",
+    | "user-streams"
+    | "stream-viewer-heartbeats",
   err: unknown
 ): string {
   return `[${pass}] pass failed: ${redactLinks(safeErrorSummary(err))}`;
@@ -791,6 +792,15 @@ export function formatStalePendingSweepLine(result: StalePendingSweepResult): st
 export const MAX_USER_STREAM_MS = 12 * 60 * 60 * 1000;
 
 /**
+ * One hour — a wide margin over `VIEWER_HEARTBEAT_WINDOW_MS`'s 20 seconds
+ * (`apps/api/src/application/use-cases/stream-views.ts`), the count query's
+ * own window. This cutoff only ever needs to outlive rows nothing will count
+ * again; it protects nothing about the count itself, which is why it can
+ * afford to be so much wider.
+ */
+export const VIEWER_HEARTBEAT_RETENTION_MS = 60 * 60_000;
+
+/**
  * The narrow, structural slice of `UserStreamRepositoryPort` (Task 1, `apps/api`)
  * this pass needs — `DrizzleUserStreamRepository` satisfies this directly, without
  * being declared against it, the same arrangement `ExpiredMembershipRepository` and
@@ -907,6 +917,46 @@ export function formatUserStreamSweepLine(result: UserStreamSweepResult): string
   );
 }
 
+/** `stream_viewer_heartbeat`'s prune pass's structural need — one bulk delete, no per-row loop. */
+export interface StaleViewerHeartbeatRepository {
+  deleteOlderThan(cutoff: Date): Promise<number>;
+}
+
+export interface ViewerHeartbeatSweepResult {
+  deleted: number;
+}
+
+/**
+ * Keeps `stream_viewer_heartbeat` bounded — see that table's own docstring in
+ * `db/schema.ts` for why it would otherwise grow at the rate of every HLS
+ * request on the platform. A single bulk delete, so unlike the other five
+ * sweeps there is no per-row loop and no per-row failure to catch here: a
+ * thrown `deleteOlderThan` propagates to this pass's own `PollLoop.onError`,
+ * exactly like a failure in `listStaleLive` would for `SweepStaleUserStreams`.
+ */
+export class SweepStaleViewerHeartbeats {
+  private readonly now: () => Date;
+
+  constructor(
+    private readonly heartbeats: StaleViewerHeartbeatRepository,
+    options: { now?: () => Date } = {}
+  ) {
+    this.now = options.now ?? (() => new Date());
+  }
+
+  async execute(): Promise<ViewerHeartbeatSweepResult> {
+    const cutoff = new Date(this.now().getTime() - VIEWER_HEARTBEAT_RETENTION_MS);
+    const deleted = await this.heartbeats.deleteOlderThan(cutoff);
+    return { deleted };
+  }
+}
+
+/** The viewer-heartbeat sweep's summary line, or `null` when there is nothing to say. */
+export function formatViewerHeartbeatSweepLine(result: ViewerHeartbeatSweepResult): string | null {
+  if (result.deleted === 0) return null;
+  return `[stream-viewer-heartbeats] deleted=${result.deleted}`;
+}
+
 /**
  * The reminder pass's summary line, or `null` when there is nothing to say. Counts
  * only, as above — the rows this pass walks carry a member's EMAIL and WhatsApp
@@ -978,6 +1028,10 @@ export interface StalePendingSweepPass {
 export interface UserStreamSweepPass {
   execute(): Promise<UserStreamSweepResult>;
 }
+/** Same shape, for `SweepStaleViewerHeartbeats` — or any test double with a matching `execute()`. */
+export interface ViewerHeartbeatSweepPass {
+  execute(): Promise<ViewerHeartbeatSweepResult>;
+}
 
 export interface ScheduledPassLoopsOptions {
   processOrphanSweep: OrphanSweepPass;
@@ -985,6 +1039,7 @@ export interface ScheduledPassLoopsOptions {
   processMembershipReminder: MembershipReminderPass;
   processStalePendingSweep: StalePendingSweepPass;
   processUserStreamSweep: UserStreamSweepPass;
+  processViewerHeartbeatSweep: ViewerHeartbeatSweepPass;
   intervalMs: number;
   log?: (line: string) => void;
   logError?: (line: string) => void;
@@ -1035,6 +1090,7 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
   membershipReminderLoop: PollLoop;
   stalePendingSweepLoop: PollLoop;
   userStreamSweepLoop: PollLoop;
+  viewerHeartbeatSweepLoop: PollLoop;
 } {
   const log = options.log ?? ((line: string) => console.log(line));
   const logError = options.logError ?? ((line: string) => console.error(line));
@@ -1090,11 +1146,23 @@ export function createScheduledPassLoops(options: ScheduledPassLoopsOptions): {
     onError: (err) => logError(formatPassFailure("user-streams", err)),
   });
 
+  const viewerHeartbeatSweepLoop = new PollLoop({
+    intervalMs: options.intervalMs,
+    poll: async () => {
+      const line = formatViewerHeartbeatSweepLine(
+        await options.processViewerHeartbeatSweep.execute()
+      );
+      if (line !== null) log(line);
+    },
+    onError: (err) => logError(formatPassFailure("stream-viewer-heartbeats", err)),
+  });
+
   return {
     orphanSweepLoop,
     membershipSweepLoop,
     membershipReminderLoop,
     stalePendingSweepLoop,
     userStreamSweepLoop,
+    viewerHeartbeatSweepLoop,
   };
 }

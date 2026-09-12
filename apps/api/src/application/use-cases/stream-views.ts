@@ -1,6 +1,14 @@
 import type { UserStreamRow } from "../ports/user-stream-repository.port";
 
 /**
+ * How long a viewer's last heartbeat keeps counting them as "watching" —
+ * see `stream_viewer_heartbeat`'s own docstring in `db/schema.ts`. Twenty
+ * seconds comfortably survives a normal HLS reload gap while dropping
+ * someone within a few reloads of actually leaving.
+ */
+export const VIEWER_HEARTBEAT_WINDOW_MS = 20_000;
+
+/**
  * THE ONE definition of what a live stream looks like on the wire — the
  * `toStreamView` `UserStreamRepositoryPort`'s own docstring anticipated ("the
  * wire shape is decided in exactly one place ... not re-derived per route").
@@ -45,6 +53,13 @@ export interface StreamView {
    * unchanged on a box with no streaming provider configured at all.
    */
   hlsPlaybackPath?: string;
+  /**
+   * On EVERY row, locked or not — a discovery signal, not something worth
+   * hiding on a gated stream a visitor cannot yet watch. Distinct identities
+   * with a heartbeat in the last `VIEWER_HEARTBEAT_WINDOW_MS`; `0` for a
+   * stream nothing has recorded one for yet.
+   */
+  viewerCount: number;
 }
 
 /**
@@ -90,13 +105,14 @@ export function userStreamPlaybackPath(streamId: string): string {
  * needs a viewer id and a membership lookup, and both belong to the use case
  * that already has them (`ListLiveStreams`).
  */
-export function toStreamView(row: UserStreamRow, locked: boolean): StreamView {
+export function toStreamView(row: UserStreamRow, locked: boolean, viewerCount: number): StreamView {
   const view: StreamView = {
     id: row.id,
     title: row.title,
     visibility: row.visibility,
     owner: { handle: row.ownerHandle, displayName: row.ownerDisplayName },
     locked,
+    viewerCount,
   };
   if (!locked) {
     view.hlsPlaybackPath = userStreamPlaybackPath(row.id);

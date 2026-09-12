@@ -2,7 +2,19 @@ import { Hono } from "hono";
 import { NotFoundError, UnauthorizedError } from "../application/errors";
 import { verifyCallbackToken } from "../infrastructure/webhooks/webhook-token";
 import { parseStreamPath } from "../application/use-cases/authorise-stream";
+import { anonymousViewerIdentity } from "../domain/anonymous-viewer-identity";
 import type { Dependencies } from "../bootstrap";
+
+/**
+ * `$remote_addr`, forwarded by `live-hls.conf.template`'s internal
+ * `/auth-request` location — see `RecordStreamViewerHeartbeat`'s own spec
+ * (`docs/superpowers/specs/2026-09-12-live-viewer-counts-design.md`) for why
+ * this is the one piece of this feature not yet verified against a real
+ * MediaMTX/nginx box. Absent (not yet deployed, or a non-nginx caller)
+ * degrades to a shared "unknown" identity rather than erroring — see
+ * `anonymousViewerIdentity`.
+ */
+const CLIENT_IP_HEADER = "X-Client-IP";
 
 /**
  * The header a caller MAY carry the shared secret in, mirroring
@@ -133,7 +145,10 @@ const LIFECYCLE_HOOKS: ReadonlySet<string> = new Set(["online", "offline"]);
  * event" from "not entitled" from "expired token".
  */
 export function mediamtxWebhookRoutes(
-  deps: Pick<Dependencies, "authoriseStream" | "mediamtxWebhookSecret" | "endUserStream">
+  deps: Pick<
+    Dependencies,
+    "authoriseStream" | "mediamtxWebhookSecret" | "endUserStream" | "recordStreamViewerHeartbeat"
+  >
 ) {
   const app = new Hono();
 
@@ -321,8 +336,34 @@ export function mediamtxWebhookRoutes(
     });
 
     if (!result.allowed) {
+      // A refusal is not a viewer — nothing is recorded. See
+      // `RecordStreamViewerHeartbeat`'s own docstring.
       return c.json(REFUSED_BODY, 403);
     }
+
+    // Awaited, not fire-and-forget: this endpoint already pays one database
+    // read to authorise the request, and one more small upsert is a modest
+    // addition next to it — worth it for a write whose success or failure
+    // this route can actually observe and reason about, rather than one a
+    // caller (a test, an operator) has no way to wait for. A failed
+    // heartbeat must never turn an authorised read into a 500, so it is
+    // swallowed here — an approximate viewer count losing one data point is
+    // nothing compared to every HLS segment on the platform starting to fail.
+    try {
+      await deps.recordStreamViewerHeartbeat.execute({
+        streamId,
+        identity:
+          result.viewerId ??
+          anonymousViewerIdentity(
+            c.req.header(CLIENT_IP_HEADER) ?? "unknown",
+            c.req.header("User-Agent") ?? ""
+          ),
+        now: new Date(),
+      });
+    } catch {
+      // Swallowed — see the comment above.
+    }
+
     // Read only by nginx's `auth_request_set` — never forwarded to the
     // client. See this route's own docstring for why that is safe.
     c.header("X-Stream-Key", result.streamKey);

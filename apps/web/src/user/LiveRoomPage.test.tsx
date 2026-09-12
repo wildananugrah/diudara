@@ -18,6 +18,7 @@ function aStream(overrides: Partial<StreamView> = {}): StreamView {
     owner: { handle: "wildan", displayName: "Wildan" },
     locked: false,
     hlsPlaybackPath: "/hls/stream-1/index.m3u8",
+    viewerCount: 0,
     ...overrides,
   };
 }

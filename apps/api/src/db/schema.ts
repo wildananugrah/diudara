@@ -737,6 +737,47 @@ export const userStreams = pgTable(
 );
 
 /**
+ * A viewer's "still here" — recorded through nginx's `/auth-request`, which
+ * already fires on every HLS request (see `mediamtx-webhooks.ts`'s own
+ * docstring), rather than through any new MediaMTX hook. `identity` is a
+ * token's `viewerId` for a members-only read, or `anonymousViewerIdentity`'s
+ * hash for a public one (which carries no token at all) — see
+ * `domain/anonymous-viewer-identity.ts`.
+ *
+ * One row per (stream, identity), upserted — never one row per request, or
+ * this table would grow at the rate of every HLS segment fetch on the
+ * platform. `GET /streams` counts DISTINCT identities per stream with
+ * `last_seen_at` inside `VIEWER_HEARTBEAT_WINDOW_MS` (`stream-views.ts`) as
+ * that stream's live viewer count; `SweepStaleViewerHeartbeats`
+ * (`apps/worker`) deletes rows well past that window so the table stays
+ * bounded.
+ */
+export const streamViewerHeartbeats = pgTable(
+  "stream_viewer_heartbeat",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    streamId: uuid("stream_id")
+      .notNull()
+      .references(() => userStreams.id),
+    // A viewer-token's `viewerId` (a uuid), or a sha256 hex hash — 64
+    // characters covers either verbatim.
+    identity: varchar("identity", { length: 64 }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // What makes recording a heartbeat an UPSERT rather than a new row per
+    // request.
+    uniqueIndex("stream_viewer_heartbeat_stream_identity_unique").on(
+      table.streamId,
+      table.identity
+    ),
+    // The count query's own index: distinct identities for a stream, filtered
+    // to `last_seen_at >= since`.
+    index("stream_viewer_heartbeat_stream_last_seen_idx").on(table.streamId, table.lastSeenAt),
+  ]
+);
+
+/**
  * A community owned by an `app_user`.
  *
  * This is NOT the `community` table that was dropped in Phase 1. That one hung

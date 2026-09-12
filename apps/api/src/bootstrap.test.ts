@@ -27,6 +27,8 @@ import {
   MintUserWatchToken,
 } from "./application/use-cases/start-user-stream";
 import type { UserStreamRepositoryPort } from "./application/ports/user-stream-repository.port";
+import type { StreamViewerRepositoryPort } from "./application/ports/stream-viewer-repository.port";
+import { RecordStreamViewerHeartbeat } from "./application/use-cases/record-stream-viewer-heartbeat";
 import { MediaMtxAdapter } from "./infrastructure/streaming/mediamtx.adapter";
 import { FakeStreamingAdapter } from "./infrastructure/streaming/fake-streaming.adapter";
 import { createApp } from "./app";
@@ -544,6 +546,16 @@ const fakeUserStreamRepository: UserStreamRepositoryPort = {
   },
 };
 
+const fakeStreamViewerRepository: StreamViewerRepositoryPort = {
+  async heartbeat() {},
+  async countRecentViewers() {
+    return new Map();
+  },
+  async deleteOlderThan() {
+    return 0;
+  },
+};
+
 /**
  * Phase 5 gave `StartCheckout` and `HandlePaymentWebhook` a clock. A fixed one here, like
  * every other fake in this file: nothing in these tests depends on the instant, and a
@@ -997,8 +1009,10 @@ describe("Dependencies (composition root contract)", () => {
       listLiveStreams: new ListLiveStreams(
         fakeUserStreamRepository,
         fakeUserSubscriptionRepository,
+        fakeStreamViewerRepository,
         fakeClock
       ),
+      recordStreamViewerHeartbeat: new RecordStreamViewerHeartbeat(fakeStreamViewerRepository),
       endOwnUserStream: new EndOwnUserStream(fakeUserStreamRepository, fakeClock),
       // Task 5's mint endpoint. `undefined` in lockstep with `authoriseStream`
       // below (both need STREAM_TOKEN_SECRET, absent here).

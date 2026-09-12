@@ -7,6 +7,7 @@ import { FixedClock } from "../../infrastructure/clock/fixed.clock";
 import { FakeStreamingAdapter } from "../../infrastructure/streaming/fake-streaming.adapter";
 import { DrizzleUserStreamRepository } from "../../infrastructure/repositories/drizzle-user-stream.repository";
 import { DrizzleUserSubscriptionRepository } from "../../infrastructure/repositories/drizzle-user-subscription.repository";
+import { DrizzleStreamViewerRepository } from "../../infrastructure/repositories/drizzle-stream-viewer.repository";
 import { ArrivalLatch } from "../../test-support/arrival-latch";
 import { ConflictError, ForbiddenError, NotFoundError } from "../errors";
 import { EndOwnUserStream, ListLiveStreams, StartUserStream } from "./start-user-stream";
@@ -19,13 +20,14 @@ const YESTERDAY = new Date("2026-08-21T10:00:00.000Z");
 
 const streams = new DrizzleUserStreamRepository(db);
 const subscriptions = new DrizzleUserSubscriptionRepository(db);
+const streamViewers = new DrizzleStreamViewerRepository(db);
 
 function startUserStream() {
   return new StartUserStream(streams, new FakeStreamingAdapter());
 }
 
 function listLiveStreams(clock = new FixedClock(NOW)) {
-  return new ListLiveStreams(streams, subscriptions, clock);
+  return new ListLiveStreams(streams, subscriptions, streamViewers, clock);
 }
 
 let seedCounter = 0;
@@ -303,6 +305,7 @@ describe("ListLiveStreams", () => {
       "locked",
       "owner",
       "title",
+      "viewerCount",
       "visibility",
     ]);
     expect(gated!.locked).toBe(true);
@@ -322,6 +325,7 @@ describe("ListLiveStreams", () => {
       "locked",
       "owner",
       "title",
+      "viewerCount",
       "visibility",
     ]);
     expect(open!.locked).toBe(false);
@@ -479,6 +483,32 @@ describe("ListLiveStreams", () => {
 
   it("answers an empty listing when nobody is live", async () => {
     expect(await listLiveStreams().execute({ viewerId: null })).toEqual({ streams: [] });
+  });
+
+  it("defaults viewerCount to 0 for a stream nothing has recorded a heartbeat for", async () => {
+    const rina = await createUser("rina");
+    await startUserStream().execute({ ownerId: rina.id, title: "Baru mulai", visibility: "public" });
+
+    const [row] = (await listLiveStreams().execute({ viewerId: null })).streams;
+
+    expect(row!.viewerCount).toBe(0);
+  });
+
+  it("counts distinct heartbeats within the window, on a locked row too", async () => {
+    const { streamId } = await rinaLiveAndGated();
+    await streamViewers.heartbeat(streamId, "viewer-a", NOW);
+    await streamViewers.heartbeat(streamId, "viewer-b", NOW);
+    // Outside the window — must not be counted.
+    await streamViewers.heartbeat(
+      streamId,
+      "viewer-stale",
+      new Date(NOW.getTime() - 60_000)
+    );
+
+    const [row] = (await listLiveStreams().execute({ viewerId: null })).streams;
+
+    expect(row!.locked).toBe(true);
+    expect(row!.viewerCount).toBe(2);
   });
 });
 

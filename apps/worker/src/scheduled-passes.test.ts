@@ -8,6 +8,7 @@ import {
   formatPassFailure,
   formatStalePendingSweepLine,
   formatUserStreamSweepLine,
+  formatViewerHeartbeatSweepLine,
   MAX_USER_STREAM_MS,
   ORPHAN_SWEEP_WINDOW_MS,
   resolveRenewalIntervalMs,
@@ -16,6 +17,9 @@ import {
   SweepOrphanMedia,
   SweepStalePendingCheckouts,
   SweepStaleUserStreams,
+  SweepStaleViewerHeartbeats,
+  VIEWER_HEARTBEAT_RETENTION_MS,
+  type StaleViewerHeartbeatRepository,
 } from "./scheduled-passes";
 
 /**
@@ -62,7 +66,7 @@ const NOTHING_HAPPENED_USER_STREAM_SWEEP = {
 
 /** Counts, an optional stage-free label, `=` and spaces. Nothing else may appear. */
 const COUNTS_ONLY =
-  /^\[(media|memberships|membership-reminders|pending-checkouts|user-streams)\] (?:[a-z_]+=\d+ ?)+$/;
+  /^\[(media|memberships|membership-reminders|pending-checkouts|user-streams|stream-viewer-heartbeats)\] (?:[a-z_]+=\d+ ?)+$/;
 
 describe("formatOrphanSweepLine", () => {
   it("says nothing when the pass had nothing to do", () => {
@@ -217,6 +221,22 @@ describe("formatUserStreamSweepLine", () => {
   });
 });
 
+describe("formatViewerHeartbeatSweepLine", () => {
+  it("says nothing when nothing was deleted", () => {
+    expect(formatViewerHeartbeatSweepLine({ deleted: 0 })).toBeNull();
+  });
+
+  it("reports the count when the pass deleted something", () => {
+    expect(formatViewerHeartbeatSweepLine({ deleted: 5 })).toBe(
+      "[stream-viewer-heartbeats] deleted=5"
+    );
+  });
+
+  it("emits counts and nothing else", () => {
+    expect(formatViewerHeartbeatSweepLine({ deleted: 1 })).toMatch(COUNTS_ONLY);
+  });
+});
+
 describe("formatPassFailure", () => {
   it("drops the bound parameters of a failed query", () => {
     // Exactly what Phase 4 found in the worker's log: drizzle formats a query
@@ -308,6 +328,44 @@ describe("STALE_PENDING_CHECKOUT_WINDOW_MS", () => {
 describe("MAX_USER_STREAM_MS", () => {
   it("is 12 hours — a backstop against a LOST webhook, not a liveness check (design spec §7)", () => {
     expect(MAX_USER_STREAM_MS).toBe(12 * 60 * 60 * 1000);
+  });
+});
+
+describe("VIEWER_HEARTBEAT_RETENTION_MS", () => {
+  it("is 1 hour — a wide margin over the 20-second count window, not a protection for it", () => {
+    expect(VIEWER_HEARTBEAT_RETENTION_MS).toBe(60 * 60_000);
+  });
+});
+
+class FakeStaleViewerHeartbeatRepository implements StaleViewerHeartbeatRepository {
+  cutoffsSeen: Date[] = [];
+  toDelete = 0;
+
+  async deleteOlderThan(cutoff: Date): Promise<number> {
+    this.cutoffsSeen.push(cutoff);
+    return this.toDelete;
+  }
+}
+
+describe("SweepStaleViewerHeartbeats", () => {
+  const NOW = new Date("2026-09-12T12:00:00.000Z");
+
+  it("deletes everything older than the retention window, measured from now", async () => {
+    const heartbeats = new FakeStaleViewerHeartbeatRepository();
+    heartbeats.toDelete = 3;
+    const sweep = new SweepStaleViewerHeartbeats(heartbeats, { now: () => NOW });
+
+    expect(await sweep.execute()).toEqual({ deleted: 3 });
+    expect(heartbeats.cutoffsSeen).toEqual([
+      new Date(NOW.getTime() - VIEWER_HEARTBEAT_RETENTION_MS),
+    ]);
+  });
+
+  it("reports 0 deleted when there was nothing stale", async () => {
+    const heartbeats = new FakeStaleViewerHeartbeatRepository();
+    const sweep = new SweepStaleViewerHeartbeats(heartbeats, { now: () => NOW });
+
+    expect(await sweep.execute()).toEqual({ deleted: 0 });
   });
 });
 
@@ -1499,6 +1557,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipReminder: fakePass({ ...NOTHING_HAPPENED_MEMBERSHIP_REMINDER }),
       processStalePendingSweep: fakePass({ ...NOTHING_HAPPENED_STALE_PENDING_SWEEP }),
       processUserStreamSweep: fakePass({ ...NOTHING_HAPPENED_USER_STREAM_SWEEP }),
+      processViewerHeartbeatSweep: fakePass({ deleted: 0 }),
       intervalMs: 60_000,
     });
 
@@ -1508,6 +1567,7 @@ describe("createScheduledPassLoops", () => {
       "orphanSweepLoop",
       "stalePendingSweepLoop",
       "userStreamSweepLoop",
+      "viewerHeartbeatSweepLoop",
     ]);
   });
 
@@ -1523,6 +1583,7 @@ describe("createScheduledPassLoops", () => {
       expired: 1,
     });
     const processUserStreamSweep = fakePass({ ...NOTHING_HAPPENED_USER_STREAM_SWEEP, ended: 1 });
+    const processViewerHeartbeatSweep = fakePass({ deleted: 1 });
     const lines: string[] = [];
     const {
       orphanSweepLoop,
@@ -1530,12 +1591,14 @@ describe("createScheduledPassLoops", () => {
       membershipReminderLoop,
       stalePendingSweepLoop,
       userStreamSweepLoop,
+      viewerHeartbeatSweepLoop,
     } = createScheduledPassLoops({
       processOrphanSweep,
       processMembershipSweep,
       processMembershipReminder,
       processStalePendingSweep,
       processUserStreamSweep,
+      processViewerHeartbeatSweep,
       intervalMs: 60_000,
       log: (line) => lines.push(line),
     });
@@ -1546,6 +1609,7 @@ describe("createScheduledPassLoops", () => {
       membershipReminderLoop.run(),
       stalePendingSweepLoop.run(),
       userStreamSweepLoop.run(),
+      viewerHeartbeatSweepLoop.run(),
     ]);
     await waitUntil(
       () =>
@@ -1553,7 +1617,8 @@ describe("createScheduledPassLoops", () => {
         processMembershipSweep.state.calls > 0 &&
         processMembershipReminder.state.calls > 0 &&
         processStalePendingSweep.state.calls > 0 &&
-        processUserStreamSweep.state.calls > 0,
+        processUserStreamSweep.state.calls > 0 &&
+        processViewerHeartbeatSweep.state.calls > 0,
       "the first pass of each type"
     );
     // Long enough that a 5s-ish interval — or no interval at all — would show up
@@ -1564,12 +1629,14 @@ describe("createScheduledPassLoops", () => {
     expect(processMembershipReminder.state.calls).toBe(1);
     expect(processStalePendingSweep.state.calls).toBe(1);
     expect(processUserStreamSweep.state.calls).toBe(1);
+    expect(processViewerHeartbeatSweep.state.calls).toBe(1);
 
     orphanSweepLoop.stop();
     membershipSweepLoop.stop();
     membershipReminderLoop.stop();
     stalePendingSweepLoop.stop();
     userStreamSweepLoop.stop();
+    viewerHeartbeatSweepLoop.stop();
     const finished = await Promise.race([
       running.then(() => "stopped"),
       Bun.sleep(2_000).then(() => "still sleeping in the interval"),
@@ -1582,6 +1649,7 @@ describe("createScheduledPassLoops", () => {
       "[membership-reminders] considered=0 reminded=1 already_reminded=0 skipped=0 failed=0",
       "[pending-checkouts] considered=0 expired=1 skipped=0 failed=0",
       "[user-streams] considered=0 ended=1 failed=0",
+      "[stream-viewer-heartbeats] deleted=1",
     ]);
   });
 
@@ -1611,6 +1679,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipReminder,
       processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
       processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
+      processViewerHeartbeatSweep: fakePass({ deleted: 0 }),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -1663,6 +1732,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
       processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
+      processViewerHeartbeatSweep: fakePass({ deleted: 0 }),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -1707,6 +1777,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
       processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
+      processViewerHeartbeatSweep: fakePass({ deleted: 0 }),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -1754,6 +1825,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipReminder,
       processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
       processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
+      processViewerHeartbeatSweep: fakePass({ deleted: 0 }),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -1805,6 +1877,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       processStalePendingSweep,
       processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
+      processViewerHeartbeatSweep: fakePass({ deleted: 0 }),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -1854,6 +1927,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
       processUserStreamSweep,
+      processViewerHeartbeatSweep: fakePass({ deleted: 0 }),
       intervalMs: 1,
       log: () => undefined,
       logError: (line) => errors.push(line),
@@ -1913,6 +1987,7 @@ describe("createScheduledPassLoops", () => {
       processMembershipReminder: fakePass(NOTHING_HAPPENED_MEMBERSHIP_REMINDER),
       processStalePendingSweep: fakePass(NOTHING_HAPPENED_STALE_PENDING_SWEEP),
       processUserStreamSweep: fakePass(NOTHING_HAPPENED_USER_STREAM_SWEEP),
+      processViewerHeartbeatSweep: fakePass({ deleted: 0 }),
       intervalMs: 1,
       log: () => undefined,
     });

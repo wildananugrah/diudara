@@ -1,0 +1,115 @@
+### Discover — manual test requests (sub-projects 1 & 2)
+###
+### Requires the VS Code "REST Client" extension (or IntelliJ's built-in HTTP
+### Client) so the `# @name` / `{{name.response.body...}}` chaining below works.
+### Start the API first: `cd apps/api && bun run dev`.
+### @baseUrl below assumes PORT=3004 (apps/api/.env on this box) — change it
+### if yours differs (apps/api/.env.example defaults to 3000).
+
+@baseUrl = http://localhost:3004
+
+### 1. Sign up — skip this request if the account already exists (409 is fine)
+POST {{baseUrl}}/users/signup
+Content-Type: application/json
+
+{
+  "handle": "wildan",
+  "email": "wildan@example.com",
+  "password": "supersecret123",
+  "displayName": "Wildan"
+}
+
+### 2. Log in — captures the token every authenticated request below reuses
+# @name login
+POST {{baseUrl}}/users/login
+Content-Type: application/json
+
+{
+  "email": "wildan@example.com",
+  "password": "supersecret123"
+}
+
+###
+@token = {{login.response.body.token}}
+
+
+### ================= Sub-project 1: Discover browse data =================
+
+### 3. Create a community with tags
+# @name createCommunity
+POST {{baseUrl}}/communities
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Kelas Desain",
+  "category": "Skill Digital",
+  "description": "Belajar desain dari nol.",
+  "tags": ["Desain", "UI", "UX"]
+}
+
+###
+@slug = {{createCommunity.response.body.slug}}
+
+### 4. Browse communities — each row carries tags/trending/price, plus the
+###    site's popularTags alongside the list
+GET {{baseUrl}}/communities
+
+### 5. Filter by category
+GET {{baseUrl}}/communities?category=Skill%20Digital
+
+### 6. Search by name
+GET {{baseUrl}}/communities?q=desain
+
+### 7. Replace the community's tags — owner-only, full replace
+PATCH {{baseUrl}}/communities/{{slug}}/tags
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "tags": ["desain", "belajar"]
+}
+
+### 8. Read the community back — tags reflect the PATCH above
+GET {{baseUrl}}/communities/{{slug}}
+
+
+### ================= Sub-project 2: Live viewer counts =================
+### Starting a stream needs a streaming provider configured (MEDIAMTX_*  env
+### vars) — without one, #9 answers 503, and #11/#12 have nothing to target.
+
+### 9. Go live, publicly
+# @name startStream
+POST {{baseUrl}}/streams
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "Ngobrol santai",
+  "visibility": "public"
+}
+
+###
+@streamId = {{startStream.response.body.id}}
+
+### 10. List live streams — each row now carries viewerCount
+GET {{baseUrl}}/streams
+
+### 11. Simulate nginx's /auth-request for that stream, forwarding a viewer's
+###     IP — this is what records a heartbeat. Replace webhookSecret with the
+###     real MEDIAMTX_WEBHOOK_SECRET from apps/api/.env before running this.
+@webhookSecret = REPLACE_WITH_MEDIAMTX_WEBHOOK_SECRET
+
+GET {{baseUrl}}/webhooks/mediamtx/auth-request
+X-Mediamtx-Secret: {{webhookSecret}}
+X-Mtx-Stream-Id: {{streamId}}
+X-Client-IP: 203.0.113.9
+User-Agent: manual-test
+
+### 12. Re-run #10 (GET /streams) now — viewerCount should read 1. Change
+###     X-Client-IP in #11 and re-run both to watch the count grow; wait 20+
+###     seconds and re-run #10 alone to watch it drop back to 0.
+
+### 13. End the stream when you're done
+DELETE {{baseUrl}}/streams/{{streamId}}
+Authorization: Bearer {{token}}

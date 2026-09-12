@@ -282,7 +282,13 @@ export class AuthoriseStream {
     if (!stream) {
       return { allowed: false };
     }
-    return this.authoriseUserStreamRead(stream, query, now);
+    // Stripped to `allowed` alone — nothing on THIS entry point (MediaMTX's
+    // own hook, called once per session) consumes a viewer's identity, so it
+    // is not carried past this line. `authoriseUserReadByStreamId` below is
+    // the one entry point nginx's repeatedly-firing `auth_request` reaches,
+    // which is where a viewer's identity actually matters.
+    const { allowed } = this.authoriseUserStreamRead(stream, query, now);
+    return { allowed };
   }
 
   /**
@@ -328,7 +334,9 @@ export class AuthoriseStream {
     streamId: string;
     query: string;
     now: number;
-  }): Promise<{ allowed: false } | { allowed: true; streamKey: string }> {
+  }): Promise<
+    { allowed: false } | { allowed: true; streamKey: string; viewerId: string | null }
+  > {
     const stream = await this.userStreams.findById(input.streamId);
     if (!stream) {
       return { allowed: false };
@@ -337,7 +345,11 @@ export class AuthoriseStream {
     if (!result.allowed) {
       return { allowed: false };
     }
-    return { allowed: true, streamKey: stream.streamKey };
+    // `viewerId` is `null` for a public row (nothing was minted to name one)
+    // and the token's own claim for a members-only row — see this class's
+    // own docstring. This is the one entry point a viewer's identity is
+    // surfaced through, for `RecordStreamViewerHeartbeat` to key on.
+    return { allowed: true, streamKey: stream.streamKey, viewerId: result.viewerId };
   }
 
   /**
@@ -399,7 +411,7 @@ export class AuthoriseStream {
     stream: UserStreamRow,
     query: string,
     now: number
-  ): { allowed: boolean } {
+  ): { allowed: false } | { allowed: true; viewerId: string | null } {
     if (stream.status !== USER_READABLE_STATUS) {
       // I3. Nothing a reader can carry rescues a stream the creator ended —
       // see this method's own docstring.
@@ -409,8 +421,11 @@ export class AuthoriseStream {
       // Nothing to gate. Spec §5: "A public stream needs no token" — there is
       // nothing to mint and nothing to refresh, and `MintUserWatchToken`
       // refuses to issue one for such a stream rather than handing out a
-      // credential that means nothing.
-      return { allowed: true };
+      // credential that means nothing. `viewerId: null` says so explicitly —
+      // this read carries no per-viewer identity at all, which is exactly
+      // what makes a public stream's viewer heartbeats fall back to an
+      // IP/User-Agent hash instead (`anonymousViewerIdentity`).
+      return { allowed: true, viewerId: null };
     }
     if (stream.visibility !== MEMBERS_ONLY) {
       return { allowed: false };
@@ -435,6 +450,6 @@ export class AuthoriseStream {
     if (claims.streamId !== stream.id) {
       return { allowed: false };
     }
-    return { allowed: true };
+    return { allowed: true, viewerId: claims.viewerId };
   }
 }

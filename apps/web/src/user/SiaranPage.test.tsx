@@ -54,6 +54,7 @@ const PUBLIC_STREAM: StreamView = {
   owner: { handle: "wildan", displayName: "Wildan" },
   locked: false,
   hlsPlaybackPath: "/u/stream-public/index.m3u8",
+  viewerCount: 0,
 };
 
 const LOCKED_STREAM: StreamView = {
@@ -62,6 +63,7 @@ const LOCKED_STREAM: StreamView = {
   visibility: "members",
   owner: { handle: "sari", displayName: "Sari" },
   locked: true,
+  viewerCount: 0,
   // Deliberately no `hlsPlaybackPath` key at all — the API omits it,
   // never sends `null`. See `StreamView`'s own docstring in `apiClient.ts`.
 };
@@ -762,6 +764,7 @@ describe("SiaranPage — Akhiri siaran survives a reload (I2)", () => {
     owner: { handle: "wildan", displayName: "Wildan" },
     locked: false,
     hlsPlaybackPath: "/u/stream-mine/index.m3u8",
+    viewerCount: 0,
   };
 
   /** Somebody else's live row — the same shape, a different owner. */
@@ -772,6 +775,7 @@ describe("SiaranPage — Akhiri siaran survives a reload (I2)", () => {
     owner: { handle: "sari", displayName: "Sari" },
     locked: false,
     hlsPlaybackPath: "/u/stream-theirs/index.m3u8",
+    viewerCount: 0,
   };
 
   /** `GET /streams` answering `streams`, `DELETE /streams/:id` answering `{ ended: true }`. */
