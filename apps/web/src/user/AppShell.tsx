@@ -17,9 +17,9 @@ import ChatPanel from "./ChatPanel";
  * the one nothing used).
  */
 const STATIC_DESTINATIONS = [
-  { to: "/beranda", label: "Beranda" },
+  // { to: "/beranda", label: "Beranda" },
   { to: "/discover", label: "Discover" },
-  { to: "/siaran", label: "Siaran" },
+  // { to: "/siaran", label: "Siaran" },
 ] as const;
 
 /**
