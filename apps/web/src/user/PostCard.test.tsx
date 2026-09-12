@@ -414,7 +414,7 @@ describe("PostCard — the lock panel (Task 7, spec §5, §5.1)", () => {
   /**
    * The link target is the author's PUBLIC profile route, `/@handle` — the
    * SAME shape every other in-app link to a profile already uses (the
-   * identity link above, `FollowListPage`, `JelajahPage`), and the ONLY shape
+   * identity link above, `FollowListPage`, `DiscoverPage`), and the ONLY shape
    * `ProfilePage`'s own route actually accepts: `App.tsx` mounts the profile
    * at the bare `path="/:handleParam"` and `ProfilePage` 404s anything whose
    * first segment does not start with "@" (see that file's docstring). A

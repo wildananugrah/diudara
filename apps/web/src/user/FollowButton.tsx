@@ -31,7 +31,7 @@ export interface FollowButtonProps {
    * `apiClient.ts`.
    *
    * This used to read "or the caller's best guess of it — see `FollowRow` in
-   * `JelajahPage.tsx` for the one place that guesses". That guess was
+   * `DiscoverPage.tsx` for the one place that guesses". That guess was
    * `signedIn ? false : null`, and item 1 deleted it when it widened all three
    * list endpoints; `FollowRow` now passes `row.viewerFollows` straight through
    * and no caller guesses anything. Corrected by re-review N4 — a docstring

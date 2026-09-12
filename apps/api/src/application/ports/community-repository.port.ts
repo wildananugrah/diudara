@@ -27,6 +27,13 @@ export interface CommunityListRow {
   tags: string[];
   trending: boolean;
   price: { amount: number; billingCycle: string } | null;
+  /**
+   * `null` unless the community's owner currently has a `live` `user_stream`
+   * — at most one, per `user_stream_one_live`'s own partial unique index.
+   * Present regardless of that stream's visibility: a live badge is a
+   * discovery signal even for a stream a visitor cannot watch yet.
+   */
+  live: { streamId: string; viewerCount: number } | null;
 }
 
 export interface CommunityMemberRow {

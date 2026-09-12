@@ -15,6 +15,7 @@ const ROW: CommunityListRow = {
   tags: [],
   trending: false,
   price: null,
+  live: null,
 };
 
 function renderCard(overrides: Partial<CommunityListRow> = {}) {

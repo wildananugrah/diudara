@@ -165,7 +165,7 @@ describe("routing — the personal-account routes", () => {
 });
 
 /**
- * Task 4: the app shell. `/beranda`, `/jelajah` and `/siaran` are new,
+ * Task 4: the app shell. `/beranda`, `/discover` and `/siaran` are new,
  * static, single-segment routes — the brief requires they be registered
  * BEFORE `/:handleParam` (already last, per the block above) precisely so
  * they cannot be shadowed by it. React Router ranks static segments above
@@ -177,7 +177,7 @@ describe("routing — the app shell", () => {
   it("resolves /beranda inside the shell, with Beranda's empty-state copy", async () => {
     // Task 5: Beranda now LOADS its feed, so its empty-state copy only appears
     // once the first page resolves. Mocked and awaited for exactly the reason
-    // the /jelajah test below gives — an unmocked `fetch` here hits the real
+    // the /discover test below gives — an unmocked `fetch` here hits the real
     // network and updates state outside any `act(...)`.
     global.fetch = mock(async () =>
       jsonResponse({ posts: [], nextCursor: null })
@@ -189,34 +189,34 @@ describe("routing — the app shell", () => {
     expect(screen.getAllByRole("navigation").length).toBeGreaterThan(0);
   });
 
-  it("resolves /jelajah inside the shell", async () => {
-    // Phase 1 made KOMUNITAS the default tab, so bare `/jelajah` loads
+  it("resolves /discover inside the shell", async () => {
+    // Phase 1 made KOMUNITAS the default tab, so bare `/discover` loads
     // `GET /communities` rather than `/users/explore`. One mock answering both
     // shapes, since which one is asked for is the page's business, not this
     // routing test's.
     global.fetch = mock(async (url: string) =>
       url.startsWith("/communities")
-        ? jsonResponse({ communities: [] })
+        ? jsonResponse({ communities: [], popularTags: [] })
         : jsonResponse({ results: [], newest: [], mostFollowed: [] })
     ) as unknown as typeof fetch;
 
-    renderAt("/jelajah");
+    renderAt("/discover");
 
     expect(screen.getAllByRole("navigation").length).toBeGreaterThan(0);
-    // Lets JelajahPage's own fetch resolve inside this test's `act` scope,
+    // Lets DiscoverPage's own fetch resolve inside this test's `act` scope,
     // rather than after it — an unmocked `fetch` here previously hit the real
     // network and updated state outside any `act(...)`.
     await screen.findByText("Belum ada komunitas di sini.");
   });
 
-  it("resolves /jelajah?tab=orang onto the people half", async () => {
+  it("resolves /discover?tab=orang onto the people half", async () => {
     global.fetch = mock(async (url: string) =>
       url.startsWith("/communities")
-        ? jsonResponse({ communities: [] })
+        ? jsonResponse({ communities: [], popularTags: [] })
         : jsonResponse({ results: [], newest: [], mostFollowed: [] })
     ) as unknown as typeof fetch;
 
-    renderAt("/jelajah?tab=orang");
+    renderAt("/discover?tab=orang");
 
     await screen.findAllByText("Belum ada akun.");
   });
@@ -224,7 +224,7 @@ describe("routing — the app shell", () => {
   it("resolves /siaran inside the shell, with Siaran's empty-state copy", async () => {
     // Task 7: Siaran now LOADS `GET /streams`, so its empty-state copy only
     // appears once that first fetch resolves — same reasoning, and same
-    // fix, as the /beranda and /jelajah tests just above.
+    // fix, as the /beranda and /discover tests just above.
     global.fetch = mock(async () => jsonResponse({ streams: [] })) as unknown as typeof fetch;
 
     renderAt("/siaran");
@@ -756,7 +756,7 @@ describe("routing — the shell partition of the real route table", () => {
       "/:handleParam/mengikuti",
       "/:handleParam/pengikut",
       "/beranda",
-      "/jelajah",
+      "/discover",
       "/komunitas/:slug",
       "/komunitas/:slug/diskusi/:postId",
       "/komunitas/:slug/kegiatan/:postId",

@@ -14,7 +14,7 @@ import RedirectIfSignedIn from "./user/RedirectIfSignedIn";
 import BerandaPage from "./user/BerandaPage";
 import LiveRoomPage from "./user/LiveRoomPage";
 import SiaranPage from "./user/SiaranPage";
-import JelajahPage from "./user/JelajahPage";
+import DiscoverPage from "./user/DiscoverPage";
 import CommunityPage from "./user/CommunityPage";
 import CommunityCreatePage from "./user/CommunityCreatePage";
 import DiscussionPage from "./user/DiscussionPage";
@@ -74,7 +74,7 @@ export function AppRoutes() {
       */}
       <Route element={<AppShell />}>
         <Route path="/beranda" element={<BerandaPage />} />
-        <Route path="/jelajah" element={<JelajahPage />} />
+        <Route path="/discover" element={<DiscoverPage />} />
         <Route path="/siaran" element={<SiaranPage />} />
         {/* Phase 7. Declared AFTER the index and, like every route in this
             block, above `/:handleParam` — `siaran` is a literal, so the two
@@ -176,7 +176,7 @@ export function AppRoutes() {
 
 /**
  * Task 7: repairs a split session (a token with no cached account) once, at
- * the root, above the router — so it covers `/@handle` and `/jelajah` alike,
+ * the root, above the router — so it covers `/@handle` and `/discover` alike,
  * the two surfaces where the bad state is visible sit on opposite sides of
  * the `AppShell` boundary. See `repairSplitSession`'s own docstring for why
  * this fixes the CAUSE rather than patching each screen.

@@ -175,7 +175,7 @@ export default function LandingPage() {
             <h3>Pengikut tanpa bayar</h3>
             <p>
               Siapa pun boleh mengikuti Anda tanpa membeli apa pun, membaca kiriman
-              terbuka Anda di berandanya, dan menemukan Anda lewat halaman Jelajah.
+              terbuka Anda di berandanya, dan menemukan Anda lewat halaman Discover.
             </p>
           </article>
         </div>

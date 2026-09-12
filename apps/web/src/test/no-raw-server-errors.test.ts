@@ -10,7 +10,7 @@ import { join } from "node:path";
  *
  * | round | file | what reached the screen |
  * |---|---|---|
- * | item 5 | `JelajahPage.tsx` | `"invalid query: q must be at most 100 characters, ..."` |
+ * | item 5 | `DiscoverPage.tsx` | `"invalid query: q must be at most 100 characters, ..."` |
  * | item 7 | `FollowButton.tsx` | whatever `readError` lifted, incl. `"user not found"` |
  * | re-review N1 | `FollowListPage.tsx` | `"internal server error"` on a 500 |
  * | re-review N1 | `ProfilePage.tsx` | `"Failed to fetch"` on a network drop |

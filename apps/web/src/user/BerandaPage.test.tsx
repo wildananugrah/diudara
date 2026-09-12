@@ -276,9 +276,9 @@ describe("BerandaPage — the two tabs", () => {
 
     expect(await screen.findByText("Belum ada kiriman dari orang yang Anda ikuti.")).toBeTruthy();
     // The only answer to an empty follow graph, and this is where it is needed.
-    const jelajah = screen.getAllByRole("link", { name: "Jelajah" });
-    expect(jelajah.length).toBe(1);
-    expect(jelajah[0]!.getAttribute("href")).toBe("/jelajah");
+    const discover = screen.getAllByRole("link", { name: "Discover" });
+    expect(discover.length).toBe(1);
+    expect(discover[0]!.getAttribute("href")).toBe("/discover?tab=orang");
   });
 });
 

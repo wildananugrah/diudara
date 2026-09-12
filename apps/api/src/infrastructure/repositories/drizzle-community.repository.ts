@@ -1,6 +1,13 @@
 import { aliasedTable, and, count, desc, eq, gte, ilike, inArray, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
-import { appUsers, communities, communityMembers, userTiers } from "../../db/schema";
+import {
+  appUsers,
+  communities,
+  communityMembers,
+  streamViewerHeartbeats,
+  userStreams,
+  userTiers,
+} from "../../db/schema";
 import { UniqueRule } from "../../application/errors";
 import type {
   BrowseCommunitiesQuery,
@@ -9,6 +16,7 @@ import type {
   CommunityRecord,
   CommunityRepositoryPort,
 } from "../../application/ports/community-repository.port";
+import { VIEWER_HEARTBEAT_WINDOW_MS } from "../../domain/viewer-heartbeat-window";
 import { clampLimit } from "./drizzle-follow.repository";
 import { escapeLikePattern } from "./drizzle-user.repository";
 import { rethrowUniqueViolation } from "./pg-errors";
@@ -141,6 +149,7 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
     const rows = await this.db
       .select({
         id: communities.id,
+        ownerId: communities.ownerId,
         slug: communities.slug,
         name: communities.name,
         category: communities.category,
@@ -164,16 +173,66 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
     // Both computed GLOBALLY (see `CommunityListRow`'s own docstring), never
     // scoped to `filters` above — two more queries rather than folding into
     // the one above, which would need a correlated subquery per row.
-    const [trendingIds, prices] = await Promise.all([
+    const [trendingIds, prices, liveByOwner] = await Promise.all([
       this.trendingCommunityIds(),
       this.cheapestActivePrices(rows.map((row) => row.id)),
+      this.liveByOwner(rows.map((row) => row.ownerId)),
     ]);
 
-    return rows.map(({ id, ...row }) => ({
+    return rows.map(({ id, ownerId, ...row }) => ({
       ...row,
       trending: trendingIds.has(id),
       price: prices.get(id) ?? null,
+      live: liveByOwner.get(ownerId) ?? null,
     }));
+  }
+
+  /**
+   * Which of these owners currently has a `live` stream, and how many are
+   * watching it. At most one live row per owner
+   * (`user_stream_one_live`'s own partial unique index), so this is a plain
+   * map — never a list a caller could misread as "could be more than one".
+   *
+   * Regardless of `visibility`: a live badge is a discovery signal even for a
+   * stream a visitor cannot watch yet, the same call `viewerCount` on
+   * `StreamView` already makes.
+   */
+  private async liveByOwner(
+    ownerIds: string[]
+  ): Promise<Map<string, { streamId: string; viewerCount: number }>> {
+    if (ownerIds.length === 0) return new Map();
+
+    const live = await this.db
+      .select({ ownerId: userStreams.ownerId, streamId: userStreams.id })
+      .from(userStreams)
+      .where(and(inArray(userStreams.ownerId, ownerIds), eq(userStreams.status, "live")));
+    if (live.length === 0) return new Map();
+
+    const since = new Date(Date.now() - VIEWER_HEARTBEAT_WINDOW_MS);
+    const counts = await this.db
+      .select({
+        streamId: streamViewerHeartbeats.streamId,
+        value: sql<number>`count(*)`,
+      })
+      .from(streamViewerHeartbeats)
+      .where(
+        and(
+          inArray(
+            streamViewerHeartbeats.streamId,
+            live.map((row) => row.streamId)
+          ),
+          gte(streamViewerHeartbeats.lastSeenAt, since)
+        )
+      )
+      .groupBy(streamViewerHeartbeats.streamId);
+    const viewerCounts = new Map(counts.map((row) => [row.streamId, Number(row.value)]));
+
+    return new Map(
+      live.map((row) => [
+        row.ownerId,
+        { streamId: row.streamId, viewerCount: viewerCounts.get(row.streamId) ?? 0 },
+      ])
+    );
   }
 
   /** The top `TRENDING_LIMIT` communities by joins in the last `TRENDING_WINDOW_MS`, at least `TRENDING_FLOOR` of them. */

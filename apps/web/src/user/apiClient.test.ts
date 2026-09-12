@@ -889,7 +889,7 @@ describe("follow", () => {
   });
 });
 
-describe("follow lists and Jelajah", () => {
+describe("follow lists and Discover", () => {
   /**
    * REWRITTEN BY THE FINAL REVIEW'S ITEM 1, and the old version is worth
    * recording: it asserted `Authorization` was ABSENT here even while signed in,
@@ -939,7 +939,7 @@ describe("follow lists and Jelajah", () => {
     expect(new Headers(calls[0]!.init?.headers).get("Authorization")).toBe("Bearer jwt-abc");
   });
 
-  it("sends the token on the Jelajah explore fetch too", async () => {
+  it("sends the token on the Discover explore fetch too", async () => {
     setUserSession("jwt-abc", USER);
     const calls: Array<{ init: RequestInit | undefined }> = [];
     global.fetch = mock(async (_url: string, init?: RequestInit) => {

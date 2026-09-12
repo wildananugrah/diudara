@@ -199,7 +199,7 @@ export default function PostCard({
         // the API's own construction) — there is no media URL anywhere in
         // this branch for a future edit to accidentally wire up. The link
         // target is `/@handle`, the SAME shape every other in-app profile
-        // link uses (the identity link above, `FollowListPage`, `JelajahPage`)
+        // link uses (the identity link above, `FollowListPage`, `DiscoverPage`)
         // and the only shape `ProfilePage`'s route actually accepts — see
         // that file's own docstring on why a bare handle 404s. Phase 5a's
         // membership offer and "Jadi anggota" button already live there

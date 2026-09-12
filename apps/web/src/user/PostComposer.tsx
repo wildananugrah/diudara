@@ -207,7 +207,7 @@ function seedImages(media: MediaView[]): ComposerImage[] {
  * **The limit is bounded twice, and both are `MAX_POST_BODY_LENGTH`** — the
  * `maxLength` attribute, which is what a real browser applies to typing and
  * pasting, and a `.slice()` in `onChange`, which is what bounds every other way
- * a value can arrive. Exactly how `JelajahPage` bounds `?q=` at
+ * a value can arrive. Exactly how `DiscoverPage` bounds `?q=` at
  * `MAX_EXPLORE_QUERY_LENGTH`, for the same reason: a limit known only to the
  * server put a raw English Zod message on a user's screen once already.
  *

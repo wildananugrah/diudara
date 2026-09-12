@@ -28,7 +28,7 @@ function renderShellAt(path: string) {
       <Routes>
         <Route element={<AppShell />}>
           <Route path="/beranda" element={<Dummy label="Beranda" />} />
-          <Route path="/jelajah" element={<Dummy label="Jelajah" />} />
+          <Route path="/discover" element={<Dummy label="Discover" />} />
           <Route path="/siaran" element={<Dummy label="Siaran" />} />
           <Route path="/pengaturan" element={<Dummy label="Pengaturan" />} />
         </Route>
@@ -47,7 +47,7 @@ describe("AppShell", () => {
   it("renders the three fixed destinations twice each — one source, a bottom bar and a side rail", () => {
     renderShellAt("/beranda");
 
-    for (const label of ["Beranda", "Jelajah", "Siaran"]) {
+    for (const label of ["Beranda", "Discover", "Siaran"]) {
       expect(screen.getAllByRole("link", { name: label }).length).toBe(2);
     }
   });
@@ -92,8 +92,8 @@ describe("AppShell", () => {
     expect(screen.queryAllByText("Beranda page content").length).toBe(0);
   });
 
-  it("renders on /beranda, /jelajah and /siaran", () => {
-    for (const path of ["/beranda", "/jelajah", "/siaran"]) {
+  it("renders on /beranda, /discover and /siaran", () => {
+    for (const path of ["/beranda", "/discover", "/siaran"]) {
       renderShellAt(path);
       expect(screen.getAllByRole("navigation").length).toBeGreaterThan(0);
       cleanup();
@@ -139,7 +139,7 @@ describe("AppShell", () => {
 describe("AppShell — the Udara shell", () => {
   it("still renders one destination list twice, as a rail and a bar", () => {
     renderShellAt("/beranda");
-    for (const label of ["Beranda", "Jelajah", "Siaran"]) {
+    for (const label of ["Beranda", "Discover", "Siaran"]) {
       expect(screen.getAllByRole("link", { name: label }).length).toBe(2);
     }
   });

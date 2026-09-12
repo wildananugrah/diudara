@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "bun:test";
 import { db } from "../../db/client";
-import { appUsers, communityMembers, userTiers } from "../../db/schema";
+import { appUsers, communityMembers, streamViewerHeartbeats, userStreams, userTiers } from "../../db/schema";
 import { resetDatabase } from "../../db/test-helpers";
 import { DrizzleCommunityRepository } from "./drizzle-community.repository";
 
@@ -66,6 +66,27 @@ async function addTier(
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+let streamKeyCounter = 0;
+
+async function goLive(ownerId: string, visibility: "public" | "members" = "public") {
+  streamKeyCounter += 1;
+  const [stream] = await db
+    .insert(userStreams)
+    .values({
+      ownerId,
+      title: "Siaran",
+      visibility,
+      streamKey: streamKeyCounter.toString(16).padStart(32, "e"),
+      status: "live",
+    })
+    .returning();
+  return stream!;
+}
+
+async function heartbeat(streamId: string, identity: string, lastSeenAt: Date) {
+  await db.insert(streamViewerHeartbeats).values({ streamId, identity, lastSeenAt });
+}
 
 describe("DrizzleCommunityRepository", () => {
   it("creating a community also makes the owner a member, in one transaction", async () => {
@@ -268,6 +289,65 @@ describe("DrizzleCommunityRepository", () => {
       const rows = await repo().browse({ search: "", category: "", limit: 24 });
       const trendingSlugs = rows.filter((r) => r.trending).map((r) => r.slug).sort();
       expect(trendingSlugs).toEqual(["c6", "c7", "c8"]);
+    });
+  });
+
+  describe("live", () => {
+    it("reports the owner's live stream id and recent viewer count", async () => {
+      const ownerId = await seedUser("wildan");
+      const created = await create(ownerId, { slug: "kelas-desain", name: "Kelas Desain" });
+      const stream = await goLive(ownerId, "public");
+      await heartbeat(stream.id, "viewer-1", new Date());
+      await heartbeat(stream.id, "viewer-2", new Date());
+
+      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+
+      expect(rows.find((r) => r.slug === created.slug)!.live).toEqual({
+        streamId: stream.id,
+        viewerCount: 2,
+      });
+    });
+
+    it("is live regardless of the stream's visibility — a discovery signal even when gated", async () => {
+      const ownerId = await seedUser("wildan");
+      const created = await create(ownerId, { slug: "kelas-desain", name: "Kelas Desain" });
+      const stream = await goLive(ownerId, "members");
+
+      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+
+      expect(rows.find((r) => r.slug === created.slug)!.live?.streamId).toBe(stream.id);
+    });
+
+    it("is null when the owner has no live stream", async () => {
+      const ownerId = await seedUser("wildan");
+      const created = await create(ownerId, { slug: "kelas-desain", name: "Kelas Desain" });
+
+      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+
+      expect(rows.find((r) => r.slug === created.slug)!.live).toBeNull();
+    });
+
+    it("is null once the owner's stream has ended", async () => {
+      const ownerId = await seedUser("wildan");
+      const created = await create(ownerId, { slug: "kelas-desain", name: "Kelas Desain" });
+      const stream = await goLive(ownerId);
+      await db.update(userStreams).set({ status: "ended" }).where(eq(userStreams.id, stream.id));
+
+      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+
+      expect(rows.find((r) => r.slug === created.slug)!.live).toBeNull();
+    });
+
+    it("a viewer count only counts heartbeats within the window", async () => {
+      const ownerId = await seedUser("wildan");
+      const created = await create(ownerId, { slug: "kelas-desain", name: "Kelas Desain" });
+      const stream = await goLive(ownerId);
+      await heartbeat(stream.id, "fresh", new Date());
+      await heartbeat(stream.id, "stale", new Date(Date.now() - 60_000));
+
+      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+
+      expect(rows.find((r) => r.slug === created.slug)!.live?.viewerCount).toBe(1);
     });
   });
 });

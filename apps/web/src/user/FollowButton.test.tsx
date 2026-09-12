@@ -292,7 +292,7 @@ describe("FollowButton — a failed toggle is not silent (item 7)", () => {
 /**
  * Re-review N4. `FollowButtonProps.viewerFollows`' docstring still described the
  * guess item 1 deleted — "or the caller's best guess of it — see `FollowRow` in
- * `JelajahPage.tsx` for the one place that guesses". Correcting the prose is
+ * `DiscoverPage.tsx` for the one place that guesses". Correcting the prose is
  * cheap; what follows pins the CLAIM the corrected prose makes, so it cannot go
  * stale again the way `getProfileByHandle`'s "a request nothing checks" did —
  * that comment stayed true-looking for a whole phase after it stopped being
@@ -330,7 +330,7 @@ describe("FollowButton — nobody guesses viewerFollows (N4)", () => {
     const callSites = readdirSync(dir)
       .filter((entry) => /\.tsx$/.test(entry) && !/\.test\.tsx$/.test(entry))
       .flatMap((entry) => [...readFileSync(join(dir, entry), "utf8").matchAll(/viewerFollows=\{/g)]);
-    // ProfilePage and JelajahPage's FollowRow, at least.
+    // ProfilePage and DiscoverPage's FollowRow, at least.
     expect(callSites.length).toBeGreaterThan(1);
 
     // The exact expression item 1 deleted.

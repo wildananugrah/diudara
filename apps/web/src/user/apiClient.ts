@@ -71,7 +71,7 @@ export function getUserToken(): string | null {
  *
  * Final-review I2: that question used to be answered from two different
  * storage keys. `getProfileByHandle` asked `getUserToken()`
- * (`diudara.user.token`); `FollowRow` in `JelajahPage.tsx` asked
+ * (`diudara.user.token`); `FollowRow` in `DiscoverPage.tsx` asked
  * `getSessionUser() !== null` (`diudara.user.account`). Each was locally
  * defensible and together they were wrong, because nothing ever put the two
  * keys out of step in a test — every test either `localStorage.clear()`s or
@@ -426,7 +426,7 @@ async function publicPost<T>(path: string, body: unknown, fallback: string): Pro
 
 /**
  * A **PUBLIC BUT NOT ANONYMOUS** GET whose JSON body is the result — the
- * `publicPost` above, but for `GET`. Backs Jelajah's three lists and a
+ * `publicPost` above, but for `GET`. Backs Discover's three lists and a
  * profile's follower/following screens.
  *
  * **IT SENDS THE VIEWER'S TOKEN, and that is the whole point of this
@@ -725,7 +725,7 @@ export function completePasswordReset(token: string, newPassword: string): Promi
 }
 
 /**
- * A single row in a follower/following list or a Jelajah result — mirrors the
+ * A single row in a follower/following list or a Discover result — mirrors the
  * API's own `FollowListRowForViewer`
  * (`apps/api/src/application/use-cases/viewer-follow-state.ts`) exactly: the
  * same shape backs `GET /:handle/followers`, `/:handle/following` and
@@ -779,7 +779,7 @@ export function listFollowing(handle: string, limit?: number): Promise<FollowLis
 }
 
 /**
- * `GET /explore`. `q` omitted or empty is Jelajah's DEFAULT state, not an
+ * `GET /explore`. `q` omitted or empty is Discover's (Orang tab) DEFAULT state, not an
  * error — see `ExploreUsers`'s own docstring: `results` comes back `[]` and
  * `newest`/`mostFollowed` are still populated either way.
  */
@@ -795,7 +795,7 @@ export function exploreUsers(input: { q?: string; limit?: number } = {}): Promis
   if (input.limit !== undefined) params.set("limit", String(input.limit));
   const query = params.toString();
   const search = query.length > 0 ? `?${query}` : "";
-  return publicGet<ExploreResult>(`/users/explore${search}`, "gagal memuat Jelajah");
+  return publicGet<ExploreResult>(`/users/explore${search}`, "gagal memuat Discover");
 }
 
 /**
@@ -2117,6 +2117,8 @@ export interface CommunityListRow {
   tags: string[];
   trending: boolean;
   price: { amount: number; billingCycle: string } | null;
+  /** `null` unless the community's owner currently has a live stream. */
+  live: { streamId: string; viewerCount: number } | null;
 }
 
 /**
@@ -2154,7 +2156,7 @@ export interface CommunityMemberRow {
 }
 
 /**
- * `GET /communities` — the Komunitas tab of Jelajah.
+ * `GET /communities` — the Komunitas tab of Discover.
  *
  * Through `publicGet`, not `apiFetch`, for the reason that function's own
  * docstring gives: this route NOTICES a session rather than requiring one, so

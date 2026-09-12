@@ -4,7 +4,7 @@ import { DEFAULT_FOLLOW_LIST_LIMIT } from "@diudara/shared";
 import NotFoundPage from "../pages/NotFoundPage";
 import { listFollowers, listFollowing, UserApiError, type FollowListRow } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
-import { FollowRow } from "./JelajahPage";
+import { FollowRow } from "./DiscoverPage";
 import Header from "./shell/Header";
 
 type LoadState =

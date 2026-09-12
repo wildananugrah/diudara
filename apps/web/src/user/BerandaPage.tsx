@@ -222,7 +222,7 @@ export default function BerandaPage() {
       )}
 
       <p>
-        Temukan orang untuk diikuti di <Link to="/jelajah">Jelajah</Link>.
+        Temukan orang untuk diikuti di <Link to="/discover?tab=orang">Discover</Link>.
       </p>
       </main>
     </>

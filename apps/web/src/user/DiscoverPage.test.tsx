@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import JelajahPage from "./JelajahPage";
-import { setUserSession } from "./apiClient";
+import DiscoverPage from "./DiscoverPage";
+import { setUserSession, type CommunityListRow } from "./apiClient";
 
 const USER = { id: "user-1", handle: "wildan", displayName: "Wildan", email: "wildan@example.com" };
 
@@ -17,24 +17,25 @@ function jsonResponse(body: unknown, status = 200): Response {
  * Mounts the page on its ORANG tab.
  *
  * Phase 1 put a tab layer above this content and made KOMUNITAS the default,
- * so `/jelajah` with no query string now renders the community grid. Every
+ * so `/discover` with no query string now renders the community grid. Every
  * assertion below is about the Orang half and is unchanged from before that
- * layer existed; the only thing this helper added is the `?tab=orang` that
- * says which half is on screen. `renderKomunitas` below is its sibling.
+ * layer existed (or the page's rename from Jelajah); the only thing this
+ * helper added is the `?tab=orang` that says which half is on screen.
+ * `renderKomunitas` below is its sibling.
  */
 function renderPage() {
   return render(
-    <MemoryRouter initialEntries={["/jelajah?tab=orang"]}>
-      <JelajahPage />
+    <MemoryRouter initialEntries={["/discover?tab=orang"]}>
+      <DiscoverPage />
     </MemoryRouter>
   );
 }
 
 /** Mounts the page on its default (Komunitas) tab. */
-function renderKomunitas(entry = "/jelajah") {
+function renderKomunitas(entry = "/discover") {
   return render(
     <MemoryRouter initialEntries={[entry]}>
-      <JelajahPage />
+      <DiscoverPage />
     </MemoryRouter>
   );
 }
@@ -61,7 +62,7 @@ const MOST_FOLLOWED = [
   { handle: "populer", displayName: "Akun Populer", bio: null, viewerFollows: null },
 ];
 
-describe("JelajahPage", () => {
+describe("DiscoverPage", () => {
   it("loads both rails with an empty query on mount, and asks for no ?q=", async () => {
     const calls: string[] = [];
     global.fetch = mock(async (url: string) => {
@@ -297,7 +298,7 @@ describe("JelajahPage", () => {
  * goes red on both sides at once — which is what makes it one number rather
  * than two that happen to agree.
  */
-describe("JelajahPage — the ?q= bound and a survivable failed search (item 5)", () => {
+describe("DiscoverPage — the ?q= bound and a survivable failed search (item 5)", () => {
   it("bounds the search input at 100 characters, the same number the server enforces", async () => {
     global.fetch = mock(async () =>
       jsonResponse({ results: [], newest: NEWEST, mostFollowed: MOST_FOLLOWED })
@@ -397,7 +398,7 @@ describe("JelajahPage — the ?q= bound and a survivable failed search (item 5)"
     renderPage();
 
     await waitFor(() => {
-      expect(screen.getByRole("alert").textContent).toBe("Gagal memuat Jelajah. Coba lagi.");
+      expect(screen.getByRole("alert").textContent).toBe("Gagal memuat Discover. Coba lagi.");
     });
     expect(screen.queryAllByText("internal server error").length).toBe(0);
   });
@@ -454,8 +455,8 @@ describe("JelajahPage — the ?q= bound and a survivable failed search (item 5)"
  * particular half is shareable and the back button steps between them, the
  * same arrangement Beranda's two feeds use.
  */
-describe("JelajahPage tabs", () => {
-  const COMMUNITIES = [
+describe("DiscoverPage tabs", () => {
+  const COMMUNITIES: CommunityListRow[] = [
     {
       slug: "kelas-desain",
       name: "Kelas Desain",
@@ -465,6 +466,7 @@ describe("JelajahPage tabs", () => {
       tags: [],
       trending: false,
       price: null,
+      live: null,
     },
     {
       slug: "bimbel-sbmptn",
@@ -475,17 +477,28 @@ describe("JelajahPage tabs", () => {
       tags: [],
       trending: false,
       price: null,
+      live: null,
     },
   ];
 
-  function stubCommunityFetch(calls: string[] = []) {
+  const POPULAR_TAGS = ["desain", "bisnis"];
+
+  function stubCommunityFetch(
+    calls: string[] = [],
+    options: { communities?: typeof COMMUNITIES; popularTags?: string[] } = {}
+  ) {
     global.fetch = mock(async (url: string) => {
       calls.push(url);
       if (url.startsWith("/communities")) {
-        const wanted = url.includes("q=bimbel") || url.includes("Bimbel")
-          ? COMMUNITIES.filter((c) => c.slug === "bimbel-sbmptn")
-          : COMMUNITIES;
-        return jsonResponse({ communities: wanted });
+        const all = options.communities ?? COMMUNITIES;
+        const wanted =
+          url.includes("q=bimbel") || url.includes("Bimbel")
+            ? all.filter((c) => c.slug === "bimbel-sbmptn")
+            : all;
+        return jsonResponse({
+          communities: wanted,
+          popularTags: options.popularTags ?? POPULAR_TAGS,
+        });
       }
       return jsonResponse({ results: [], newest: NEWEST, mostFollowed: MOST_FOLLOWED });
     }) as unknown as typeof fetch;
@@ -541,7 +554,7 @@ describe("JelajahPage tabs", () => {
     // Typing alone must not have gone to the network.
     expect(calls.length).toBe(before);
 
-    fireEvent.click(screen.getByRole("button", { name: "Cari" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cari Komunitas" }));
     await waitFor(() => {
       expect(calls.some((url) => url.includes("q=bimbel"))).toBe(true);
     });
@@ -565,5 +578,62 @@ describe("JelajahPage tabs", () => {
     await screen.findByText("Akun Baru");
 
     expect(calls.some((url) => url.startsWith("/communities"))).toBe(false);
+  });
+
+  it("renders the site's popular tags in the sidebar", async () => {
+    stubCommunityFetch();
+    renderKomunitas();
+
+    expect(await screen.findByText("#desain")).toBeTruthy();
+    expect(screen.getByText("#bisnis")).toBeTruthy();
+  });
+
+  it("links the 'own a community' CTA to the real creation flow", async () => {
+    stubCommunityFetch();
+    renderKomunitas();
+    await screen.findByRole("link", { name: "Kelas Desain" });
+
+    const cta = screen.getByRole("link", { name: /Mulai sekarang/ });
+    expect(cta.getAttribute("href")).toBe("/komunitas/baru");
+  });
+
+  it("shows no live-now strip when nothing is live", async () => {
+    stubCommunityFetch();
+    renderKomunitas();
+    await screen.findByRole("link", { name: "Kelas Desain" });
+
+    expect(screen.queryAllByText("Sedang berlangsung").length).toBe(0);
+  });
+
+  describe("the live-now strip", () => {
+    const LIVE_COMMUNITIES = [
+      {
+        ...COMMUNITIES[0]!,
+        live: { streamId: "stream-1", viewerCount: 128 },
+      },
+      COMMUNITIES[1]!,
+    ];
+
+    it("shows only the communities currently live, with their viewer count", async () => {
+      stubCommunityFetch([], { communities: LIVE_COMMUNITIES });
+      renderKomunitas();
+
+      await screen.findByText("Sedang berlangsung");
+      expect(screen.getByText("128 nonton")).toBeTruthy();
+      // Bimbel SBMPTN is not live — it must appear in the grid below, not here.
+      const liveStrip = screen.getByText("Sedang berlangsung").closest("section")!;
+      expect(liveStrip.textContent).toContain("Kelas Desain");
+      expect(liveStrip.textContent).not.toContain("Bimbel SBMPTN");
+    });
+
+    it("links a live card to its live room", async () => {
+      stubCommunityFetch([], { communities: LIVE_COMMUNITIES });
+      renderKomunitas();
+
+      await screen.findByText("Sedang berlangsung");
+      const liveStrip = screen.getByText("Sedang berlangsung").closest("section")!;
+      const link = within(liveStrip).getByRole("link", { name: /Kelas Desain/ });
+      expect(link.getAttribute("href")).toBe("/siaran/stream-1");
+    });
   });
 });

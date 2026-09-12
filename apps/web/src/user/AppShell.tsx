@@ -18,7 +18,7 @@ import ChatPanel from "./ChatPanel";
  */
 const STATIC_DESTINATIONS = [
   { to: "/beranda", label: "Beranda" },
-  { to: "/jelajah", label: "Jelajah" },
+  { to: "/discover", label: "Discover" },
   { to: "/siaran", label: "Siaran" },
 ] as const;
 
@@ -35,7 +35,7 @@ const STATIC_DESTINATIONS = [
  * synchronous token check `SettingsPage.tsx` already makes.
  * Signed in, this reads "Profil" -> `/pengaturan`, same as before. Signed
  * out, it reads "Masuk" -> `/masuk`, so the nav does not lie about what
- * tapping it will do. Beranda/Jelajah/Siaran stay public routes either way
+ * tapping it will do. Beranda/Discover/Siaran stay public routes either way
  * — discovery-first means a signed-out visitor can still browse them — only
  * this one label and target change.
  *
@@ -69,7 +69,7 @@ function Destinations({ destinations }: { destinations: ReturnType<typeof useDes
 /**
  * The chrome every member-facing page sits inside — see the design spec's
  * §3. Mounted as a path-less layout route in `App.tsx` wrapping `/beranda`,
- * `/jelajah`, `/siaran`, `/pengaturan`, and — since 2026-08-25 — the public
+ * `/discover`, `/siaran`, `/pengaturan`, and — since 2026-08-25 — the public
  * profile `/:handleParam` and its two follow lists.
  *
  * What stays OUTSIDE, and never renders this nav: `/signup`, `/masuk`,

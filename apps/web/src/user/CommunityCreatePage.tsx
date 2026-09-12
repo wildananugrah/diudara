@@ -93,7 +93,7 @@ export default function CommunityCreatePage() {
           <Field
             label="Kategori"
             name="category"
-            hint="Kategori menentukan di mana komunitas Anda muncul di Jelajah."
+            hint="Kategori menentukan di mana komunitas Anda muncul di Discover."
           >
             {/*
               A `<select>` of exactly the six, generated from the shared tuple

@@ -12,6 +12,7 @@ import {
   type FollowListRow,
 } from "./apiClient";
 import CommunityCard from "./CommunityCard";
+import { communityColor } from "./communityColor";
 import FollowButton from "./FollowButton";
 import Header from "./shell/Header";
 
@@ -40,7 +41,7 @@ type Rails = { newest: FollowListRow[]; mostFollowed: FollowListRow[] } | null;
 const SEARCH_FAILED_MESSAGE = "Pencarian gagal. Coba lagi.";
 
 /** The same, for the case where nothing has loaded yet and the whole screen is empty. */
-const LOAD_FAILED_MESSAGE = "Gagal memuat Jelajah. Coba lagi.";
+const LOAD_FAILED_MESSAGE = "Gagal memuat Discover. Coba lagi.";
 
 /** The same again, for the Komunitas tab. */
 const COMMUNITIES_FAILED_MESSAGE = "Gagal memuat komunitas. Coba lagi.";
@@ -90,7 +91,42 @@ function FollowRowList({ rows, empty }: { rows: FollowListRow[]; empty: string }
 }
 
 /**
- * The Komunitas half — Phase 1, and the DEFAULT tab.
+ * The live-now strip's own card — never `CommunityCard`, which links to the
+ * community's page: this links to the live room instead
+ * (`/siaran/{live.streamId}`), because that is where "sedang berlangsung"
+ * actually takes you. `community.live` is asserted non-null by every caller,
+ * which only ever hands this component a row the caller already filtered on.
+ */
+function LiveNowCard({ community }: { community: CommunityListRow }) {
+  const live = community.live!;
+  return (
+    <Link
+      to={`/siaran/${live.streamId}`}
+      className="card card-clickable discover-live-card"
+    >
+      <div
+        className="discover-live-card-banner"
+        style={{ background: communityColor(community.slug) }}
+      >
+        <span className="badge badge-pending">
+          <span className="dot" />
+          LIVE
+        </span>
+        <span className="discover-live-card-viewers">{live.viewerCount} nonton</span>
+      </div>
+      <div className="discover-live-card-body">
+        <p className="discover-live-card-name">{community.name}</p>
+        <p className="muted">{community.category}</p>
+      </div>
+    </Link>
+  );
+}
+
+/**
+ * The Komunitas half — Phase 1's grid, replaced in Phase 9 (Discover) by the
+ * reference-matched layout: search, category chips, a live-now strip, the
+ * community grid, and a sidebar (popular tags, a CTA to create a community).
+ * Still the DEFAULT tab.
  *
  * Search is on SUBMIT for the same reason the Orang half's is: the query runs
  * an `ILIKE '%…%'` over a grouped join, which is not a thing to re-run per
@@ -110,6 +146,8 @@ function KomunitasTab() {
   /** Bumped by every tap of "Cari" — see the Orang half's own `attempt` for why re-submitting the same text must still re-run the effect. */
   const [attempt, setAttempt] = useState(0);
   const [communities, setCommunities] = useState<CommunityListRow[] | null>(null);
+  /** The site's most-used tags, alongside `communities` in the same response — never re-fetched per search or category, since neither scopes it. */
+  const [popularTags, setPopularTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -120,6 +158,7 @@ function KomunitasTab() {
       .then((result) => {
         if (cancelled) return;
         setCommunities(result.communities);
+        setPopularTags(result.popularTags);
         setError(null);
       })
       .catch(() => {
@@ -140,68 +179,116 @@ function KomunitasTab() {
     setAttempt((previous) => previous + 1);
   }
 
-  return (
-    <>
-      <form className="jelajah-search" onSubmit={handleSubmit} role="search">
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value.slice(0, MAX_COMMUNITY_SEARCH_LENGTH))}
-          maxLength={MAX_COMMUNITY_SEARCH_LENGTH}
-          placeholder="Cari komunitas"
-          aria-label="Cari komunitas"
-        />
-        <button type="submit" className="button-primary">
-          Cari
-        </button>
-      </form>
+  const liveNow = communities?.filter((community) => community.live !== null) ?? [];
 
-      {/*
-        `aria-pressed` rather than `aria-current`: these are filter toggles, not
-        navigation, and only the tab strip above represents where you are.
-      */}
-      <div className="category-chips" role="group" aria-label="Kategori komunitas">
-        <button
-          type="button"
-          className="category-chip"
-          aria-pressed={category === ""}
-          onClick={() => setCategory("")}
-        >
-          Semua
-        </button>
-        {COMMUNITY_CATEGORIES.map((name) => (
+  return (
+    <div className="discover-layout">
+      <div className="discover-main">
+        <form className="jelajah-search" onSubmit={handleSubmit} role="search">
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value.slice(0, MAX_COMMUNITY_SEARCH_LENGTH))}
+            maxLength={MAX_COMMUNITY_SEARCH_LENGTH}
+            placeholder="Cari komunitas, topik, atau mentor..."
+            aria-label="Cari komunitas"
+          />
+          <button type="submit" className="btn btn-primary">
+            Cari Komunitas
+          </button>
+        </form>
+
+        {/*
+          `aria-pressed` rather than `aria-current`: these are filter toggles, not
+          navigation, and only the tab strip above represents where you are.
+        */}
+        <div className="category-chips" role="group" aria-label="Kategori komunitas">
           <button
-            key={name}
             type="button"
             className="category-chip"
-            aria-pressed={category === name}
-            onClick={() => setCategory(category === name ? "" : name)}
+            aria-pressed={category === ""}
+            onClick={() => setCategory("")}
           >
-            {name}
+            Semua
           </button>
-        ))}
+          {COMMUNITY_CATEGORIES.map((name) => (
+            <button
+              key={name}
+              type="button"
+              className="category-chip"
+              aria-pressed={category === name}
+              onClick={() => setCategory(category === name ? "" : name)}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+
+        {loading ? <p>Memuat...</p> : null}
+
+        {error !== null ? (
+          <p className="form-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+
+        {communities !== null && error === null ? (
+          <>
+            {liveNow.length > 0 ? (
+              <section className="discover-live-section">
+                <div className="discover-live-heading">
+                  <span className="badge badge-pending">
+                    <span className="dot" />
+                    LIVE
+                  </span>
+                  <h2>Sedang berlangsung</h2>
+                </div>
+                <div className="discover-live-grid">
+                  {liveNow.map((community) => (
+                    <LiveNowCard key={community.slug} community={community} />
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            <h2 className="discover-grid-heading">
+              {category === "" ? "Semua komunitas" : category}
+              <span className="muted"> · {communities.length} hasil</span>
+            </h2>
+            {communities.length === 0 ? (
+              <p className="empty">Belum ada komunitas di sini.</p>
+            ) : (
+              <div className="community-grid">
+                {communities.map((community) => (
+                  <CommunityCard key={community.slug} community={community} />
+                ))}
+              </div>
+            )}
+          </>
+        ) : null}
       </div>
 
-      {loading ? <p>Memuat...</p> : null}
-
-      {error !== null ? (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
-      ) : null}
-
-      {communities !== null && error === null ? (
-        communities.length === 0 ? (
-          <p className="empty">Belum ada komunitas di sini.</p>
-        ) : (
-          <div className="community-grid">
-            {communities.map((community) => (
-              <CommunityCard key={community.slug} community={community} />
+      <aside className="discover-sidebar">
+        <div className="card discover-sidebar-card">
+          <h4>Tag populer</h4>
+          <div className="discover-tag-cloud">
+            {popularTags.map((tag) => (
+              <span key={tag} className="badge badge-neutral">
+                #{tag}
+              </span>
             ))}
           </div>
-        )
-      ) : null}
-    </>
+        </div>
+
+        <div className="card discover-cta-card">
+          <p className="discover-cta-eyebrow">PUNYA KOMUNITAS SENDIRI?</p>
+          <p>Setup komunitas berbayar kamu dalam 15 menit bareng Pulse-ID.</p>
+          <Link to="/komunitas/baru" className="btn btn-primary btn-sm">
+            Mulai sekarang <span aria-hidden="true">→</span>
+          </Link>
+        </div>
+      </aside>
+    </div>
   );
 }
 
@@ -339,7 +426,11 @@ function OrangTab() {
 }
 
 /**
- * `/jelajah` — one discovery surface with two halves, Komunitas and Orang.
+ * `/discover` — one discovery surface with two halves, Komunitas and Orang.
+ * Renamed from Jelajah: the one English nav label and route in an otherwise
+ * all-Bahasa-Indonesia shell, deliberately, to match
+ * `docs/references/discover.png`. Orang moved here unchanged rather than
+ * being dropped — it is a real, working feature with nowhere else to live.
  *
  * **ONE PAGE RATHER THAN TWO MENU ENTRIES.** Two near-identical search boxes on
  * adjacent sidebar items is the kind of thing a person picks wrong every time,
@@ -351,19 +442,23 @@ function OrangTab() {
  * `.feed-tabs` markup and classes so the indicator invariant
  * `BerandaPage.test.tsx` pins covers this page too.
  *
- * Komunitas is the default: `/jelajah` with no query string is the community
+ * Komunitas is the default: `/discover` with no query string is the community
  * grid, and Orang is `?tab=orang`. Only the active half is mounted, so the
  * inactive one issues no request at all.
+ *
+ * **The wide 1180px frame, only here.** `PageContainer`'s cap replaces
+ * `.user-page`'s 36rem one — every other page keeps the narrow column; see
+ * this phase's own spec for why this is the one page that adopts it.
  */
-export default function JelajahPage() {
+export default function DiscoverPage() {
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") === "orang" ? "orang" : "komunitas";
 
   return (
     <>
-      <Header title="Jelajah" />
-      <main className="user-page jelajah-page">
-        <nav className="feed-tabs" aria-label="Jenis jelajah">
+      <Header title="Discover" subtitle="Gabung komunitas yang cocok dengan minatmu" />
+      <main className="page-container discover-page">
+        <nav className="feed-tabs" aria-label="Tampilan Discover">
           <button type="button" aria-current={tab === "komunitas"} onClick={() => setParams({})}>
             Komunitas
           </button>

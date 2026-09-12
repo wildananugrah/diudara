@@ -15,7 +15,7 @@ import { NavLink } from "react-router-dom";
  */
 const ICONS: Record<string, IconDefinition> = {
   "/beranda": faHouse,
-  "/jelajah": faCompass,
+  "/discover": faCompass,
   "/siaran": faTowerBroadcast,
   "/pengaturan": faUser,
   "/masuk": faUser,

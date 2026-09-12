@@ -1,12 +1,7 @@
 import type { UserStreamRow } from "../ports/user-stream-repository.port";
+import { VIEWER_HEARTBEAT_WINDOW_MS } from "../../domain/viewer-heartbeat-window";
 
-/**
- * How long a viewer's last heartbeat keeps counting them as "watching" —
- * see `stream_viewer_heartbeat`'s own docstring in `db/schema.ts`. Twenty
- * seconds comfortably survives a normal HLS reload gap while dropping
- * someone within a few reloads of actually leaving.
- */
-export const VIEWER_HEARTBEAT_WINDOW_MS = 20_000;
+export { VIEWER_HEARTBEAT_WINDOW_MS };
 
 /**
  * THE ONE definition of what a live stream looks like on the wire — the
