@@ -2594,8 +2594,30 @@ button:disabled {
   color: var(--ink-soft);
 }
 
-.comment-row .button-quiet {
+.comment-row-actions {
+  display: flex;
+  gap: 12px;
   margin-top: 4px;
+}
+
+.comment-row-actions .button-quiet {
+  margin-top: 0;
+}
+
+.comment-replies {
+  margin: 8px 0 0;
+  padding: 0 0 0 20px;
+  list-style: none;
+  border-left: 2px solid var(--line-soft);
+}
+
+.comment-replies .comment-row {
+  border-bottom: none;
+  padding: 8px 0;
+}
+
+.comment-reply-form {
+  margin-top: 8px;
 }
 
 .comment-form {

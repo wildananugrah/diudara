@@ -127,6 +127,13 @@ export type CreateCommunityPostInput = z.infer<typeof createCommunityPostSchema>
 
 export const createCommentSchema = z.object({
   body: z.string().trim().min(1).max(MAX_COMMENT_BODY_LENGTH),
+  /**
+   * The comment being replied to. Omitted (or absent) means a new top-level
+   * comment. One level of nesting only — replying to a reply is allowed on
+   * the wire, but the server flattens it onto that reply's own top-level
+   * ancestor rather than nesting deeper; see `CreateComment`'s docstring.
+   */
+  parentId: z.string().uuid().optional(),
 });
 
 export type CreateCommentInput = z.infer<typeof createCommentSchema>;

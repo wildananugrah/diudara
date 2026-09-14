@@ -244,11 +244,12 @@ export function postRoutes(
     validateParams(postIdParams),
     validate(createCommentSchema),
     async (c) => {
-      const input = c.get("validated") as { body: string };
+      const input = c.get("validated") as { body: string; parentId?: string };
       const view = await deps.createComment.execute({
         postId: c.req.param("id"),
         authorId: c.get("userId"),
         body: input.body,
+        ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
       });
       return c.json(view, 201);
     }

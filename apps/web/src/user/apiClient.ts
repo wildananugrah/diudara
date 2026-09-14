@@ -1072,6 +1072,8 @@ export interface CommentView {
     handle: string;
     displayName: string;
   };
+  /** The top-level comment this is a reply to, or `null` for a top-level comment. Never another reply's id — the server flattens depth to one level. */
+  parentId: string | null;
 }
 
 /** One keyset page of posts — `nextCursor` is `null` on the last page, never absent. */
@@ -1637,11 +1639,17 @@ export function listCommunityEvents(
   );
 }
 
-/** `POST /users/posts/:id/comments` (201). */
-export function createComment(postId: string, body: string): Promise<CommentView> {
+/**
+ * `POST /users/posts/:id/comments` (201). `parentId` replies to that comment;
+ * the server flattens a reply-to-a-reply onto its own top-level ancestor, so
+ * this never needs to resolve depth itself.
+ */
+export function createComment(postId: string, body: string, parentId?: string): Promise<CommentView> {
+  const payload: { body: string; parentId?: string } = { body };
+  if (parentId !== undefined) payload.parentId = parentId;
   return apiFetch<CommentView>(`/users/posts/${encodeURIComponent(postId)}/comments`, {
     method: "POST",
-    body: JSON.stringify({ body }),
+    body: JSON.stringify(payload),
   });
 }
 

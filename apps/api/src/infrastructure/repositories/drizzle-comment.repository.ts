@@ -23,15 +23,21 @@ const commentColumns = {
   authorId: postComments.authorId,
   authorHandle: appUsers.handle,
   authorDisplayName: appUsers.displayName,
+  parentId: postComments.parentId,
 } as const;
 
 export class DrizzleCommentRepository implements CommentRepositoryPort {
   constructor(private readonly db: DatabaseExecutor) {}
 
-  async create(postId: string, authorId: string, body: string): Promise<CommentRow> {
+  async create(
+    postId: string,
+    authorId: string,
+    body: string,
+    parentId: string | null
+  ): Promise<CommentRow> {
     const [inserted] = await this.db
       .insert(postComments)
-      .values({ postId, authorId, body })
+      .values({ postId, authorId, body, parentId })
       .returning({ id: postComments.id });
     const row = await this.readOne(inserted!.id);
     // The row was just inserted inside this call; a null here means the
@@ -86,6 +92,7 @@ export class DrizzleCommentRepository implements CommentRepositoryPort {
         authorId: postComments.authorId,
         postId: postComments.postId,
         deletedAt: postComments.deletedAt,
+        parentId: postComments.parentId,
       })
       .from(postComments)
       .where(eq(postComments.id, id));
@@ -98,6 +105,7 @@ export class DrizzleCommentRepository implements CommentRepositoryPort {
       authorId: row.authorId,
       postId: row.postId,
       isDeleted: row.deletedAt !== null,
+      parentId: row.parentId,
     };
   }
 

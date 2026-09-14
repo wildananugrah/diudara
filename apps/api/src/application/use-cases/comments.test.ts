@@ -37,8 +37,11 @@ function silentNotifier(): NotifyOf {
 
 
 const POST_ID = "aaaaaaaa-0000-4000-8000-000000000000";
+const OTHER_POST_ID = "aaaaaaaa-0000-4000-8000-000000000001";
 const COMMUNITY_ID = "cccccccc-0000-4000-8000-000000000000";
 const COMMENT_ID = "eeeeeeee-0000-4000-8000-000000000000";
+const PARENT_ID = "eeeeeeee-0000-4000-8000-000000000001";
+const REPLY_ID = "eeeeeeee-0000-4000-8000-000000000002";
 const OWNER_ID = "00000000-0000-4000-8000-000000000000";
 const MEMBER_ID = "11111111-0000-4000-8000-000000000000";
 const OTHER_MEMBER_ID = "22222222-0000-4000-8000-000000000000";
@@ -52,6 +55,7 @@ function commentRow(overrides: Partial<CommentRow> = {}): CommentRow {
     authorId: MEMBER_ID,
     authorHandle: "budi",
     authorDisplayName: "Budi",
+    parentId: null,
     ...overrides,
   };
 }
@@ -106,15 +110,23 @@ class FakePosts implements PostRepositoryPort {
  * still returns a well-formed row so `CreateComment`'s mapping is exercised.
  */
 class FakeComments implements CommentRepositoryPort {
+  /** Read by `ownershipOf` when a given id has no entry in `ownershipById` — every existing `DeleteComment` test sets only this, ignoring the id it's looked up under. */
   ownership: CommentOwnership | null = null;
+  /** Per-id overrides, keyed by comment id — what a reply's parent lookup needs, since `CreateComment.resolveParentId` calls `ownershipOf(parentId)` with a SPECIFIC id that must resolve to that parent's own row, not to whatever `.ownership` happens to hold. */
+  ownershipById: Record<string, CommentOwnership> = {};
   rows: CommentRow[] = [];
-  created: Array<{ postId: string; authorId: string; body: string }> = [];
+  created: Array<{ postId: string; authorId: string; body: string; parentId: string | null }> = [];
   softDeleted: string[] = [];
   listForPostCalls: Array<{ postId: string; limit: number }> = [];
 
-  async create(postId: string, authorId: string, body: string): Promise<CommentRow> {
-    this.created.push({ postId, authorId, body });
-    return commentRow({ body, authorId });
+  async create(
+    postId: string,
+    authorId: string,
+    body: string,
+    parentId: string | null
+  ): Promise<CommentRow> {
+    this.created.push({ postId, authorId, body, parentId });
+    return commentRow({ body, authorId, parentId });
   }
   async listForPost(postId: string, limit: number): Promise<CommentRow[]> {
     this.listForPostCalls.push({ postId, limit });
@@ -123,8 +135,8 @@ class FakeComments implements CommentRepositoryPort {
   async countForPosts(): Promise<Map<string, number>> {
     throw new Error("not used in these tests");
   }
-  async ownershipOf(): Promise<CommentOwnership | null> {
-    return this.ownership;
+  async ownershipOf(id: string): Promise<CommentOwnership | null> {
+    return this.ownershipById[id] ?? this.ownership;
   }
   async softDelete(id: string): Promise<void> {
     this.softDeleted.push(id);
@@ -228,9 +240,12 @@ describe("CreateComment", () => {
       body: "halo",
     });
 
-    expect(comments.created).toEqual([{ postId: POST_ID, authorId: MEMBER_ID, body: "halo" }]);
+    expect(comments.created).toEqual([
+      { postId: POST_ID, authorId: MEMBER_ID, body: "halo", parentId: null },
+    ]);
     expect(view.body).toBe("halo");
     expect(view.author.handle).toBe("budi");
+    expect(view.parentId).toBeNull();
   });
 
   test("a non-member may not", async () => {
@@ -307,6 +322,148 @@ describe("CreateComment", () => {
       })
     ).rejects.toBeInstanceOf(NotFoundError);
   });
+
+  test("replying to a top-level comment attaches to it directly", async () => {
+    const { posts, comments, communities } = subject();
+    posts.ownership = {
+      id: POST_ID,
+      authorId: OTHER_MEMBER_ID,
+      isDeleted: false,
+      visibility: "public",
+      communityId: COMMUNITY_ID,
+    };
+    comments.ownershipById[PARENT_ID] = {
+      id: PARENT_ID,
+      authorId: OTHER_MEMBER_ID,
+      postId: POST_ID,
+      isDeleted: false,
+      parentId: null,
+    };
+
+    const view = await new CreateComment(comments, posts, communities, silentNotifier()).execute({
+      postId: POST_ID,
+      authorId: MEMBER_ID,
+      body: "setuju",
+      parentId: PARENT_ID,
+    });
+
+    expect(comments.created).toEqual([
+      { postId: POST_ID, authorId: MEMBER_ID, body: "setuju", parentId: PARENT_ID },
+    ]);
+    expect(view.parentId).toBe(PARENT_ID);
+  });
+
+  /**
+   * ONE level of nesting (the class docstring's rule): a reply aimed at
+   * another REPLY does not nest two deep — it flattens onto that reply's own
+   * top-level parent, so `PARENT_ID` ends up as the stored `parentId`, never
+   * `REPLY_ID`.
+   */
+  test("replying to a reply flattens onto that reply's own top-level ancestor", async () => {
+    const { posts, comments, communities } = subject();
+    posts.ownership = {
+      id: POST_ID,
+      authorId: OTHER_MEMBER_ID,
+      isDeleted: false,
+      visibility: "public",
+      communityId: COMMUNITY_ID,
+    };
+    comments.ownershipById[REPLY_ID] = {
+      id: REPLY_ID,
+      authorId: OTHER_MEMBER_ID,
+      postId: POST_ID,
+      isDeleted: false,
+      parentId: PARENT_ID,
+    };
+
+    const view = await new CreateComment(comments, posts, communities, silentNotifier()).execute({
+      postId: POST_ID,
+      authorId: MEMBER_ID,
+      body: "juga setuju",
+      parentId: REPLY_ID,
+    });
+
+    expect(comments.created).toEqual([
+      { postId: POST_ID, authorId: MEMBER_ID, body: "juga setuju", parentId: PARENT_ID },
+    ]);
+    expect(view.parentId).toBe(PARENT_ID);
+  });
+
+  test("replying to a comment on a DIFFERENT post is not found", async () => {
+    const { posts, comments, communities } = subject();
+    posts.ownership = {
+      id: POST_ID,
+      authorId: OTHER_MEMBER_ID,
+      isDeleted: false,
+      visibility: "public",
+      communityId: COMMUNITY_ID,
+    };
+    comments.ownershipById[PARENT_ID] = {
+      id: PARENT_ID,
+      authorId: OTHER_MEMBER_ID,
+      postId: OTHER_POST_ID,
+      isDeleted: false,
+      parentId: null,
+    };
+
+    await expect(
+      new CreateComment(comments, posts, communities, silentNotifier()).execute({
+        postId: POST_ID,
+        authorId: MEMBER_ID,
+        body: "salah tempat",
+        parentId: PARENT_ID,
+      })
+    ).rejects.toBeInstanceOf(NotFoundError);
+    expect(comments.created).toEqual([]);
+  });
+
+  test("replying to a comment id that never existed is not found", async () => {
+    const { posts, comments, communities } = subject();
+    posts.ownership = {
+      id: POST_ID,
+      authorId: OTHER_MEMBER_ID,
+      isDeleted: false,
+      visibility: "public",
+      communityId: COMMUNITY_ID,
+    };
+
+    await expect(
+      new CreateComment(comments, posts, communities, silentNotifier()).execute({
+        postId: POST_ID,
+        authorId: MEMBER_ID,
+        body: "halo",
+        parentId: PARENT_ID,
+      })
+    ).rejects.toBeInstanceOf(NotFoundError);
+    expect(comments.created).toEqual([]);
+  });
+
+  test("replying to an already soft-deleted comment is still allowed", async () => {
+    const { posts, comments, communities } = subject();
+    posts.ownership = {
+      id: POST_ID,
+      authorId: OTHER_MEMBER_ID,
+      isDeleted: false,
+      visibility: "public",
+      communityId: COMMUNITY_ID,
+    };
+    comments.ownershipById[PARENT_ID] = {
+      id: PARENT_ID,
+      authorId: OTHER_MEMBER_ID,
+      postId: POST_ID,
+      isDeleted: true,
+      parentId: null,
+    };
+
+    const view = await new CreateComment(comments, posts, communities, silentNotifier()).execute({
+      postId: POST_ID,
+      authorId: MEMBER_ID,
+      body: "masih relevan",
+      parentId: PARENT_ID,
+    });
+
+    expect(view.parentId).toBe(PARENT_ID);
+  });
 });
 
 describe("DeleteComment", () => {
@@ -317,6 +474,7 @@ describe("DeleteComment", () => {
       authorId: MEMBER_ID,
       postId: POST_ID,
       isDeleted: false,
+      parentId: null,
     };
 
     await new DeleteComment(comments, posts, communities).execute({
@@ -336,6 +494,7 @@ describe("DeleteComment", () => {
       authorId: OTHER_MEMBER_ID,
       postId: POST_ID,
       isDeleted: false,
+      parentId: null,
     };
     posts.ownership = {
       id: POST_ID,
@@ -360,6 +519,7 @@ describe("DeleteComment", () => {
       authorId: MEMBER_ID,
       postId: POST_ID,
       isDeleted: false,
+      parentId: null,
     };
     posts.ownership = {
       id: POST_ID,
@@ -385,6 +545,7 @@ describe("DeleteComment", () => {
       authorId: MEMBER_ID,
       postId: POST_ID,
       isDeleted: true,
+      parentId: null,
     };
 
     await new DeleteComment(comments, posts, communities).execute({

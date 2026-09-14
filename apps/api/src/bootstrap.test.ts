@@ -496,7 +496,7 @@ const fakePostRepository: PostRepositoryPort = {
  * tests pin bootstrap wiring, not the comment paths.
  */
 const fakeCommentRepository: CommentRepositoryPort = {
-  async create(postId, authorId, body) {
+  async create(postId, authorId, body, parentId) {
     return {
       id: "fake-comment",
       body,
@@ -504,6 +504,7 @@ const fakeCommentRepository: CommentRepositoryPort = {
       authorId,
       authorHandle: "fake",
       authorDisplayName: "Fake",
+      parentId,
     };
   },
   async listForPost() {

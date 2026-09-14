@@ -310,9 +310,18 @@ export const postMedia = pgTable(
 );
 
 /**
- * Phase 2. FLAT — no `parent_id`. The programme's feature list says "threaded
- * comments"; the spec records the deviation and its reason. `parent_id` can
- * be added later as a nullable column without moving a row.
+ * ONE LEVEL of nesting: `parentId` points at a top-level comment only, never
+ * at another reply. `CreateComment` enforces this by flattening — replying to
+ * a reply attaches to THAT reply's own `parentId` rather than to the reply
+ * itself — so this column, and every reader of it, can assume depth <= 1
+ * without a recursive query or a recursive render. Nullable: `null` is a
+ * top-level comment.
+ *
+ * Self-referencing FK declared in the table-config array below (via
+ * `foreignKey`), not inline on the column, because `postComments` is not yet
+ * assigned at the point the column object is built — the same reason the
+ * multi-column FKs elsewhere in this file live in that array rather than on
+ * their columns.
  */
 export const postComments = pgTable(
   "post_comment",
@@ -331,12 +340,21 @@ export const postComments = pgTable(
     editedAt: timestamp("edited_at", { withTimezone: true }),
     // SOFT delete, matching `post`. Every read path must filter it.
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    parentId: uuid("parent_id"),
   },
   (table) => [
     // The thread, oldest first. PARTIAL: deleted comments leave the index.
     index("post_comment_post_created_idx")
       .on(table.postId, table.createdAt)
       .where(sql`${table.deletedAt} is null`),
+    // A reply's target must be an actual comment row (any row it points at,
+    // deleted or not — a reply to a since-deleted comment stays attached
+    // rather than dangling).
+    foreignKey({
+      columns: [table.parentId],
+      foreignColumns: [table.id],
+      name: "post_comment_parent_fk",
+    }),
   ]
 );
 

@@ -151,10 +151,31 @@ describe("DrizzleCommentRepository", () => {
     const row = await new DrizzleCommentRepository(db).create(
       ids.postId,
       ids.authorId,
-      "komentar baru"
+      "komentar baru",
+      null
     );
     expect(row.body).toBe("komentar baru");
     expect(row.authorHandle).toBe("wildan");
     expect(row.authorId).toBe(ids.authorId);
+    expect(row.parentId).toBeNull();
+  });
+
+  test("create with a parentId round-trips it, and listForPost carries it through", async () => {
+    const ids = await seedPostWithComments();
+    const repo = new DrizzleCommentRepository(db);
+    const reply = await repo.create(ids.postId, ids.authorId, "balasan", ids.firstCommentId);
+
+    expect(reply.parentId).toBe(ids.firstCommentId);
+    const listed = await repo.listForPost(ids.postId, 50);
+    expect(listed.find((r) => r.id === reply.id)?.parentId).toBe(ids.firstCommentId);
+  });
+
+  test("ownershipOf carries parentId through too — null for a top-level comment", async () => {
+    const ids = await seedPostWithComments();
+    const repo = new DrizzleCommentRepository(db);
+    const reply = await repo.create(ids.postId, ids.authorId, "balasan", ids.firstCommentId);
+
+    expect((await repo.ownershipOf(ids.firstCommentId))?.parentId).toBeNull();
+    expect((await repo.ownershipOf(reply.id))?.parentId).toBe(ids.firstCommentId);
   });
 });

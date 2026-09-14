@@ -121,6 +121,8 @@ export interface CommentView {
   /** ISO-8601. */
   createdAt: string;
   author: { handle: string; displayName: string };
+  /** `null` for a top-level comment; otherwise the top-level comment this replies to. See `CommentRow.parentId` — already flattened to depth 1 by the time this is built. */
+  parentId: string | null;
 }
 
 export function toCommentView(row: CommentRow): CommentView {
@@ -129,6 +131,7 @@ export function toCommentView(row: CommentRow): CommentView {
     body: row.body,
     createdAt: row.createdAt.toISOString(),
     author: { handle: row.authorHandle, displayName: row.authorDisplayName },
+    parentId: row.parentId,
   };
 }
 

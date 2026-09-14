@@ -330,6 +330,13 @@
       "when": 1789175914855,
       "tag": "0046_quiet_roland_deschain",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1789366792550,
+      "tag": "0047_lyrical_shinobi_shaw",
+      "breakpoints": true
     }
   ]
 }

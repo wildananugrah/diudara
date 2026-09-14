@@ -41,6 +41,18 @@ export class ListComments {
  * `isMember`'s parameter is typed `string`. A future reader tempted to add
  * `if (post.communityId === null) throw ...` as its own branch: don't. That
  * would state the rule a second time and let the two copies drift.
+ *
+ * **`parentId` (optional) is a reply.** One level of nesting: replying to a
+ * reply FLATTENS onto that reply's own `parentId` rather than nesting deeper,
+ * so `resolveParentId` below is the only place depth is ever decided, and
+ * every reader downstream (the repository, the view, the client) can assume
+ * a comment's `parentId` is either `null` or a TOP-LEVEL comment's id. The
+ * target must exist and belong to the SAME post — a stray or mistyped id, or
+ * one lifted from a different post's thread, is `NotFoundError`, the same
+ * answer an unknown post gets. A reply to an already soft-deleted comment is
+ * still allowed: the deleted comment's row still exists to flatten onto, and
+ * refusing here would make deletion of a parent silently break replying to
+ * its siblings for no one's benefit.
  */
 export class CreateComment {
   constructor(
@@ -54,6 +66,7 @@ export class CreateComment {
     postId: string;
     authorId: string;
     body: string;
+    parentId?: string;
   }): Promise<CommentView> {
     const post = await this.posts.ownershipOf(input.postId);
     if (post === null) throw new NotFoundError("post not found");
@@ -66,7 +79,9 @@ export class CreateComment {
       throw new ForbiddenError("hanya anggota komunitas yang boleh berkomentar");
     }
 
-    const created = await this.comments.create(input.postId, input.authorId, input.body);
+    const parentId = await this.resolveParentId(input.postId, input.parentId);
+
+    const created = await this.comments.create(input.postId, input.authorId, input.body, parentId);
 
     // Phase 8a, and its position is the whole design: AFTER the comment has
     // been written, and `NotifyOf` never throws. A bug here must not fail
@@ -81,6 +96,16 @@ export class CreateComment {
     });
 
     return toCommentView(created);
+  }
+
+  /** `undefined` (no reply) resolves to `null`. Otherwise looks up the target and flattens it onto its own top-level ancestor — see the class docstring. */
+  private async resolveParentId(postId: string, parentId: string | undefined): Promise<string | null> {
+    if (parentId === undefined) return null;
+    const parent = await this.comments.ownershipOf(parentId);
+    if (parent === null || parent.postId !== postId) {
+      throw new NotFoundError("comment not found");
+    }
+    return parent.parentId ?? parent.id;
   }
 }
 

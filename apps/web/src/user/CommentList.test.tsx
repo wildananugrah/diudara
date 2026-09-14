@@ -6,8 +6,14 @@ import { setUserSession, type CommentView } from "./apiClient";
 
 const USER = { handle: "rina", displayName: "Rina", email: "rina@example.com" };
 
-function comment(id: string, body: string, handle: string, displayName: string): CommentView {
-  return { id, body, createdAt: "2026-09-01T00:00:00.000Z", author: { handle, displayName } };
+function comment(
+  id: string,
+  body: string,
+  handle: string,
+  displayName: string,
+  parentId: string | null = null
+): CommentView {
+  return { id, body, createdAt: "2026-09-01T00:00:00.000Z", author: { handle, displayName }, parentId };
 }
 
 const THREAD: CommentView[] = [
@@ -196,6 +202,108 @@ describe("CommentList", () => {
     expect(alert.textContent).toBe("Server sedang bermasalah. Coba lagi sebentar lagi.");
     // The value property, not text content — see the report's happy-dom note.
     expect((box as HTMLTextAreaElement).value).toBe("Komentar saya");
+  });
+
+  it("nests a reply under its top-level comment, not the flat list", () => {
+    const withReply: CommentView[] = [
+      comment("c1", "Pertama", "budi", "Budi"),
+      comment("c2", "Kedua", "sari", "Sari"),
+      comment("c3", "Balasan pertama", "wildan", "Wildan", "c1"),
+    ];
+    render(
+      <CommentList
+        postId="post-1"
+        comments={withReply}
+        viewerIsMember={false}
+        viewerIsOwner={false}
+        onSubmitted={noop}
+        onDeleted={noop}
+      />
+    );
+
+    // Two top-level rows; the reply lives nested inside c1's own row.
+    expect(screen.getAllByRole("list").length).toBe(2); // the thread <ul> plus c1's replies <ul>
+    const rows = screen.getAllByRole("listitem").map((row) => row.textContent ?? "");
+    expect(rows.length).toBe(3);
+    const c1Row = screen.getAllByRole("listitem").find((row) => (row.textContent ?? "").includes("@budi"));
+    expect((c1Row?.textContent ?? "")).toContain("Balasan pertama");
+  });
+
+  it("treats a reply whose parent is gone (deleted) as a top-level row", () => {
+    const orphan: CommentView[] = [
+      comment("c1", "Pertama", "budi", "Budi"),
+      // "c-missing" never appears among comments — its parent was deleted.
+      comment("c2", "Balasan yatim", "sari", "Sari", "c-missing"),
+    ];
+    render(
+      <CommentList
+        postId="post-1"
+        comments={orphan}
+        viewerIsMember={false}
+        viewerIsOwner={false}
+        onSubmitted={noop}
+        onDeleted={noop}
+      />
+    );
+
+    // No nested <ul> — the orphan renders as its own top-level <li>.
+    expect(screen.getAllByRole("list").length).toBe(1);
+    expect(screen.getAllByRole("listitem").length).toBe(2);
+  });
+
+  it("shows a member a Balas control on both a top-level comment and a reply", () => {
+    const withReply: CommentView[] = [
+      comment("c1", "Pertama", "budi", "Budi"),
+      comment("c3", "Balasan pertama", "wildan", "Wildan", "c1"),
+    ];
+    render(
+      <CommentList
+        postId="post-1"
+        comments={withReply}
+        viewerIsMember={true}
+        viewerIsOwner={false}
+        onSubmitted={noop}
+        onDeleted={noop}
+      />
+    );
+
+    expect(screen.getAllByRole("button", { name: "Balas" }).length).toBe(2);
+  });
+
+  it("hides Balas from a non-member and a signed-out visitor", () => {
+    render(
+      <CommentList
+        postId="post-1"
+        comments={THREAD}
+        viewerIsMember={false}
+        viewerIsOwner={false}
+        onSubmitted={noop}
+        onDeleted={noop}
+      />
+    );
+
+    expect(screen.queryAllByRole("button", { name: "Balas" }).length).toBe(0);
+  });
+
+  it("submits a reply with the target comment's id as parentId, and it lands nested", async () => {
+    const calls: { url: string; body: unknown }[] = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push({ url, body: init?.body !== undefined ? JSON.parse(init.body as string) : undefined });
+      return jsonResponse(comment("new-reply", "Balasan saya", "rina", "Rina", "c1"), 201);
+    }) as unknown as typeof fetch;
+
+    render(<Harness initial={THREAD} />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Balas" })[0]);
+    const box = screen.getByRole("textbox", { name: "Balas Budi" });
+    fireEvent.change(box, { target: { value: "Balasan saya" } });
+    const replyForm = box.closest("form") as HTMLElement;
+    fireEvent.click(within(replyForm).getByRole("button", { name: "Kirim" }));
+
+    await waitFor(() => expect(screen.getAllByRole("listitem").length).toBe(3));
+    expect(calls).toEqual([
+      { url: "/users/posts/post-1/comments", body: { body: "Balasan saya", parentId: "c1" } },
+    ]);
   });
 
   it("shows the empty-thread copy when there are no comments", () => {

@@ -1414,23 +1414,34 @@ describe("members-only posts: the projection never sends a media id to a non-mem
  * routes on this router, plus the community feed's cousin — all driven
  * through the real `createApp`, exactly like the feed tests above.
  */
-async function makeCommunityWithPost(a: ReturnType<typeof app>) {
+/**
+ * `name` also seeds the owner's handle/email, so two calls in the SAME test —
+ * see the parentId-on-a-different-post route test — get genuinely separate
+ * owners and communities rather than the second call's signup silently
+ * failing against the first's account and its community name colliding. The
+ * slug returned is the server's own derivation (`slugifyCommunityName`), not
+ * a guess, since `POST /communities` accepts no `slug` field of its own.
+ */
+async function makeCommunityWithPost(a: ReturnType<typeof app>, name = "Kelas Fisika") {
+  // HANDLE_PATTERN is lowercase letters, digits and underscore only — no hyphens.
+  const owner = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   const ownerToken = await tokenForValidUser(a, {
-    handle: "owner",
-    email: "owner@example.com",
+    handle: `owner_${owner}`.slice(0, 30),
+    email: `owner-${owner}@example.com`,
   });
-  await a.request("/communities", {
+  const community = await a.request("/communities", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authed(ownerToken) },
-    body: JSON.stringify({ name: "Kelas Fisika", category: "Skill Digital" }),
+    body: JSON.stringify({ name, category: "Skill Digital" }),
   });
-  const created = await a.request("/communities/kelas-fisika/posts", {
+  const { slug } = (await community.json()) as { slug: string };
+  const created = await a.request(`/communities/${slug}/posts`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authed(ownerToken) },
     body: JSON.stringify({ body: "diskusi pertama" }),
   });
   const post = await created.json();
-  return { ownerToken, slug: "kelas-fisika", postId: post.id as string };
+  return { ownerToken, slug, postId: post.id as string };
 }
 
 describe("GET /users/posts/:id", () => {
@@ -1491,5 +1502,94 @@ describe("comment routes on /users", () => {
     });
 
     expect(res.status).toBe(403);
+  });
+
+  it("POST .../comments with a parentId replies to that comment", async () => {
+    const a = app();
+    const { ownerToken, postId } = await makeCommunityWithPost(a);
+    const top = await (
+      await a.request(`/users/posts/${postId}/comments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authed(ownerToken) },
+        body: JSON.stringify({ body: "komentar utama" }),
+      })
+    ).json();
+
+    const res = await a.request(`/users/posts/${postId}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(ownerToken) },
+      body: JSON.stringify({ body: "balasan", parentId: top.id }),
+    });
+    const reply = await res.json();
+
+    expect(res.status).toBe(201);
+    expect(reply.parentId).toBe(top.id);
+  });
+
+  /** One level of nesting (`CreateComment`'s own rule): replying to a reply attaches to that reply's own top-level parent, not to the reply itself. */
+  it("POST .../comments replying to a reply flattens onto its top-level parent", async () => {
+    const a = app();
+    const { ownerToken, postId } = await makeCommunityWithPost(a);
+    const top = await (
+      await a.request(`/users/posts/${postId}/comments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authed(ownerToken) },
+        body: JSON.stringify({ body: "komentar utama" }),
+      })
+    ).json();
+    const reply = await (
+      await a.request(`/users/posts/${postId}/comments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authed(ownerToken) },
+        body: JSON.stringify({ body: "balasan pertama", parentId: top.id }),
+      })
+    ).json();
+
+    const res = await a.request(`/users/posts/${postId}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(ownerToken) },
+      body: JSON.stringify({ body: "balasan kedua", parentId: reply.id }),
+    });
+    const secondReply = await res.json();
+
+    expect(res.status).toBe(201);
+    expect(secondReply.parentId).toBe(top.id);
+  });
+
+  it("POST .../comments with a parentId from a different post is 404", async () => {
+    const a = app();
+    const { ownerToken, postId } = await makeCommunityWithPost(a);
+    const { ownerToken: otherOwnerToken, postId: otherPostId } = await makeCommunityWithPost(
+      a,
+      "kelas-kimia"
+    );
+    const elsewhere = await (
+      await a.request(`/users/posts/${otherPostId}/comments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authed(otherOwnerToken) },
+        body: JSON.stringify({ body: "komentar di tempat lain" }),
+      })
+    ).json();
+
+    const res = await a.request(`/users/posts/${postId}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(ownerToken) },
+      body: JSON.stringify({ body: "salah tempat", parentId: elsewhere.id }),
+    });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("POST .../comments with a parentId that isn't a UUID is 400", async () => {
+    const a = app();
+    const { ownerToken, postId } = await makeCommunityWithPost(a);
+
+    const res = await a.request(`/users/posts/${postId}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(ownerToken) },
+      body: JSON.stringify({ body: "halo", parentId: "not-a-uuid" }),
+    });
+
+    expect(res.status).toBe(400);
   });
 });

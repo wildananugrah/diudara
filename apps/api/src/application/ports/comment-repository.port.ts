@@ -21,16 +21,19 @@ export interface CommentRow {
   authorId: string;
   authorHandle: string;
   authorDisplayName: string;
+  /** `null` for a top-level comment; otherwise the top-level comment this is a reply to. Never a reply's own id — `CreateComment` flattens replies-to-replies before this is ever written. */
+  parentId: string | null;
 }
 
-/** What a delete needs before it is allowed to proceed. */
+/** What a delete — or a reply's parent lookup — needs before it is allowed to proceed. */
 export interface CommentOwnership {
   id: string;
   authorId: string;
   /**
    * The comment's post. The moderation rule "a post's author may delete any
    * comment on their post" reads this rather than issuing a second query, and
-   * it is not answerable from `authorId` alone.
+   * it is not answerable from `authorId` alone. `CreateComment` also uses it
+   * to refuse a reply aimed at a comment on a DIFFERENT post.
    */
   postId: string;
   /**
@@ -39,11 +42,18 @@ export interface CommentOwnership {
    * contract as the post repository's `ownershipOf`.
    */
   isDeleted: boolean;
+  /** Same flattening field as `CommentRow.parentId` — `CreateComment` reads this to resolve a reply-to-a-reply onto its top-level ancestor. */
+  parentId: string | null;
 }
 
 export interface CommentRepositoryPort {
-  /** Inserts one comment and returns it in the SAME projected shape every read path uses. */
-  create(postId: string, authorId: string, body: string): Promise<CommentRow>;
+  /**
+   * Inserts one comment and returns it in the SAME projected shape every read
+   * path uses. `parentId` is the ALREADY-FLATTENED top-level ancestor —
+   * `CreateComment` resolves it before calling this, so nothing here needs to
+   * re-check depth.
+   */
+  create(postId: string, authorId: string, body: string, parentId: string | null): Promise<CommentRow>;
   /**
    * Oldest first — a discussion thread reads top to bottom, the opposite of
    * the post feed's newest-first. Excludes soft-deleted comments. `limit` caps

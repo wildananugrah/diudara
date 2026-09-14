@@ -1,0 +1,2 @@
+ALTER TABLE "post_comment" ADD COLUMN "parent_id" uuid;--> statement-breakpoint
+ALTER TABLE "post_comment" ADD CONSTRAINT "post_comment_parent_fk" FOREIGN KEY ("parent_id") REFERENCES "public"."post_comment"("id") ON DELETE no action ON UPDATE no action;
