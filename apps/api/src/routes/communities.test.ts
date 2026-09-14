@@ -1197,3 +1197,53 @@ describe("GET /communities/:slug/stats (Phase 6)", () => {
     ).toBe(404);
   });
 });
+
+describe("GET /communities/mine — the sidebar's Komunitas submenu", () => {
+  it("lists communities the caller has joined, alphabetically", async () => {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    await createCommunity(a, ownerToken, { name: "Zed Community", category: "Skill Digital" });
+    await createCommunity(a, ownerToken, { name: "Alpha Community", category: "Skill Digital" });
+
+    const res = await a.request("/communities/mine", { headers: authed(ownerToken) });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      communities: [
+        { slug: "alpha-community", name: "Alpha Community" },
+        { slug: "zed-community", name: "Zed Community" },
+      ],
+    });
+  });
+
+  it("answers an empty list, not an error, for someone in no communities", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/communities/mine", { headers: authed(token) });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ communities: [] });
+  });
+
+  it("requires auth — 401", async () => {
+    const a = app();
+
+    expect((await a.request("/communities/mine")).status).toBe(401);
+  });
+
+  /**
+   * `mine` is reserved (`RESERVED_COMMUNITY_SLUGS`) precisely so this can
+   * never happen for real, but this proves the route itself resolves `mine`
+   * to the submenu handler rather than `GET /:slug` — the literal-wins
+   * ordering `routes/communities.ts` declares it under.
+   */
+  it("never falls through to GET /:slug, even in shape", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await a.request("/communities/mine", { headers: authed(token) });
+
+    expect(await res.json()).not.toHaveProperty("ownerHandle");
+  });
+});

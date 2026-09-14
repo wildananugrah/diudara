@@ -350,4 +350,37 @@ describe("DrizzleCommunityRepository", () => {
       expect(rows.find((r) => r.slug === created.slug)!.live?.viewerCount).toBe(1);
     });
   });
+
+  describe("listJoinedByMember", () => {
+    it("lists communities this user belongs to, alphabetically by name", async () => {
+      const ownerId = await seedUser("wildan");
+      const memberId = await seedUser("rina");
+      const zed = await create(ownerId, { slug: "zed-community", name: "Zed Community" });
+      const alpha = await create(ownerId, { slug: "alpha-community", name: "Alpha Community" });
+      await joinAt(zed.id, memberId, new Date());
+      await joinAt(alpha.id, memberId, new Date());
+
+      const rows = await repo().listJoinedByMember(memberId);
+
+      expect(rows).toEqual([
+        { slug: "alpha-community", name: "Alpha Community" },
+        { slug: "zed-community", name: "Zed Community" },
+      ]);
+    });
+
+    it("includes communities the caller owns, not only ones they joined as a member", async () => {
+      const ownerId = await seedUser("wildan");
+      const created = await create(ownerId, { slug: "kelas-desain", name: "Kelas Desain" });
+
+      const rows = await repo().listJoinedByMember(ownerId);
+
+      expect(rows).toEqual([{ slug: created.slug, name: created.name }]);
+    });
+
+    it("answers empty for someone in no communities", async () => {
+      const userId = await seedUser("rina");
+
+      expect(await repo().listJoinedByMember(userId)).toEqual([]);
+    });
+  });
 });

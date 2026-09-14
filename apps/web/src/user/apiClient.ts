@@ -2139,6 +2139,12 @@ export interface CommunityMemberRow {
   joinedAt: string;
 }
 
+/** One row of the sidebar's "Komunitas" submenu — the API's `MyCommunityRow`. */
+export interface MyCommunityRow {
+  slug: string;
+  name: string;
+}
+
 /**
  * `GET /communities` — the Komunitas tab of Discover.
  *
@@ -2181,6 +2187,15 @@ export function listCommunityMembers(
     `/communities/${encodeURIComponent(slug)}/members`,
     "gagal memuat anggota"
   );
+}
+
+/**
+ * `GET /communities/mine` — the sidebar's "Komunitas" submenu. Authenticated,
+ * so `apiFetch`, not `publicGet`: there is no viewer-less version of
+ * "communities I've joined".
+ */
+export function listMyCommunities(): Promise<{ communities: MyCommunityRow[] }> {
+  return apiFetch<{ communities: MyCommunityRow[] }>("/communities/mine");
 }
 
 /**

@@ -59,6 +59,11 @@ describe("isReservedCommunitySlug", () => {
     expect(isReservedCommunitySlug("baru")).toBe(true);
     expect(isReservedCommunitySlug("pengikut")).toBe(true);
     expect(isReservedCommunitySlug("mengikuti")).toBe(true);
+    // `GET /communities/mine` (the sidebar's joined-communities list) is a
+    // literal first segment after `/communities`, exactly where `:slug`
+    // sits — the API's own version of the `baru`/`pengikut`/`mengikuti`
+    // collision above, not a web route this time.
+    expect(isReservedCommunitySlug("mine")).toBe(true);
   });
 
   it("does not reserve an ordinary slug", () => {

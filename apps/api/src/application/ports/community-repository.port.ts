@@ -44,6 +44,12 @@ export interface CommunityMemberRow {
   joinedAt: Date;
 }
 
+/** One row of the sidebar's "Komunitas" submenu — see `listJoinedByMember`. */
+export interface MyCommunityRow {
+  slug: string;
+  name: string;
+}
+
 export interface BrowseCommunitiesQuery {
   /** Already trimmed and clamped by the use-case. Empty means "no search". */
   search: string;
@@ -113,6 +119,15 @@ export interface CommunityRepositoryPort {
 
   /** Owner first, then newest joiners. The caller clamps `limit`. */
   listMembers(communityId: string, limit: number): Promise<CommunityMemberRow[]>;
+
+  /**
+   * Every community this user is a member of, including ones they own — the
+   * sidebar's "Komunitas" submenu (`ListMyCommunities`, `GET
+   * /communities/mine`). Alphabetical by name: a persistent nav list a
+   * reader scans repeatedly should stay in a stable, predictable order
+   * rather than reshuffle by recency the way a feed would.
+   */
+  listJoinedByMember(userId: string): Promise<MyCommunityRow[]>;
   /**
    * Phase 8b. Whether these two people are members of at least one community
    * in common — the gate on STARTING a direct-message conversation.

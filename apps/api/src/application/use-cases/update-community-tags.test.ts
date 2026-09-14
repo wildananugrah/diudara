@@ -60,6 +60,9 @@ class FakeCommunityRepository implements CommunityRepositoryPort {
   async listMembers(): Promise<never> {
     throw new Error("not used in these tests");
   }
+  async listJoinedByMember(): Promise<never> {
+    throw new Error("not used in these tests");
+  }
   async sharesCommunityWith() {
     return false;
   }

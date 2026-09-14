@@ -25,18 +25,28 @@ export function isValidCommunitySlug(slug: string): boolean {
 }
 
 /**
- * Slugs nobody may take, because each is a literal segment of a real web
- * route and a community holding it would be unreachable.
+ * Slugs nobody may take, because each is a literal segment of a real route
+ * and a community holding it would be unreachable.
  *
- * `baru` is `/komunitas/baru`, the create form. `pengikut` and `mengikuti`
- * are the second segments of `/:handleParam/pengikut` and `/:handleParam/mengikuti`:
- * for the URL `/komunitas/pengikut`, react-router scores that route and
- * `/komunitas/:slug` identically — one static segment and one dynamic each —
- * so the winner is decided by declaration order rather than by intent.
+ * `baru` is `/komunitas/baru`, the web create form. `pengikut` and
+ * `mengikuti` are the second segments of `/:handleParam/pengikut` and
+ * `/:handleParam/mengikuti`: for the URL `/komunitas/pengikut`, react-router
+ * scores that route and `/komunitas/:slug` identically — one static segment
+ * and one dynamic each — so the winner is decided by declaration order
+ * rather than by intent.
+ *
+ * `mine` is the API's own version of the same hazard, one layer down:
+ * `GET /communities/mine` (the sidebar's joined-communities list —
+ * `ListMyCommunities`) is a literal first segment after `/communities`,
+ * exactly where `GET /communities/:slug` sits. `routes/communities.ts`
+ * declares `/mine` before `/:slug` as the first defense; this is the second,
+ * the same belt-and-suspenders `RESERVED_COMMUNITY_SLUGS`'s own docstring
+ * on `documents` already argues for.
  */
 export const RESERVED_COMMUNITY_SLUGS: ReadonlySet<string> = new Set([
   "baru",
   "mengikuti",
+  "mine",
   "pengikut",
 ]);
 

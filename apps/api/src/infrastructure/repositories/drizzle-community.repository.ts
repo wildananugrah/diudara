@@ -1,4 +1,4 @@
-import { aliasedTable, and, count, desc, eq, gte, ilike, inArray, sql } from "drizzle-orm";
+import { aliasedTable, and, asc, count, desc, eq, gte, ilike, inArray, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import {
   appUsers,
@@ -15,6 +15,7 @@ import type {
   CommunityMemberRow,
   CommunityRecord,
   CommunityRepositoryPort,
+  MyCommunityRow,
 } from "../../application/ports/community-repository.port";
 import { VIEWER_HEARTBEAT_WINDOW_MS } from "../../domain/viewer-heartbeat-window";
 import { clampLimit } from "./drizzle-follow.repository";
@@ -380,6 +381,16 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
       )
       .limit(clampLimit(limit));
   }
+
+  async listJoinedByMember(userId: string): Promise<MyCommunityRow[]> {
+    return this.db
+      .select({ slug: communities.slug, name: communities.name })
+      .from(communityMembers)
+      .innerJoin(communities, eq(communityMembers.communityId, communities.id))
+      .where(eq(communityMembers.userId, userId))
+      .orderBy(asc(communities.name));
+  }
+
   /**
    * One `EXISTS` over a self-join of `community_member`: is there a community
    * that both of these people are in.

@@ -1840,6 +1840,53 @@ button:disabled {
   .side-rail-collapsed ~ .app-shell-main {
     margin-left: 96px;
   }
+
+  /* --- The "Komunitas" submenu (`Sidebar.tsx`'s own `KomunitasGroup`). The
+         toggle reuses `.sidebar-nav`'s look (color, hover, active) and only
+         resets the `<button>` chrome that class doesn't already cover — a
+         `<button>` needs an explicit border/width/cursor reset a `<a>` never
+         did. `.sidebar-subnav`/`.sidebar-subnav-active` (declared far above,
+         alongside `.sidebar-nav`) were already there for exactly this list,
+         unused until now. ---------------------------------------------- */
+  .side-rail-group-toggle {
+    width: 100%;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+  }
+
+  .side-rail-group-chevron {
+    margin-left: auto;
+    font-size: 10px;
+    opacity: 0.7;
+  }
+
+  .side-rail-submenu {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    /* Aligns with the toggle's LABEL, not its icon — `.sidebar-nav-icon`'s
+       width plus its own gap. */
+    padding-left: 36px;
+  }
+
+  .side-rail-submenu .sidebar-subnav {
+    display: block;
+    padding: 7px 10px;
+    border-radius: 999px;
+    font-size: 13px;
+  }
+
+  .side-rail-submenu-empty {
+    padding: 4px 10px;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+
+  .side-rail-submenu-empty a {
+    color: var(--langit);
+  }
 }
 
 /* ---------------------------------------------------------------

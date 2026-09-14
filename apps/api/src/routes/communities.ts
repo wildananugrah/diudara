@@ -185,6 +185,7 @@ export function communityRoutes(
     | "joinCommunity"
     | "browseCommunities"
     | "listCommunityMembers"
+    | "listMyCommunities"
     | "createCommunityPost"
     | "listCommunityFeed"
     | "listCommunityEvents"
@@ -583,6 +584,14 @@ export function communityRoutes(
         lessonId: c.req.param("id"),
       })
     );
+  });
+
+  // DECLARED BEFORE `/:slug` for the same literal-wins reason `posts` above
+  // is — `mine` is a literal first segment competing with `:slug`, so it
+  // must be matched first. `RESERVED_COMMUNITY_SLUGS` reserves the slug
+  // itself too, belt and suspenders (see its own docstring).
+  app.get("/mine", requireAuth, async (c) => {
+    return c.json(await deps.listMyCommunities.execute({ viewerId: c.get("userId") }));
   });
 
   app.get<"/:slug">("/:slug", async (c) => {

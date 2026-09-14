@@ -1,6 +1,11 @@
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { isUserSignedIn, subscribeToUserAuth } from "./apiClient";
+import {
+  isUserSignedIn,
+  listMyCommunities,
+  subscribeToUserAuth,
+  type MyCommunityRow,
+} from "./apiClient";
 import Sidebar from "./shell/Sidebar";
 import ChatPanel from "./ChatPanel";
 
@@ -50,6 +55,40 @@ function useDestinations(): ReadonlyArray<{ to: string; label: string }> {
   return [...STATIC_DESTINATIONS, profile];
 }
 
+/**
+ * The sidebar's "Komunitas" submenu — `null` means "don't render the item at
+ * all" (signed out, or the read hasn't settled yet), an empty array means
+ * "signed in, render it with its own empty note". Fetched once per sign-in,
+ * the same `NotificationBell` polling pattern: no fetch at all while signed
+ * out (`listMyCommunities` needs a session, so asking anyway would only ever
+ * 401), and a failed read hides the item rather than showing an empty list
+ * it cannot stand behind — `NotificationBell`'s own reasoning for the bell
+ * disappearing on a network blip.
+ */
+function useMyCommunities(signedIn: boolean): MyCommunityRow[] | null {
+  const [communities, setCommunities] = useState<MyCommunityRow[] | null>(null);
+
+  useEffect(() => {
+    if (!signedIn) {
+      setCommunities(null);
+      return;
+    }
+    let cancelled = false;
+    listMyCommunities()
+      .then((page) => {
+        if (!cancelled) setCommunities(page.communities);
+      })
+      .catch(() => {
+        if (!cancelled) setCommunities(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [signedIn]);
+
+  return communities;
+}
+
 function activeClass({ isActive }: { isActive: boolean }): string | undefined {
   return isActive ? "active" : undefined;
 }
@@ -85,6 +124,8 @@ function Destinations({ destinations }: { destinations: ReturnType<typeof useDes
  */
 export default function AppShell() {
   const destinations = useDestinations();
+  const signedIn = useSyncExternalStore(subscribeToUserAuth, isUserSignedIn, () => false);
+  const myCommunities = useMyCommunities(signedIn);
   const [collapsed, setCollapsed] = useState(false);
   return (
     <div className="app-shell">
@@ -92,6 +133,7 @@ export default function AppShell() {
         destinations={destinations}
         collapsed={collapsed}
         onToggleCollapse={() => setCollapsed((value) => !value)}
+        myCommunities={myCommunities}
       />
       {/*
         A <div>, NOT a <main>: every page this shell renders brings its own

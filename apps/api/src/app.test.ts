@@ -99,6 +99,7 @@ describe("the app's routing table", () => {
       "GET /communities/:slug/stats",
       "GET /communities/:slug/syllabus",
       "GET /communities/:slug/tiers",
+      "GET /communities/mine",
       "GET /health",
       "GET /streams",
       "GET /users/:handle/followers",

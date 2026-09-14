@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { setUserSession } from "./apiClient";
 import AppShell from "./AppShell";
@@ -31,17 +31,31 @@ function renderShellAt(path: string) {
           <Route path="/discover" element={<Dummy label="Discover" />} />
           <Route path="/siaran" element={<Dummy label="Siaran" />} />
           <Route path="/pengaturan" element={<Dummy label="Pengaturan" />} />
+          <Route path="/komunitas/:slug" element={<Dummy label="Komunitas" />} />
         </Route>
       </Routes>
     </MemoryRouter>
   );
 }
 
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+let originalFetch: typeof fetch;
+
 beforeEach(() => {
   localStorage.clear();
+  originalFetch = global.fetch;
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  global.fetch = originalFetch;
+  cleanup();
+});
 
 describe("AppShell", () => {
   it("renders the three fixed destinations twice each — one source, a bottom bar and a side rail", () => {
@@ -225,5 +239,99 @@ describe("AppShell — the navigation paints above the page", () => {
     const offenders = other.filter((rule) => rule.value >= lowestNav);
     expect(selectors(offenders)).toBe("");
     expect(lowestNav > highestOther).toBe(true);
+  });
+});
+
+/**
+ * The sidebar's "Komunitas" submenu — `Sidebar.tsx`'s `KomunitasGroup`, fed
+ * by `AppShell.tsx`'s `useMyCommunities`. Sidebar-only, per this session's
+ * own scoped design: none of this renders in the bottom bar, so these tests
+ * only ever look at the ONE "Komunitas" toggle that exists (the rail's),
+ * unlike the "twice each" tests above.
+ */
+describe("AppShell — the Komunitas submenu", () => {
+  it("does not render at all when signed out", async () => {
+    renderShellAt("/beranda");
+
+    await waitFor(() => {
+      expect(screen.queryAllByRole("button", { name: "Komunitas" }).length).toBe(0);
+    });
+  });
+
+  it("signed in with no communities joined: shows an empty note and a link to Discover", async () => {
+    global.fetch = mock(async () => jsonResponse({ communities: [] })) as unknown as typeof fetch;
+    setUserSession("jwt-abc", USER);
+    renderShellAt("/beranda");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Komunitas" }));
+
+    expect(await screen.findByText(/Belum ada komunitas/)).toBeTruthy();
+    const link = screen.getByRole("link", { name: "Jelajahi Discover" });
+    expect(link.getAttribute("href")).toBe("/discover");
+  });
+
+  it("signed in with communities joined: lists them, linking to their own pages", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({
+        communities: [
+          { slug: "kelas-desain", name: "Kelas Desain" },
+          { slug: "bimbel-snbt", name: "Bimbel SNBT" },
+        ],
+      })
+    ) as unknown as typeof fetch;
+    setUserSession("jwt-abc", USER);
+    renderShellAt("/beranda");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Komunitas" }));
+
+    const kelasLink = await screen.findByRole("link", { name: "Kelas Desain" });
+    expect(kelasLink.getAttribute("href")).toBe("/komunitas/kelas-desain");
+    const bimbelLink = screen.getByRole("link", { name: "Bimbel SNBT" });
+    expect(bimbelLink.getAttribute("href")).toBe("/komunitas/bimbel-snbt");
+  });
+
+  it("starts collapsed by default, toggling open and closed on click", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ communities: [{ slug: "kelas-desain", name: "Kelas Desain" }] })
+    ) as unknown as typeof fetch;
+    setUserSession("jwt-abc", USER);
+    renderShellAt("/beranda");
+
+    const toggle = await screen.findByRole("button", { name: "Komunitas" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryAllByRole("link", { name: "Kelas Desain" }).length).toBe(0);
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(await screen.findByRole("link", { name: "Kelas Desain" })).toBeTruthy();
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryAllByRole("link", { name: "Kelas Desain" }).length).toBe(0);
+  });
+
+  it("auto-expands when already on a community's page", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ communities: [{ slug: "kelas-desain", name: "Kelas Desain" }] })
+    ) as unknown as typeof fetch;
+    setUserSession("jwt-abc", USER);
+    renderShellAt("/komunitas/kelas-desain");
+
+    const toggle = await screen.findByRole("button", { name: "Komunitas" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(await screen.findByRole("link", { name: "Kelas Desain" })).toBeTruthy();
+  });
+
+  it("hides the submenu content while the rail is collapsed", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ communities: [{ slug: "kelas-desain", name: "Kelas Desain" }] })
+    ) as unknown as typeof fetch;
+    setUserSession("jwt-abc", USER);
+    renderShellAt("/komunitas/kelas-desain");
+    await screen.findByRole("button", { name: "Komunitas" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Tutup navigasi" }));
+
+    expect(screen.queryAllByRole("link", { name: "Kelas Desain" }).length).toBe(0);
   });
 });

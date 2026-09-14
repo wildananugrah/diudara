@@ -54,6 +54,7 @@ import { GetCommunity } from "./application/use-cases/get-community";
 import { JoinCommunity } from "./application/use-cases/join-community";
 import { BrowseCommunities } from "./application/use-cases/browse-communities";
 import { ListCommunityMembers } from "./application/use-cases/list-community-members";
+import { ListMyCommunities } from "./application/use-cases/list-my-communities";
 import { CreateCommunityPost, ListCommunityFeed } from "./application/use-cases/community-feed";
 import { ListCommunityEvents } from "./application/use-cases/community-events";
 import { ManageCommunityTiers } from "./application/use-cases/community-tiers";
@@ -409,6 +410,9 @@ const fakeCommunityRepository: CommunityRepositoryPort = {
   async listMembers() {
     return [];
   },
+  async listJoinedByMember() {
+    return [];
+  },
   /** Phase 8b. Not reached by these tests — direct messages have their own suite. */
   async sharesCommunityWith() {
     return false;
@@ -731,6 +735,7 @@ describe("Dependencies (composition root contract)", () => {
       joinCommunity: new JoinCommunity(fakeCommunityRepository, fakeNotifyOf),
       browseCommunities: new BrowseCommunities(fakeCommunityRepository),
       listCommunityMembers: new ListCommunityMembers(fakeCommunityRepository),
+      listMyCommunities: new ListMyCommunities(fakeCommunityRepository),
       createCommunityPost: new CreateCommunityPost(
         fakeCommunityRepository,
         new CreatePost(fakePostWriteUnitOfWork)

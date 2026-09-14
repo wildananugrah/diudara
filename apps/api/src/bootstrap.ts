@@ -23,6 +23,7 @@ import { GetCommunity } from "./application/use-cases/get-community";
 import { JoinCommunity } from "./application/use-cases/join-community";
 import { BrowseCommunities } from "./application/use-cases/browse-communities";
 import { ListCommunityMembers } from "./application/use-cases/list-community-members";
+import { ListMyCommunities } from "./application/use-cases/list-my-communities";
 import { DrizzlePostRepository } from "./infrastructure/repositories/drizzle-post.repository";
 import { CreatePost, DeletePost, EditPost } from "./application/use-cases/write-post";
 import { DrizzleMediaRepository } from "./infrastructure/repositories/drizzle-media.repository";
@@ -262,6 +263,8 @@ export interface Dependencies {
   browseCommunities: BrowseCommunities;
   /** `GET /communities/:slug/members` — the roster. Public. */
   listCommunityMembers: ListCommunityMembers;
+  /** `GET /communities/mine` — the sidebar's "Komunitas" submenu. Behind `requireUserAuth`. */
+  listMyCommunities: ListMyCommunities;
   /**
    * `POST /communities/:slug/posts`. Behind `requireUserAuth`. An
    * authorisation wrapper around `createPost`: unknown slug 404s, a
@@ -1678,6 +1681,7 @@ export function bootstrap(): Dependencies {
 
   const browseCommunities = new BrowseCommunities(communityRepository);
   const listCommunityMembers = new ListCommunityMembers(communityRepository);
+  const listMyCommunities = new ListMyCommunities(communityRepository);
   // Task 6 of community-feed. ONE `DrizzleCommentRepository`, shared by
   // `ListComments`, `CreateComment`, `DeleteComment` and `ListCommunityFeed`
   // below — the same one-repository-many-consumers shape `communityRepository`
@@ -2119,6 +2123,7 @@ export function bootstrap(): Dependencies {
     joinCommunity,
     browseCommunities,
     listCommunityMembers,
+    listMyCommunities,
     createCommunityPost,
     listCommunityFeed,
     listCommunityEvents,
