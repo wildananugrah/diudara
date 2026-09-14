@@ -134,6 +134,13 @@ export default function MediaStrip({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      {/* The visible affordance that this whole strip is a drop target — the
+          dashed border alone reads as decoration, not an instruction. */}
+      <p className="media-strip-prompt" aria-hidden="true">
+        <span className="media-strip-prompt-icon">↑</span>
+        Seret foto ke sini, atau klik &quot;Tambah foto&quot;
+      </p>
+
       {items.length > 0 ? (
         <ul className="media-strip-items" aria-label="Foto kiriman">
           {items.map((item, index) => {
@@ -228,7 +235,6 @@ export default function MediaStrip({
             string rather than three adjacent nodes — same rule as the body
             counter in `PostComposer`. */}
         <span className="media-strip-counter">{`${items.length}/${max} foto`}</span>
-        <span className="muted media-strip-drop-hint">atau seret foto ke sini</span>
       </div>
 
       {/* Below the button that produced it, and `role="alert"` like every other

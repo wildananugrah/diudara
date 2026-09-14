@@ -472,6 +472,10 @@ function SectionAuthoring({
         onDragLeave={handleDragLeave}
         onDrop={(event) => void handleDrop(event)}
       >
+        <p className="dokumen-upload-prompt" aria-hidden="true">
+          <span className="dokumen-upload-prompt-icon">↑</span>
+          Seret berkas ke sini, atau klik untuk memilih
+        </p>
         <label htmlFor="lesson-attachment">Lampiran (opsional)</label>
         <input
           id="lesson-attachment"
@@ -496,7 +500,7 @@ function SectionAuthoring({
         <p className="muted">
           {attachment !== null
             ? `Terlampir: ${attachment.name}`
-            : `Maksimal ${formatBytes(MAX_DOCUMENT_BYTES)} per berkas, atau seret berkas ke sini.`}
+            : `Maksimal ${formatBytes(MAX_DOCUMENT_BYTES)} per berkas.`}
         </p>
         {attachError !== null ? (
           <p className="form-error" role="alert">
@@ -620,6 +624,10 @@ function FirstSectionAuthoring({
         onDragLeave={handleDragLeave}
         onDrop={(event) => void handleDrop(event)}
       >
+        <p className="dokumen-upload-prompt" aria-hidden="true">
+          <span className="dokumen-upload-prompt-icon">↑</span>
+          Seret berkas ke sini, atau klik untuk memilih
+        </p>
         <label htmlFor="first-lesson-attachment">Lampiran (opsional)</label>
         <input
           id="first-lesson-attachment"
@@ -641,7 +649,7 @@ function FirstSectionAuthoring({
         <p className="muted">
           {attachment !== null
             ? `Terlampir: ${attachment.name}`
-            : `Maksimal ${formatBytes(MAX_DOCUMENT_BYTES)} per berkas, atau seret berkas ke sini.`}
+            : `Maksimal ${formatBytes(MAX_DOCUMENT_BYTES)} per berkas.`}
         </p>
         {attachError !== null ? (
           <p className="form-error" role="alert">

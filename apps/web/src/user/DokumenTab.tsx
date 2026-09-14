@@ -209,6 +209,14 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
           onDragLeave={handleDragLeave}
           onDrop={(event) => void handleDrop(event)}
         >
+          {/* The visible affordance that this whole box is a drop target —
+              the dashed border alone reads as decoration, not an instruction.
+              The `<label htmlFor="dokumen-upload">` right below stays the
+              input's accessible name; this is purely an extra visual cue. */}
+          <p className="dokumen-upload-prompt" aria-hidden="true">
+            <span className="dokumen-upload-prompt-icon">↑</span>
+            Seret berkas ke sini, atau klik untuk memilih
+          </p>
           <label htmlFor="dokumen-upload">Unggah dokumen</label>
           <input
             id="dokumen-upload"
@@ -230,9 +238,7 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
             />
             Khusus anggota berbayar
           </label>
-          <p className="muted">
-            Maksimal {formatBytes(MAX_DOCUMENT_BYTES)} per berkas, atau seret berkas ke sini.
-          </p>
+          <p className="muted">Maksimal {formatBytes(MAX_DOCUMENT_BYTES)} per berkas.</p>
         </div>
       ) : null}
 
