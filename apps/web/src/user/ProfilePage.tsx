@@ -10,6 +10,7 @@ import {
   type PublicUserProfile,
   type StreamView,
 } from "./apiClient";
+import { communityColor, communityInk } from "./communityColor";
 import { describeRequestFailure } from "./errorCopy";
 import FollowButton from "./FollowButton";
 import MembershipOffer from "./MembershipOffer";
@@ -207,7 +208,7 @@ export default function ProfilePage() {
     return (
       <>
         <Header title="Memuat..." />
-        <main className="user-page">
+        <main className="page-container profile-page">
           <p>Memuat...</p>
         </main>
       </>
@@ -218,7 +219,7 @@ export default function ProfilePage() {
     return (
       <>
         <Header title="Gagal memuat profil" />
-        <main className="user-page">
+        <main className="page-container profile-page">
           <p>{load.message}</p>
         </main>
       </>
@@ -230,140 +231,186 @@ export default function ProfilePage() {
   return (
     <>
       <Header title={profile.displayName} />
-      <main className="user-page profile-page">
-      <div className="spread">
-        <div>
-          <p className="profile-handle muted">@{profile.handle}</p>
-          {/*
-            Only rendered when there is something to click. A badge that
-            announces a broadcast and goes nowhere is the same defect as the
-            lock CTA that linked to the page you were already standing on.
-          */}
-          {liveStream !== null ? (
-            <a href={`#${liveSectionId}`} className="profile-live-badge" data-testid="profile-live-badge">
-              SEDANG LIVE
-            </a>
-          ) : null}
-        </div>
+      <main className="page-container profile-page">
         {/*
-          Absent entirely on your own profile — FollowButton itself decides
-          that by comparing `profile.handle` to the signed-in caller's own
-          handle (see its own docstring), never by trusting
-          `viewerFollowing`/`viewerFollows` alone: the API deliberately
-          reports `false`, not some self-specific value, when the viewer IS
-          the profile.
+          The wide banner `CommunityPage` uses for a community's own page —
+          reused verbatim rather than a parallel `.profile-banner` block,
+          since the shape (tile, heading, meta, description, actions) is
+          identical. `communityColor`/`communityInk` are keyed on any string,
+          not just a community slug, so the tile is coloured off the
+          handle the same deterministic way a community's is off its slug.
         */}
-        <FollowButton handle={profile.handle} viewerFollows={viewerFollowing} onChange={handleFollowChange} />
-      </div>
-      {/* No element at all for a bio-less profile — never an empty <p>. */}
-      {profile.bio !== null && profile.bio !== "" ? <p className="profile-bio">{profile.bio}</p> : null}
-      <div className="profile-counts">
-        <Link to={`/@${profile.handle}/pengikut`} className="profile-count">
-          <strong>{followerCount}</strong> Pengikut
-        </Link>
-        <Link to={`/@${profile.handle}/mengikuti`} className="profile-count">
-          <strong>{profile.followingCount}</strong> Mengikuti
-        </Link>
-      </div>
-
-      {/*
-        The broadcast itself, on the profile — so "SEDANG LIVE" has somewhere
-        to go. Same `StreamPlayer` Siaran uses (its `attachHls`/`mintToken`
-        props default to the real ones; Siaran only injects them for tests),
-        and the SAME lock treatment: `locked` is the server's answer, computed
-        once by the paywall, so a members-only broadcast stays members-only for
-        a stranger standing on a public profile.
-      */}
-      {liveStream !== null ? (
-        <section id={liveSectionId} className="profile-live" data-testid="profile-live">
-          <h2 className="profile-live-title">{liveStream.title}</h2>
-          {liveStream.locked ? (
-            <div className="stream-lock" data-testid="profile-live-lock">
-              <p className="stream-lock-copy">Siaran ini khusus anggota.</p>
-              <span className="stream-lock-cta">Jadi anggota untuk menonton</span>
+        <section className="community-banner">
+          <span
+            className="community-banner-tile"
+            style={{ background: communityColor(profile.handle), color: communityInk(profile.handle) }}
+            aria-hidden="true"
+          >
+            {profile.displayName.slice(0, 1).toUpperCase()}
+          </span>
+          <div className="community-banner-body">
+            <div className="community-banner-heading">
+              <h1 className="community-banner-name">{profile.displayName}</h1>
+              {/*
+                Only rendered when there is something to click. A badge that
+                announces a broadcast and goes nowhere is the same defect as
+                the lock CTA that linked to the page you were already
+                standing on.
+              */}
+              {liveStream !== null ? (
+                <a
+                  href={`#${liveSectionId}`}
+                  className="badge badge-pending community-banner-live"
+                  data-testid="profile-live-badge"
+                >
+                  SEDANG LIVE
+                </a>
+              ) : null}
             </div>
-          ) : (
-            <StreamPlayer stream={liveStream} />
-          )}
+            <p className="community-banner-meta">@{profile.handle}</p>
+            {/* No element at all for a bio-less profile — never an empty <p>. */}
+            {profile.bio !== null && profile.bio !== "" ? (
+              <p className="community-banner-description profile-bio">{profile.bio}</p>
+            ) : null}
+            <div className="profile-counts">
+              <Link to={`/@${profile.handle}/pengikut`} className="profile-count">
+                <strong>{followerCount}</strong> Pengikut
+              </Link>
+              <Link to={`/@${profile.handle}/mengikuti`} className="profile-count">
+                <strong>{profile.followingCount}</strong> Mengikuti
+              </Link>
+            </div>
+          </div>
+          {/*
+            Absent entirely on your own profile — FollowButton itself decides
+            that by comparing `profile.handle` to the signed-in caller's own
+            handle (see its own docstring), never by trusting
+            `viewerFollowing`/`viewerFollows` alone: the API deliberately
+            reports `false`, not some self-specific value, when the viewer IS
+            the profile. Same empty-wrapper shape `CommunityJoinControl`
+            already leaves behind for a community's own owner.
+          */}
+          <div className="community-banner-actions">
+            <FollowButton handle={profile.handle} viewerFollows={viewerFollowing} onChange={handleFollowChange} />
+          </div>
         </section>
-      ) : null}
 
-      {/*
-        Task 10, spec §6. Given the tiers off the profile response and nothing
-        else — `MembershipOffer` decides for itself whether to render at all
-        (no tiers, or your own profile) and whether to offer a button or a link
-        to Masuk, exactly as `FollowButton` above decides its own own-profile
-        case. Placed under the counts and above the feed: it is part of who
-        this person is, not part of what they posted.
+        {/*
+          The same wide content + sidebar split `CommunityPage`'s Diskusi tab
+          uses — single column under 768px, two above. The feed is the
+          primary content so it takes the main column; the membership offer
+          is supplementary ("who this person is", not "what they posted")
+          so it moves into the sidebar, where it already reads as its own
+          bordered card without any extra wrapper.
+        */}
+        <div className="community-layout">
+          <div className="community-main">
+            {/*
+              The broadcast itself, on the profile — so "SEDANG LIVE" has
+              somewhere to go. Same `StreamPlayer` Siaran uses (its
+              `attachHls`/`mintToken` props default to the real ones; Siaran
+              only injects them for tests), and the SAME lock treatment:
+              `locked` is the server's answer, computed once by the paywall,
+              so a members-only broadcast stays members-only for a stranger
+              standing on a public profile.
+            */}
+            {liveStream !== null ? (
+              <section id={liveSectionId} className="profile-live" data-testid="profile-live">
+                <h2 className="profile-live-title">{liveStream.title}</h2>
+                {liveStream.locked ? (
+                  <div className="stream-lock" data-testid="profile-live-lock">
+                    <p className="stream-lock-copy">Siaran ini khusus anggota.</p>
+                    <span className="stream-lock-cta">Jadi anggota untuk menonton</span>
+                  </div>
+                ) : (
+                  <StreamPlayer stream={liveStream} />
+                )}
+              </section>
+            ) : null}
 
-        `membership?.tiers ?? []` even though the field is REQUIRED on
-        `PublicUserProfile` and the API always sends it (`toMembershipView`
-        answers `{ tiers: [] }` rather than omitting the key). That is not a
-        state branch — an absent field and an empty list mean the same thing
-        here, "no offer" — it is the blast radius. A bare
-        `profile.membership.tiers` THROWS on a response that predates Task 5,
-        and it throws during render: measured against `App.test.tsx`'s own
-        minimal profile fixtures, the whole page went blank — name, bio,
-        follow button, counts and the entire feed — for a missing offer. A
-        rolling deploy that ships this app before the API is exactly that
-        response, and Phase 4 already shipped a version of this mistake
-        (`toMembershipView`'s docstring records the white screen it caused).
-      */}
-      <MembershipOffer
-        handle={profile.handle}
-        tiers={profile.membership?.tiers ?? []}
-        // `?? false` for the same skew reason as `tiers` above, and `false` is
-        // the safe half of it: a response that could not tell us whether this
-        // viewer is a member must never end up CLAIMING that they are.
-        viewerIsMember={profile.membership?.viewerIsMember ?? false}
-        // `?? false` again, and here the safe half is the OTHER direction:
-        // an API that predates this field says nothing about a lapsed
-        // membership, and defaulting to `true` would tell every signed-in
-        // visitor on that deploy that a membership of theirs had ended.
-        viewerMembershipEnded={profile.membership?.viewerMembershipEnded ?? false}
-        // `?? false` again, same skew reasoning: an API response that
-        // predates Task 6 says nothing about a pending free request, and
-        // defaulting to `true` would withhold every tier's button from
-        // everybody until the next deploy finished.
-        viewerRequestPending={profile.membership?.viewerRequestPending ?? false}
-      />
+            {/* The same `EditComposer` Beranda renders — keyed on `editing.id`
+                inside it, for the reason its own docstring records. */}
+            {editing !== null ? (
+              <EditComposer post={editing} onSubmit={saveEdit} onCancel={cancelEdit} />
+            ) : null}
 
-      {/* The same `EditComposer` Beranda renders — keyed on `editing.id`
-          inside it, for the reason its own docstring records. */}
-      {editing !== null ? (
-        <EditComposer post={editing} onSubmit={saveEdit} onCancel={cancelEdit} />
-      ) : null}
+            {pendingDelete !== null ? (
+              <DeleteConfirm
+                postId={pendingDelete}
+                deleting={deleting}
+                onConfirm={() => void confirmDelete()}
+                onCancel={cancelDelete}
+              />
+            ) : null}
 
-      {pendingDelete !== null ? (
-        <DeleteConfirm
-          postId={pendingDelete}
-          deleting={deleting}
-          onConfirm={() => void confirmDelete()}
-          onCancel={cancelDelete}
-        />
-      ) : null}
+            {deleteError !== null ? (
+              <p className="feed-error" role="alert">
+                {deleteError}
+              </p>
+            ) : null}
 
-      {deleteError !== null ? (
-        <p className="feed-error" role="alert">
-          {deleteError}
-        </p>
-      ) : null}
+            {/*
+              `PostFeed` owns its own loading and error state entirely — a
+              failed fetch here shows its own `role="alert"` paragraph next
+              to the header above, which stays exactly as it was. Nothing in
+              this component's `load`/`setLoad` is touched by anything that
+              happens inside `PostFeed`.
+            */}
+            <PostFeed
+              ref={postsFeed}
+              load={loadPosts}
+              ownHandle={ownHandle}
+              onEdit={onEdit}
+              onDeleteRequested={onDeleteRequested}
+              emptyMessage="Belum ada kiriman untuk ditampilkan."
+            />
+          </div>
 
-      {/*
-        `PostFeed` owns its own loading and error state entirely — a failed
-        fetch here shows its own `role="alert"` paragraph next to the header
-        above, which stays exactly as it was. Nothing in this component's
-        `load`/`setLoad` is touched by anything that happens inside
-        `PostFeed`.
-      */}
-      <PostFeed
-        ref={postsFeed}
-        load={loadPosts}
-        ownHandle={ownHandle}
-        onEdit={onEdit}
-        onDeleteRequested={onDeleteRequested}
-        emptyMessage="Belum ada kiriman untuk ditampilkan."
-      />
+          <div className="community-sidebar">
+            {/*
+              Task 10, spec §6. Given the tiers off the profile response and
+              nothing else — `MembershipOffer` decides for itself whether to
+              render at all (no tiers, or your own profile) and whether to
+              offer a button or a link to Masuk, exactly as `FollowButton`
+              above decides its own own-profile case.
+
+              `membership?.tiers ?? []` even though the field is REQUIRED on
+              `PublicUserProfile` and the API always sends it
+              (`toMembershipView` answers `{ tiers: [] }` rather than
+              omitting the key). That is not a state branch — an absent
+              field and an empty list mean the same thing here, "no offer"
+              — it is the blast radius. A bare `profile.membership.tiers`
+              THROWS on a response that predates Task 5, and it throws
+              during render: measured against `App.test.tsx`'s own minimal
+              profile fixtures, the whole page went blank — name, bio,
+              follow button, counts and the entire feed — for a missing
+              offer. A rolling deploy that ships this app before the API is
+              exactly that response, and Phase 4 already shipped a version
+              of this mistake (`toMembershipView`'s docstring records the
+              white screen it caused).
+            */}
+            <MembershipOffer
+              handle={profile.handle}
+              tiers={profile.membership?.tiers ?? []}
+              // `?? false` for the same skew reason as `tiers` above, and
+              // `false` is the safe half of it: a response that could not
+              // tell us whether this viewer is a member must never end up
+              // CLAIMING that they are.
+              viewerIsMember={profile.membership?.viewerIsMember ?? false}
+              // `?? false` again, and here the safe half is the OTHER
+              // direction: an API that predates this field says nothing
+              // about a lapsed membership, and defaulting to `true` would
+              // tell every signed-in visitor on that deploy that a
+              // membership of theirs had ended.
+              viewerMembershipEnded={profile.membership?.viewerMembershipEnded ?? false}
+              // `?? false` again, same skew reasoning: an API response that
+              // predates Task 6 says nothing about a pending free request,
+              // and defaulting to `true` would withhold every tier's
+              // button from everybody until the next deploy finished.
+              viewerRequestPending={profile.membership?.viewerRequestPending ?? false}
+            />
+          </div>
+        </div>
       </main>
     </>
   );

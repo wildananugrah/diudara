@@ -920,10 +920,6 @@ button:disabled {
   text-align: left;
 }
 
-.profile-handle {
-  margin-top: 0;
-}
-
 .profile-bio {
   margin-top: 20px;
   white-space: pre-wrap;
@@ -2075,26 +2071,6 @@ button:disabled {
      move the hand on the right. The published stream is NOT mirrored — this
      transform is presentation only. */
   transform: scaleX(-1);
-}
-
-/* --- "SEDANG LIVE" on a profile. A LINK, not a decoration: it jumps to the
-       broadcast rendered further down the same page. Red because that is what
-       "live" means everywhere else people have seen it. ------------------- */
-.profile-live-badge {
-  display: inline-block;
-  margin-top: 6px;
-  padding: 2px 8px;
-  border-radius: var(--radius);
-  background: var(--merah-senja);
-  color: var(--surface);
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-decoration: none;
-}
-
-.profile-live-badge:hover {
-  background: var(--langit-dark);
 }
 
 .profile-live {

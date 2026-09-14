@@ -120,7 +120,7 @@ describe("routing — the personal-account routes", () => {
 
     renderAt("/@wildan");
 
-    expect(await screen.findByText("Wildan")).toBeTruthy();
+    expect((await screen.findAllByText("Wildan")).length).toBeGreaterThan(0);
   });
 
   /**
@@ -310,7 +310,7 @@ describe("routing — the app shell", () => {
 
     renderAt("/@wildan");
 
-    await screen.findByText("Wildan");
+    await screen.findAllByText("Wildan");
     expect(screen.getAllByRole("navigation", { name: "Navigasi utama" }).length).toBe(2);
   });
 

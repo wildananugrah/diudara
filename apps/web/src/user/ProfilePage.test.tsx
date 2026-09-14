@@ -149,7 +149,7 @@ describe("ProfilePage", () => {
 
     renderAt("/@wildan");
 
-    await screen.findByText("Wildan Anugrah");
+    await screen.findAllByText("Wildan Anugrah");
     // `=== null` first: handing the element itself to a matcher serialises
     // its whole node graph on failure, which OOM-killed a machine on this
     // project once. A boolean prints `false`.
@@ -168,7 +168,7 @@ describe("ProfilePage", () => {
 
     renderAt("/@wildan");
 
-    await screen.findByText("Wildan Anugrah");
+    await screen.findAllByText("Wildan Anugrah");
     // `=== null` first: handing the element itself to a matcher serialises
     // its whole node graph on failure, which OOM-killed a machine on this
     // project once. A boolean prints `false`.
@@ -205,7 +205,7 @@ describe("ProfilePage", () => {
 
     renderAt("/@wildan");
 
-    expect(await screen.findByText("Wildan Anugrah")).toBeTruthy();
+    expect((await screen.findAllByText("Wildan Anugrah")).length).toBeGreaterThan(0);
     // `=== null` first: handing the element itself to a matcher serialises
     // its whole node graph on failure, which OOM-killed a machine on this
     // project once. A boolean prints `false`.
@@ -224,7 +224,7 @@ describe("ProfilePage", () => {
 
     renderAt("/@wildan");
 
-    expect(await screen.findByText("Wildan Anugrah")).toBeTruthy();
+    expect((await screen.findAllByText("Wildan Anugrah")).length).toBeGreaterThan(0);
     expect(screen.getByText("@wildan")).toBeTruthy();
     expect(screen.getByText("Membangun DIUDARA.")).toBeTruthy();
     // The `@` is stripped before the API call — a bare handle, per Task 3.
@@ -244,7 +244,7 @@ describe("ProfilePage", () => {
 
     renderAt("/@budi");
 
-    expect(await screen.findByText("Budi")).toBeTruthy();
+    expect((await screen.findAllByText("Budi")).length).toBeGreaterThan(0);
     expect(document.querySelectorAll(".profile-bio").length).toBe(0);
   });
 
@@ -273,7 +273,7 @@ describe("ProfilePage", () => {
 
     renderAt("/@budi");
 
-    await screen.findByText("Budi");
+    await screen.findAllByText("Budi");
     const followers = screen.getByRole("link", { name: /12.*Pengikut/ });
     expect(followers.getAttribute("href")).toBe("/@budi/pengikut");
     const following = screen.getByRole("link", { name: /4.*Mengikuti/ });
@@ -301,7 +301,7 @@ describe("ProfilePage", () => {
 
     renderAt("/@wildan");
 
-    await screen.findByText("Wildan");
+    await screen.findAllByText("Wildan");
     expect(screen.queryAllByRole("button", { name: /ikuti/i }).length).toBe(0);
     expect(screen.queryAllByRole("link", { name: /masuk untuk mengikuti/i }).length).toBe(0);
   });
@@ -408,7 +408,7 @@ describe("ProfilePage — posts (Task 6)", () => {
 
     renderAt("/@budi");
 
-    await screen.findByText("Budi");
+    await screen.findAllByText("Budi");
     expect(await screen.findByText("Kiriman pertama")).toBeTruthy();
     expect(screen.getByText("Kiriman kedua")).toBeTruthy();
 
@@ -431,7 +431,7 @@ describe("ProfilePage — posts (Task 6)", () => {
 
     renderAt("/@budi");
 
-    await screen.findByText("Budi");
+    await screen.findAllByText("Budi");
     expect(await screen.findByText("Kiriman publik")).toBeTruthy();
 
     // Fix round 1, item 4: a signed-out visitor must never be treated as the
@@ -451,7 +451,7 @@ describe("ProfilePage — posts (Task 6)", () => {
 
     renderAt("/@budi");
 
-    await screen.findByText("Budi");
+    await screen.findAllByText("Budi");
     expect(await screen.findByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
     expect(screen.queryAllByText("Memuat...").length).toBe(0);
   });
@@ -504,13 +504,13 @@ describe("ProfilePage — posts (Task 6)", () => {
     renderAt("/@budi");
 
     // Guard: the header actually loaded.
-    await screen.findByText("Budi");
+    await screen.findAllByText("Budi");
     // Guard: the post load actually failed and PostFeed's own error rendered
     // — proof this isn't just "we didn't wait long enough".
     await screen.findByRole("alert");
 
     // The point: the header is STILL there next to that error.
-    expect(screen.getByText("Budi")).toBeTruthy();
+    expect(screen.getAllByText("Budi").length).toBeGreaterThan(0);
     expect(screen.getByText("@budi")).toBeTruthy();
   });
 
@@ -945,7 +945,7 @@ describe("ProfilePage — the membership offer (Task 10)", () => {
     ) as unknown as typeof fetch;
 
     renderAt("/@budi");
-    await screen.findByText("Budi");
+    await screen.findAllByText("Budi");
 
     const offer = await screen.findByTestId("membership-tier-tier-1");
     expect(offer.textContent).toContain("Anggota");
@@ -964,7 +964,7 @@ describe("ProfilePage — the membership offer (Task 10)", () => {
     ) as unknown as typeof fetch;
 
     renderAt("/@budi");
-    await screen.findByText("Budi");
+    await screen.findAllByText("Budi");
 
     expect(document.querySelectorAll(".membership-offer").length).toBe(0);
     expect(screen.queryAllByRole("button", { name: /Jadi anggota/ }).length).toBe(0);
@@ -985,7 +985,7 @@ describe("ProfilePage — the membership offer (Task 10)", () => {
     ) as unknown as typeof fetch;
 
     renderAt("/@budi");
-    await screen.findByText("Budi");
+    await screen.findAllByText("Budi");
 
     const panel = await screen.findByTestId("membership-member");
     expect(panel.textContent).toContain("Anda sudah menjadi anggota");
@@ -1013,7 +1013,7 @@ describe("ProfilePage — the membership offer (Task 10)", () => {
     ) as unknown as typeof fetch;
 
     renderAt("/@budi");
-    await screen.findByText("Budi");
+    await screen.findAllByText("Budi");
 
     const panel = await screen.findByTestId("membership-ended");
     expect(panel.textContent).toContain("sudah berakhir");
@@ -1036,7 +1036,7 @@ describe("ProfilePage — the membership offer (Task 10)", () => {
     ) as unknown as typeof fetch;
 
     renderAt("/@budi");
-    await screen.findByText("Budi");
+    await screen.findAllByText("Budi");
 
     expect(await screen.findByRole("button", { name: "Jadi anggota — Anggota" })).toBeTruthy();
     expect(screen.queryAllByTestId("membership-ended").length).toBe(0);
@@ -1067,7 +1067,7 @@ describe("ProfilePage — a response with no membership field at all", () => {
 
     // The page itself is intact: the header, the counts and the feed's own
     // empty state — none of which has anything to do with memberships.
-    expect(await screen.findByText("Budi")).toBeTruthy();
+    expect((await screen.findAllByText("Budi")).length).toBeGreaterThan(0);
     expect(screen.getByText("@budi")).toBeTruthy();
     expect(await screen.findByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
     expect(document.querySelectorAll(".membership-offer").length).toBe(0);
