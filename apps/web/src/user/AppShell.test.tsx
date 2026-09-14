@@ -274,8 +274,8 @@ describe("AppShell — the Komunitas submenu", () => {
     global.fetch = mock(async () =>
       jsonResponse({
         communities: [
-          { slug: "kelas-desain", name: "Kelas Desain" },
-          { slug: "bimbel-snbt", name: "Bimbel SNBT" },
+          { slug: "kelas-desain", name: "Kelas Desain", isOwner: true },
+          { slug: "bimbel-snbt", name: "Bimbel SNBT", isOwner: false },
         ],
       })
     ) as unknown as typeof fetch;
@@ -292,7 +292,7 @@ describe("AppShell — the Komunitas submenu", () => {
 
   it("starts collapsed by default, toggling open and closed on click", async () => {
     global.fetch = mock(async () =>
-      jsonResponse({ communities: [{ slug: "kelas-desain", name: "Kelas Desain" }] })
+      jsonResponse({ communities: [{ slug: "kelas-desain", name: "Kelas Desain", isOwner: true }] })
     ) as unknown as typeof fetch;
     setUserSession("jwt-abc", USER);
     renderShellAt("/beranda");
@@ -333,5 +333,54 @@ describe("AppShell — the Komunitas submenu", () => {
     fireEvent.click(screen.getByRole("button", { name: "Tutup navigasi" }));
 
     expect(screen.queryAllByRole("link", { name: "Kelas Desain" }).length).toBe(0);
+  });
+});
+
+/**
+ * The sidebar's "Dashboard Creator" submenu — `Sidebar.tsx`'s
+ * `DashboardCreatorGroup`, `KomunitasGroup`'s sibling, filtered from the same
+ * `useMyCommunities` read down to `isOwner: true` rows. Links to
+ * `CreatorDashboardPage`'s route rather than the community's own page.
+ */
+describe("AppShell — the Dashboard Creator submenu", () => {
+  it("does not render at all when signed out", async () => {
+    renderShellAt("/beranda");
+
+    await waitFor(() => {
+      expect(screen.queryAllByRole("button", { name: "Dashboard Creator" }).length).toBe(0);
+    });
+  });
+
+  it("signed in owning no communities: shows an empty note and a link to create one", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({ communities: [{ slug: "bimbel-snbt", name: "Bimbel SNBT", isOwner: false }] })
+    ) as unknown as typeof fetch;
+    setUserSession("jwt-abc", USER);
+    renderShellAt("/beranda");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Dashboard Creator" }));
+
+    expect(await screen.findByText(/Anda belum memiliki komunitas/)).toBeTruthy();
+    const link = screen.getByRole("link", { name: "Buat komunitas" });
+    expect(link.getAttribute("href")).toBe("/komunitas/baru");
+  });
+
+  it("lists only the communities the viewer owns, linking to their dashboard page", async () => {
+    global.fetch = mock(async () =>
+      jsonResponse({
+        communities: [
+          { slug: "kelas-desain", name: "Kelas Desain", isOwner: true },
+          { slug: "bimbel-snbt", name: "Bimbel SNBT", isOwner: false },
+        ],
+      })
+    ) as unknown as typeof fetch;
+    setUserSession("jwt-abc", USER);
+    renderShellAt("/beranda");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Dashboard Creator" }));
+
+    const kelasLink = await screen.findByRole("link", { name: "Kelas Desain" });
+    expect(kelasLink.getAttribute("href")).toBe("/komunitas/kelas-desain/dashboard");
+    expect(screen.queryAllByRole("link", { name: "Bimbel SNBT" }).length).toBe(0);
   });
 });

@@ -730,7 +730,8 @@ describe("routing — the shell partition of the real route table", () => {
 
     // Phase 1 added the two `/komunitas` paths; Task 9 added the discussion
     // page; Phase 3 added the kegiatan page beside it; Phase 7 added the
-    // live room. Spelled out rather
+    // live room; the sidebar's "Dashboard Creator" submenu added the
+    // dashboard page. Spelled out rather
     // than counted, the same discipline the rest of this file keeps: a set
     // that gained a route nobody meant to add should fail here, naming it.
     expect(inside).toEqual([
@@ -740,6 +741,7 @@ describe("routing — the shell partition of the real route table", () => {
       "/beranda",
       "/discover",
       "/komunitas/:slug",
+      "/komunitas/:slug/dashboard",
       "/komunitas/:slug/diskusi/:postId",
       "/komunitas/:slug/kegiatan/:postId",
       "/komunitas/baru",

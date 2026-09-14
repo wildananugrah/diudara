@@ -2139,10 +2139,15 @@ export interface CommunityMemberRow {
   joinedAt: string;
 }
 
-/** One row of the sidebar's "Komunitas" submenu — the API's `MyCommunityRow`. */
+/**
+ * One row of the sidebar's "Komunitas" submenu — the API's `MyCommunityRow`.
+ * `isOwner` also feeds the sidebar's "Dashboard Creator" submenu, which is
+ * this same list filtered down to the rows the viewer owns.
+ */
 export interface MyCommunityRow {
   slug: string;
   name: string;
+  isOwner: boolean;
 }
 
 /**

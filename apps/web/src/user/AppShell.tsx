@@ -76,7 +76,10 @@ function useMyCommunities(signedIn: boolean): MyCommunityRow[] | null {
     let cancelled = false;
     listMyCommunities()
       .then((page) => {
-        if (!cancelled) setCommunities(page.communities);
+        // ponytail: trust boundary — a response missing/malformed `communities`
+        // (seen from tests that stub `fetch` broadly for an unrelated endpoint)
+        // must not hand every consumer of this hook a non-array to crash on.
+        if (!cancelled) setCommunities(Array.isArray(page.communities) ? page.communities : []);
       })
       .catch(() => {
         if (!cancelled) setCommunities(null);

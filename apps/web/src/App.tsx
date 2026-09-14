@@ -17,6 +17,7 @@ import SiaranPage from "./user/SiaranPage";
 import DiscoverPage from "./user/DiscoverPage";
 import CommunityPage from "./user/CommunityPage";
 import CommunityCreatePage from "./user/CommunityCreatePage";
+import CreatorDashboardPage from "./user/CreatorDashboardPage";
 import DiscussionPage from "./user/DiscussionPage";
 import { loadPostImageLimit, repairSplitSession } from "./user/apiClient";
 
@@ -98,6 +99,15 @@ export function AppRoutes() {
         */}
         <Route path="/komunitas/baru" element={<CommunityCreatePage />} />
         <Route path="/komunitas/:slug" element={<CommunityPage />} />
+        {/*
+          The sidebar's "Dashboard Creator" submenu (`Sidebar.tsx`'s
+          `DashboardCreatorGroup`) links here — the owner's numbers on their
+          own page rather than a query param on `CommunityPage`, see
+          `CreatorDashboardPage`'s own docstring. Declared beside the other
+          `/komunitas/:slug/*` routes and, like them, above the catch-all
+          `/:handleParam`.
+        */}
+        <Route path="/komunitas/:slug/dashboard" element={<CreatorDashboardPage />} />
         {/*
           Task 9 (ruling R11): a community post on its own page, with its comment
           thread — the link every Diskusi-tab card carries. Declared AFTER

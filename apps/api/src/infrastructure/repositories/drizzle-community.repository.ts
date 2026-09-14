@@ -384,7 +384,11 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
 
   async listJoinedByMember(userId: string): Promise<MyCommunityRow[]> {
     return this.db
-      .select({ slug: communities.slug, name: communities.name })
+      .select({
+        slug: communities.slug,
+        name: communities.name,
+        isOwner: sql<boolean>`${communities.ownerId} = ${userId}`,
+      })
       .from(communityMembers)
       .innerJoin(communities, eq(communityMembers.communityId, communities.id))
       .where(eq(communityMembers.userId, userId))

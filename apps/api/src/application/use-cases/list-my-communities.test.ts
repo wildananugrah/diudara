@@ -63,8 +63,8 @@ describe("ListMyCommunities", () => {
   it("answers with the repository's rows for this viewer", async () => {
     const communities = new FakeCommunityRepository();
     communities.rows = [
-      { slug: "kelas-desain", name: "Kelas Desain" },
-      { slug: "bimbel-snbt", name: "Bimbel SNBT" },
+      { slug: "kelas-desain", name: "Kelas Desain", isOwner: true },
+      { slug: "bimbel-snbt", name: "Bimbel SNBT", isOwner: false },
     ];
     const useCase = new ListMyCommunities(communities);
 

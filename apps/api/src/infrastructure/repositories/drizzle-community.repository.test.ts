@@ -363,18 +363,34 @@ describe("DrizzleCommunityRepository", () => {
       const rows = await repo().listJoinedByMember(memberId);
 
       expect(rows).toEqual([
-        { slug: "alpha-community", name: "Alpha Community" },
-        { slug: "zed-community", name: "Zed Community" },
+        { slug: "alpha-community", name: "Alpha Community", isOwner: false },
+        { slug: "zed-community", name: "Zed Community", isOwner: false },
       ]);
     });
 
-    it("includes communities the caller owns, not only ones they joined as a member", async () => {
+    it("includes communities the caller owns, not only ones they joined as a member — flagged isOwner", async () => {
       const ownerId = await seedUser("wildan");
       const created = await create(ownerId, { slug: "kelas-desain", name: "Kelas Desain" });
 
       const rows = await repo().listJoinedByMember(ownerId);
 
-      expect(rows).toEqual([{ slug: created.slug, name: created.name }]);
+      expect(rows).toEqual([{ slug: created.slug, name: created.name, isOwner: true }]);
+    });
+
+    it("flags a community isOwner: false for a member who is not its owner, true for one who is, in the same list", async () => {
+      const ownerId = await seedUser("wildan");
+      const memberId = await seedUser("rina");
+      const owned = await create(ownerId, { slug: "owned-by-rina", name: "Owned By Rina" });
+      const joined = await create(memberId, { slug: "joined-by-rina", name: "Joined By Rina" });
+      await joinAt(owned.id, memberId, new Date());
+      await joinAt(joined.id, ownerId, new Date());
+
+      const rows = await repo().listJoinedByMember(memberId);
+
+      expect(rows).toEqual([
+        { slug: "joined-by-rina", name: "Joined By Rina", isOwner: true },
+        { slug: "owned-by-rina", name: "Owned By Rina", isOwner: false },
+      ]);
     });
 
     it("answers empty for someone in no communities", async () => {

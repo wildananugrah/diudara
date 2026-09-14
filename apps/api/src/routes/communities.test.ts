@@ -1210,9 +1210,22 @@ describe("GET /communities/mine — the sidebar's Komunitas submenu", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       communities: [
-        { slug: "alpha-community", name: "Alpha Community" },
-        { slug: "zed-community", name: "Zed Community" },
+        { slug: "alpha-community", name: "Alpha Community", isOwner: true },
+        { slug: "zed-community", name: "Zed Community", isOwner: true },
       ],
+    });
+  });
+
+  it("flags isOwner: false for a community the caller joined but does not own", async () => {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    await createCommunity(a, ownerToken, KELAS);
+    const memberToken = await joinAs(a, "rina", "rina@example.com");
+
+    const res = await a.request("/communities/mine", { headers: authed(memberToken) });
+
+    expect(await res.json()).toEqual({
+      communities: [{ slug: "kelas-desain", name: "Kelas Desain", isOwner: false }],
     });
   });
 

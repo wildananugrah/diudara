@@ -44,10 +44,19 @@ export interface CommunityMemberRow {
   joinedAt: Date;
 }
 
-/** One row of the sidebar's "Komunitas" submenu — see `listJoinedByMember`. */
+/**
+ * One row of the sidebar's "Komunitas" submenu — see `listJoinedByMember`.
+ *
+ * `isOwner` is what lets ONE fetch also feed the "Dashboard Creator" submenu
+ * (`ListMyCommunities`'s only caller filters this same list down to
+ * `isOwner === true`) rather than a second query: an owner is always also a
+ * member, by `CreateCommunity`'s own invariant (it writes both rows in one
+ * transaction), so "owned" is never anything but a subset of "joined".
+ */
 export interface MyCommunityRow {
   slug: string;
   name: string;
+  isOwner: boolean;
 }
 
 export interface BrowseCommunitiesQuery {
