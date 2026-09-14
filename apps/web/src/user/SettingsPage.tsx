@@ -124,7 +124,7 @@ function SettingsForm() {
     return (
       <>
         <Header title="Memuat..." />
-        <main className="user-page">
+        <main className="page-container">
           <p>Memuat...</p>
         </main>
       </>
@@ -135,7 +135,7 @@ function SettingsForm() {
     return (
       <>
         <Header title="Gagal memuat profil" />
-        <main className="user-page">
+        <main className="page-container">
           <p>{load.message}</p>
         </main>
       </>
@@ -174,100 +174,117 @@ function SettingsForm() {
           </button>
         }
       />
-      <main className="user-page">
-      <div className="card stack">
-        <p className="muted">@{profile.handle}</p>
-        <p className="muted">{profile.email}</p>
+      <main className="page-container">
+      {/*
+        The same wide content + sidebar split `CommunityPage`'s Diskusi tab
+        and the redesigned `ProfilePage` use — single column under 768px,
+        two above. The account form is the primary reason anyone is on this
+        page, so it takes the main column; the seller-facing widgets below
+        it are each already their own bordered `.card` (`MembershipSettings`,
+        `MembershipRequests`, `SubscriberList`), so the sidebar column takes
+        them as-is, no extra wrapper needed — the same reuse `ProfilePage`
+        applies to `MembershipOffer`.
+      */}
+      <div className="community-layout">
+        <div className="community-main">
+          <div className="card stack">
+            <p className="muted">@{profile.handle}</p>
+            <p className="muted">{profile.email}</p>
 
-        <form onSubmit={handleSubmit} className="stack" noValidate>
-          <Field label="Nama tampilan" name="displayName" error={fieldErrors.displayName}>
-            <input
-              id="field-displayName"
-              type="text"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              aria-invalid={fieldErrors.displayName !== undefined}
-            />
-          </Field>
+            <form onSubmit={handleSubmit} className="stack" noValidate>
+              <Field label="Nama tampilan" name="displayName" error={fieldErrors.displayName}>
+                <input
+                  id="field-displayName"
+                  type="text"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  aria-invalid={fieldErrors.displayName !== undefined}
+                />
+              </Field>
 
-          <Field label="Bio" name="bio" error={fieldErrors.bio}>
-            <textarea
-              id="field-bio"
-              value={bio}
-              onChange={(e) => setBio(e.target.value)}
-              aria-invalid={fieldErrors.bio !== undefined}
-            />
-          </Field>
+              <Field label="Bio" name="bio" error={fieldErrors.bio}>
+                <textarea
+                  id="field-bio"
+                  value={bio}
+                  onChange={(e) => setBio(e.target.value)}
+                  aria-invalid={fieldErrors.bio !== undefined}
+                />
+              </Field>
+
+              {/*
+                Whole-branch review item 1: before this, GET /users/me returned
+                whatsappNumber but PATCH /users/me had no field to change it —
+                a number set (or skipped) at signup was permanent. This is the
+                second reset channel spec §5 promises, so a wrong or missing
+                value here was a real, unrecoverable cost, not a cosmetic one —
+                see the spec's own corrected §8. Editable exactly like bio now,
+                not read-only.
+              */}
+              <Field
+                label="Nomor WhatsApp"
+                name="whatsappNumber"
+                error={fieldErrors.whatsappNumber}
+                hint="Untuk memulihkan sandi jika Anda kehilangan akses ke email, dan untuk memberi tahu Anda saat ada siaran langsung."
+              >
+                <input
+                  id="field-whatsappNumber"
+                  type="tel"
+                  value={whatsappNumber}
+                  onChange={(e) => setWhatsappNumber(e.target.value)}
+                  aria-invalid={fieldErrors.whatsappNumber !== undefined}
+                />
+              </Field>
+
+              {message !== null ? (
+                <p className="form-error" role="alert">
+                  {message}
+                </p>
+              ) : null}
+
+              {saved && message === null ? <p className="form-ok">Perubahan disimpan.</p> : null}
+
+              <button type="submit" className="button-primary" disabled={submitting}>
+                {submitting ? "Menyimpan..." : "Simpan perubahan"}
+              </button>
+            </form>
+          </div>
+        </div>
+
+        <div className="community-sidebar">
+          {/*
+            Task 9 (spec §5-§6): connecting a payout account and defining what
+            you sell live in Pengaturan, on the seller's own account. They
+            used to be expected in `/dashboard/*`, a different app for a
+            different account type; Phase 8 (retire-telegram) deleted it, so
+            this is not one of two places they could be — it is the only one.
+
+            It loads its own payout status rather than being handed one, so a
+            failure on either side is independent: this page already refuses
+            to render at all when `GET /users/me` fails, and a payout status
+            that cannot be read must not be able to take the profile form
+            down with it.
+          */}
+          <MembershipSettings />
 
           {/*
-            Whole-branch review item 1: before this, GET /users/me returned
-            whatsappNumber but PATCH /users/me had no field to change it —
-            a number set (or skipped) at signup was permanent. This is the
-            second reset channel spec §5 promises, so a wrong or missing
-            value here was a real, unrecoverable cost, not a cosmetic one —
-            see the spec's own corrected §8. Editable exactly like bio now,
-            not read-only.
+            Task 7 of "free memberships" (spec §2.4): the owner's queue of
+            pending free-tier requests, waiting on an approve/reject from
+            this creator. A separate component for the same reason
+            `SubscriberList` is — see `MembershipRequests`'s own docstring.
           */}
-          <Field
-            label="Nomor WhatsApp"
-            name="whatsappNumber"
-            error={fieldErrors.whatsappNumber}
-            hint="Untuk memulihkan sandi jika Anda kehilangan akses ke email, dan untuk memberi tahu Anda saat ada siaran langsung."
-          >
-            <input
-              id="field-whatsappNumber"
-              type="tel"
-              value={whatsappNumber}
-              onChange={(e) => setWhatsappNumber(e.target.value)}
-              aria-invalid={fieldErrors.whatsappNumber !== undefined}
-            />
-          </Field>
+          <MembershipRequests />
 
-          {message !== null ? (
-            <p className="form-error" role="alert">
-              {message}
-            </p>
-          ) : null}
-
-          {saved && message === null ? <p className="form-ok">Perubahan disimpan.</p> : null}
-
-          <button type="submit" className="button-primary" disabled={submitting}>
-            {submitting ? "Menyimpan..." : "Simpan perubahan"}
-          </button>
-        </form>
+          {/*
+            Task 6 of Phase 5b (spec §8): who currently subscribes to YOU. A
+            separate component from `MembershipSettings` — see
+            `SubscriberList`'s own docstring for why — that loads its own
+            list independently, for the same reason `MembershipSettings`
+            loads its own payout status independently: a failure here must
+            not be able to take the rest of this page down with it.
+          */}
+          <SubscriberList />
+        </div>
       </div>
-
-      {/*
-        Task 9 (spec §5-§6): connecting a payout account and defining what you
-        sell live in Pengaturan, on the seller's own account. They used to be
-        expected in `/dashboard/*`, a different app for a different account
-        type; Phase 8 (retire-telegram) deleted it, so this is not one of two
-        places they could be — it is the only one.
-
-        It loads its own payout status rather than being handed one, so a
-        failure on either side is independent: this page already refuses to
-        render at all when `GET /users/me` fails, and a payout status that
-        cannot be read must not be able to take the profile form down with it.
-      */}
-      <MembershipSettings />
-
-      {/*
-        Task 7 of "free memberships" (spec §2.4): the owner's queue of
-        pending free-tier requests, waiting on an approve/reject from this
-        creator. A separate component for the same reason `SubscriberList`
-        is — see `MembershipRequests`'s own docstring.
-      */}
-      <MembershipRequests />
-
-      {/*
-        Task 6 of Phase 5b (spec §8): who currently subscribes to YOU. A
-        separate component from `MembershipSettings` — see `SubscriberList`'s
-        own docstring for why — that loads its own list independently, for
-        the same reason `MembershipSettings` loads its own payout status
-        independently: a failure here must not be able to take the rest of
-        this page down with it.
-      */}
-      <SubscriberList />
       </main>
     </>
   );
