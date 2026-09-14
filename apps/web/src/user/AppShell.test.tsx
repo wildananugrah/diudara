@@ -57,11 +57,23 @@ afterEach(() => {
   cleanup();
 });
 
+/**
+ * The labels `STATIC_DESTINATIONS` currently produces. Beranda and Siaran were
+ * commented out of that list in "update sidebar menu" (397f72e) — their routes
+ * still exist and are still reachable, they are simply no longer advertised in
+ * the nav, so these tests assert what the nav shows rather than what routes the
+ * app has. Uncommenting them there means adding them back here.
+ *
+ * The property under test is unchanged and is the reason this list is asserted
+ * at all: ONE source rendered TWICE, as a bar and a rail.
+ */
+const STATIC_NAV_LABELS = ["Discover"];
+
 describe("AppShell", () => {
-  it("renders the three fixed destinations twice each — one source, a bottom bar and a side rail", () => {
+  it("renders each fixed destination twice — one source, a bottom bar and a side rail", () => {
     renderShellAt("/beranda");
 
-    for (const label of ["Beranda", "Discover", "Siaran"]) {
+    for (const label of STATIC_NAV_LABELS) {
       expect(screen.getAllByRole("link", { name: label }).length).toBe(2);
     }
   });
@@ -100,9 +112,9 @@ describe("AppShell", () => {
     renderShellAt("/beranda");
     expect(screen.getByText("Beranda page content")).toBeTruthy();
 
-    fireEvent.click(screen.getAllByRole("link", { name: "Siaran" })[0]);
+    fireEvent.click(screen.getAllByRole("link", { name: "Discover" })[0]);
 
-    expect(screen.getByText("Siaran page content")).toBeTruthy();
+    expect(screen.getByText("Discover page content")).toBeTruthy();
     expect(screen.queryAllByText("Beranda page content").length).toBe(0);
   });
 
@@ -153,7 +165,7 @@ describe("AppShell", () => {
 describe("AppShell — the Udara shell", () => {
   it("still renders one destination list twice, as a rail and a bar", () => {
     renderShellAt("/beranda");
-    for (const label of ["Beranda", "Discover", "Siaran"]) {
+    for (const label of STATIC_NAV_LABELS) {
       expect(screen.getAllByRole("link", { name: label }).length).toBe(2);
     }
   });
@@ -175,7 +187,7 @@ describe("AppShell — the Udara shell", () => {
     fireEvent.click(screen.getByRole("button", { name: "Tutup navigasi" }));
 
     // Still two of each: the bar is untouched by the rail's collapse.
-    expect(screen.getAllByRole("link", { name: "Beranda" }).length).toBe(2);
+    expect(screen.getAllByRole("link", { name: "Discover" }).length).toBe(2);
   });
 });
 /**
