@@ -33,6 +33,14 @@ type LoadState =
  * **Nothing here gates anything.** A lesson is always readable; the paid
  * material is its ATTACHED DOCUMENT, and that lock is Phase 4a's, reported by
  * the server and rendered with Phase 4a's own download.
+ *
+ * **Card-styled to match the reference syllabus design** — numbered section
+ * cards, a bordered lesson list, and a "materi selanjutnya" quick link in the
+ * viewer, all derived from data this tab already has. Deliberately NOT
+ * matched further: the reference's per-lesson type icons (video/audio/quiz),
+ * durations and completion state have no backing field on `LessonRow` — this
+ * app has one kind of lesson (title, body, an optional document), so those
+ * are skipped rather than invented.
  */
 export default function MateriTab({ slug, viewerIsOwner }: Props) {
   const [sections, setSections] = useState<SectionRow[]>([]);
@@ -167,6 +175,16 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
     );
   }
 
+  // The section the selected lesson lives in, and its own next sibling —
+  // both derived from `sections`, already in hand from the one fetch above.
+  // No second read: `SectionRow.lessons` is already position-ordered.
+  const selectedSection =
+    selected === null ? null : sections.find((row) => row.lessons.some((l) => l.id === selected.id)) ?? null;
+  const nextLesson =
+    selectedSection === null || selected === null
+      ? null
+      : (selectedSection.lessons[selectedSection.lessons.findIndex((l) => l.id === selected.id) + 1] ?? null);
+
   return (
     <section className="materi-tab" data-viewing={selected === null ? undefined : "lesson"}>
       {actionError !== null ? (
@@ -179,17 +197,21 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
         {sections.length === 0 ? (
           <p className="empty">Belum ada materi.</p>
         ) : (
-          sections.map((section) => (
+          sections.map((section, index) => (
             <div className="materi-section" key={section.id}>
-              <h4>
-                {section.title}
-                <span className="muted"> · {section.lessonCount} materi</span>
-              </h4>
-              <ul>
+              <div className="materi-section-head">
+                <span className="materi-section-index">{index + 1}</span>
+                <div className="materi-section-heading">
+                  <h4>{section.title}</h4>
+                  <span className="materi-section-count muted">{section.lessonCount} materi</span>
+                </div>
+              </div>
+              <ul className="materi-lesson-list">
                 {section.lessons.map((lesson) => (
-                  <li key={lesson.id}>
+                  <li className="materi-lesson-row" key={lesson.id}>
                     <button
                       type="button"
+                      className="materi-lesson-button"
                       aria-current={selected?.id === lesson.id}
                       onClick={() => setSelected(lesson)}
                     >
@@ -201,7 +223,12 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
                       ) : null}
                     </button>
                     {viewerIsOwner ? (
-                      <button type="button" disabled={busy} onClick={() => removeLesson(lesson)}>
+                      <button
+                        type="button"
+                        className="button-quiet"
+                        disabled={busy}
+                        onClick={() => removeLesson(lesson)}
+                      >
                         Hapus
                       </button>
                     ) : null}
@@ -220,7 +247,7 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
         )}
 
         {viewerIsOwner ? (
-          <form className="materi-form" onSubmit={addSection}>
+          <form className="materi-form materi-form-section" onSubmit={addSection}>
             <label htmlFor="section-title">Bagian baru</label>
             <input id="section-title" name="section-title" maxLength={160} required />
             <button type="submit" disabled={busy}>
@@ -242,6 +269,9 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
             >
               Kembali
             </button>
+            {selectedSection !== null ? (
+              <p className="materi-viewer-eyebrow muted">{selectedSection.title}</p>
+            ) : null}
             <h4>{selected.title}</h4>
             {/* A plain text node, never dangerouslySetInnerHTML — the rule
                 `PostCard` records for this class of untrusted input. */}
@@ -255,10 +285,26 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
                 Lampiran khusus anggota berbayar — {selected.attachment.name}
               </p>
             ) : (
-              <button type="button" disabled={busy} onClick={() => handleDownload(selected)}>
+              <button
+                type="button"
+                className="materi-attachment"
+                disabled={busy}
+                onClick={() => handleDownload(selected)}
+              >
                 Unduh {selected.attachment.name} ({formatBytes(selected.attachment.byteSize)})
               </button>
             )}
+
+            {nextLesson !== null ? (
+              <button
+                type="button"
+                className="materi-next"
+                onClick={() => setSelected(nextLesson)}
+              >
+                <span className="muted">Materi selanjutnya</span>
+                <span>{nextLesson.title}</span>
+              </button>
+            ) : null}
           </>
         )}
       </div>
@@ -292,12 +338,14 @@ function SectionAuthoring({
       <input id="lesson-title" name="lesson-title" maxLength={160} required />
       <label htmlFor="lesson-body">Isi materi</label>
       <textarea id="lesson-body" name="lesson-body" rows={3} required />
-      <button type="submit" disabled={busy}>
-        Tambah materi
-      </button>
-      <button type="button" disabled={busy} onClick={onRemove}>
-        Hapus bagian
-      </button>
+      <div className="materi-form-actions">
+        <button type="submit" disabled={busy}>
+          Tambah materi
+        </button>
+        <button type="button" className="button-quiet" disabled={busy} onClick={onRemove}>
+          Hapus bagian
+        </button>
+      </div>
     </form>
   );
 }

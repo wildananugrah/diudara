@@ -206,6 +206,48 @@ describe("MateriTab", () => {
     expect(calls.filter((call) => call.startsWith("DELETE")).length).toBe(0);
   });
 
+  it("offers a quick link to the next lesson in the same section, and it navigates", async () => {
+    stubFetch({
+      sections: [
+        aSection({
+          lessonCount: 2,
+          lessons: [
+            { id: "l1", title: "Pengenalan", body: "mulai dari sini", position: 1, attachment: null },
+            { id: "l2", title: "Lanjutan", body: "lanjut ke sini", position: 2, attachment: null },
+          ],
+        }),
+      ],
+    });
+    renderTab();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Pengenalan/ }));
+    await screen.findByText("mulai dari sini");
+
+    fireEvent.click(screen.getByRole("button", { name: /Materi selanjutnya/ }));
+
+    await screen.findByText("lanjut ke sini");
+  });
+
+  it("the last lesson in a section offers no next-lesson link", async () => {
+    stubFetch({
+      sections: [
+        aSection({
+          lessonCount: 2,
+          lessons: [
+            { id: "l1", title: "Pengenalan", body: "mulai dari sini", position: 1, attachment: null },
+            { id: "l2", title: "Lanjutan", body: "lanjut ke sini", position: 2, attachment: null },
+          ],
+        }),
+      ],
+    });
+    renderTab();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Lanjutan/ }));
+    await screen.findByText("lanjut ke sini");
+
+    expect(screen.queryAllByRole("button", { name: /Materi selanjutnya/ }).length).toBe(0);
+  });
+
   it("a failed load shows an error, not an empty syllabus", async () => {
     stubFetch({ status: 500 });
     renderTab();

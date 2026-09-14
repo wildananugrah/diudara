@@ -3716,22 +3716,65 @@ button:disabled {
 
 .materi-tab {
   display: grid;
-  grid-template-columns: minmax(12rem, 18rem) 1fr;
-  gap: 1rem;
+  grid-template-columns: minmax(14rem, 21rem) 1fr;
+  gap: 1.25rem;
   align-items: start;
 }
 
-.materi-section {
-  margin-bottom: 1rem;
+.materi-syllabus {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
 }
 
-.materi-section h4 {
-  margin: 0 0 0.375rem;
+/* One card per section — the same border/radius/background rule the
+   restyled comment and post cards use elsewhere, so this tab reads as part
+   of the same design rather than a leftover prototype box. */
+.materi-section {
+  padding: 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.materi-section-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.625rem;
+  margin-bottom: 0.5rem;
+}
+
+/* The section's position, 1-based — purely a reading aid ("Bagian 1", "Bagian
+   2"); it carries no data of its own beyond the array index. */
+.materi-section-index {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 999px;
+  background: var(--awan);
+  color: var(--ink-700);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.materi-section-heading {
+  min-width: 0;
+}
+
+.materi-section-heading h4 {
+  margin: 0;
   font-size: 0.875rem;
   font-weight: 600;
 }
 
-.materi-section ul {
+.materi-section-count {
+  font-size: 0.75rem;
+}
+
+.materi-lesson-list {
   display: grid;
   gap: 0.125rem;
   margin: 0;
@@ -3739,17 +3782,18 @@ button:disabled {
   list-style: none;
 }
 
-.materi-section li {
+.materi-lesson-row {
   display: flex;
   align-items: center;
   gap: 0.375rem;
 }
 
-.materi-section li > button:first-child {
+.materi-lesson-button {
   flex: 1;
   min-width: 0;
-  padding: 0.375rem 0.5rem;
+  padding: 0.5rem 0.625rem;
   border: none;
+  border-left: 2px solid transparent;
   border-radius: var(--radius-sm);
   background: none;
   color: var(--ink-700);
@@ -3758,28 +3802,37 @@ button:disabled {
   cursor: pointer;
 }
 
-.materi-section li > button:first-child:hover {
+.materi-lesson-button:hover {
   background: var(--awan);
 }
 
 /* The selected lesson. `aria-current` carries it for assistive technology;
-   the tint and weight are what a sighted reader sees — never colour alone. */
-.materi-section li > button[aria-current="true"] {
+   the tint, left border and weight are what a sighted reader sees — never
+   colour alone. */
+.materi-lesson-button[aria-current="true"] {
+  border-left-color: var(--langit);
   background: var(--awan);
   color: var(--langit);
   font-weight: 700;
 }
 
 .materi-viewer {
-  padding: 1rem;
+  padding: 1.25rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);
 }
 
+.materi-viewer-eyebrow {
+  margin: 0 0 0.25rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .materi-viewer h4 {
   margin: 0 0 0.5rem;
-  font-size: 1rem;
+  font-size: 1.0625rem;
   font-weight: 600;
 }
 
@@ -3804,13 +3857,57 @@ button:disabled {
   cursor: pointer;
 }
 
+.materi-attachment {
+  margin-top: 0.875rem;
+  padding: 0.5rem 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--awan);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* The quick link to the next lesson in the same section — real navigation
+   over real sibling data, not a fabricated "up next" recommendation. */
+.materi-next {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.125rem;
+  width: 100%;
+  margin-top: 1rem;
+  padding: 0.75rem 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: none;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.materi-next:hover {
+  background: var(--awan);
+}
+
+.materi-next .muted {
+  font-weight: 400;
+  font-size: 0.75rem;
+}
+
 .materi-form {
   display: grid;
-  gap: 0.25rem;
-  margin-top: 0.5rem;
-  padding: 0.5rem;
-  border: 1px dashed var(--border);
+  gap: 0.3125rem;
+  margin-top: 0.625rem;
+  padding: 0.625rem;
+  border: 1px solid var(--line-soft);
   border-radius: var(--radius-sm);
+  background: var(--surface-sunk);
+}
+
+.materi-form-section {
+  margin-top: 0;
 }
 
 .materi-form label {
@@ -3835,6 +3932,11 @@ button:disabled {
   background: var(--surface);
   font-size: 0.75rem;
   cursor: pointer;
+}
+
+.materi-form-actions {
+  display: flex;
+  gap: 0.5rem;
 }
 
 @media (max-width: 720px) {
