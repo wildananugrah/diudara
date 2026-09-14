@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ALLOWED_DOCUMENT_TYPES, MAX_DOCUMENT_BYTES, isAllowedDocumentType } from "@diudara/shared";
 import {
   createLesson,
   createSection,
@@ -6,6 +7,7 @@ import {
   deleteSection,
   downloadCommunityDocument,
   getSyllabus,
+  uploadCommunityDocument,
   type LessonRow,
   type SectionRow,
 } from "./apiClient";
@@ -111,7 +113,12 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
     }
   }
 
-  async function addLesson(sectionId: string, title: string, body: string): Promise<void> {
+  async function addLesson(
+    sectionId: string,
+    title: string,
+    body: string,
+    documentId?: string
+  ): Promise<void> {
     const section = sections.find((row) => row.id === sectionId);
     setBusy(true);
     setActionError(null);
@@ -121,6 +128,7 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
         title,
         body,
         position: (section?.lessonCount ?? 0) + 1,
+        ...(documentId === undefined ? {} : { documentId }),
       });
       await refresh();
     } catch (error: unknown) {
@@ -237,8 +245,9 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
               </ul>
               {viewerIsOwner ? (
                 <SectionAuthoring
+                  slug={slug}
                   busy={busy}
-                  onAdd={(title, body) => addLesson(section.id, title, body)}
+                  onAdd={(title, body, documentId) => addLesson(section.id, title, body, documentId)}
                   onRemove={() => removeSection(section)}
                 />
               ) : null}
@@ -312,16 +321,96 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
   );
 }
 
-/** The owner's per-section controls. Split out so the list above stays readable. */
+/**
+ * The owner's per-section controls. Split out so the list above stays
+ * readable.
+ *
+ * **The attachment dropzone is `DokumenTab`'s own — copied, not shared**, for
+ * the reason `dashboard/apiClient.ts`'s own docstring gives for its sibling
+ * copies: this form uploads eagerly (the file becomes a real community
+ * document, with its own `documentId`, the moment it is dropped or picked),
+ * then carries that id into `onAdd` when the lesson itself is submitted. A
+ * file dropped and never followed by a submit is simply an unattached
+ * document in the library — the same "unclaimed until named" contract
+ * `uploadMedia`'s own docstring records for a post's images.
+ */
 function SectionAuthoring({
+  slug,
   busy,
   onAdd,
   onRemove,
 }: {
+  slug: string;
   busy: boolean;
-  onAdd: (title: string, body: string) => void;
+  onAdd: (title: string, body: string, documentId?: string) => void;
   onRemove: () => void;
 }) {
+  const [attachment, setAttachment] = useState<{ id: string; name: string } | null>(null);
+  const [attachMembersOnly, setAttachMembersOnly] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  // Purely a highlight while a file is dragged over the dropzone — the drop
+  // itself goes through the same `processFile` path as the file input, so
+  // this never gates an upload, only a CSS class. Mirrors `DokumenTab`'s own.
+  const [isDragging, setIsDragging] = useState(false);
+  const attachmentBusy = busy || attaching;
+
+  async function processFile(file: File): Promise<void> {
+    // Same courtesy check `DokumenTab.processFile` runs, and the same
+    // shared-constant limits — the server remains the authority either way.
+    if (file.size > MAX_DOCUMENT_BYTES) {
+      setAttachError(`Berkas terlalu besar. Batasnya ${formatBytes(MAX_DOCUMENT_BYTES)}.`);
+      return;
+    }
+    if (!isAllowedDocumentType(file.type)) {
+      setAttachError("Format berkas tidak didukung.");
+      return;
+    }
+
+    setAttaching(true);
+    setAttachError(null);
+    try {
+      const created = await uploadCommunityDocument(slug, file, attachMembersOnly);
+      setAttachment({ id: created.id, name: created.name });
+    } catch (error: unknown) {
+      setAttachError(`Lampiran gagal diunggah. ${describeRequestFailure(error)}`);
+    } finally {
+      setAttaching(false);
+    }
+  }
+
+  function handleDragOver(event: React.DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    if (attachmentBusy) return;
+    setIsDragging(true);
+  }
+
+  function handleDragLeave(event: React.DragEvent<HTMLDivElement>): void {
+    // Only the outer dropzone leaving counts — a child element (the label,
+    // the checkbox) firing its own dragleave must not cancel the highlight
+    // while the pointer is still over the dropzone.
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setIsDragging(false);
+  }
+
+  async function handleDrop(event: React.DragEvent<HTMLDivElement>): Promise<void> {
+    event.preventDefault();
+    setIsDragging(false);
+    if (attachmentBusy) return;
+    const file = event.dataTransfer.files[0];
+    if (file === undefined) return;
+    await processFile(file);
+  }
+
+  async function handlePick(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0];
+    // Clear the input immediately so choosing the SAME file twice after a
+    // failure still fires a change event.
+    event.target.value = "";
+    if (file === undefined) return;
+    await processFile(file);
+  }
+
   return (
     <form
       className="materi-form"
@@ -330,14 +419,57 @@ function SectionAuthoring({
         const form = event.target as HTMLFormElement;
         const title = (form.elements.namedItem("lesson-title") as HTMLInputElement).value;
         const body = (form.elements.namedItem("lesson-body") as HTMLTextAreaElement).value;
-        onAdd(title, body);
+        onAdd(title, body, attachment?.id);
         form.reset();
+        setAttachment(null);
+        setAttachMembersOnly(false);
+        setAttachError(null);
       }}
     >
       <label htmlFor="lesson-title">Judul materi</label>
       <input id="lesson-title" name="lesson-title" maxLength={160} required />
       <label htmlFor="lesson-body">Isi materi</label>
       <textarea id="lesson-body" name="lesson-body" rows={3} required />
+
+      <div
+        className={`dokumen-upload${isDragging ? " dokumen-upload-dragging" : ""}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={(event) => void handleDrop(event)}
+      >
+        <label htmlFor="lesson-attachment">Lampiran (opsional)</label>
+        <input
+          id="lesson-attachment"
+          type="file"
+          disabled={attachmentBusy}
+          // The same allowlist the server enforces, so the file picker
+          // filters rather than letting somebody choose a file that will be
+          // refused after it uploads.
+          accept={ALLOWED_DOCUMENT_TYPES.join(",")}
+          onChange={(event) => void handlePick(event)}
+        />
+        <label htmlFor="lesson-attachment-members-only">
+          <input
+            id="lesson-attachment-members-only"
+            type="checkbox"
+            checked={attachMembersOnly}
+            disabled={attachmentBusy}
+            onChange={(event) => setAttachMembersOnly(event.target.checked)}
+          />
+          Khusus anggota berbayar
+        </label>
+        <p className="muted">
+          {attachment !== null
+            ? `Terlampir: ${attachment.name}`
+            : `Maksimal ${formatBytes(MAX_DOCUMENT_BYTES)} per berkas, atau seret berkas ke sini.`}
+        </p>
+        {attachError !== null ? (
+          <p className="form-error" role="alert">
+            {attachError}
+          </p>
+        ) : null}
+      </div>
+
       <div className="materi-form-actions">
         <button type="submit" disabled={busy}>
           Tambah materi

@@ -194,6 +194,69 @@ describe("MateriTab", () => {
     expect(calls.filter((call) => call.startsWith("GET")).length).toBeGreaterThan(1);
   });
 
+  /**
+   * The lesson form's own dropzone — a copy of `DokumenTab`'s. It uploads
+   * eagerly (a real document, its own id) and only THEN attaches on submit,
+   * so this asserts both halves: the upload lands, and the id it returns is
+   * what `createLesson` is sent.
+   */
+  it("uploads a dropped attachment eagerly, then attaches it when the lesson is submitted", async () => {
+    const calls: { url: string; method: string; body: unknown }[] = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      let body: unknown;
+      if (init?.body instanceof FormData) {
+        body = "form-data";
+      } else if (typeof init?.body === "string") {
+        body = JSON.parse(init.body);
+      }
+      calls.push({ url, method, body });
+      if (url.includes("/documents") && method === "POST") {
+        return jsonResponse(
+          { id: "doc-1", name: "Modul.pdf", byteSize: 10, createdAt: "2026-01-01T00:00:00.000Z", uploader: { handle: "wildan", displayName: "Wildan" }, membersOnly: false, mayDownload: true },
+          201
+        );
+      }
+      if (url.includes("/lessons") && method === "POST") {
+        return jsonResponse({ id: "l2", title: "Baru", body: "isi", position: 2, attachment: null }, 201);
+      }
+      return jsonResponse({ sections: [aSection()] });
+    }) as unknown as typeof fetch;
+    renderTab(true);
+    await screen.findByText("Minggu 1");
+
+    const dropzone = screen.getByLabelText("Lampiran (opsional)") as HTMLInputElement;
+    const file = new File([new Uint8Array([1])], "Modul.pdf", { type: "application/pdf" });
+    fireEvent.change(dropzone, { target: { files: [file] } });
+
+    await screen.findByText("Terlampir: Modul.pdf");
+
+    fireEvent.change(screen.getByLabelText("Judul materi"), { target: { value: "Baru" } });
+    fireEvent.change(screen.getByLabelText("Isi materi"), { target: { value: "isi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Tambah materi" }));
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.url.includes("/lessons") && call.method === "POST")).toBe(
+        true
+      )
+    );
+    const lessonCall = calls.find((call) => call.url.includes("/lessons") && call.method === "POST");
+    expect((lessonCall?.body as { documentId?: string }).documentId).toBe("doc-1");
+  });
+
+  it("highlights the attachment dropzone while dragging over it, and clears on drag leave", async () => {
+    stubFetch();
+    const { container } = renderTab(true);
+    await screen.findByText("Minggu 1");
+
+    const dropzone = container.querySelector(".dokumen-upload") as HTMLElement;
+    fireEvent.dragOver(dropzone);
+    expect(dropzone.className).toContain("dokumen-upload-dragging");
+
+    fireEvent.dragLeave(dropzone, { relatedTarget: document.body });
+    expect(dropzone.className).not.toContain("dokumen-upload-dragging");
+  });
+
   /** Deleting a whole section takes its lessons, so it asks first. */
   it("deleting a section confirms, and a cancel sends nothing", async () => {
     window.confirm = mock(() => false) as unknown as typeof window.confirm;

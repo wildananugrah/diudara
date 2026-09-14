@@ -3939,6 +3939,25 @@ button:disabled {
   gap: 0.5rem;
 }
 
+/* The attachment dropzone nested inside this form is `.dokumen-upload`
+   itself (see `SectionAuthoring`'s own docstring) — these three rules undo
+   the plain `.materi-form label`/`input` styling above so it still reads as
+   the same dropzone `DokumenTab` renders standalone. */
+.materi-form .dokumen-upload label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink-700);
+}
+
+.materi-form .dokumen-upload input[type="file"] {
+  padding: 0;
+  border: none;
+}
+
+.materi-form .dokumen-upload input[type="checkbox"] {
+  width: auto;
+}
+
 @media (max-width: 720px) {
   .materi-tab {
     grid-template-columns: 1fr;
