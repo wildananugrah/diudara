@@ -1138,6 +1138,14 @@ button:disabled {
   margin: 0 auto;
 }
 
+/* `/pengaturan` — a single column of stacked cards (the account form, then
+   the seller widgets), not the wide frame's main+sidebar split. Narrowed to
+   the same 36rem every other single-column page (`.user-page`) already
+   settles on, so a form field here isn't stretched across a near-1180px row. */
+.settings-page {
+  max-width: 36rem;
+}
+
 .app-header {
   position: sticky;
   top: 0;
