@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   COMMUNITY_CATEGORIES,
@@ -66,6 +66,15 @@ export default function CoBuilderModal({ onClose }: { onClose: () => void }) {
   const [draftForm, setDraftForm] = useState<DraftForm | null>(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+
+  // Keeps the newest message in view without the user scrolling — a new
+  // reply (or the "Mengetik..." placeholder while one is on the way) is
+  // always what's worth seeing next, so this fires on both.
+  useEffect(() => {
+    const node = transcriptRef.current;
+    if (node !== null) node.scrollTop = node.scrollHeight;
+  }, [messages, sending]);
 
   async function handleSend(event: FormEvent) {
     event.preventDefault();
@@ -117,7 +126,7 @@ export default function CoBuilderModal({ onClose }: { onClose: () => void }) {
         </button>
       </div>
 
-      <div className="chat-transcript" role="log">
+      <div className="chat-transcript" role="log" ref={transcriptRef}>
         {messages.map((message, index) => (
           <div key={index} className={`chat-bubble chat-bubble-${message.role}`}>
             <p>{message.content}</p>
