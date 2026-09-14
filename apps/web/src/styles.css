@@ -2561,6 +2561,23 @@ button:disabled {
   min-width: 0;
 }
 
+/* `.post-composer` (and `.community-feed-guestnote`, shown to a non-member
+   in its place) carry a 12px top margin meant to separate them from
+   whatever sits above — Beranda's tab bar, or the previous post when one is
+   being edited mid-feed. Here there is nothing above: `.community-feed` is
+   `.community-main`'s only child, and `.community-main` is a grid item,
+   which establishes its own block-formatting context. That traps the
+   margin INSIDE `.community-main` instead of letting it escape upward, so
+   it silently becomes 12px of invisible space above the composer's visible
+   border — while `.community-sidebar`'s cards, which carry no such margin,
+   start flush with the grid row. The composer's border then sits 12px below
+   the sidebar's, reading as "the sidebar is higher." Zeroing it here, at the
+   one call site with nothing above to separate from, fixes the alignment
+   without touching the margin where it's actually doing its job. */
+.community-main > .community-feed > :first-child {
+  margin-top: 0;
+}
+
 .community-sidebar {
   display: flex;
   flex-direction: column;
