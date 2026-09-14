@@ -252,6 +252,29 @@ export class DrizzlePostRepository implements PostRepositoryPort {
     return this.readOne(updated.id);
   }
 
+  /**
+   * Every field SET explicitly, `endsAt`/`location` to `null` when omitted —
+   * unlike `create`'s insert above, which spreads optional fields in only
+   * when present. See the port's own docstring for why: this is a complete
+   * re-submission of the schedule, and a stale `endsAt` left behind because
+   * the caller cleared the "waktu selesai" field would be a silent edit
+   * failure nobody could see on the wire.
+   */
+  async updateEvent(
+    id: string,
+    event: { title: string; startsAt: Date; endsAt?: Date; location?: string }
+  ): Promise<void> {
+    await this.db
+      .update(communityEvents)
+      .set({
+        title: event.title,
+        startsAt: event.startsAt,
+        endsAt: event.endsAt ?? null,
+        location: event.location ?? null,
+      })
+      .where(eq(communityEvents.postId, id));
+  }
+
   async softDelete(id: string): Promise<void> {
     // The `isNull(posts.deletedAt)` guard IS present, and idempotency comes
     // from it, not despite it: a repeat call matches zero rows (the row's

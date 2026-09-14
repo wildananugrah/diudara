@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { MAX_POST_BODY_LENGTH, createCommentSchema } from "@diudara/shared";
+import { MAX_POST_BODY_LENGTH, createCommentSchema, eventInputSchema } from "@diudara/shared";
 import { ValidationError } from "../application/errors";
 import { decodeKeysetCursor, type KeysetCursor } from "../domain/keyset-cursor";
 import { uuidParam, validate, validateParams } from "../http/validate";
@@ -82,6 +82,15 @@ function buildPostBodySchema(maxPostImages: number) {
      * server recognises.
      */
     visibility: z.enum(["public", "members"]).optional(),
+    /**
+     * A `kegiatan`'s schedule, re-submitted in full — see `EditPost`'s own
+     * `event` docstring for why an omitted field here CLEARS the column
+     * rather than leaving it alone, unlike `mediaIds`/`visibility` above.
+     * `POST /posts` (a PERSONAL post) never reads this key even though the
+     * schema allows it — the same "shared shape, only some routes use every
+     * field" the schema already carries for `mediaIds` on a media-less post.
+     */
+    event: eventInputSchema.optional(),
   });
 }
 
@@ -196,6 +205,7 @@ export function postRoutes(
         body: string;
         mediaIds?: string[];
         visibility?: "public" | "members";
+        event?: { title: string; startsAt: string; endsAt?: string; location?: string };
       };
       const view = await deps.editPost.execute({
         editorId: c.get("userId"),
@@ -206,6 +216,22 @@ export function postRoutes(
         // repository — see `buildPostBodySchema`'s docstring on `visibility`
         // for why this must never collapse an absent field to `"public"`.
         visibility: input.visibility,
+        // ISO strings in, `Date`s onward — the same boundary conversion
+        // `POST /communities/:slug/posts` already does for create.
+        ...(input.event === undefined
+          ? {}
+          : {
+              event: {
+                title: input.event.title,
+                startsAt: new Date(input.event.startsAt),
+                ...(input.event.endsAt === undefined
+                  ? {}
+                  : { endsAt: new Date(input.event.endsAt) }),
+                ...(input.event.location === undefined
+                  ? {}
+                  : { location: input.event.location }),
+              },
+            }),
       });
       return c.json(view);
     }

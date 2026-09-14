@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import KegiatanTab from "./KegiatanTab";
-import type { CommunityEventRow } from "./apiClient";
+import { setUserSession, type CommunityEventRow } from "./apiClient";
 
 /**
- * The Kegiatan tab — the month grid and the agenda below it, from ONE fetch.
+ * The Kegiatan tab — the month grid and the agenda below it, from ONE fetch,
+ * plus (since the add/view/edit/delete modal) the calendar's OWN writes.
  *
  * **No happy-dom node ever reaches a serialising matcher** (see
  * `no-hanging-dom-assertions.test.ts`): negatives are `queryAllBy…().length`,
@@ -29,10 +30,32 @@ function anEvent(overrides: Partial<CommunityEventRow> = {}): CommunityEventRow 
   };
 }
 
+function aPostView(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "post-1",
+    body: "kelas tatap muka daring",
+    createdAt: "2026-09-15T00:00:00.000Z",
+    editedAt: null,
+    author: { handle: "pakandi", displayName: "Pak Andi" },
+    media: [],
+    membersOnly: false,
+    lockedMediaCount: 0,
+    type: "kegiatan",
+    commentCount: 0,
+    event: { title: "Trigonometri lanjutan", startsAt: STARTS_AT, endsAt: null, location: null },
+    ...overrides,
+  };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
 let originalFetch: typeof fetch;
 
 beforeEach(() => {
   originalFetch = global.fetch;
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -40,30 +63,66 @@ afterEach(() => {
   cleanup();
 });
 
-/** Records every requested URL, so the tests can assert which month was asked for. */
-function stubFetch(events: CommunityEventRow[] = [], status = 200): string[] {
+/**
+ * Routes every request the tab and the modal it opens can make:
+ *  - GET `.../events` — the calendar's own read.
+ *  - GET `/users/posts/:id` — the detail modal's own read on open.
+ *  - POST `.../communities/:slug/posts` — create.
+ *  - PATCH `/users/posts/:id` — edit.
+ *  - DELETE `/users/posts/:id` — delete.
+ * `postDetail` is what every write/detail-read answers with (echoing the
+ * request body's own `body`/`event` back, the way the real API's `toPostView`
+ * does) — one fixture, since these tests are about the TAB folding a
+ * response into `events`, not about the API's own behaviour (that is
+ * `write-post.test.ts`'s and `posts.test.ts`'s job).
+ */
+function stubFetch(
+  options: {
+    events?: CommunityEventRow[];
+    eventsStatus?: number;
+    postDetail?: Record<string, unknown>;
+  } = {}
+): string[] {
   const calls: string[] = [];
-  global.fetch = mock(async (url: string) => {
-    calls.push(url);
-    return new Response(JSON.stringify(status === 200 ? { events } : { error: "nope" }), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    });
+  const post = options.postDetail ?? aPostView();
+  global.fetch = mock(async (url: string, init?: RequestInit) => {
+    calls.push(`${init?.method ?? "GET"} ${url}`);
+    if (url.includes("/events")) {
+      return jsonResponse(
+        options.eventsStatus === undefined || options.eventsStatus === 200
+          ? { events: options.events ?? [] }
+          : { error: "nope" },
+        options.eventsStatus ?? 200
+      );
+    }
+    if (url.includes("/communities/") && url.includes("/posts") && init?.method === "POST") {
+      const body = JSON.parse(init.body as string) as { body: string; event?: unknown };
+      return jsonResponse({ ...post, body: body.body, event: body.event ?? post.event }, 201);
+    }
+    if (url.includes("/users/posts/") && init?.method === "DELETE") {
+      return jsonResponse({ deleted: true });
+    }
+    if (url.includes("/users/posts/") && init?.method === "PATCH") {
+      const body = JSON.parse(init.body as string) as { body: string; event?: unknown };
+      return jsonResponse({ ...post, body: body.body, event: body.event ?? post.event });
+    }
+    // GET /users/posts/:id — the detail modal's own read.
+    return jsonResponse(post);
   }) as unknown as typeof fetch;
   return calls;
 }
 
-function renderTab() {
+function renderTab(viewerIsOwner = false) {
   return render(
     <MemoryRouter>
-      <KegiatanTab slug="kelas-fisika" now={NOW} />
+      <KegiatanTab slug="kelas-fisika" viewerIsOwner={viewerIsOwner} now={NOW} />
     </MemoryRouter>
   );
 }
 
 describe("KegiatanTab", () => {
   it("asks for the WIB month containing now, and names it", async () => {
-    const calls = stubFetch([]);
+    const calls = stubFetch();
     renderTab();
 
     await waitFor(() => expect(calls.length).toBe(1));
@@ -72,7 +131,9 @@ describe("KegiatanTab", () => {
   });
 
   it("renders the agenda from the same fetch the grid uses", async () => {
-    stubFetch([anEvent(), anEvent({ postId: "post-2", title: "Sesi alumni", startsAt: "2026-09-20T13:00:00.000Z" })]);
+    stubFetch({
+      events: [anEvent(), anEvent({ postId: "post-2", title: "Sesi alumni", startsAt: "2026-09-20T13:00:00.000Z" })],
+    });
     renderTab();
 
     // findAllBy, not findBy: each title is rendered twice on purpose, and a
@@ -86,7 +147,7 @@ describe("KegiatanTab", () => {
   it("places an event under its WIB day, not its UTC one", async () => {
     // 16 September, 00:30 WIB = 15 September, 17:30 UTC. A grid bucketing on
     // UTC parts puts this chip in the 15th's cell.
-    stubFetch([anEvent({ startsAt: "2026-09-15T17:30:00.000Z" })]);
+    stubFetch({ events: [anEvent({ startsAt: "2026-09-15T17:30:00.000Z" })] });
     renderTab();
 
     await screen.findByTestId("kegiatan-day-16");
@@ -95,22 +156,8 @@ describe("KegiatanTab", () => {
     expect(screen.getByTestId("kegiatan-day-15").textContent).not.toContain("Trigonometri");
   });
 
-  it("links each agenda row and each chip to the event page", async () => {
-    stubFetch([anEvent()]);
-    renderTab();
-
-    await screen.findAllByRole("link", { name: /Trigonometri lanjutan/ });
-    const hrefs = screen
-      .getAllByRole("link", { name: /Trigonometri lanjutan/ })
-      .map((link) => link.getAttribute("href"));
-    expect(hrefs).toEqual([
-      "/komunitas/kelas-fisika/kegiatan/post-1",
-      "/komunitas/kelas-fisika/kegiatan/post-1",
-    ]);
-  });
-
   it("shows the WIB time on the agenda row", async () => {
-    stubFetch([anEvent()]);
+    stubFetch({ events: [anEvent()] });
     renderTab();
 
     // 09:00Z is 16.00 in Jakarta.
@@ -118,7 +165,7 @@ describe("KegiatanTab", () => {
   });
 
   it("moves to the next month and refetches", async () => {
-    const calls = stubFetch([]);
+    const calls = stubFetch();
     renderTab();
     await waitFor(() => expect(calls.length).toBe(1));
 
@@ -130,7 +177,7 @@ describe("KegiatanTab", () => {
   });
 
   it("moves to the previous month, rolling the year at January", async () => {
-    const calls = stubFetch([]);
+    const calls = stubFetch();
     render(
       <MemoryRouter>
         <KegiatanTab slug="kelas-fisika" now={new Date("2026-01-15T03:00:00.000Z")} />
@@ -145,7 +192,7 @@ describe("KegiatanTab", () => {
   });
 
   it("an empty month says so rather than showing a blank page", async () => {
-    stubFetch([]);
+    stubFetch();
     renderTab();
 
     await screen.findByText(/Belum ada kegiatan/);
@@ -154,7 +201,7 @@ describe("KegiatanTab", () => {
   });
 
   it("a failed fetch shows an error, not an empty calendar", async () => {
-    stubFetch([], 500);
+    stubFetch({ eventsStatus: 500 });
     renderTab();
 
     await screen.findByRole("alert");
@@ -162,7 +209,7 @@ describe("KegiatanTab", () => {
   });
 
   it("renders the weekday header Monday-first", async () => {
-    stubFetch([]);
+    stubFetch();
     renderTab();
 
     await screen.findByText("September 2026");
@@ -171,7 +218,7 @@ describe("KegiatanTab", () => {
   });
 
   it("marks today, and only today", async () => {
-    stubFetch([]);
+    stubFetch();
     renderTab();
 
     await screen.findByTestId("kegiatan-day-4");
@@ -191,11 +238,13 @@ describe("KegiatanTab", () => {
    * the reference does — a cell that grows with its contents breaks the grid.
    */
   it("shows at most two chips a day and counts the rest", async () => {
-    stubFetch([
-      anEvent({ postId: "a", title: "Satu" }),
-      anEvent({ postId: "b", title: "Dua" }),
-      anEvent({ postId: "c", title: "Tiga" }),
-    ]);
+    stubFetch({
+      events: [
+        anEvent({ postId: "a", title: "Satu" }),
+        anEvent({ postId: "b", title: "Dua" }),
+        anEvent({ postId: "c", title: "Tiga" }),
+      ],
+    });
     renderTab();
 
     await screen.findByTestId("kegiatan-day-15");
@@ -206,5 +255,124 @@ describe("KegiatanTab", () => {
     expect(cell.textContent).toContain("+1 lagi");
     // All three are still in the agenda below — the cell is what is capped.
     expect(screen.getAllByText("Tiga").length).toBe(1);
+  });
+});
+
+describe("KegiatanTab — clicking a date to add a kegiatan", () => {
+  it("an owner's day cells are clickable and open the add modal seeded with that date", async () => {
+    stubFetch();
+    renderTab(true);
+
+    await screen.findByTestId("kegiatan-day-15");
+    expect(screen.getByTestId("kegiatan-day-15").getAttribute("role")).toBe("button");
+
+    fireEvent.click(screen.getByTestId("kegiatan-day-15"));
+
+    await screen.findByRole("dialog");
+    expect(screen.getByText("Tambah kegiatan").textContent).toBe("Tambah kegiatan");
+    expect((screen.getByLabelText("Tanggal") as HTMLInputElement).value).toBe("2026-09-15");
+  });
+
+  it("a non-owner's day cells are not clickable at all", async () => {
+    stubFetch();
+    renderTab(false);
+
+    await screen.findByTestId("kegiatan-day-15");
+    expect(screen.getByTestId("kegiatan-day-15").getAttribute("role")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("kegiatan-day-15"));
+    expect(screen.queryAllByRole("dialog").length).toBe(0);
+  });
+
+  it("creates a kegiatan and appends it to the calendar, with no refetch of the month", async () => {
+    stubFetch();
+    renderTab(true);
+    await screen.findByTestId("kegiatan-day-20");
+
+    fireEvent.click(screen.getByTestId("kegiatan-day-20"));
+    await screen.findByRole("dialog");
+
+    fireEvent.change(screen.getByLabelText("Judul kegiatan"), { target: { value: "Sesi Baru" } });
+    fireEvent.change(screen.getByLabelText("Waktu mulai"), { target: { value: "10:00" } });
+    fireEvent.change(screen.getByLabelText("Deskripsi"), { target: { value: "kelas tambahan" } });
+    fireEvent.click(screen.getByRole("button", { name: "Buat kegiatan" }));
+
+    await waitFor(() => expect(screen.queryAllByRole("dialog").length).toBe(0));
+    // On screen without the tab ever re-asking `GET .../events`.
+    expect(screen.getAllByText("Sesi Baru").length).toBe(2); // chip + agenda row
+  });
+});
+
+describe("KegiatanTab — viewing, editing and deleting an existing kegiatan", () => {
+  it("clicking a chip opens the detail modal with the event's own information", async () => {
+    stubFetch({ events: [anEvent()] });
+    renderTab();
+
+    await screen.findByTestId("kegiatan-day-15");
+    fireEvent.click(screen.getByRole("button", { name: "Trigonometri lanjutan" }));
+
+    await screen.findByRole("dialog");
+    expect(screen.getByText("kelas tatap muka daring").textContent).toBe("kelas tatap muka daring");
+    expect(screen.getByText(/Pak Andi/).textContent).toContain("pakandi");
+  });
+
+  it("clicking the agenda row opens the same detail modal", async () => {
+    stubFetch({ events: [anEvent()] });
+    renderTab();
+
+    await screen.findByText("16.00 WIB");
+    // Two rows carry the title — the chip and the agenda row. The agenda
+    // row's own button is the LAST one in document order.
+    const buttons = screen.getAllByRole("button", { name: /Trigonometri lanjutan/ });
+    fireEvent.click(buttons[buttons.length - 1]!);
+
+    await screen.findByRole("dialog");
+    expect(screen.getByText("kelas tatap muka daring").textContent).toBe("kelas tatap muka daring");
+  });
+
+  it("gives the author Edit and Hapus; a stranger sees neither", async () => {
+    stubFetch({ events: [anEvent()] });
+    renderTab();
+    await screen.findByTestId("kegiatan-day-15");
+    fireEvent.click(screen.getByRole("button", { name: "Trigonometri lanjutan" }));
+    await screen.findByRole("dialog");
+
+    // No session at all — `isOwnHandle` reads `getSessionUser()`, which is
+    // null with nothing signed in (this file never calls `setUserSession`).
+    expect(screen.queryAllByRole("button", { name: "Edit" }).length).toBe(0);
+    expect(screen.queryAllByRole("button", { name: "Hapus" }).length).toBe(0);
+  });
+
+  it("editing rewrites the agenda row's title, with no refetch of the month", async () => {
+    setUserSession("token-1", { handle: "pakandi", displayName: "Pak Andi", email: "pak@example.com" });
+    stubFetch({ events: [anEvent()] });
+    renderTab();
+    await screen.findByTestId("kegiatan-day-15");
+    fireEvent.click(screen.getByRole("button", { name: "Trigonometri lanjutan" }));
+    await screen.findByRole("dialog");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Judul kegiatan"), { target: { value: "Jadwal Baru" } });
+    fireEvent.click(screen.getByRole("button", { name: "Simpan" }));
+
+    await waitFor(() => expect(screen.queryAllByRole("dialog").length).toBe(0));
+    expect(screen.getAllByText("Jadwal Baru").length).toBe(2);
+    expect(screen.queryAllByText("Trigonometri lanjutan").length).toBe(0);
+  });
+
+  it("deleting removes the event from the calendar entirely", async () => {
+    setUserSession("token-1", { handle: "pakandi", displayName: "Pak Andi", email: "pak@example.com" });
+    stubFetch({ events: [anEvent()] });
+    renderTab();
+    await screen.findByTestId("kegiatan-day-15");
+    fireEvent.click(screen.getByRole("button", { name: "Trigonometri lanjutan" }));
+    await screen.findByRole("dialog");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ya, hapus" }));
+
+    await waitFor(() => expect(screen.queryAllByRole("dialog").length).toBe(0));
+    expect(screen.queryAllByText("Trigonometri lanjutan").length).toBe(0);
+    await screen.findByText(/Belum ada kegiatan/);
   });
 });

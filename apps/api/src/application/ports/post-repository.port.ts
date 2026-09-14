@@ -179,6 +179,25 @@ export interface PostRepositoryPort {
    * every post anyone edits without thinking about visibility.
    */
   updateBody(id: string, body: string, visibility?: string): Promise<PostRow | null>;
+  /**
+   * Rewrites a `kegiatan`'s `community_event` row — the fields `create`'s own
+   * `event` parameter would have written, applied to an EXISTING row instead
+   * of inserted. UNLIKE `create`'s optional sub-fields, every field here is
+   * SET explicitly rather than left alone when omitted: this is an edit
+   * re-submitting the whole schedule (the same complete-value contract
+   * `mediaIds` carries on `EditPost`), so an omitted `endsAt`/`location`
+   * CLEARS the column rather than leaving a stale value behind.
+   *
+   * A no-op (matches zero rows) when `id` names a post with no
+   * `community_event` row — a caller sending `event` for a non-`kegiatan`
+   * post reaches this rather than a distinct error, since `EditPost` has no
+   * way to know a post's `type` from `PostOwnership` alone and the failure
+   * mode is harmless silence, not a wrong write.
+   */
+  updateEvent(
+    id: string,
+    event: { title: string; startsAt: Date; endsAt?: Date; location?: string }
+  ): Promise<void>;
   /** Idempotent: deleting an already-deleted post is a no-op, not an error. */
   softDelete(id: string): Promise<void>;
   /** Newest first, across every author. Excludes deleted. Excludes community posts. */

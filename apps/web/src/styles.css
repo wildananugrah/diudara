@@ -2820,6 +2820,18 @@ button:disabled {
   min-height: 4.5rem;
   padding: 0.25rem;
   background: var(--surface);
+  text-align: left;
+}
+
+/* Only an owner's cells carry `role="button"` (see `MonthGrid`) — clicking
+   one opens the "add kegiatan" modal seeded with that WIB date. */
+.kegiatan-day[role="button"] {
+  cursor: pointer;
+}
+
+.kegiatan-day[role="button"]:hover,
+.kegiatan-day[role="button"]:focus-visible {
+  background: var(--awan);
 }
 
 .kegiatan-day-empty {
@@ -2843,17 +2855,22 @@ button:disabled {
 
 .kegiatan-chip {
   display: block;
+  width: 100%;
   margin-top: 2px;
   padding: 1px 4px;
+  border: none;
   border-radius: 4px;
   background: var(--langit);
   color: var(--surface);
+  font: inherit;
   font-size: 0.625rem;
   font-weight: 600;
+  text-align: left;
   text-decoration: none;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .kegiatan-more {
@@ -2865,13 +2882,19 @@ button:disabled {
   margin-top: 1rem;
 }
 
-.kegiatan-agenda-row a {
+.kegiatan-agenda-row button {
   display: flex;
   align-items: center;
   gap: 1rem;
+  width: 100%;
   padding: 0.75rem;
+  border: none;
+  background: none;
+  font: inherit;
   color: inherit;
+  text-align: left;
   text-decoration: none;
+  cursor: pointer;
 }
 
 .kegiatan-agenda-date {
@@ -3881,6 +3904,23 @@ button:disabled {
 .modal-header h2 {
   margin: 0;
   font-size: 1.125rem;
+}
+
+/** The row of buttons at the foot of a modal form — the Kegiatan modal's own, but generic enough for any future one. */
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.kegiatan-detail-title {
+  margin: 0;
+}
+
+.kegiatan-detail-body {
+  margin: 0;
+  white-space: pre-wrap;
 }
 
 .chat-transcript {

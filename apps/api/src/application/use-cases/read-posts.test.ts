@@ -69,6 +69,7 @@ class FakePosts implements PostRepositoryPort {
   async updateBody(): Promise<PostRow | null> {
     return null;
   }
+  async updateEvent(): Promise<void> {}
   async softDelete(): Promise<void> {}
   async listGlobal(limit: number, before: unknown): Promise<PostRow[]> {
     this.globalCalls.push({ limit, before });

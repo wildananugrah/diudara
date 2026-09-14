@@ -92,7 +92,12 @@ async function patchPost(
   a: ReturnType<typeof app>,
   token: string,
   id: string,
-  payload: { body: string; mediaIds?: string[]; visibility?: "public" | "members" }
+  payload: {
+    body: string;
+    mediaIds?: string[];
+    visibility?: "public" | "members";
+    event?: { title: string; startsAt: string; endsAt?: string; location?: string };
+  }
 ) {
   return a.request(`/users/posts/${id}`, {
     method: "PATCH",
@@ -424,6 +429,106 @@ describe("PATCH /users/posts/:id", () => {
       body: JSON.stringify({ body: "baru" }),
     });
     expect(res.status).toBe(400);
+  });
+});
+
+/** A community owner's `kegiatan` post, created through the real HTTP routes. */
+async function makeKegiatan(a: ReturnType<typeof app>, token: string) {
+  await a.request("/communities", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authed(token) },
+    body: JSON.stringify({ name: "Kelas Fisika", category: "Skill Digital" }),
+  });
+  const created = await (
+    await a.request("/communities/kelas-fisika/posts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(token) },
+      body: JSON.stringify({
+        body: "kelas tatap muka",
+        type: "kegiatan",
+        event: {
+          title: "Trigonometri lanjutan",
+          startsAt: "2026-09-15T09:00:00.000Z",
+          endsAt: "2026-09-15T11:00:00.000Z",
+          location: "Online via Zoom",
+        },
+      }),
+    })
+  ).json();
+  return created as { id: string; body: string };
+}
+
+describe("PATCH /users/posts/:id — a kegiatan's schedule", () => {
+  it("rewrites every field, clearing endsAt/location when they are omitted", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const created = await makeKegiatan(a, token);
+
+    const res = await patchPost(a, token, created.id, {
+      body: created.body,
+      event: { title: "Jadwal baru", startsAt: "2026-09-20T09:00:00.000Z" },
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.event).toEqual({
+      title: "Jadwal baru",
+      startsAt: "2026-09-20T09:00:00.000Z",
+      endsAt: null,
+      location: null,
+    });
+  });
+
+  it("omitting event entirely leaves the schedule exactly as it was", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const created = await makeKegiatan(a, token);
+
+    const res = await patchPost(a, token, created.id, { body: "hanya deskripsi yang berubah" });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.event).toEqual({
+      title: "Trigonometri lanjutan",
+      startsAt: "2026-09-15T09:00:00.000Z",
+      endsAt: "2026-09-15T11:00:00.000Z",
+      location: "Online via Zoom",
+    });
+  });
+
+  it("a stranger may not edit the schedule either — 403, and nothing changes", async () => {
+    const a = app();
+    const ownerToken = await tokenForValidUser(a);
+    const strangerToken = await tokenForValidUser(a, { handle: "rina", email: "rina@example.com" });
+    const created = await makeKegiatan(a, ownerToken);
+
+    const res = await patchPost(a, strangerToken, created.id, {
+      body: created.body,
+      event: { title: "Dibajak", startsAt: "2026-09-20T09:00:00.000Z" },
+    });
+
+    expect(res.status).toBe(403);
+    const confirm = await (await a.request(`/users/posts/${created.id}`)).json();
+    expect(confirm.event.title).toBe("Trigonometri lanjutan");
+  });
+
+  it("an end time before the start time is 400, and the schedule is untouched", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const created = await makeKegiatan(a, token);
+
+    const res = await patchPost(a, token, created.id, {
+      body: created.body,
+      event: {
+        title: "Jadwal salah",
+        startsAt: "2026-09-20T09:00:00.000Z",
+        endsAt: "2026-09-20T08:00:00.000Z",
+      },
+    });
+
+    expect(res.status).toBe(400);
+    const confirm = await (await a.request(`/users/posts/${created.id}`)).json();
+    expect(confirm.event.title).toBe("Trigonometri lanjutan");
   });
 });
 

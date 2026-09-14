@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState, type KeyboardEvent } from "react";
 import { listCommunityEvents, type CommunityEventRow } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
+import KegiatanEventModal from "./KegiatanEventModal";
 import {
   WEEKDAYS_ID,
   daysInWibMonth,
@@ -15,6 +15,8 @@ import {
 
 interface Props {
   slug: string;
+  /** Gates the "click a date to add a kegiatan" affordance — creation is owner-only (`OWNER_ONLY_TYPES` in the API's `community-feed.ts`). */
+  viewerIsOwner?: boolean;
   /**
    * Injected clock, the same reason every other dated component on this
    * project takes one: a tab that reads `Date.now()` itself cannot be tested
@@ -28,6 +30,8 @@ type LoadState =
   | { status: "error"; message: string }
   | { status: "ready"; events: CommunityEventRow[] };
 
+type ModalTarget = { mode: "create"; date: string } | { mode: "detail"; postId: string };
+
 /**
  * The **Kegiatan** tab of `/komunitas/:slug` — a month grid with an agenda
  * beneath it.
@@ -37,16 +41,26 @@ type LoadState =
  * screen, and the grid has to hold the whole month to render at all — which
  * is also why `GET /communities/:slug/events` is unpaginated.
  *
- * Reading is open; there is no member gate and no composer here. An owner
- * creates an event from the Diskusi tab's composer, which is where every
- * other post type is created — a second composer on this tab would be a
- * second thing to keep in visual sync.
+ * Reading is open; there is no member gate. An owner clicks an empty date to
+ * add a kegiatan (`KegiatanEventModal`, create mode) — the ONLY place one is
+ * created now; the Diskusi composer's own `kegiatan` type selector predates
+ * this and still works identically, since both paths end at the same
+ * `POST /communities/:slug/posts`. Anyone — owner or not — clicks an existing
+ * chip or agenda row to see its detail; the owner (in practice the same
+ * person, since creation is owner-only) gets Edit/Hapus there too.
+ *
+ * **Local mutation, no refetch** — the same rule every other feed on this
+ * project follows. `handleCreated`/`handleUpdated`/`handleDeleted` fold the
+ * modal's own write response straight into `events`, re-sorted by
+ * `startsAt`: an append out of order would show a newly-added kegiatan in the
+ * wrong place in the agenda until the next month change refetched it.
  */
-export default function KegiatanTab({ slug, now }: Props) {
+export default function KegiatanTab({ slug, viewerIsOwner = false, now }: Props) {
   // Read ONCE, to seed the month. A re-render with a new `now` must not yank
   // the calendar back from a month the reader has navigated to.
   const [month, setMonth] = useState(() => wibMonthOf((now ?? new Date()).toISOString()));
   const [state, setState] = useState<LoadState>({ status: "loading" });
+  const [modalTarget, setModalTarget] = useState<ModalTarget | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -65,6 +79,37 @@ export default function KegiatanTab({ slug, now }: Props) {
       cancelled = true;
     };
   }, [slug, month]);
+
+  function sorted(events: CommunityEventRow[]): CommunityEventRow[] {
+    // ISO 8601 strings sort lexicographically in chronological order — no
+    // `Date` parsing needed, same trick `listBetween`'s own ordering relies on.
+    return [...events].sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+  }
+
+  function handleCreated(event: CommunityEventRow): void {
+    setState((current) =>
+      current.status === "ready" ? { status: "ready", events: sorted([...current.events, event]) } : current
+    );
+  }
+
+  function handleUpdated(event: CommunityEventRow): void {
+    setState((current) =>
+      current.status === "ready"
+        ? {
+            status: "ready",
+            events: sorted(current.events.map((row) => (row.postId === event.postId ? event : row))),
+          }
+        : current
+    );
+  }
+
+  function handleDeleted(postId: string): void {
+    setState((current) =>
+      current.status === "ready"
+        ? { status: "ready", events: current.events.filter((row) => row.postId !== postId) }
+        : current
+    );
+  }
 
   const events = state.status === "ready" ? state.events : [];
   const todayWib = wibParts((now ?? new Date()).toISOString());
@@ -104,8 +149,10 @@ export default function KegiatanTab({ slug, now }: Props) {
       <MonthGrid
         month={month}
         byDay={byDay}
-        slug={slug}
         todayDay={isCurrentMonth ? todayWib.day : null}
+        viewerIsOwner={viewerIsOwner}
+        onAddClick={(day) => setModalTarget({ mode: "create", date: `${month}-${String(day).padStart(2, "0")}` })}
+        onEventClick={(postId) => setModalTarget({ mode: "detail", postId })}
       />
 
       {state.status === "error" ? (
@@ -118,7 +165,7 @@ export default function KegiatanTab({ slug, now }: Props) {
         <ul className="card-list kegiatan-agenda">
           {events.map((event) => (
             <li className="card kegiatan-agenda-row" key={event.postId}>
-              <Link to={eventHref(slug, event.postId)}>
+              <button type="button" onClick={() => setModalTarget({ mode: "detail", postId: event.postId })}>
                 <span className="kegiatan-agenda-date">
                   <span className="kegiatan-agenda-day">{wibParts(event.startsAt).day}</span>
                   <span className="kegiatan-agenda-weekday">
@@ -133,17 +180,24 @@ export default function KegiatanTab({ slug, now }: Props) {
                     {event.location === null ? "" : ` · ${event.location}`}
                   </span>
                 </span>
-              </Link>
+              </button>
             </li>
           ))}
         </ul>
       )}
+
+      {modalTarget !== null ? (
+        <KegiatanEventModal
+          slug={slug}
+          target={modalTarget}
+          onClose={() => setModalTarget(null)}
+          onCreated={handleCreated}
+          onUpdated={handleUpdated}
+          onDeleted={handleDeleted}
+        />
+      ) : null}
     </section>
   );
-}
-
-function eventHref(slug: string, postId: string): string {
-  return `/komunitas/${encodeURIComponent(slug)}/kegiatan/${encodeURIComponent(postId)}`;
 }
 
 /** How many chips a day cell shows before collapsing the rest into a count. */
@@ -158,13 +212,17 @@ const CHIPS_PER_DAY = 2;
 function MonthGrid({
   month,
   byDay,
-  slug,
   todayDay,
+  viewerIsOwner,
+  onAddClick,
+  onEventClick,
 }: {
   month: string;
   byDay: Map<number, CommunityEventRow[]>;
-  slug: string;
   todayDay: number | null;
+  viewerIsOwner: boolean;
+  onAddClick: (day: number) => void;
+  onEventClick: (postId: string) => void;
 }) {
   const lead = firstWeekdayOfWibMonth(month);
   const days = daysInWibMonth(month);
@@ -173,6 +231,12 @@ function MonthGrid({
     ...Array.from({ length: days }, (_, index) => index + 1),
   ];
   while (cells.length % 7 !== 0) cells.push(null);
+
+  function onCellKeyDown(day: number, event: KeyboardEvent<HTMLDivElement>): void {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onAddClick(day);
+  }
 
   return (
     <div className="kegiatan-grid">
@@ -196,13 +260,32 @@ function MonthGrid({
             // entirely, so `getAttribute` answers null on every other day and
             // the CSS hook matches only the real one.
             data-today={day === todayDay ? "true" : undefined}
+            // Only an owner's cells are clickable — a plain member or a
+            // signed-out visitor gets a static day, since `CreateCommunityPost`
+            // would refuse them a `kegiatan` anyway (403).
+            role={viewerIsOwner ? "button" : undefined}
+            tabIndex={viewerIsOwner ? 0 : undefined}
+            aria-label={viewerIsOwner ? `Tambah kegiatan tanggal ${day}` : undefined}
+            onClick={viewerIsOwner ? () => onAddClick(day) : undefined}
+            onKeyDown={viewerIsOwner ? (event) => onCellKeyDown(day, event) : undefined}
             key={day}
           >
             <span className="kegiatan-day-number">{day}</span>
             {items.slice(0, CHIPS_PER_DAY).map((event) => (
-              <Link className="kegiatan-chip" to={eventHref(slug, event.postId)} key={event.postId}>
+              <button
+                type="button"
+                className="kegiatan-chip"
+                key={event.postId}
+                onClick={(domEvent) => {
+                  // Stops the click reaching the cell's own "add" handler
+                  // above — opening an existing event must never also pop
+                  // the create modal.
+                  domEvent.stopPropagation();
+                  onEventClick(event.postId);
+                }}
+              >
                 {event.title}
-              </Link>
+              </button>
             ))}
             {items.length > CHIPS_PER_DAY ? (
               <span className="kegiatan-more muted">+{items.length - CHIPS_PER_DAY} lagi</span>

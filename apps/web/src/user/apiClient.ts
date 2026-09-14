@@ -1167,17 +1167,29 @@ export function createPost(
  * key-by-key rather than relying on that, the same way `mediaIds` above
  * does, so the omission is deliberate and not a stringify accident.
  */
+/**
+ * `event` follows the SAME "omitted means leave alone" rule as `mediaIds`/
+ * `visibility` — but unlike them, when it IS present it is a COMPLETE
+ * re-submission of the schedule: an omitted `endsAt`/`location` on the
+ * passed `EventDraft` clears that field rather than leaving it be. See the
+ * API's own `EditPost.execute` docstring on `event`.
+ */
 export function editPost(
   id: string,
   body: string,
   mediaIds?: string[],
-  visibility?: "public" | "members"
+  visibility?: "public" | "members",
+  event?: EventDraft
 ): Promise<PostView> {
-  const payload: { body: string; mediaIds?: string[]; visibility?: "public" | "members" } = {
-    body,
-  };
+  const payload: {
+    body: string;
+    mediaIds?: string[];
+    visibility?: "public" | "members";
+    event?: EventDraft;
+  } = { body };
   if (mediaIds !== undefined) payload.mediaIds = mediaIds;
   if (visibility !== undefined) payload.visibility = visibility;
+  if (event !== undefined) payload.event = event;
   return apiFetch<PostView>(`/users/posts/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: JSON.stringify(payload),

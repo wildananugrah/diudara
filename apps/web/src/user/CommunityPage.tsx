@@ -309,7 +309,7 @@ export default function CommunityPage() {
             <CommunitySidebar slug={community.slug} description={community.description} />
           </div>
         ) : tab === "kegiatan" ? (
-          <KegiatanTab slug={community.slug} />
+          <KegiatanTab slug={community.slug} viewerIsOwner={community.viewerIsOwner} />
         ) : tab === "statistik" && community.viewerIsOwner ? (
           <StatistikTab slug={community.slug} />
         ) : tab === "keanggotaan" ? (

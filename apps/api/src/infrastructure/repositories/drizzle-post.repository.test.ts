@@ -842,3 +842,48 @@ describe("DrizzlePostRepository — the event on a kegiatan post", () => {
     expect((await repository.listByAuthor(ids.ownerId, 20, null))[0]?.event).toBeNull();
   });
 });
+
+describe("DrizzlePostRepository.updateEvent", () => {
+  test("rewrites every field, and getById reads the new schedule", async () => {
+    const ids = await seedCommunity();
+    const repository = new DrizzlePostRepository(db);
+    const created = await repository.create({
+      authorId: ids.ownerId,
+      body: "kelas tatap muka daring",
+      communityId: ids.communityId,
+      type: "kegiatan",
+      event: {
+        title: "Trigonometri lanjutan",
+        startsAt: EVENT_STARTS_AT,
+        endsAt: EVENT_ENDS_AT,
+        location: "Online via Zoom",
+      },
+    });
+
+    const newStartsAt = new Date("2026-09-25T09:00:00.000Z");
+    await repository.updateEvent(created.id, { title: "Jadwal baru", startsAt: newStartsAt });
+
+    const row = await repository.getById(created.id);
+    expect(row?.event?.title).toBe("Jadwal baru");
+    expect(row?.event?.startsAt).toEqual(newStartsAt);
+    // Omitted here — CLEARED, not left at the row's old value. This is the
+    // one way `updateEvent` differs from `create`'s optional-field spreading;
+    // see the port's own docstring.
+    expect(row?.event?.endsAt).toBeNull();
+    expect(row?.event?.location).toBeNull();
+  });
+
+  test("a post with no community_event row is an unmatched no-op, not an error", async () => {
+    const ids = await seedCommunity();
+    const repository = new DrizzlePostRepository(db);
+    const discussion = await repository.create({
+      authorId: ids.ownerId,
+      body: "diskusi biasa",
+      communityId: ids.communityId,
+    });
+
+    await repository.updateEvent(discussion.id, { title: "tidak relevan", startsAt: EVENT_STARTS_AT });
+
+    expect((await repository.getById(discussion.id))?.event).toBeNull();
+  });
+});

@@ -51,6 +51,8 @@ class FakePosts implements PostRepositoryPort {
   ownership: PostOwnership | null = null;
   created: string[] = [];
   updated: { id: string; body: string; visibility?: string } | null = null;
+  updatedEvent: { id: string; event: { title: string; startsAt: Date; endsAt?: Date; location?: string } } | null =
+    null;
   deleted: string[] = [];
   updateResult: PostRow | null = fakeRow();
 
@@ -96,7 +98,29 @@ class FakePosts implements PostRepositoryPort {
   async updateBody(id: string, body: string, visibility?: string): Promise<PostRow | null> {
     this.updated = { id, body, visibility };
     if (this.updateResult === null) return null;
-    return { ...this.updateResult, body, visibility: visibility ?? this.updateResult.visibility };
+    // Mirrors the real repository's ordering (`updateEvent` runs BEFORE
+    // `updateBody`'s own re-read): a test asserting on the returned view's
+    // `event` field needs THIS call to already reflect `updatedEvent`.
+    return {
+      ...this.updateResult,
+      body,
+      visibility: visibility ?? this.updateResult.visibility,
+      event:
+        this.updatedEvent === null
+          ? this.updateResult.event
+          : {
+              title: this.updatedEvent.event.title,
+              startsAt: this.updatedEvent.event.startsAt,
+              endsAt: this.updatedEvent.event.endsAt ?? null,
+              location: this.updatedEvent.event.location ?? null,
+            },
+    };
+  }
+  async updateEvent(
+    id: string,
+    event: { title: string; startsAt: Date; endsAt?: Date; location?: string }
+  ): Promise<void> {
+    this.updatedEvent = { id, event };
   }
   async softDelete(id: string): Promise<void> {
     this.deleted.push(id);
@@ -666,6 +690,48 @@ describe("EditPost", () => {
 
     expect(view.media).toEqual([]);
     expect(await media.findById(FIRST_IMAGE)).toMatchObject({ postId: null });
+  });
+
+  /**
+   * An OMITTED `event` says nothing about the schedule — a text-only edit, or
+   * an edit of a post with no schedule at all — and must not touch
+   * `community_event`.
+   */
+  it("leaves the schedule alone when event is omitted entirely", async () => {
+    const posts = new FakePosts();
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public", communityId: null };
+
+    await editPostFor(posts, new FakeMedia()).execute({
+      editorId: AUTHOR,
+      postId: POST_ID,
+      body: "hanya teks yang berubah",
+    });
+
+    expect(posts.updatedEvent).toBeNull();
+  });
+
+  it("rewrites a kegiatan's schedule when event is present, and the returned view carries it", async () => {
+    const posts = new FakePosts();
+    posts.ownership = { id: POST_ID, authorId: AUTHOR, isDeleted: false, visibility: "public", communityId: null };
+    const startsAt = new Date("2026-09-20T09:00:00.000Z");
+
+    const view = await editPostFor(posts, new FakeMedia()).execute({
+      editorId: AUTHOR,
+      postId: POST_ID,
+      body: "jadwal baru",
+      event: { title: "Sesi lanjutan", startsAt, location: "Ruang B" },
+    });
+
+    expect(posts.updatedEvent).toEqual({
+      id: POST_ID,
+      event: { title: "Sesi lanjutan", startsAt, location: "Ruang B" },
+    });
+    expect(view.event).toEqual({
+      title: "Sesi lanjutan",
+      startsAt: startsAt.toISOString(),
+      endsAt: null,
+      location: "Ruang B",
+    });
   });
 
   /**

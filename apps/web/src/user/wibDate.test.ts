@@ -3,10 +3,12 @@ import {
   daysInWibMonth,
   firstWeekdayOfWibMonth,
   shiftWibMonth,
+  wibDateInputValue,
   wibDateLabel,
   wibMonthLabel,
   wibMonthOf,
   wibParts,
+  wibTimeInputValue,
   wibTimeLabel,
   wibWallClockToIso,
 } from "./wibDate";
@@ -151,5 +153,19 @@ describe("wibWallClockToIso", () => {
     // check is what refuses it.
     expect(wibWallClockToIso("2026-02-31", "16:00")).toBeNull();
     expect(wibWallClockToIso("2026-02-28", "16:00")).not.toBeNull();
+  });
+});
+
+describe("wibDateInputValue / wibTimeInputValue", () => {
+  test("are the exact inverse of wibWallClockToIso, for pre-filling an edit form", () => {
+    const iso = wibWallClockToIso("2026-09-15", "16:00")!;
+    expect(wibDateInputValue(iso)).toBe("2026-09-15");
+    expect(wibTimeInputValue(iso)).toBe("16:00");
+  });
+
+  test("an early-morning WIB time still reads its OWN day, not the UTC one", () => {
+    const iso = wibWallClockToIso("2026-09-16", "00:30")!;
+    expect(wibDateInputValue(iso)).toBe("2026-09-16");
+    expect(wibTimeInputValue(iso)).toBe("00:30");
   });
 });

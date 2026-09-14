@@ -122,6 +122,9 @@ class FakePosts implements PostRepositoryPort {
   async updateBody(): Promise<never> {
     return this.unused();
   }
+  async updateEvent(): Promise<never> {
+    return this.unused();
+  }
   async softDelete(): Promise<never> {
     return this.unused();
   }

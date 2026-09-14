@@ -132,6 +132,22 @@ export function wibWallClockToIso(date: string, time: string): string | null {
   return at.toISOString();
 }
 
+/**
+ * `<input type="date">`'s own value format, in WIB — the date half of the
+ * inverse of `wibWallClockToIso`, for pre-filling an edit form from an
+ * existing event's ISO instant.
+ */
+export function wibDateInputValue(iso: string): string {
+  const { year, month, day } = wibParts(iso);
+  return `${year}-${pad(month + 1)}-${pad(day)}`;
+}
+
+/** `<input type="time">`'s own value format, in WIB — the time half of the inverse of `wibWallClockToIso`. */
+export function wibTimeInputValue(iso: string): string {
+  const { hour, minute } = wibParts(iso);
+  return `${pad(hour)}:${pad(minute)}`;
+}
+
 function pad(value: number): string {
   return String(value).padStart(2, "0");
 }

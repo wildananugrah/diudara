@@ -476,6 +476,7 @@ const fakePostRepository: PostRepositoryPort = {
   async updateBody() {
     return null;
   },
+  async updateEvent() {},
   async softDelete() {},
   async listGlobal() {
     return [];

@@ -279,6 +279,15 @@ export class EditPost {
      * why `.optional()` here is load-bearing at the route.
      */
     visibility?: string;
+    /**
+     * A `kegiatan`'s schedule, re-submitted in full — OMITTED means "this
+     * edit says nothing about the schedule" (a plain text/media edit, or an
+     * edit of a non-event post), never "clear it". When present, EVERY field
+     * is applied as given: `endsAt`/`location` absent here really does clear
+     * that column, the same complete-value contract `mediaIds` already
+     * carries. See `PostRepositoryPort.updateEvent`'s own docstring.
+     */
+    event?: { title: string; startsAt: Date; endsAt?: Date; location?: string };
   }): Promise<PostView> {
     const body = requireBody(input.body);
     return this.postWrite.run(async ({ posts, media }) => {
@@ -313,6 +322,14 @@ export class EditPost {
             ? input.mediaIds.length
             : (await media.listForPost(input.postId)).length;
         requireImageWhenLocked(resultingVisibility, resultingMediaCount);
+      }
+
+      // BEFORE `updateBody`, not after: `updateBody` re-reads the post
+      // through the SAME `community_event` join `create`'s own read does, so
+      // writing the event first is what makes the `PostView` this call
+      // returns already carry the new schedule — no second read needed.
+      if (input.event !== undefined) {
+        await posts.updateEvent(input.postId, input.event);
       }
 
       // `updateBody` sets `edited_at` unconditionally, which is what makes an
