@@ -1,4 +1,4 @@
-import { useRef, type ChangeEvent } from "react";
+import { useRef, useState, type ChangeEvent, type DragEvent } from "react";
 
 /**
  * Where one image in the strip is in its life. There is no "removed" state:
@@ -56,10 +56,11 @@ export interface MediaStripProps {
  * failure with a retry, per-image removal, and the "Tambah foto" button that
  * opens the file picker (spec §7).
  *
- * Purely presentational: it holds no state, starts no request, and knows
- * nothing about uploading. `PostComposer` owns all of that, which is what keeps
- * the one rule that matters — **an attached photo never enables Kirim on its
- * own** (spec §7.1) — in the component that owns the submit button, rather than
+ * Otherwise presentational: the only state it owns is the drag-over highlight
+ * for its own dropzone. It starts no request and knows nothing about
+ * uploading — `PostComposer` owns all of that, which is what keeps the one
+ * rule that matters — **an attached photo never enables Kirim on its own**
+ * (spec §7.1) — in the component that owns the submit button, rather than
  * split across two.
  *
  * There is deliberately NO drag-to-reorder: spec §5.2 defers it, because touch
@@ -77,6 +78,10 @@ export default function MediaStrip({
   onRetry,
 }: MediaStripProps) {
   const picker = useRef<HTMLInputElement>(null);
+  // Purely a highlight while files are dragged over the strip — same
+  // drag-and-drop pattern as `DokumenTab`/`MateriTab`, just here it wraps the
+  // whole strip rather than a single upload box.
+  const [isDragging, setIsDragging] = useState(false);
 
   /**
    * Every image counts, whatever its state. One still uploading occupies a slot
@@ -95,8 +100,40 @@ export default function MediaStrip({
     if (chosen.length > 0) onAdd(chosen);
   }
 
+  function handleDragOver(event: DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    if (busy) return;
+    setIsDragging(true);
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLDivElement>): void {
+    // Only the strip itself leaving counts — a child (a preview, the button)
+    // firing its own dragleave must not cancel the highlight while the
+    // pointer is still over the strip.
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setIsDragging(false);
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    setIsDragging(false);
+    if (busy) return;
+    // The picker's `accept="image/*"` only filters what the OS shows; a drop
+    // carries whatever was dragged, so it gets the same filter here.
+    const dropped = [...event.dataTransfer.files].filter((file) =>
+      file.type.startsWith("image/")
+    );
+    if (dropped.length > 0) onAdd(dropped);
+  }
+
   return (
-    <div className="media-strip">
+    <div
+      data-testid="media-strip"
+      className={`media-strip${isDragging ? " media-strip-dragging" : ""}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       {items.length > 0 ? (
         <ul className="media-strip-items" aria-label="Foto kiriman">
           {items.map((item, index) => {
@@ -191,6 +228,7 @@ export default function MediaStrip({
             string rather than three adjacent nodes — same rule as the body
             counter in `PostComposer`. */}
         <span className="media-strip-counter">{`${items.length}/${max} foto`}</span>
+        <span className="muted media-strip-drop-hint">atau seret foto ke sini</span>
       </div>
 
       {/* Below the button that produced it, and `role="alert"` like every other

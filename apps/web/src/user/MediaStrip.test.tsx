@@ -49,6 +49,10 @@ function addButton(): HTMLButtonElement {
   return screen.getByRole("button", { name: "Tambah foto" }) as HTMLButtonElement;
 }
 
+function strip(): HTMLElement {
+  return screen.getByTestId("media-strip");
+}
+
 function jpeg(name: string): File {
   return new File([new Uint8Array([1, 2, 3])], name, { type: "image/jpeg" });
 }
@@ -243,6 +247,56 @@ describe("MediaStrip — adding", () => {
     });
 
     expect(addButton().disabled).toBe(true);
+  });
+});
+
+describe("MediaStrip — dragging files onto the strip", () => {
+  it("hands dropped files to onAdd, same as a picked file", () => {
+    const added: string[][] = [];
+    renderStrip({ onAdd: (files: File[]) => added.push(files.map((file) => file.name)) });
+
+    fireEvent.drop(strip(), { dataTransfer: { files: [jpeg("satu.jpg"), jpeg("dua.jpg")] } });
+
+    expect(added).toEqual([["satu.jpg", "dua.jpg"]]);
+  });
+
+  it("filters out non-image files dropped alongside images", () => {
+    const added: string[][] = [];
+    const pdf = new File([new Uint8Array([1])], "dokumen.pdf", { type: "application/pdf" });
+    renderStrip({ onAdd: (files: File[]) => added.push(files.map((file) => file.name)) });
+
+    fireEvent.drop(strip(), { dataTransfer: { files: [jpeg("satu.jpg"), pdf] } });
+
+    expect(added).toEqual([["satu.jpg"]]);
+  });
+
+  it("calls onAdd nothing when only non-image files are dropped", () => {
+    const onAdd = mock(() => {});
+    const pdf = new File([new Uint8Array([1])], "dokumen.pdf", { type: "application/pdf" });
+    renderStrip({ onAdd });
+
+    fireEvent.drop(strip(), { dataTransfer: { files: [pdf] } });
+
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
+  it("highlights the strip while a file is dragged over it, and clears it on drop", () => {
+    renderStrip();
+
+    fireEvent.dragOver(strip());
+    expect(strip().className).toContain("media-strip-dragging");
+
+    fireEvent.drop(strip(), { dataTransfer: { files: [jpeg("satu.jpg")] } });
+    expect(strip().className).not.toContain("media-strip-dragging");
+  });
+
+  it("ignores a drop while the post itself is being sent", () => {
+    const onAdd = mock(() => {});
+    renderStrip({ onAdd, busy: true });
+
+    fireEvent.drop(strip(), { dataTransfer: { files: [jpeg("satu.jpg")] } });
+
+    expect(onAdd).not.toHaveBeenCalled();
   });
 });
 

@@ -1644,6 +1644,21 @@ button:disabled {
 
 .media-strip {
   margin-bottom: 8px;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+/* Same drag-over highlight as `.dokumen-upload-dragging` — see
+   `MediaStrip.tsx`'s drop handlers. */
+.media-strip-dragging {
+  border-color: var(--langit);
+  background-color: var(--awan);
+}
+
+.media-strip-drop-hint {
+  font-size: 0.8125rem;
 }
 
 .media-strip-items {
