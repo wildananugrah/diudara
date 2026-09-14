@@ -1,4 +1,16 @@
-import { aliasedTable, and, asc, count, desc, eq, gte, ilike, inArray, sql } from "drizzle-orm";
+import {
+  aliasedTable,
+  and,
+  arrayContains,
+  asc,
+  count,
+  desc,
+  eq,
+  gte,
+  ilike,
+  inArray,
+  sql,
+} from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/client";
 import {
   appUsers,
@@ -145,6 +157,7 @@ export class DrizzleCommunityRepository implements CommunityRepositoryPort {
       query.search === ""
         ? undefined
         : ilike(communities.name, `%${escapeLikePattern(query.search)}%`),
+      query.tag === "" ? undefined : arrayContains(communities.tags, [query.tag]),
     ].filter((f) => f !== undefined);
 
     const rows = await this.db

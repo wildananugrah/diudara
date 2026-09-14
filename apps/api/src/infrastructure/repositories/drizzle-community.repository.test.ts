@@ -173,14 +173,26 @@ describe("DrizzleCommunityRepository", () => {
     await repo().create({ ownerId, slug: "kelas-desain", name: "Kelas Desain", category: "Skill Digital", description: null });
     await repo().create({ ownerId, slug: "bimbel-sbmptn", name: "Bimbel SBMPTN", category: "Bimbel & Ujian", description: null });
 
-    const byCategory = await repo().browse({ search: "", category: "Skill Digital", limit: 24 });
+    const byCategory = await repo().browse({ search: "", category: "Skill Digital", tag: "", limit: 24 });
     expect(byCategory.map((c) => c.slug).join(",")).toBe("kelas-desain");
 
-    const bySearch = await repo().browse({ search: "bimbel", category: "", limit: 24 });
+    const bySearch = await repo().browse({ search: "bimbel", category: "", tag: "", limit: 24 });
     expect(bySearch.map((c) => c.slug).join(",")).toBe("bimbel-sbmptn");
 
-    const all = await repo().browse({ search: "", category: "", limit: 24 });
+    const all = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
     expect(all.length).toBe(2);
+  });
+
+  it("browse filters by tag, matching a community that carries it among several", async () => {
+    const ownerId = await seedUser("wildan");
+    await create(ownerId, { slug: "kelas-desain", name: "Kelas Desain", tags: ["desain", "ui"] });
+    await create(ownerId, { slug: "bimbel-sbmptn", name: "Bimbel SBMPTN", tags: ["ujian"] });
+
+    const byTag = await repo().browse({ search: "", category: "", tag: "desain", limit: 24 });
+    expect(byTag.map((c) => c.slug).join(",")).toBe("kelas-desain");
+
+    const noMatch = await repo().browse({ search: "", category: "", tag: "tidak-ada", limit: 24 });
+    expect(noMatch.length).toBe(0);
   });
 
   it("browse reports a member count per row, so the grid needs no second query", async () => {
@@ -189,7 +201,7 @@ describe("DrizzleCommunityRepository", () => {
     const created = await repo().create({ ownerId, slug: "kelas-desain", name: "Kelas Desain", category: "Skill Digital", description: null });
     await repo().join(created.id, joinerId);
 
-    const rows = await repo().browse({ search: "", category: "", limit: 24 });
+    const rows = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
     expect(rows.map((r) => `${r.slug}:${r.memberCount}`).join(",")).toBe("kelas-desain:2");
   });
 
@@ -201,12 +213,12 @@ describe("DrizzleCommunityRepository", () => {
       tags: ["desain", "ui"],
     });
 
-    const before = await repo().browse({ search: "", category: "", limit: 24 });
+    const before = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
     expect(before[0]!.tags).toEqual(["desain", "ui"]);
 
     await repo().setTags(created.id, ["baru"]);
 
-    const after = await repo().browse({ search: "", category: "", limit: 24 });
+    const after = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
     expect(after[0]!.tags).toEqual(["baru"]);
   });
 
@@ -229,7 +241,7 @@ describe("DrizzleCommunityRepository", () => {
 
     const withoutTiers = await create(ownerId, { slug: "without-tiers", name: "Without Tiers" });
 
-    const rows = await repo().browse({ search: "", category: "", limit: 24 });
+    const rows = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
     const byId = new Map(rows.map((r) => [r.slug, r]));
     expect(byId.get("with-tiers")!.price).toEqual({ amount: 50_000, billingCycle: "monthly" });
     expect(byId.get("without-tiers")!.price).toBeNull();
@@ -249,7 +261,7 @@ describe("DrizzleCommunityRepository", () => {
         await repo().join(manyJoins.id, await seedUser(`joiner-many-${i}`));
       }
 
-      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+      const rows = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
       const byId = new Map(rows.map((r) => [r.slug, r]));
       expect(byId.get("few-joins")!.trending).toBe(false);
       expect(byId.get("many-joins")!.trending).toBe(true);
@@ -265,14 +277,14 @@ describe("DrizzleCommunityRepository", () => {
 
       // All 5 members joined 8 days ago — none within the window, so it must not be trending
       // even though its total membership clears the floor.
-      const stale = await repo().browse({ search: "", category: "", limit: 24 });
+      const stale = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
       expect(stale.find((r) => r.slug === "old-crowd")!.trending).toBe(false);
 
       // Backdate one fewer join and add 5 fresh ones instead: now exactly 5 recent joins.
       for (let i = 0; i < 5; i += 1) {
         await joinAt(created.id, await seedUser(`fresh-${i}`), new Date());
       }
-      const fresh = await repo().browse({ search: "", category: "", limit: 24 });
+      const fresh = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
       expect(fresh.find((r) => r.slug === "old-crowd")!.trending).toBe(true);
     });
 
@@ -286,7 +298,7 @@ describe("DrizzleCommunityRepository", () => {
         }
       }
 
-      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+      const rows = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
       const trendingSlugs = rows.filter((r) => r.trending).map((r) => r.slug).sort();
       expect(trendingSlugs).toEqual(["c6", "c7", "c8"]);
     });
@@ -300,7 +312,7 @@ describe("DrizzleCommunityRepository", () => {
       await heartbeat(stream.id, "viewer-1", new Date());
       await heartbeat(stream.id, "viewer-2", new Date());
 
-      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+      const rows = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
 
       expect(rows.find((r) => r.slug === created.slug)!.live).toEqual({
         streamId: stream.id,
@@ -313,7 +325,7 @@ describe("DrizzleCommunityRepository", () => {
       const created = await create(ownerId, { slug: "kelas-desain", name: "Kelas Desain" });
       const stream = await goLive(ownerId, "members");
 
-      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+      const rows = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
 
       expect(rows.find((r) => r.slug === created.slug)!.live?.streamId).toBe(stream.id);
     });
@@ -322,7 +334,7 @@ describe("DrizzleCommunityRepository", () => {
       const ownerId = await seedUser("wildan");
       const created = await create(ownerId, { slug: "kelas-desain", name: "Kelas Desain" });
 
-      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+      const rows = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
 
       expect(rows.find((r) => r.slug === created.slug)!.live).toBeNull();
     });
@@ -333,7 +345,7 @@ describe("DrizzleCommunityRepository", () => {
       const stream = await goLive(ownerId);
       await db.update(userStreams).set({ status: "ended" }).where(eq(userStreams.id, stream.id));
 
-      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+      const rows = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
 
       expect(rows.find((r) => r.slug === created.slug)!.live).toBeNull();
     });
@@ -345,7 +357,7 @@ describe("DrizzleCommunityRepository", () => {
       await heartbeat(stream.id, "fresh", new Date());
       await heartbeat(stream.id, "stale", new Date(Date.now() - 60_000));
 
-      const rows = await repo().browse({ search: "", category: "", limit: 24 });
+      const rows = await repo().browse({ search: "", category: "", tag: "", limit: 24 });
 
       expect(rows.find((r) => r.slug === created.slug)!.live?.viewerCount).toBe(1);
     });

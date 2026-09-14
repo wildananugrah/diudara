@@ -2181,10 +2181,12 @@ export interface MyCommunityRow {
 export function browseCommunities(input: {
   q?: string;
   category?: string;
+  tag?: string;
 } = {}): Promise<{ communities: CommunityListRow[]; popularTags: string[] }> {
   const params = new URLSearchParams();
   if (input.q) params.set("q", input.q);
   if (input.category) params.set("category", input.category);
+  if (input.tag) params.set("tag", input.tag);
   const query = params.toString();
   return publicGet<{ communities: CommunityListRow[]; popularTags: string[] }>(
     query === "" ? "/communities" : `/communities?${query}`,

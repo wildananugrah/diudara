@@ -133,6 +133,38 @@ describe("DiscoverPage", () => {
     expect(screen.getByText("#bisnis")).toBeTruthy();
   });
 
+  it("filters by tag when a popular tag is tapped", async () => {
+    const calls = stubCommunityFetch();
+    renderDiscover();
+    await screen.findByRole("link", { name: "Kelas Desain" });
+
+    fireEvent.click(screen.getByRole("button", { name: "#desain" }));
+
+    await waitFor(() => {
+      expect(calls.some((url) => url.includes("tag=desain"))).toBe(true);
+    });
+    expect(screen.getByRole("button", { name: "#desain" }).getAttribute("aria-pressed")).toBe(
+      "true"
+    );
+  });
+
+  it("clears the tag filter when the same tag is tapped again", async () => {
+    const calls = stubCommunityFetch();
+    renderDiscover();
+    await screen.findByRole("link", { name: "Kelas Desain" });
+
+    const desainTag = screen.getByRole("button", { name: "#desain" });
+    fireEvent.click(desainTag);
+    await waitFor(() => expect(calls.some((url) => url.includes("tag=desain"))).toBe(true));
+
+    const callsAfterFirstClick = calls.length;
+    fireEvent.click(desainTag);
+
+    await waitFor(() => expect(calls.length).toBeGreaterThan(callsAfterFirstClick));
+    expect(calls[calls.length - 1]).not.toContain("tag=");
+    expect(desainTag.getAttribute("aria-pressed")).toBe("false");
+  });
+
   it("opens the AI co-builder modal from the 'own a community' CTA", async () => {
     stubCommunityFetch();
     renderDiscover();

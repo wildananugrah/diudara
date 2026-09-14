@@ -89,6 +89,8 @@ export default function DiscoverPage() {
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [category, setCategory] = useState("");
+  /** Set by tapping a tag in "Tag populer" — a second tap clears it, the same toggle the category chips use. */
+  const [tag, setTag] = useState("");
   /** Bumped by every tap of "Cari Komunitas" so re-submitting the SAME text still re-runs the effect (React bails out of a `useState` set to an equal value otherwise). */
   const [attempt, setAttempt] = useState(0);
   const [communities, setCommunities] = useState<CommunityListRow[] | null>(null);
@@ -101,7 +103,7 @@ export default function DiscoverPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    browseCommunities({ q: submittedQuery, category })
+    browseCommunities({ q: submittedQuery, category, tag })
       .then((result) => {
         if (cancelled) return;
         setCommunities(result.communities);
@@ -118,7 +120,7 @@ export default function DiscoverPage() {
     return () => {
       cancelled = true;
     };
-  }, [submittedQuery, category, attempt]);
+  }, [submittedQuery, category, tag, attempt]);
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -200,6 +202,7 @@ export default function DiscoverPage() {
 
                 <h2 className="discover-grid-heading">
                   {category === "" ? "Semua komunitas" : category}
+                  {tag === "" ? null : ` · #${tag}`}
                   <span className="muted"> · {communities.length} hasil</span>
                 </h2>
                 {communities.length === 0 ? (
@@ -218,11 +221,21 @@ export default function DiscoverPage() {
           <aside className="discover-sidebar">
             <div className="card discover-sidebar-card">
               <h4>Tag populer</h4>
-              <div className="discover-tag-cloud">
-                {popularTags.map((tag) => (
-                  <span key={tag} className="badge badge-neutral">
-                    #{tag}
-                  </span>
+              {/* Filter toggles, not navigation — `aria-pressed` like the
+                  category chips above, and the same "tap again to clear"
+                  behaviour. Combines with category/search (AND), rather than
+                  replacing them, since they filter independent facets. */}
+              <div className="discover-tag-cloud" role="group" aria-label="Tag komunitas">
+                {popularTags.map((popularTag) => (
+                  <button
+                    key={popularTag}
+                    type="button"
+                    className="badge badge-neutral discover-tag"
+                    aria-pressed={tag === popularTag}
+                    onClick={() => setTag(tag === popularTag ? "" : popularTag)}
+                  >
+                    #{popularTag}
+                  </button>
                 ))}
               </div>
             </div>

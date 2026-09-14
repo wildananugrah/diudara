@@ -255,6 +255,18 @@ describe("GET /communities", () => {
     expect(body.communities.map((c: { slug: string }) => c.slug)).toEqual(["bimbel-sbmptn"]);
   });
 
+  it("filters by tag, normalising a leading '#' the same way a saved tag is", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    await createCommunity(a, token, { ...KELAS, tags: ["desain", "ui"] });
+    await createCommunity(a, token, { name: "Bimbel SBMPTN", category: "Bimbel & Ujian", tags: ["ujian"] });
+
+    const res = await a.request(`/communities?tag=${encodeURIComponent("#Desain")}`);
+
+    const body = await res.json();
+    expect(body.communities.map((c: { slug: string }) => c.slug)).toEqual(["kelas-desain"]);
+  });
+
   it("answers with each community's tags/trending/price, and the site's popular tags", async () => {
     const a = app();
     const token = await tokenForValidUser(a);

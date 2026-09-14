@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   DEFAULT_COMMUNITY_LIST_LIMIT,
   MAX_COMMUNITY_SEARCH_LENGTH,
+  MAX_COMMUNITY_TAG_LENGTH,
   POPULAR_TAGS_LIMIT,
 } from "@diudara/shared";
 import { BrowseCommunities } from "./browse-communities";
@@ -132,5 +133,34 @@ describe("BrowseCommunities", () => {
 
     expect(result.popularTags).toEqual(["desain", "bisnis"]);
     expect(communities.lastPopularTagsLimit).toBe(POPULAR_TAGS_LIMIT);
+  });
+
+  it("passes an empty tag through as 'any tag'", async () => {
+    const { communities, useCase } = subject();
+
+    await useCase.execute({ search: "", category: "", tag: undefined, limit: undefined });
+
+    expect(communities.lastQuery?.tag).toBe("");
+  });
+
+  it("normalises a tag exactly like a saved one — trimmed, lowercased, '#' stripped", async () => {
+    const { communities, useCase } = subject();
+
+    await useCase.execute({ search: "", category: "", tag: "  #Desain  ", limit: undefined });
+
+    expect(communities.lastQuery?.tag).toBe("desain");
+  });
+
+  it("clamps an over-long tag rather than rejecting it — the vocabulary is open, not a 400", async () => {
+    const { communities, useCase } = subject();
+
+    await useCase.execute({
+      search: "",
+      category: "",
+      tag: "a".repeat(MAX_COMMUNITY_TAG_LENGTH + 10),
+      limit: undefined,
+    });
+
+    expect(communities.lastQuery?.tag).toBe("a".repeat(MAX_COMMUNITY_TAG_LENGTH));
   });
 });

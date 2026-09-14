@@ -6,6 +6,7 @@ import {
   DEFAULT_COMMUNITY_LIST_LIMIT,
   DEFAULT_COMMUNITY_MEMBER_LIMIT,
   MAX_COMMUNITY_SEARCH_LENGTH,
+  MAX_COMMUNITY_TAG_LENGTH,
   DOCUMENT_ERROR_CODE,
   MAX_DOCUMENT_BYTES,
   coBuilderChatRequestSchema,
@@ -26,7 +27,7 @@ import { parseBefore, parseFeedLimit } from "./posts";
 import type { Dependencies } from "../bootstrap";
 
 /**
- * `?q=`/`?category=`/`?limit=` for the browse grid, mirroring
+ * `?q=`/`?category=`/`?tag=`/`?limit=` for the browse grid, mirroring
  * `parseExploreQuery` in `routes/users.ts` — including its reason for
  * OMITTING an empty `limit` rather than passing it through: `?limit=` would
  * otherwise coerce to 0 and fail the minimum with a confusing message.
@@ -35,33 +36,43 @@ import type { Dependencies } from "../bootstrap";
  * `BrowseCommunities`, so a malformed query is a 400 that names the field
  * rather than a generic one. The use-case's own check is not redundant — it
  * is what protects a caller that is not this route.
+ *
+ * `tag` gets only a length cap here, NOT the six-category treatment: the tag
+ * vocabulary is open, so there is no fixed set to check it against, and
+ * `BrowseCommunities` already normalises and clamps it rather than rejecting
+ * an unrecognised one — see that use-case's own docstring.
  */
 const browseQuerySchema = z.object({
   q: z.string().max(MAX_COMMUNITY_SEARCH_LENGTH).optional(),
   category: z.enum(COMMUNITY_CATEGORIES).optional(),
+  tag: z.string().max(MAX_COMMUNITY_TAG_LENGTH).optional(),
   limit: z.coerce.number().int().min(1).max(DEFAULT_COMMUNITY_LIST_LIMIT).optional(),
 });
 
 function parseBrowseQuery(raw: {
   q: string | undefined;
   category: string | undefined;
+  tag: string | undefined;
   limit: string | undefined;
 }) {
   const parsed = browseQuerySchema.safeParse({
     ...(raw.q === undefined ? {} : { q: raw.q }),
     ...(raw.category === undefined || raw.category === "" ? {} : { category: raw.category }),
+    ...(raw.tag === undefined || raw.tag === "" ? {} : { tag: raw.tag }),
     ...(raw.limit === undefined || raw.limit === "" ? {} : { limit: raw.limit }),
   });
   if (!parsed.success) {
     throw new ValidationError(
       `invalid query: q must be at most ${MAX_COMMUNITY_SEARCH_LENGTH} characters, ` +
         `category must be one of the ${COMMUNITY_CATEGORIES.length} known categories, ` +
+        `tag must be at most ${MAX_COMMUNITY_TAG_LENGTH} characters, ` +
         `limit must be an integer between 1 and ${DEFAULT_COMMUNITY_LIST_LIMIT}`
     );
   }
   return {
     q: parsed.data.q,
     category: parsed.data.category,
+    tag: parsed.data.tag,
     limit: parsed.data.limit ?? DEFAULT_COMMUNITY_LIST_LIMIT,
   };
 }
@@ -281,12 +292,13 @@ export function communityRoutes(
   );
 
   app.get("/", async (c) => {
-    const { q, category, limit } = parseBrowseQuery({
+    const { q, category, tag, limit } = parseBrowseQuery({
       q: c.req.query("q"),
       category: c.req.query("category"),
+      tag: c.req.query("tag"),
       limit: c.req.query("limit"),
     });
-    return c.json(await deps.browseCommunities.execute({ search: q, category, limit }));
+    return c.json(await deps.browseCommunities.execute({ search: q, category, tag, limit }));
   });
 
   // DECLARED BEFORE `/:slug` so the literal `posts` segment wins over the

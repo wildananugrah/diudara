@@ -2300,6 +2300,27 @@ button:disabled {
   margin-top: 0.75rem;
 }
 
+/* `.badge`/`.badge-neutral` set the pill shape and idle color; this undoes
+   the plain `<button>` chrome underneath and adds the same interactive
+   states `.category-chip` above uses, so a tag reads as tappable the same
+   way a category does. */
+.discover-tag {
+  font: inherit;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.discover-tag:hover {
+  border-color: var(--kabut);
+}
+
+/* Measured: #ffffff on --langit is 8.88:1 — same pairing `.category-chip`
+   uses for its own pressed state. */
+.discover-tag[aria-pressed="true"] {
+  color: var(--surface);
+  background: var(--langit);
+}
+
 .discover-sidebar-card h4 {
   font-size: 0.8125rem;
   font-weight: 600;

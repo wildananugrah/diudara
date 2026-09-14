@@ -64,6 +64,8 @@ export interface BrowseCommunitiesQuery {
   search: string;
   /** Empty means "every category". */
   category: string;
+  /** Already normalised by the use-case (`communityTagSchema`). Empty means "any tag". */
+  tag: string;
   limit: number;
 }
 

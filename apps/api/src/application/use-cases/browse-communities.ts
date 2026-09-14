@@ -2,6 +2,7 @@ import {
   COMMUNITY_CATEGORIES,
   DEFAULT_COMMUNITY_LIST_LIMIT,
   MAX_COMMUNITY_SEARCH_LENGTH,
+  MAX_COMMUNITY_TAG_LENGTH,
   POPULAR_TAGS_LIMIT,
 } from "@diudara/shared";
 import { ValidationError } from "../errors";
@@ -30,6 +31,16 @@ const CATEGORIES: ReadonlySet<string> = new Set(COMMUNITY_CATEGORIES);
  * `limit` is clamped to `DEFAULT_COMMUNITY_LIST_LIMIT` rather than to some
  * larger ceiling: one screen of cards is the whole contract of this endpoint,
  * and a caller asking for 500 is not a caller this phase serves.
+ *
+ * **`tag` is trimmed, lowercased and stripped of a leading "#"**, the same
+ * normalisation a tag goes through on the way IN
+ * (`communityTagSchema`/`PATCH /communities/:slug/tags`) — so a click on
+ * "#Desain" in the popular-tags panel matches communities stored under
+ * "desain" without the caller having to know that. Unlike category, an
+ * unrecognised tag is not rejected: the tag vocabulary is open (owners type
+ * whatever they want), so "no community has this tag" is a valid, silent
+ * empty result rather than a 400. Clamped rather than rejected too, for the
+ * same reason `search` above is clamped rather than rejected.
  */
 export class BrowseCommunities {
   constructor(private readonly communities: CommunityRepositoryPort) {}
@@ -37,6 +48,7 @@ export class BrowseCommunities {
   async execute(input: {
     search?: string;
     category?: string;
+    tag?: string;
     limit?: number;
   }): Promise<{ communities: CommunityListRow[]; popularTags: string[] }> {
     const category = input.category ?? "";
@@ -46,6 +58,12 @@ export class BrowseCommunities {
 
     const search = (input.search ?? "").trim().slice(0, MAX_COMMUNITY_SEARCH_LENGTH);
 
+    const tag = (input.tag ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/^#/, "")
+      .slice(0, MAX_COMMUNITY_TAG_LENGTH);
+
     const requested = input.limit ?? DEFAULT_COMMUNITY_LIST_LIMIT;
     const limit =
       Number.isFinite(requested) && requested > 0
@@ -53,7 +71,7 @@ export class BrowseCommunities {
         : DEFAULT_COMMUNITY_LIST_LIMIT;
 
     const [rows, popularTags] = await Promise.all([
-      this.communities.browse({ search, category, limit }),
+      this.communities.browse({ search, category, tag, limit }),
       this.communities.popularTags(POPULAR_TAGS_LIMIT),
     ]);
     return { communities: rows, popularTags };
