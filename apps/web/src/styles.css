@@ -3698,7 +3698,16 @@ button:disabled {
 }
 
 /* ---------------------------------------------------------------------------
-   Phase 8b — the chat panel.
+   Phase 8b — the chat dock. Redesigned 2026-09-15 from a round launcher +
+   one sheet into the LinkedIn shape the `adamfloothink/diudara` reference
+   mockup draws: a docked "Pesan" roster at the bottom right with open
+   conversations stacked as their own windows to its left.
+
+   EVERY rule below is scoped under `.chat-dock`. Not style — necessity: the
+   AI co-builder modal further down this sheet declares its own `.chat-bubble`
+   and `.chat-composer`, and being later in source order it was silently
+   winning the padding and radius of the direct-message bubbles. Scoping ends
+   that collision without renaming either side.
    --------------------------------------------------------------------------- */
 
 /* Visible to a screen reader, not on screen. The chat composer's label is the
@@ -3715,93 +3724,232 @@ button:disabled {
   white-space: nowrap;
 }
 
-.chat-panel {
+/* Mobile first: a single column above the bottom navigation, roster at the
+   foot and the newest window stacked over it. The row layout the reference
+   draws arrives at md, where the bottom bar is gone. */
+.chat-dock {
   position: fixed;
-  right: 1rem;
-  /* Clear of the bottom navigation, which is fixed at the foot on a phone —
-     a launcher sitting on top of it would cover a destination. */
-  bottom: 5rem;
+  left: 0.5rem;
+  right: 0.5rem;
+  /* Clear of the bottom navigation, which is fixed at the foot below md — a
+     dock sitting on top of it would cover a destination. */
+  bottom: 4rem;
   /* BELOW the navigation's z-index of 10. AppShell.test.tsx asserts the nav
      outranks everything else in this sheet, because a badge once painted over
      the only way off a page. */
   z-index: 5;
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
   gap: 0.5rem;
+  /* The container spans the viewport to lay its children out, so without this
+     its empty gaps would swallow every click on the page underneath. */
+  pointer-events: none;
 }
 
-.chat-launcher {
-  position: relative;
-  width: 3rem;
-  height: 3rem;
-  border: none;
-  border-radius: 50%;
+.chat-dock > * {
+  pointer-events: auto;
+}
+
+/* ONE window at a time on a phone. Three 18.75rem columns plus the roster do
+   not fit a narrow viewport, and the newest is the one you just opened. */
+.chat-dock .chat-window:not(:first-child) {
+  display: none;
+}
+
+.chat-roster,
+.chat-window {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* Square at the foot: these sit ON the bottom edge rather than floating
+     above it, which is what makes them read as docked. */
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.chat-window {
+  height: min(26rem, 55vh);
+}
+
+/* Minimised is the header bar and nothing else — the state that also stops
+   this window's thread polling (see ChatPanel.tsx's `liveIds`). */
+.chat-window[data-minimized="true"] {
+  height: auto;
+}
+
+@media (min-width: 768px) {
+  .chat-dock {
+    left: auto;
+    right: 1.25rem;
+    /* The bottom bar is hidden at this width, so the dock reaches the edge. */
+    bottom: 0;
+    flex-direction: row;
+    align-items: flex-end;
+    gap: 0.625rem;
+  }
+
+  .chat-dock .chat-window:not(:first-child) {
+    display: flex;
+  }
+
+  .chat-roster,
+  .chat-window {
+    width: 18.75rem;
+  }
+
+  .chat-window {
+    height: min(28.75rem, 70vh);
+  }
+}
+
+/* Initials rather than a photo: `ConversationRow` carries a handle and a
+   display name, no avatar URL. Same shape as `.member-avatar`. */
+.chat-dock .chat-avatar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.875rem;
+  height: 1.875rem;
+  border-radius: 999px;
   background: var(--langit);
   color: var(--awan);
-  font-size: 1.125rem;
-  box-shadow: var(--shadow-card);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.chat-dock-error {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--merah-senja);
+  color: var(--surface);
+  font-size: 0.75rem;
+}
+
+.chat-roster-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  width: 100%;
+  padding: 0.625rem 0.75rem;
+  border: none;
+  background: none;
+  color: var(--ink-900);
+  font: inherit;
   cursor: pointer;
 }
 
-.chat-badge {
-  position: absolute;
-  top: -0.125rem;
-  right: -0.125rem;
+.chat-roster-title {
+  flex: 1;
+  text-align: left;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.chat-dock .chat-badge {
   min-width: 1.125rem;
-  padding: 0 0.25rem;
+  padding: 0 0.3125rem;
   border-radius: 999px;
   background: var(--merah-senja);
   color: var(--surface);
   font-size: 0.6875rem;
   font-weight: 700;
   line-height: 1.125rem;
+  text-align: center;
 }
 
-.chat-sheet {
+.chat-search {
+  position: relative;
   display: flex;
-  flex-direction: column;
-  width: min(20rem, calc(100vw - 2rem));
-  max-height: min(26rem, 60vh);
-  overflow: hidden;
-  padding: 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  box-shadow: var(--shadow-card);
+  align-items: center;
+  padding: 0 0.75rem 0.625rem;
 }
 
-.chat-list {
+.chat-search svg {
+  position: absolute;
+  left: 1.375rem;
+  font-size: 0.75rem;
+  color: var(--ink-500);
+  pointer-events: none;
+}
+
+.chat-search input {
+  width: 100%;
+  padding: 0.4375rem 0.625rem 0.4375rem 1.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--awan);
+  font: inherit;
+  font-size: 0.8125rem;
+}
+
+.chat-dock .empty {
+  padding: 1rem 0.75rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.8125rem;
+}
+
+.chat-dock .chat-list {
   margin: 0;
   padding: 0;
+  max-height: 17rem;
   overflow-y: auto;
+  border-top: 1px solid var(--border);
   list-style: none;
 }
 
-.chat-list button {
-  position: relative;
+/* Two rows, avatar spanning both: name and time above, preview and the unread
+   dot below — the reference's row, as a grid instead of nested flexboxes. */
+.chat-dock .chat-list button {
   display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "avatar name    time"
+    "avatar preview dot";
+  align-items: center;
+  column-gap: 0.625rem;
+  row-gap: 0.125rem;
   width: 100%;
-  gap: 0.125rem;
-  padding: 0.5rem;
+  padding: 0.625rem 0.75rem;
   border: none;
-  border-radius: var(--radius-sm);
   background: none;
   text-align: left;
   cursor: pointer;
 }
 
-.chat-list button:hover {
+.chat-dock .chat-list button:hover {
   background: var(--awan);
 }
 
+.chat-dock .chat-list .chat-avatar {
+  grid-area: avatar;
+  width: 2.25rem;
+  height: 2.25rem;
+  font-size: 0.8125rem;
+}
+
 .chat-list-name {
+  grid-area: name;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
   font-size: 0.8125rem;
   color: var(--ink-900);
 }
 
+.chat-list-time {
+  grid-area: time;
+  font-size: 0.6875rem;
+  white-space: nowrap;
+}
+
 .chat-list-preview {
+  grid-area: preview;
   font-size: 0.75rem;
   /* One line, ellipsised: a preview that wrapped would make rows different
      heights and the list hard to scan. */
@@ -3810,94 +3958,223 @@ button:disabled {
   white-space: nowrap;
 }
 
-.chat-thread-header {
+/* Unread is carried by weight and a tinted row, not by the dot alone — the
+   dot is the reinforcement, never the only signal. */
+.chat-dock .chat-list button[data-unread="true"] {
+  background: var(--awan);
+}
+
+.chat-dock .chat-list button[data-unread="true"] .chat-list-name {
+  font-weight: 700;
+}
+
+.chat-dock .chat-list button[data-unread="true"] .chat-list-preview {
+  font-weight: 600;
+  color: var(--ink-900);
+}
+
+.chat-dot {
+  grid-area: dot;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--sinyal);
+}
+
+.chat-window-header {
+  display: flex;
+  align-items: center;
+  flex: none;
+  background: var(--langit-dark);
+  color: var(--awan);
+}
+
+.chat-window-title {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--border);
+  padding: 0.5rem 0.25rem 0.5rem 0.75rem;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-window-header .chat-avatar {
+  background: var(--langit-light);
+}
+
+.chat-window-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
   font-size: 0.8125rem;
   font-weight: 600;
 }
 
-.chat-thread-header button {
+.chat-dock .chat-icon-button {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
   border: none;
+  border-radius: var(--radius-sm);
   background: none;
-  color: var(--ink-500);
-  font-size: 0.75rem;
+  color: inherit;
+  font-size: 0.8125rem;
   cursor: pointer;
 }
 
-.chat-thread {
+.chat-window-header .chat-icon-button {
+  margin-right: 0.25rem;
+}
+
+/* A token, not an rgba() white wash — `no-hardcoded-colours.test.ts` holds
+   every rule outside `:root` to the palette. `--langit` on the header's
+   `--langit-dark` is the lift. */
+.chat-window-header .chat-icon-button:hover {
+  background: var(--langit);
+}
+
+.chat-dock .chat-composer .chat-icon-button {
+  color: var(--ink-500);
+}
+
+/* The reference tints the open emoji button `--sinyal`, which measures
+   2.45:1 on `--awan` and fails AA — one more of the documented deviations
+   this sheet takes from the mockup (see the palette's own note). `--langit`
+   carries the same "this is on" reading and passes; `aria-pressed` carries
+   it for anyone not reading colour at all. */
+.chat-dock .chat-composer .chat-icon-button:hover,
+.chat-dock .chat-composer .chat-icon-button[aria-pressed="true"] {
+  background: var(--awan);
+  color: var(--langit);
+}
+
+.chat-dock .chat-thread {
   flex: 1;
+  min-height: 0;
   display: grid;
+  align-content: start;
   gap: 0.375rem;
   margin: 0;
-  padding: 0.5rem 0;
+  padding: 0.625rem 0.75rem;
   overflow-y: auto;
   list-style: none;
 }
 
-.chat-thread li {
+.chat-dock .chat-thread li {
   display: grid;
   justify-items: start;
+  gap: 0.125rem;
   font-size: 0.6875rem;
   color: var(--ink-500);
 }
 
 /* Your own messages sit right. Alignment carries the identity, and the bubble
    colour reinforces it — never colour alone. */
-.chat-thread li[data-mine="true"] {
+.chat-dock .chat-thread li[data-mine="true"] {
   justify-items: end;
 }
 
-.chat-bubble {
+.chat-dock .chat-bubble {
   max-width: 85%;
-  padding: 0.375rem 0.625rem;
-  border-radius: var(--radius-sm);
-  background: var(--ink-100);
+  padding: 0.4375rem 0.6875rem;
+  border-radius: var(--radius-md);
+  background: var(--awan);
   color: var(--ink-900);
   font-size: 0.8125rem;
+  line-height: 1.4;
   /* Preserves the line breaks somebody typed, without parsing anything as
      markup — the same rule `.post-card-body` follows. */
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.chat-thread li[data-mine="true"] .chat-bubble {
+.chat-dock .chat-thread li[data-mine="true"] .chat-bubble {
   background: var(--langit);
   color: var(--awan);
 }
 
-.chat-composer {
-  display: flex;
-  gap: 0.375rem;
-  padding-top: 0.5rem;
+.chat-emoji-grid {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 0.125rem;
+  padding: 0.5rem;
   border-top: 1px solid var(--border);
+  background: var(--awan);
 }
 
-.chat-composer input {
-  flex: 1;
-  min-width: 0;
-  padding: 0.375rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font: inherit;
-  font-size: 0.8125rem;
-}
-
-.chat-composer button {
-  flex-shrink: 0;
-  padding: 0.375rem 0.75rem;
+.chat-emoji-grid button {
+  padding: 0.1875rem;
   border: none;
   border-radius: var(--radius-sm);
-  background: var(--langit);
-  color: var(--awan);
-  font-size: 0.8125rem;
+  background: none;
+  font-size: 1rem;
   cursor: pointer;
 }
 
-.chat-composer button:disabled {
+.chat-emoji-grid button:hover {
+  background: var(--ink-100);
+}
+
+.chat-dock .chat-composer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  padding: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.chat-dock .chat-composer textarea {
+  width: 100%;
+  min-height: 3rem;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--awan);
+  color: var(--ink-900);
+  font: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  /* Fixed: the window has a fixed height, so a draggable corner would only
+     let somebody push the composer through the thread above it. */
+  resize: none;
+}
+
+.chat-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.chat-dock .chat-send {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: none;
+  border-radius: 999px;
+  background: var(--langit);
+  color: var(--awan);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.chat-dock .chat-send:disabled {
   background: var(--ink-150);
   color: var(--ink-700);
   cursor: not-allowed;

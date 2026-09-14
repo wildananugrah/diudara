@@ -6,7 +6,14 @@ import { setUserSession, type ConversationRow, type DirectMessageRow } from "./a
 
 /**
  * **No happy-dom node ever reaches a serialising matcher** (see
- * `no-hanging-dom-assertions.test.ts`).
+ * `no-hanging-dom-assertions.test.ts`). Everything below asserts on strings,
+ * numbers or booleans pulled out of a node, never on the node itself.
+ *
+ * The dock renders the roster and any number of chat windows AT THE SAME
+ * TIME, so a display name can appear two or three times on screen at once.
+ * Every query here therefore goes through an unambiguous accessible name
+ * (`Buka/Kecilkan/Tutup percakapan dengan ...`) rather than `findByText`,
+ * which the single-sheet panel could get away with and this one cannot.
  */
 
 const NOW = new Date("2026-09-12T12:00:00.000Z");
@@ -75,6 +82,11 @@ function renderPanel() {
   return render(<ChatPanel now={NOW} />);
 }
 
+/** Expands the roster and waits for the first conversation row to land. */
+async function openRoster(): Promise<void> {
+  fireEvent.click(await screen.findByRole("button", { name: /^Pesan/ }));
+}
+
 /** Stands in for the Anggota roster's "message this member" button. */
 function RequestButton({ handle }: { handle: string }) {
   const { requestConversation } = useChatContext();
@@ -96,10 +108,11 @@ function renderPanelWithRequester(handle: string) {
 
 describe("ChatPanel", () => {
   /**
-   * The cost model of the whole phase: load scales with OPEN conversations,
-   * not with signed-in users. A closed panel must poll nothing at all.
+   * The cost model of the whole phase, unchanged by the redesign: load scales
+   * with what is OPEN, not with signed-in users. A collapsed roster with no
+   * chat window must poll nothing at all.
    */
-  it("polls nothing while closed", async () => {
+  it("polls nothing while collapsed with no window open", async () => {
     setUserSession("token-123", ME);
     const calls = stubFetch();
     renderPanel();
@@ -116,14 +129,14 @@ describe("ChatPanel", () => {
     expect(calls.length).toBe(0);
   });
 
-  it("opening it lists conversations", async () => {
+  it("expanding the roster lists conversations", async () => {
     setUserSession("token-123", ME);
     stubFetch();
     renderPanel();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Pesan" }));
+    await openRoster();
 
-    await screen.findByText("Wildan");
+    await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" });
     expect(screen.getByText("halo kak").textContent).toBe("halo kak");
   });
 
@@ -132,9 +145,9 @@ describe("ChatPanel", () => {
     stubFetch({ conversations: [aConversation({ unreadCount: 2 })] });
     renderPanel();
 
-    fireEvent.click(await screen.findByRole("button", { name: /Pesan/ }));
+    await openRoster();
 
-    await waitFor(() => expect(screen.getAllByText("2").length).toBeGreaterThan(0));
+    await screen.findByRole("button", { name: "Pesan, 2 belum dibaca" });
   });
 
   it("a conversation with no messages says so rather than showing a blank preview", async () => {
@@ -142,7 +155,7 @@ describe("ChatPanel", () => {
     stubFetch({ conversations: [aConversation({ lastMessageBody: null })] });
     renderPanel();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Pesan" }));
+    await openRoster();
 
     await screen.findByText("Belum ada pesan");
   });
@@ -152,29 +165,127 @@ describe("ChatPanel", () => {
     stubFetch({ conversations: [] });
     renderPanel();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Pesan" }));
+    await openRoster();
 
     await screen.findByText(/Belum ada percakapan/);
   });
 
-  it("opening a conversation shows its thread and marks it read", async () => {
+  it("the search box filters the list", async () => {
+    setUserSession("token-123", ME);
+    stubFetch({
+      conversations: [
+        aConversation(),
+        aConversation({ id: "c2", other: { handle: "budi", displayName: "Budi" } }),
+      ],
+    });
+    renderPanel();
+    await openRoster();
+    await screen.findByRole("button", { name: "Buka percakapan dengan Budi" });
+
+    fireEvent.change(screen.getByPlaceholderText("Cari pesan"), { target: { value: "bud" } });
+
+    await waitFor(() =>
+      expect(screen.queryAllByRole("button", { name: "Buka percakapan dengan Wildan" }).length).toBe(0)
+    );
+    expect(screen.queryAllByRole("button", { name: "Buka percakapan dengan Budi" }).length).toBe(1);
+  });
+
+  it("a search matching nobody says so", async () => {
+    setUserSession("token-123", ME);
+    stubFetch();
+    renderPanel();
+    await openRoster();
+    await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" });
+
+    fireEvent.change(screen.getByPlaceholderText("Cari pesan"), { target: { value: "zzz" } });
+
+    await screen.findByText(/Tidak ada percakapan ditemukan/);
+  });
+
+  it("opening a conversation opens a window and marks it read", async () => {
     setUserSession("token-123", ME);
     const calls = stubFetch({ conversations: [aConversation({ unreadCount: 3 })] });
     renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: /Pesan/ }));
+    await openRoster();
 
-    fireEvent.click(await screen.findByText("Wildan"));
+    fireEvent.click(await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" }));
 
     await screen.findByPlaceholderText("Tulis pesan...");
+    await screen.findByRole("button", { name: "Tutup percakapan dengan Wildan" });
     await waitFor(() => expect(calls.some((call) => call.includes("/read"))).toBe(true));
+  });
+
+  it("opening the same conversation twice keeps one window", async () => {
+    setUserSession("token-123", ME);
+    stubFetch();
+    renderPanel();
+    await openRoster();
+    const row = await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" });
+
+    fireEvent.click(row);
+    await screen.findByPlaceholderText("Tulis pesan...");
+    fireEvent.click(row);
+
+    await waitFor(() => expect(screen.getAllByPlaceholderText("Tulis pesan...").length).toBe(1));
+  });
+
+  /** LinkedIn caps the stack; so does the reference mockup, at three. */
+  it("keeps at most three windows open", async () => {
+    setUserSession("token-123", ME);
+    stubFetch({
+      conversations: [
+        aConversation({ id: "c1", other: { handle: "a", displayName: "Ana" } }),
+        aConversation({ id: "c2", other: { handle: "b", displayName: "Budi" } }),
+        aConversation({ id: "c3", other: { handle: "c", displayName: "Cita" } }),
+        aConversation({ id: "c4", other: { handle: "d", displayName: "Dewi" } }),
+      ],
+    });
+    renderPanel();
+    await openRoster();
+    for (const name of ["Ana", "Budi", "Cita", "Dewi"]) {
+      fireEvent.click(await screen.findByRole("button", { name: `Buka percakapan dengan ${name}` }));
+    }
+
+    await waitFor(() => expect(screen.getAllByPlaceholderText("Tulis pesan...").length).toBe(3));
+    // The oldest is the one dropped, so the most recently opened stays.
+    expect(screen.queryAllByRole("button", { name: "Tutup percakapan dengan Dewi" }).length).toBe(1);
+    expect(screen.queryAllByRole("button", { name: "Tutup percakapan dengan Ana" }).length).toBe(0);
+  });
+
+  it("minimising a window hides its thread, restoring brings it back", async () => {
+    setUserSession("token-123", ME);
+    stubFetch();
+    renderPanel();
+    await openRoster();
+    fireEvent.click(await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" }));
+    await screen.findByPlaceholderText("Tulis pesan...");
+
+    fireEvent.click(screen.getByRole("button", { name: "Kecilkan percakapan dengan Wildan" }));
+
+    await waitFor(() => expect(screen.queryAllByPlaceholderText("Tulis pesan...").length).toBe(0));
+    fireEvent.click(screen.getByRole("button", { name: "Perbesar percakapan dengan Wildan" }));
+    await screen.findByPlaceholderText("Tulis pesan...");
+  });
+
+  it("closing a window removes it", async () => {
+    setUserSession("token-123", ME);
+    stubFetch();
+    renderPanel();
+    await openRoster();
+    fireEvent.click(await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" }));
+    await screen.findByPlaceholderText("Tulis pesan...");
+
+    fireEvent.click(screen.getByRole("button", { name: "Tutup percakapan dengan Wildan" }));
+
+    await waitFor(() => expect(screen.queryAllByPlaceholderText("Tulis pesan...").length).toBe(0));
   });
 
   it("sending appends immediately rather than waiting for a poll", async () => {
     setUserSession("token-123", ME);
     stubFetch();
     renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: "Pesan" }));
-    fireEvent.click(await screen.findByText("Wildan"));
+    await openRoster();
+    fireEvent.click(await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" }));
     await screen.findByPlaceholderText("Tulis pesan...");
 
     fireEvent.change(screen.getByPlaceholderText("Tulis pesan..."), {
@@ -186,15 +297,48 @@ describe("ChatPanel", () => {
     await screen.findByText("terkirim");
   });
 
+  /** A textarea that swallowed Enter would make every send a mouse trip. */
+  it("Enter sends and Shift+Enter does not", async () => {
+    setUserSession("token-123", ME);
+    stubFetch();
+    renderPanel();
+    await openRoster();
+    fireEvent.click(await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" }));
+    const draft = await screen.findByPlaceholderText("Tulis pesan...");
+
+    fireEvent.change(draft, { target: { value: "terkirim" } });
+    fireEvent.keyDown(draft, { key: "Enter", shiftKey: true });
+    expect((draft as HTMLTextAreaElement).value).toBe("terkirim");
+
+    fireEvent.keyDown(draft, { key: "Enter" });
+    await screen.findByText("terkirim");
+    await waitFor(() => expect((draft as HTMLTextAreaElement).value).toBe(""));
+  });
+
   it("will not send an empty message", async () => {
     setUserSession("token-123", ME);
     stubFetch();
     renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: "Pesan" }));
-    fireEvent.click(await screen.findByText("Wildan"));
+    await openRoster();
+    fireEvent.click(await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" }));
 
     const submit = await screen.findByRole("button", { name: "Kirim" });
     expect((submit as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("the emoji picker appends to the draft", async () => {
+    setUserSession("token-123", ME);
+    stubFetch();
+    renderPanel();
+    await openRoster();
+    fireEvent.click(await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" }));
+    const draft = await screen.findByPlaceholderText("Tulis pesan...");
+    fireEvent.change(draft, { target: { value: "oke" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Emoji" }));
+    fireEvent.click(await screen.findByRole("button", { name: "👍" }));
+
+    await waitFor(() => expect((draft as HTMLTextAreaElement).value).toBe("oke👍"));
   });
 
   /** A failed send must not eat what somebody typed. */
@@ -209,8 +353,8 @@ describe("ChatPanel", () => {
       return jsonResponse({ conversations: [aConversation()] });
     }) as unknown as typeof fetch;
     renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: "Pesan" }));
-    fireEvent.click(await screen.findByText("Wildan"));
+    await openRoster();
+    fireEvent.click(await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" }));
     await screen.findByPlaceholderText("Tulis pesan...");
 
     fireEvent.change(screen.getByPlaceholderText("Tulis pesan..."), {
@@ -221,7 +365,7 @@ describe("ChatPanel", () => {
     await screen.findByRole("alert");
     await waitFor(() =>
       expect(
-        (screen.getByPlaceholderText("Tulis pesan...") as HTMLInputElement).value
+        (screen.getByPlaceholderText("Tulis pesan...") as HTMLTextAreaElement).value
       ).toBe("jangan hilang")
     );
   });
@@ -234,17 +378,20 @@ describe("ChatPanel", () => {
         aMessage({ id: "mine", senderHandle: "rina", body: "dari saya" }),
       ],
     });
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: "Pesan" }));
-    fireEvent.click(await screen.findByText("Wildan"));
+    const { container } = renderPanel();
+    await openRoster();
+    fireEvent.click(await screen.findByRole("button", { name: "Buka percakapan dengan Wildan" }));
 
     await screen.findByText("dari saya");
-    const items = screen.getAllByRole("listitem");
-    // Alignment carries identity; `data-mine` is the hook it reads.
-    expect(items.map((item) => item.getAttribute("data-mine"))).toEqual([null, "true"]);
+    // Alignment carries identity; `data-mine` is the hook it reads. Scoped to
+    // the thread because the roster's own <li> rows are on screen too.
+    const marks = Array.from(container.querySelectorAll(".chat-thread li")).map((item) =>
+      item.getAttribute("data-mine")
+    );
+    expect(marks).toEqual([null, "true"]);
   });
 
-  it("opens straight into a conversation requested through ChatContext", async () => {
+  it("opens straight into a window requested through ChatContext", async () => {
     setUserSession("token-123", ME);
     const calls: string[] = [];
     global.fetch = mock(async (url: string, init?: RequestInit) => {
@@ -264,7 +411,9 @@ describe("ChatPanel", () => {
     expect(
       calls.some((call) => call.startsWith("POST") && call.includes("/users/me/conversations"))
     ).toBe(true);
-    expect(screen.getByText("halo kak").textContent).toBe("halo kak");
+    // The thread loads from the window's own polling effect, one tick after
+    // the window itself renders — hence `find`, not `get`.
+    expect((await screen.findByText("halo kak")).textContent).toBe("halo kak");
   });
 
   it("does nothing when the panel has no ChatProvider above it", async () => {
@@ -273,22 +422,8 @@ describe("ChatPanel", () => {
     renderPanel();
 
     await screen.findByRole("button", { name: "Pesan" });
-    // The default (provider-less) context carries no request, so the panel
-    // stays closed and reads nothing — exactly as before this change.
+    // The default (provider-less) context carries no request, so the dock
+    // stays collapsed and reads nothing — exactly as before this change.
     expect(calls.length).toBe(0);
-  });
-
-  it("goes back to the list", async () => {
-    setUserSession("token-123", ME);
-    stubFetch();
-    renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: "Pesan" }));
-    fireEvent.click(await screen.findByText("Wildan"));
-    await screen.findByPlaceholderText("Tulis pesan...");
-
-    fireEvent.click(screen.getByRole("button", { name: "Kembali" }));
-
-    await screen.findByText("halo kak");
-    expect(screen.queryAllByPlaceholderText("Tulis pesan...").length).toBe(0);
   });
 });
