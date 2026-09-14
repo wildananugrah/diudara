@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import ChatPanel from "./ChatPanel";
+import { ChatProvider, useChatContext } from "./ChatContext";
 import { setUserSession, type ConversationRow, type DirectMessageRow } from "./apiClient";
 
 /**
@@ -72,6 +73,25 @@ function stubFetch(
 
 function renderPanel() {
   return render(<ChatPanel now={NOW} />);
+}
+
+/** Stands in for the Anggota roster's "message this member" button. */
+function RequestButton({ handle }: { handle: string }) {
+  const { requestConversation } = useChatContext();
+  return (
+    <button type="button" onClick={() => requestConversation(handle)}>
+      Kirim pesan ke {handle}
+    </button>
+  );
+}
+
+function renderPanelWithRequester(handle: string) {
+  return render(
+    <ChatProvider>
+      <RequestButton handle={handle} />
+      <ChatPanel now={NOW} />
+    </ChatProvider>
+  );
 }
 
 describe("ChatPanel", () => {
@@ -222,6 +242,40 @@ describe("ChatPanel", () => {
     const items = screen.getAllByRole("listitem");
     // Alignment carries identity; `data-mine` is the hook it reads.
     expect(items.map((item) => item.getAttribute("data-mine"))).toEqual([null, "true"]);
+  });
+
+  it("opens straight into a conversation requested through ChatContext", async () => {
+    setUserSession("token-123", ME);
+    const calls: string[] = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      if (url.includes("/conversations") && init?.method === "POST") {
+        return jsonResponse({ id: "c-new" }, 201);
+      }
+      if (url.includes("/read")) return jsonResponse({ read: true });
+      if (url.includes("/messages")) return jsonResponse({ messages: [aMessage()] });
+      return jsonResponse({ conversations: [aConversation({ id: "c-new" })] });
+    }) as unknown as typeof fetch;
+    renderPanelWithRequester("wildan");
+
+    fireEvent.click(screen.getByRole("button", { name: "Kirim pesan ke wildan" }));
+
+    await screen.findByPlaceholderText("Tulis pesan...");
+    expect(
+      calls.some((call) => call.startsWith("POST") && call.includes("/users/me/conversations"))
+    ).toBe(true);
+    expect(screen.getByText("halo kak").textContent).toBe("halo kak");
+  });
+
+  it("does nothing when the panel has no ChatProvider above it", async () => {
+    setUserSession("token-123", ME);
+    const calls = stubFetch();
+    renderPanel();
+
+    await screen.findByRole("button", { name: "Pesan" });
+    // The default (provider-less) context carries no request, so the panel
+    // stays closed and reads nothing — exactly as before this change.
+    expect(calls.length).toBe(0);
   });
 
   it("goes back to the list", async () => {

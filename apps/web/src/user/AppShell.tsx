@@ -8,6 +8,7 @@ import {
 } from "./apiClient";
 import Sidebar from "./shell/Sidebar";
 import ChatPanel from "./ChatPanel";
+import { ChatProvider } from "./ChatContext";
 
 /**
  * The three destinations that never change — see
@@ -131,29 +132,31 @@ export default function AppShell() {
   const myCommunities = useMyCommunities(signedIn);
   const [collapsed, setCollapsed] = useState(false);
   return (
-    <div className="app-shell">
-      <Sidebar
-        destinations={destinations}
-        collapsed={collapsed}
-        onToggleCollapse={() => setCollapsed((value) => !value)}
-        myCommunities={myCommunities}
-      />
-      {/*
-        A <div>, NOT a <main>: every page this shell renders brings its own
-        <main className="user-page">, so a <main> here would nest one inside
-        the other — invalid HTML, and two "main" landmarks for assistive
-        technology to choose between.
-      */}
-      <div className="app-shell-main">
-        <Outlet />
+    <ChatProvider>
+      <div className="app-shell">
+        <Sidebar
+          destinations={destinations}
+          collapsed={collapsed}
+          onToggleCollapse={() => setCollapsed((value) => !value)}
+          myCommunities={myCommunities}
+        />
+        {/*
+          A <div>, NOT a <main>: every page this shell renders brings its own
+          <main className="user-page">, so a <main> here would nest one inside
+          the other — invalid HTML, and two "main" landmarks for assistive
+          technology to choose between.
+        */}
+        <div className="app-shell-main">
+          <Outlet />
+        </div>
+        {/* Phase 8b. Floating, outside the scrolling page so it survives
+            navigation — and it renders nothing at all when signed out, which
+            also means no authenticated endpoint is polled by a visitor. */}
+        <ChatPanel />
+        <nav className="bottom-nav" aria-label="Navigasi utama">
+          <Destinations destinations={destinations} />
+        </nav>
       </div>
-      {/* Phase 8b. Floating, outside the scrolling page so it survives
-          navigation — and it renders nothing at all when signed out, which
-          also means no authenticated endpoint is polled by a visitor. */}
-      <ChatPanel />
-      <nav className="bottom-nav" aria-label="Navigasi utama">
-        <Destinations destinations={destinations} />
-      </nav>
-    </div>
+    </ChatProvider>
   );
 }

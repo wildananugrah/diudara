@@ -418,6 +418,25 @@ describe("CommunityPage — the Diskusi / Kegiatan / Anggota tab bar", () => {
     expect(screen.queryAllByLabelText("Apa yang terjadi?").length).toBe(0);
   });
 
+  it("shows an Aktif status and a chat button for other members, but never for the viewer's own row", async () => {
+    setUserSession("token-1", USER);
+    stubFetch();
+    renderPage("/komunitas/kelas-desain?tab=anggota");
+
+    await screen.findAllByRole("link", { name: /Wildan|Rina/ });
+    expect(screen.getAllByText("Aktif").length).toBe(2);
+    expect(screen.getByRole("button", { name: "Kirim pesan ke Wildan" })).toBeTruthy();
+    expect(screen.queryAllByRole("button", { name: "Kirim pesan ke Rina" }).length).toBe(0);
+  });
+
+  it("hides every chat button when signed out — there is no session to start a conversation with", async () => {
+    stubFetch();
+    renderPage("/komunitas/kelas-desain?tab=anggota");
+
+    await screen.findAllByRole("link", { name: /Wildan|Rina/ });
+    expect(screen.queryAllByRole("button", { name: /Kirim pesan ke/ }).length).toBe(0);
+  });
+
   it("puts the tab in the URL when Anggota is clicked", async () => {
     stubFetch();
     renderPageWithSearch();

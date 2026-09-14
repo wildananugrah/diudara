@@ -237,7 +237,6 @@ code {
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
-  padding: 5px;
 }
 
 /* ---------- Udara components ----------
@@ -1109,6 +1108,89 @@ button:disabled {
 
 .follow-row-name {
   font-weight: 600;
+}
+
+/* --- The Anggota roster: an avatar tile, a role + join-time subtitle, an
+       "Aktif" status pill, and a per-row "message this member" button. A
+       dedicated set of classes rather than reusing `.follow-row*` above —
+       that block also renders the profile's follow/follower lists, which
+       keep their plainer, avatar-less layout. -------------------------- */
+.member-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.member-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  text-decoration: none;
+  color: inherit;
+}
+
+.member-avatar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.member-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.member-name {
+  font-weight: 600;
+  color: var(--ink-900);
+}
+
+.member-meta {
+  font-size: 0.8125rem;
+}
+
+.member-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: none;
+}
+
+.member-chat-button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: none;
+  border-radius: 50%;
+  background: var(--ink-100);
+  color: var(--langit);
+  font-size: 0.9375rem;
+  cursor: pointer;
+}
+
+.member-chat-button:hover,
+.member-chat-button:focus-visible {
+  background: var(--langit);
+  color: var(--awan);
 }
 
 /* Final review, item 7: the toggle plus its own error line. A column that
@@ -2629,18 +2711,6 @@ button:disabled {
   font-size: 0.8125rem;
   font-weight: 600;
   line-height: 1.35;
-}
-
-/* --- "Pemilik" beside the owner's row in the roster. Measured: --ink-700 on
-       --ink-100 is 7.4:1. ------------------------------------------------ */
-.role-badge {
-  flex: none;
-  font-size: 0.75rem;
-  font-weight: 600;
-  padding: 0.1875rem 0.5rem;
-  border-radius: 999px;
-  color: var(--ink-700);
-  background: var(--ink-100);
 }
 
 /* ---------------------------------------------------------------

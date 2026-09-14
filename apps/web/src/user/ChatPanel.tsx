@@ -9,10 +9,12 @@ import {
   listDirectMessages,
   markConversationRead,
   sendDirectMessage,
+  startConversation,
   subscribeToUserAuth,
   type ConversationRow,
   type DirectMessageRow,
 } from "./apiClient";
+import { useChatContext } from "./ChatContext";
 import { describeRequestFailure } from "./errorCopy";
 import { formatRelativeTime } from "./relativeTime";
 
@@ -52,6 +54,7 @@ export default function ChatPanel({ now }: Props) {
   const [error, setError] = useState<string | null>(null);
   const clock = now ?? new Date();
   const me = getSessionUser()?.handle ?? null;
+  const { request, clearRequest } = useChatContext();
 
   const refreshList = useCallback(async () => {
     try {
@@ -95,6 +98,34 @@ export default function ChatPanel({ now }: Props) {
       document.removeEventListener("visibilitychange", tick);
     };
   }, [signedIn, open, activeId]);
+
+  /**
+   * The Anggota roster's "message this member" button (and anything else
+   * that calls `requestConversation`) lands here: start-or-resume the thread,
+   * open the panel straight into it, then clear the request so it does not
+   * re-fire on the next render.
+   */
+  useEffect(() => {
+    if (!signedIn || request === null) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { id } = await startConversation(request.handle);
+        if (cancelled) return;
+        setOpen(true);
+        await listRef.current();
+        if (cancelled) return;
+        await openConversation(id);
+      } catch (caught: unknown) {
+        if (!cancelled) setError(describeRequestFailure(caught));
+      } finally {
+        if (!cancelled) clearRequest();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [signedIn, request, clearRequest]);
 
   if (!signedIn) return null;
 

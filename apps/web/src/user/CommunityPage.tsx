@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faComments } from "@fortawesome/free-solid-svg-icons";
 import NotFoundPage from "../pages/NotFoundPage";
 import {
   UserApiError,
@@ -10,6 +12,7 @@ import {
   type CommunityMemberRow,
 } from "./apiClient";
 import { communityColor, communityInk } from "./communityColor";
+import { useChatContext } from "./ChatContext";
 import CommunityFeed from "./CommunityFeed";
 import CommunityJoinControl from "./CommunityJoinControl";
 import CommunitySidebar from "./CommunitySidebar";
@@ -20,6 +23,7 @@ import MateriTab from "./MateriTab";
 import StatistikTab from "./StatistikTab";
 import KegiatanTab from "./KegiatanTab";
 import { describeRequestFailure } from "./errorCopy";
+import { formatRelativeTime } from "./relativeTime";
 import Header from "./shell/Header";
 
 type LoadState =
@@ -28,19 +32,71 @@ type LoadState =
   | { status: "error"; message: string }
   | { status: "ready"; community: CommunityDetail };
 
-function Roster({ members }: { members: CommunityMemberRow[] }) {
+const ROLE_LABEL: Record<string, string> = {
+  owner: "Pemilik",
+  member: "Member",
+};
+
+/**
+ * Every row here IS a current member — the roster has no notion of a pending
+ * invite or a lapsed membership (that "standing" concept exists only for
+ * `StatistikTab`'s paid-subscriber view, and does not reach this endpoint).
+ * So "Aktif" is not fabricated the way a per-post badge would be: it states
+ * the one fact this list actually carries about everyone on it.
+ */
+function Roster({
+  members,
+  viewerHandle,
+  onMessage,
+  now,
+}: {
+  members: CommunityMemberRow[];
+  viewerHandle: string | null;
+  onMessage: (handle: string) => void;
+  now: Date;
+}) {
   if (members.length === 0) {
     return <p className="empty">Belum ada anggota.</p>;
   }
   return (
-    <ul className="card-list follow-list">
+    <ul className="card-list member-list">
       {members.map((member) => (
-        <li className="follow-row card" key={member.handle}>
-          <Link to={`/@${member.handle}`} className="follow-row-identity">
-            <span className="follow-row-name">{member.displayName}</span>
-            <span className="follow-row-handle muted">@{member.handle}</span>
+        <li className="card member-row" key={member.handle}>
+          <Link to={`/@${member.handle}`} className="member-identity">
+            <span
+              className="member-avatar"
+              style={{
+                background: communityColor(member.handle),
+                color: communityInk(member.handle),
+              }}
+              aria-hidden="true"
+            >
+              {member.displayName.slice(0, 1).toUpperCase()}
+            </span>
+            <span className="member-text">
+              <span className="member-name">{member.displayName}</span>
+              <span className="member-meta muted">
+                {ROLE_LABEL[member.role] ?? member.role} · {formatRelativeTime(member.joinedAt, now)}
+              </span>
+            </span>
           </Link>
-          {member.role === "owner" ? <span className="role-badge">Pemilik</span> : null}
+          <div className="member-actions">
+            <span className="badge badge-active">
+              <span className="dot" />
+              Aktif
+            </span>
+            {/* No button on your own row — you cannot message yourself. */}
+            {viewerHandle !== null && viewerHandle !== member.handle ? (
+              <button
+                type="button"
+                className="member-chat-button"
+                aria-label={`Kirim pesan ke ${member.displayName}`}
+                onClick={() => onMessage(member.handle)}
+              >
+                <FontAwesomeIcon icon={faComments} />
+              </button>
+            ) : null}
+          </div>
         </li>
       ))}
     </ul>
@@ -59,8 +115,19 @@ function Roster({ members }: { members: CommunityMemberRow[] }) {
  * member list was unreachable, and an empty roster under a working banner is a
  * smaller lie than an error page over a community that exists.
  */
-function AnggotaTab({ slug }: { slug: string }) {
+function AnggotaTab({
+  slug,
+  viewerHandle,
+  now,
+}: {
+  slug: string;
+  viewerHandle: string | null;
+  /** Injected clock for `formatRelativeTime`, the rule every dated component here follows. */
+  now?: Date;
+}) {
   const [members, setMembers] = useState<CommunityMemberRow[]>([]);
+  const { requestConversation } = useChatContext();
+  const clock = now ?? new Date();
 
   useEffect(() => {
     let cancelled = false;
@@ -79,7 +146,12 @@ function AnggotaTab({ slug }: { slug: string }) {
   return (
     <section className="section">
       <h2>Anggota</h2>
-      <Roster members={members} />
+      <Roster
+        members={members}
+        viewerHandle={viewerHandle}
+        onMessage={requestConversation}
+        now={clock}
+      />
     </section>
   );
 }
@@ -117,7 +189,8 @@ export default function CommunityPage() {
       ? requestedTab
       : "diskusi";
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
-  const signedIn = getSessionUser() !== null;
+  const viewerHandle = getSessionUser()?.handle ?? null;
+  const signedIn = viewerHandle !== null;
 
   useEffect(() => {
     if (slug === undefined) return;
@@ -332,7 +405,7 @@ export default function CommunityPage() {
             viewerIsMember={community.viewerIsMember}
           />
         ) : (
-          <AnggotaTab slug={community.slug} />
+          <AnggotaTab slug={community.slug} viewerHandle={viewerHandle} />
         )}
       </main>
     </>
