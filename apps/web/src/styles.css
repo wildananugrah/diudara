@@ -2546,10 +2546,88 @@ button:disabled {
 
 /* ---------------------------------------------------------------
    Task 9: the discussion page — one community post with its comment
-   thread. `.discussion-page` sits inside `.user-page` (capped at 36rem
-   at every width — see `.user-page` above), so nothing here needs its
-   own breakpoints.
+   thread. `.discussion-page` uses `.page-container`'s wide 1180px frame
+   (not `.user-page`'s 36rem one), so the "Diskusi lainnya" sidebar has
+   room beside the thread — the same main+sidebar split `.discover-layout`
+   already uses, reused rather than invented twice.
    --------------------------------------------------------------- */
+.discussion-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+@media (min-width: 768px) {
+  .discussion-layout {
+    grid-template-columns: minmax(0, 1fr) 300px;
+  }
+}
+
+.discussion-main {
+  min-width: 0;
+}
+
+.discussion-sidebar {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  padding: 16px;
+}
+
+.discussion-sidebar-title {
+  margin: 0 0 10px;
+  font-size: 0.9375rem;
+}
+
+.discussion-sidebar-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.discussion-sidebar-list li {
+  padding: 10px 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.discussion-sidebar-list li:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.discussion-sidebar-list a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.discussion-sidebar-item-body {
+  margin: 0 0 4px;
+  font-weight: 600;
+  font-size: 0.875rem;
+  /* Two lines of the post's own body, since there is no separate title. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.discussion-sidebar-item-meta {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--ink-faint);
+}
+
+/* The shared `.post-card` (also used on Beranda, profiles, the community
+   feed) is otherwise unchanged — this scopes the reference's boxed-card
+   look to THIS page alone, rather than widening every feed's rows. */
+.discussion-main > .post-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  padding: 16px;
+}
+
 .discussion-comments {
   margin-top: 16px;
   padding-top: 12px;
@@ -2566,11 +2644,16 @@ button:disabled {
   margin: 0;
   padding: 0;
   list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .comment-row {
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line-soft);
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
 }
 
 .comment-identity {
@@ -2605,23 +2688,32 @@ button:disabled {
 }
 
 .comment-replies {
-  margin: 8px 0 0;
+  margin: 10px 0 0;
   padding: 0 0 0 20px;
   list-style: none;
   border-left: 2px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .comment-replies .comment-row {
-  border-bottom: none;
-  padding: 8px 0;
+  background: var(--surface-sunk);
 }
 
 .comment-reply-form {
   margin-top: 8px;
 }
 
-.comment-form {
-  margin-top: 12px;
+/* The top-level form sits ABOVE the thread now (reference layout) — a
+   reply's own inline `.comment-reply-form` shares this rule too and stays
+   unboxed, since it already sits inside a `.comment-row` card. */
+.comment-list > .comment-form {
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
 }
 
 .comment-form-body {

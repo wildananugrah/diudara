@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import NotFoundPage from "../pages/NotFoundPage";
 import {
   UserApiError,
@@ -7,6 +7,7 @@ import {
   getPost,
   getSessionUser,
   listComments,
+  listCommunityPosts,
   type CommentView,
   type CommunityDetail,
   type PostView,
@@ -20,7 +21,20 @@ type LoadState =
   | { status: "loading" }
   | { status: "not-found" }
   | { status: "error"; message: string }
-  | { status: "ready"; post: PostView; community: CommunityDetail };
+  | {
+      status: "ready";
+      post: PostView;
+      community: CommunityDetail;
+      /**
+       * The "Diskusi lainnya" sidebar — up to 5 of the community's other
+       * posts, oldest-load-order from `listCommunityPosts` with this post
+       * filtered out. Fetched alongside everything else in the same
+       * `Promise.all`, so a failure here shows the same shared error state
+       * rather than a second, independent one for what is a nice-to-have
+       * panel, not load-bearing content.
+       */
+      sidebarPosts: PostView[];
+    };
 
 interface Props {
   /**
@@ -74,10 +88,15 @@ export default function DiscussionPage({ variant = "diskusi" }: Props = {}) {
     if (slug === undefined || postId === undefined) return;
     let cancelled = false;
     setLoad({ status: "loading" });
-    Promise.all([getPost(postId), getCommunity(slug), listComments(postId)])
-      .then(([post, community, thread]) => {
+    Promise.all([getPost(postId), getCommunity(slug), listComments(postId), listCommunityPosts(slug)])
+      .then(([post, community, thread, feed]) => {
         if (cancelled) return;
-        setLoad({ status: "ready", post, community });
+        setLoad({
+          status: "ready",
+          post,
+          community,
+          sidebarPosts: feed.posts.filter((row) => row.id !== post.id).slice(0, 5),
+        });
         setComments(thread);
       })
       .catch((err: unknown) => {
@@ -124,7 +143,7 @@ export default function DiscussionPage({ variant = "diskusi" }: Props = {}) {
     );
   }
 
-  const { post, community } = load;
+  const { post, community, sidebarPosts } = load;
 
   // A discussion id typed into an event URL. NotFound and not a redirect: the
   // page cannot render a schedule it has no date for, and redirecting would
@@ -137,23 +156,53 @@ export default function DiscussionPage({ variant = "diskusi" }: Props = {}) {
 
   return (
     <>
-      <Header title={title} />
-      <main className="user-page discussion-page">
-        {/* Read-only here — the discussion page carries no post editing, so no
-            `onEdit` / `onDeleteRequested` and `isOwn={false}`. */}
-        <PostCard post={post} isOwn={false} />
+      <Header
+        title={title}
+        breadcrumb={[{ label: community.name, to: `/komunitas/${slug}` }, { label: title }]}
+      />
+      <main className="page-container discussion-page">
+        <div className="discussion-layout">
+          <div className="discussion-main">
+            {/* Read-only here — the discussion page carries no post editing,
+                so no `onEdit` / `onDeleteRequested` and `isOwn={false}`. */}
+            <PostCard post={post} isOwn={false} />
 
-        <section className="discussion-comments">
-          <h2>{comments.length} komentar</h2>
-          <CommentList
-            postId={post.id}
-            comments={comments}
-            viewerIsMember={community.viewerIsMember === true}
-            viewerIsOwner={community.viewerIsOwner}
-            onSubmitted={(comment) => setComments((current) => [...current, comment])}
-            onDeleted={(id) => setComments((current) => current.filter((c) => c.id !== id))}
-          />
-        </section>
+            <section className="discussion-comments">
+              <h2>{comments.length} komentar</h2>
+              <CommentList
+                postId={post.id}
+                comments={comments}
+                viewerIsMember={community.viewerIsMember === true}
+                viewerIsOwner={community.viewerIsOwner}
+                onSubmitted={(comment) => setComments((current) => [...current, comment])}
+                onDeleted={(id) => setComments((current) => current.filter((c) => c.id !== id))}
+              />
+            </section>
+          </div>
+
+          {/* "Diskusi lainnya" — real posts from this same community, never
+              fabricated. `sidebarPosts` is capped at 5 and already excludes
+              this post (see the effect above). */}
+          <aside className="discussion-sidebar">
+            <h2 className="discussion-sidebar-title">Diskusi lainnya</h2>
+            {sidebarPosts.length === 0 ? (
+              <p className="empty">Belum ada diskusi lain.</p>
+            ) : (
+              <ul className="discussion-sidebar-list">
+                {sidebarPosts.map((row) => (
+                  <li key={row.id}>
+                    <Link to={`/komunitas/${slug}/diskusi/${row.id}`}>
+                      <p className="discussion-sidebar-item-body">{row.body}</p>
+                      <p className="discussion-sidebar-item-meta">
+                        {row.author.displayName} · {row.commentCount ?? 0} komentar
+                      </p>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </aside>
+        </div>
       </main>
     </>
   );

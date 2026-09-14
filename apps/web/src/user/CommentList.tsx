@@ -198,6 +198,25 @@ export default function CommentList({
 
   return (
     <div className="comment-list">
+      {viewerIsMember ? (
+        <form className="comment-form" onSubmit={handleSubmit}>
+          <textarea
+            className="comment-form-body"
+            value={body}
+            onChange={(event) => setBody(event.target.value.slice(0, MAX_COMMENT_BODY_LENGTH))}
+            maxLength={MAX_COMMENT_BODY_LENGTH}
+            placeholder="Tulis komentar"
+            aria-label="Tulis komentar"
+            rows={3}
+          />
+          <div className="comment-form-actions">
+            <button type="submit" className="button-primary btn btn-sm" disabled={!canSubmit}>
+              Kirim
+            </button>
+          </div>
+        </form>
+      ) : null}
+
       {topLevel.length === 0 ? (
         <p className="empty">Belum ada komentar.</p>
       ) : (
@@ -221,25 +240,6 @@ export default function CommentList({
           })}
         </ul>
       )}
-
-      {viewerIsMember ? (
-        <form className="comment-form" onSubmit={handleSubmit}>
-          <textarea
-            className="comment-form-body"
-            value={body}
-            onChange={(event) => setBody(event.target.value.slice(0, MAX_COMMENT_BODY_LENGTH))}
-            maxLength={MAX_COMMENT_BODY_LENGTH}
-            placeholder="Tulis komentar"
-            aria-label="Tulis komentar"
-            rows={3}
-          />
-          <div className="comment-form-actions">
-            <button type="submit" className="button-primary btn btn-sm" disabled={!canSubmit}>
-              Kirim
-            </button>
-          </div>
-        </form>
-      ) : null}
 
       {/* `role="alert"` matches every other request-failure element under
           src/user — FollowButton, LoginPage, PostFeed, PostComposer. */}

@@ -61,9 +61,11 @@ afterEach(() => {
 });
 
 /**
- * Answers the three reads the page makes — the post, the community detail, and
- * the comment thread — plus the comment POST. `overrides` patches the community
- * detail; `postStatus` / `communityStatus` force a failure on either gate.
+ * Answers the four reads the page makes — the post, the community detail, the
+ * comment thread, and the community's OTHER posts for the sidebar — plus the
+ * comment POST. `overrides` patches the community detail; `postStatus` /
+ * `communityStatus` force a failure on either gate. `sidebarPosts` defaults to
+ * none, since most tests have nothing to say about the sidebar.
  */
 function stubFetch(
   options: {
@@ -72,6 +74,7 @@ function stubFetch(
     post?: Record<string, unknown>;
     postStatus?: number;
     communityStatus?: number;
+    sidebarPosts?: Record<string, unknown>[];
     calls?: string[];
   } = {}
 ) {
@@ -91,6 +94,12 @@ function stubFetch(
         );
       }
       return jsonResponse(COMMENTS);
+    }
+    // The sidebar's own feed read — `/communities/:slug/posts` — checked
+    // BEFORE the plain community-detail branch below, since both URLs
+    // contain "/communities/".
+    if (url.includes("/communities/") && url.includes("/posts")) {
+      return jsonResponse({ posts: options.sidebarPosts ?? [], nextCursor: null });
     }
     if (url.includes("/communities/")) {
       if (options.communityStatus !== undefined && options.communityStatus !== 200) {
@@ -183,6 +192,41 @@ describe("DiscussionPage", () => {
     expect(rows[1]).toContain("Terima kasih, sangat membantu.");
     // The thread was read exactly once — the append is local, no reload.
     expect(calls.filter((call) => call === "GET /users/posts/post-1/comments").length).toBe(1);
+  });
+
+  it("lists the community's other posts in the sidebar, excluding this one", async () => {
+    stubFetch({
+      sidebarPosts: [
+        { ...POST, id: "post-1", body: "Bagaimana memulai desain?" },
+        { ...POST, id: "post-2", body: "Tips memilih palet warna", commentCount: 4 },
+      ],
+    });
+    renderPage();
+
+    await screen.findByText("Bagaimana memulai desain?");
+    expect(screen.getByText("Tips memilih palet warna").textContent).toBe(
+      "Tips memilih palet warna"
+    );
+    expect(screen.getByText("Wildan · 4 komentar").textContent).toBe("Wildan · 4 komentar");
+    // The post already on screen must not also appear as its own sidebar row.
+    expect(screen.getAllByText("Bagaimana memulai desain?").length).toBe(1);
+  });
+
+  it("shows an empty note in the sidebar when the community has no other posts", async () => {
+    stubFetch();
+    renderPage();
+
+    expect((await screen.findByText("Belum ada diskusi lain.")).textContent).toBe(
+      "Belum ada diskusi lain."
+    );
+  });
+
+  it("shows a breadcrumb back to the community", async () => {
+    stubFetch();
+    renderPage();
+
+    const link = (await screen.findByRole("link", { name: "Kelas Desain" })) as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("/komunitas/kelas-desain");
   });
 });
 
