@@ -8,12 +8,13 @@ import {
   MAX_COMMUNITY_SEARCH_LENGTH,
   DOCUMENT_ERROR_CODE,
   MAX_DOCUMENT_BYTES,
+  coBuilderChatRequestSchema,
   createCommunityPostFields,
   createCommunitySchema,
   refineCommunityPostEvent,
   updateCommunityTagsSchema,
 } from "@diudara/shared";
-import { ValidationError } from "../application/errors";
+import { ServiceUnavailableError, ValidationError } from "../application/errors";
 import { DocumentRejectedError, contentDispositionFor } from "../domain/document";
 import { validate } from "../http/validate";
 import {
@@ -180,6 +181,7 @@ export function communityRoutes(
     | "userTokenIssuer"
     | "userRepository"
     | "createCommunity"
+    | "coBuilderChat"
     | "updateCommunityTags"
     | "getCommunity"
     | "joinCommunity"
@@ -238,6 +240,26 @@ export function communityRoutes(
       tags: input.tags,
     });
     return c.json(created, 201);
+  });
+
+  /**
+   * One turn of the AI co-builder chat behind Discover's "Mulai sekarang"
+   * modal. `deps.coBuilderChat` is `undefined` exactly when
+   * `selectAiProvider` found no `OPENROUTER_API_KEY` on this box (same
+   * degrade-not-throw shape `payments`/`streamingProvider` already use) —
+   * checked here, before the use-case, so a misconfigured box answers 503
+   * rather than a `Cannot read properties of undefined`.
+   *
+   * The request carries the WHOLE transcript, not just the newest message —
+   * see `CoBuilderChat`'s own docstring for why nothing is persisted here.
+   */
+  app.post("/co-builder/chat", requireAuth, validate(coBuilderChatRequestSchema), async (c) => {
+    if (deps.coBuilderChat === undefined) {
+      throw new ServiceUnavailableError("Asisten AI belum dikonfigurasi di server ini.");
+    }
+    const input = c.get("validated") as { messages: { role: "user" | "assistant"; content: string }[] };
+    const turn = await deps.coBuilderChat.execute({ messages: input.messages });
+    return c.json(turn, 200);
   });
 
   // Owner-only, full replace — `UpdateCommunityTags` answers 403 for a

@@ -3,3 +3,4 @@ export * from "./media.schema";
 export * from "./document.schema";
 export * from "./community.schema";
 export * from "./post.schema";
+export * from "./co-builder.schema";

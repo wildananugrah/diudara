@@ -82,6 +82,9 @@ import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapt
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
 import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter";
+import { FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
+import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
+import { CoBuilderChat } from "./application/use-cases/co-builder-chat";
 import { DrizzlePaymentActivationUnitOfWork } from "./infrastructure/repositories/drizzle-payment-activation.unit-of-work";
 import { DrizzleUserPurchaseUnitOfWork } from "./infrastructure/repositories/drizzle-user-purchase.unit-of-work";
 import { SystemClock } from "./infrastructure/clock/system.clock";
@@ -111,6 +114,7 @@ import type { UserTierRepositoryPort } from "./application/ports/user-tier-repos
 import type { UserTokenIssuerPort } from "./application/ports/user-token-issuer.port";
 import type { PaymentProviderPort } from "./application/ports/payment-provider.port";
 import type { EmailProviderPort } from "./application/ports/email-provider.port";
+import type { AiProviderPort } from "./application/ports/ai-provider.port";
 import type { StreamingProviderPort } from "./application/ports/streaming-provider.port";
 
 /** Values that may be interpolated into a `DatabasePing` tagged template. */
@@ -163,6 +167,23 @@ export interface Dependencies {
    * this field happens to be `truthy` for — to send a reset link over.
    */
   email: EmailProviderPort | null;
+  /**
+   * The AI co-builder chat's provider — `null` EXACTLY when
+   * `selectAiProvider` decided this box has no `OPENROUTER_API_KEY` (see
+   * that function's own docstring), same divergence `payments` makes from
+   * `messaging`. Exposed for the same reason every other selected provider
+   * is: a test must be able to prove what a given environment actually
+   * wired. `coBuilderChat` below — not this field — is what
+   * `communityRoutes` actually depends on.
+   */
+  aiProvider: AiProviderPort | null;
+  /**
+   * `POST /communities/co-builder/chat`. `undefined` EXACTLY when
+   * `aiProvider` is `null` — there is no provider to construct it against —
+   * and `communityRoutes` answers `ServiceUnavailableError` (503) for that
+   * case rather than crashing on `deps.coBuilderChat.execute(...)`.
+   */
+  coBuilderChat: CoBuilderChat | undefined;
   /**
    * Phase 9's personal-account identity, and — since retire-telegram
    * Task 7's fix round deleted `creatorRepository` alongside it — the ONLY
@@ -465,15 +486,16 @@ export interface Dependencies {
   appBaseUrl: string;
   sql: DatabasePing;
   /**
-   * Task 2's live-streaming provider — the SECOND feature in this codebase
-   * (after `aiProvider`) that boots DISABLED rather than refusing to start
-   * when unconfigured. See `selectStreamingProvider` for the full decision;
-   * `undefined` means MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/
-   * MEDIAMTX_WHIP_BASE_URL/MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET are
-   * not set and (per the design spec §7) the creator's streaming UI stays
-   * hidden rather than offering a "go live" button that always fails,
-   * exactly the way `aiProvider: undefined` hides the co-builder chat
-   * screen.
+   * Task 2's live-streaming provider — one of several features in this
+   * codebase (`aiProvider`/`coBuilderChat` above are another) that boot
+   * DISABLED rather than refusing to start when unconfigured. See
+   * `selectStreamingProvider` for the full decision; `undefined` means
+   * MEDIAMTX_RTMP_HOST/MEDIAMTX_HLS_BASE_URL/MEDIAMTX_WHIP_BASE_URL/
+   * MEDIAMTX_WEBHOOK_SECRET/STREAM_TOKEN_SECRET are not set and (per the
+   * design spec §7) the creator's streaming UI stays hidden rather than
+   * offering a "go live" button that always fails, exactly the way
+   * `coBuilderChat: undefined` sends the co-builder modal's 503 fallback
+   * instead of pretending a real model is behind it.
    */
   streamingProvider: StreamingProviderPort | undefined;
   /**
@@ -1007,6 +1029,73 @@ export function selectEmailProvider(env: {
         : "")
   );
   return new FakeEmailAdapter({ echo });
+}
+
+/** `openai/gpt-4o-mini` on OpenRouter — cheap, widely available, and reliable
+ * enough at following the fenced-JSON-draft contract `co-builder-prompt.ts`
+ * asks for. Overridable per box via `OPENROUTER_MODEL`. */
+const DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o-mini";
+
+/**
+ * Chooses the AI co-builder's provider — or chooses to have no co-builder
+ * chat at all, rather than ever pretending a real model answered.
+ *
+ * Shaped like `selectEmailProvider` above, not `selectPaymentProvider`'s
+ * half-configured-throws-in-every-environment guard, because there is only
+ * ONE required credential here: `OPENROUTER_MODEL` has a hard default
+ * (`DEFAULT_OPENROUTER_MODEL`), so there is no pair of vars that can
+ * disagree.
+ *
+ *   1. `OPENROUTER_API_KEY` set -> `OpenRouterAiAdapter`, in EVERY environment.
+ *   2. ABSENT configuration selects `FakeAiAdapter` ONLY inside
+ *      `RELAXED_NODE_ENVS` (development/test).
+ *   3. ABSENT configuration OUTSIDE the allowlist returns `null` RATHER THAN
+ *      THROWING: the co-builder modal is optional chrome on top of the
+ *      unchanged manual form at `/komunitas/baru`, not a feature anything
+ *      else in this app depends on, so a box without a key still serves
+ *      every other route. `communityRoutes` answers 503 for the one route
+ *      that does need it (`ServiceUnavailableError`, `deps.coBuilderChat`
+ *      being `undefined`).
+ *
+ * `OPENROUTER_API_KEY` is a bearer credential, so the startup line names the
+ * adapter and never the key — same rule as every other provider above.
+ */
+export function selectAiProvider(env: {
+  apiKey: string | undefined;
+  model: string | undefined;
+  nodeEnv: string | undefined;
+}): AiProviderPort | null {
+  const apiKey = presentOrUndefined(env.apiKey);
+  const model = presentOrUndefined(env.model) ?? DEFAULT_OPENROUTER_MODEL;
+
+  if (apiKey) {
+    logProviderChoice(
+      env.nodeEnv,
+      `[bootstrap] AI co-builder provider: OpenRouterAiAdapter (model ${model}, OPENROUTER_API_KEY is set)`
+    );
+    return new OpenRouterAiAdapter({ apiKey, model });
+  }
+
+  if (!isRelaxedNodeEnv(env.nodeEnv)) {
+    logProviderChoice(
+      env.nodeEnv,
+      "[bootstrap] AI co-builder provider: none — the co-builder chat is DISABLED " +
+        "(OPENROUTER_API_KEY not set, and NODE_ENV is " +
+        `${describeNodeEnv(env.nodeEnv)}, outside ${RELAXED_NODE_ENVS_LIST}). ` +
+        "POST /communities/co-builder/chat answers 503; the manual form at " +
+        "/komunitas/baru is unaffected. Set OPENROUTER_API_KEY to enable it, or " +
+        "NODE_ENV=development/test to boot with the fake adapter instead."
+    );
+    return null;
+  }
+
+  logProviderChoice(
+    env.nodeEnv,
+    "[bootstrap] AI co-builder provider: FakeAiAdapter " +
+      "(OPENROUTER_API_KEY not set — no real model will be called; set it to switch " +
+      "to the real OpenRouter adapter)"
+  );
+  return new FakeAiAdapter();
 }
 
 /**
@@ -1790,6 +1879,16 @@ export function bootstrap(): Dependencies {
     nodeEnv: process.env.NODE_ENV,
   });
 
+  // Discover's "Mulai sekarang" co-builder modal. `undefined` EXACTLY when
+  // `aiProvider` is `null` — see both fields' own docstrings on
+  // `Dependencies`.
+  const aiProvider: AiProviderPort | null = selectAiProvider({
+    apiKey: process.env.OPENROUTER_API_KEY,
+    model: process.env.OPENROUTER_MODEL,
+    nodeEnv: process.env.NODE_ENV,
+  });
+  const coBuilderChat = aiProvider ? new CoBuilderChat(aiProvider) : undefined;
+
   // Phase 5a's payout flow for `app_user`, and the only one left: the
   // creator-scoped `CreatePaymentAccount`/`GetPaymentAccountStatus` pair that
   // stood here went with `POST|GET /payment-account` in retire-telegram
@@ -2106,6 +2205,8 @@ export function bootstrap(): Dependencies {
   return {
     payments,
     email,
+    aiProvider,
+    coBuilderChat,
     userRepository,
     userPayoutRepository,
     userTierRepository,

@@ -2228,6 +2228,36 @@ export function createCommunity(input: {
   });
 }
 
+/** One turn of the AI co-builder chat, in either direction. */
+export interface CoBuilderMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/**
+ * The API's `AiTurn` — the human-facing reply, and a draft matching
+ * `createCommunity`'s own input shape once the AI has enough information.
+ * `draft` is `null` until then; nothing here is ever written to the
+ * database by the chat itself — see `CoBuilderModal`'s own docstring.
+ */
+export interface CoBuilderTurn {
+  reply: string;
+  draft: { name: string; category: string; description?: string; tags?: string[] } | null;
+}
+
+/**
+ * `POST /communities/co-builder/chat` — one turn of Discover's "Mulai
+ * sekarang" chat modal. `messages` is the WHOLE transcript so far, not just
+ * the newest one: nothing is persisted server-side (see the API's own
+ * `CoBuilderChat` docstring), so the client is what holds the conversation.
+ */
+export function chatWithCoBuilder(messages: CoBuilderMessage[]): Promise<CoBuilderTurn> {
+  return apiFetch<CoBuilderTurn>("/communities/co-builder/chat", {
+    method: "POST",
+    body: JSON.stringify({ messages }),
+  });
+}
+
 /** `PATCH /communities/:slug/tags` — owner-only, full replace. */
 export function updateCommunityTags(slug: string, tags: string[]): Promise<{ tags: string[] }> {
   return apiFetch<{ tags: string[] }>(`/communities/${encodeURIComponent(slug)}/tags`, {

@@ -8,6 +8,7 @@ import {
   resolveAppBaseUrl,
   resolveCallbackToken,
   resolveMaxPostImages,
+  selectAiProvider,
   selectEmailProvider,
   selectMediaStorage,
   selectMessagingProviders,
@@ -36,6 +37,8 @@ import { FakePaymentAdapter } from "./infrastructure/payments/fake-payment.adapt
 import { XenditPaymentAdapter } from "./infrastructure/payments/xendit-payment.adapter";
 import { FakeEmailAdapter } from "./infrastructure/email/fake-email.adapter";
 import { ResendEmailAdapter } from "./infrastructure/email/resend-email.adapter";
+import { FakeAiAdapter } from "./infrastructure/ai/fake-ai.adapter";
+import { OpenRouterAiAdapter } from "./infrastructure/ai/openrouter-ai.adapter";
 import { RegisterUser } from "./application/use-cases/register-user";
 import { AuthenticateUser } from "./application/use-cases/authenticate-user";
 import { GetUserProfile } from "./application/use-cases/get-user-profile";
@@ -696,6 +699,8 @@ describe("Dependencies (composition root contract)", () => {
     const deps: Dependencies = {
       payments: fakePaymentProvider,
       email: null,
+      aiProvider: null,
+      coBuilderChat: undefined,
       userRepository: fakeUserRepository,
       userPayoutRepository: fakeUserPayoutRepository,
       userTierRepository: fakeUserTierRepository,
@@ -2337,6 +2342,75 @@ describe("selectEmailProvider", () => {
       });
     });
     expect(lines.join("\n")).not.toContain("re_SUPERSECRET_key");
+  });
+});
+
+describe("selectAiProvider", () => {
+  it("selects OpenRouterAiAdapter when OPENROUTER_API_KEY is set", () => {
+    captureConsoleLog(() => {
+      const provider = selectAiProvider({ apiKey: "sk-or-x", model: undefined, nodeEnv: "test" });
+      expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
+    });
+  });
+
+  it("selects the real adapter in production when a key is set", () => {
+    const logs = captureConsoleLog(() => {
+      const provider = selectAiProvider({ apiKey: "sk-or-x", model: undefined, nodeEnv: "production" });
+      expect(provider).toBeInstanceOf(OpenRouterAiAdapter);
+    });
+    expect(logs.some((line) => /OpenRouterAiAdapter/.test(line))).toBe(true);
+  });
+
+  it("selects FakeAiAdapter when the key is unset in development or test", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of ["test", "development"]) {
+        expect(selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv })).toBeInstanceOf(
+          FakeAiAdapter
+        );
+      }
+    });
+  });
+
+  // CRITICAL — the same negative assertion `selectEmailProvider`'s own test
+  // makes, and for the same reason: a "helpful" fallback to the fake here
+  // would silently answer every co-builder chat with fabricated drafts on a
+  // production box that never configured a real key.
+  it("disables the co-builder (returns null, never the fake adapter) in production with no key", () => {
+    const logs = captureConsoleLog(() => {
+      const provider = selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv: "production" });
+      expect(provider).toBeNull();
+      expect(provider).not.toBeInstanceOf(FakeAiAdapter);
+    });
+    expect(logs.some((line) => /co-builder chat is DISABLED/.test(line))).toBe(true);
+  });
+
+  it("returns null (never the fake adapter) for ANY nodeEnv outside the allowlist, including unset", () => {
+    captureConsoleLog(() => {
+      for (const nodeEnv of [undefined, "staging", "prod", "PRODUCTION", "dev", "development "]) {
+        const provider = selectAiProvider({ apiKey: undefined, model: undefined, nodeEnv });
+        expect(provider).toBeNull();
+        expect(provider).not.toBeInstanceOf(FakeAiAdapter);
+      }
+    });
+  });
+
+  it("uses OPENROUTER_MODEL when set, and a hard default otherwise", () => {
+    const defaultLogs = captureConsoleLog(() => {
+      selectAiProvider({ apiKey: "k", model: undefined, nodeEnv: "production" });
+    });
+    expect(defaultLogs.some((line) => line.includes("openai/gpt-4o-mini"))).toBe(true);
+
+    const overrideLogs = captureConsoleLog(() => {
+      selectAiProvider({ apiKey: "k", model: "anthropic/claude-3.5-haiku", nodeEnv: "production" });
+    });
+    expect(overrideLogs.some((line) => line.includes("anthropic/claude-3.5-haiku"))).toBe(true);
+  });
+
+  it("keeps the API key out of the startup log line", () => {
+    const lines = captureConsoleLog(() => {
+      selectAiProvider({ apiKey: "sk-or-SUPERSECRET", model: undefined, nodeEnv: "production" });
+    });
+    expect(lines.join("\n")).not.toContain("sk-or-SUPERSECRET");
   });
 });
 

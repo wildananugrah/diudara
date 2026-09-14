@@ -133,13 +133,21 @@ describe("DiscoverPage", () => {
     expect(screen.getByText("#bisnis")).toBeTruthy();
   });
 
-  it("links the 'own a community' CTA to the real creation flow", async () => {
+  it("opens the AI co-builder modal from the 'own a community' CTA", async () => {
     stubCommunityFetch();
     renderDiscover();
     await screen.findByRole("link", { name: "Kelas Desain" });
 
-    const cta = screen.getByRole("link", { name: /Mulai sekarang/ });
-    expect(cta.getAttribute("href")).toBe("/komunitas/baru");
+    expect(screen.queryByRole("dialog") === null).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: /Mulai sekarang/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    // The chat UI actually mounted, not just an empty panel — the manual
+    // form stays reachable as a fallback INSIDE the modal (see
+    // `CoBuilderModal`'s own docstring) rather than the CTA linking there
+    // directly the way it used to.
+    expect(within(dialog).getByRole("button", { name: "Kirim" })).toBeTruthy();
   });
 
   it("shows no live-now strip when nothing is live", async () => {

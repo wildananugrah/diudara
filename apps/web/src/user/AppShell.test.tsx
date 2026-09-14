@@ -188,6 +188,13 @@ function zIndexes(): { nav: { selector: string; value: number }[]; other: { sele
   for (const rule of rules(stylesheet())) {
     const match = /(?:^|;)\s*z-index:\s*(-?\d+)/.exec(rule.body);
     if (match === null) continue;
+    // The ONE deliberate exception: a modal overlay (`shell/Modal.tsx`) is
+    // meant to cover the navigation too, not just page content — the whole
+    // point of a modal is that nothing behind it, chrome included, stays
+    // interactive while it is open. Excluded from BOTH buckets rather than
+    // folded into `nav`, so it never lowers the bar this test still holds
+    // every other rule in the sheet to.
+    if (rule.selector.includes(".modal-backdrop") || rule.selector.includes(".modal-panel")) continue;
     const entry = { selector: rule.selector, value: Number(match[1]) };
     const isNav = rule.selector.includes(".bottom-nav") || rule.selector.includes(".side-rail");
     (isNav ? nav : other).push(entry);

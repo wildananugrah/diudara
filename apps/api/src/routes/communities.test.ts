@@ -1,12 +1,19 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { createApp } from "../app";
-import { bootstrap } from "../bootstrap";
+import { bootstrap, type Dependencies } from "../bootstrap";
 import { resetDatabase } from "../db/test-helpers";
 
 beforeEach(resetDatabase);
 
-function app() {
-  return createApp(bootstrap());
+/**
+ * `overrides` lets a test swap in a single dependency (e.g. `coBuilderChat:
+ * undefined`, to prove the disabled-co-builder 503) without hand-building
+ * the other ~90 fields — everything else still comes from a real
+ * `bootstrap()` against the test database, same as every other test in
+ * this file.
+ */
+function app(overrides: Partial<Dependencies> = {}) {
+  return createApp({ ...bootstrap(), ...overrides });
 }
 
 const VALID = {
@@ -107,6 +114,107 @@ describe("POST /communities", () => {
     const res = await createCommunity(a, token, KELAS);
 
     expect(res.status).toBe(409);
+  });
+});
+
+async function coBuilderChat(a: ReturnType<typeof app>, token: string, messages: unknown) {
+  return a.request("/communities/co-builder/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authed(token) },
+    body: JSON.stringify({ messages }),
+  });
+}
+
+/**
+ * Drives the REAL route, but through the `FakeAiAdapter` `bootstrap()`
+ * wires under `NODE_ENV=test` (see `selectAiProvider`) — no real OpenRouter
+ * call happens in this suite. `OpenRouterAiAdapter`'s own parsing/retry
+ * behaviour is covered where it lives: `openrouter-ai.adapter.test.ts` and
+ * `co-builder-chat.test.ts`.
+ */
+describe("POST /communities/co-builder/chat", () => {
+  it("requires a session", async () => {
+    const a = app();
+
+    const res = await a.request("/communities/co-builder/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "Halo" }] }),
+    });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("answers a reply and no draft on the first turn", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await coBuilderChat(a, token, [{ role: "user", content: "Saya mau bikin komunitas" }]);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(typeof body.reply).toBe("string");
+    expect(body.draft).toBe(null);
+  });
+
+  it("answers a draft once the fake has enough turns to propose one", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await coBuilderChat(a, token, [
+      { role: "user", content: "Kelas Desain UI/UX" },
+      { role: "assistant", content: "Ceritakan lebih lanjut?" },
+      { role: "user", content: "Untuk pemula" },
+    ]);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.draft).toEqual({
+      name: "Kelas Desain UI/UX",
+      category: "Skill Digital",
+      description: "Kelas Desain UI/UX Untuk pemula",
+      tags: [],
+    });
+  });
+
+  it("is 400 for an empty messages array", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await coBuilderChat(a, token, []);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("is 400 for more than 30 messages", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+    const messages = Array.from({ length: 31 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `pesan ${i}`,
+    }));
+
+    const res = await coBuilderChat(a, token, messages);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("is 400 for an unknown role", async () => {
+    const a = app();
+    const token = await tokenForValidUser(a);
+
+    const res = await coBuilderChat(a, token, [{ role: "system", content: "Halo" }]);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("is 503 when the co-builder is not configured on this box", async () => {
+    const a = app({ coBuilderChat: undefined });
+    const token = await tokenForValidUser(a);
+
+    const res = await coBuilderChat(a, token, [{ role: "user", content: "Halo" }]);
+
+    expect(res.status).toBe(503);
   });
 });
 

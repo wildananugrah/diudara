@@ -84,17 +84,19 @@ export class RateLimitedError extends AppError {
 }
 
 /**
- * "This feature is not configured on THIS BOX" — the only trigger left after
- * retire-telegram Task 4 deleted the AI co-builder, which contributed the
- * other one (a provider that answered with a transport-level failure).
+ * "This feature is not configured on THIS BOX".
  *
  * Raised where a `Dependencies` field is `undefined`/`null` because the
  * environment did not configure the feature: payments
  * (`POST /payment-account`, `POST /users/me/payout`,
- * `POST /users/:handle/subscribe`) and streaming (`POST /streams`,
- * `POST /streams/:id/watch-token`). Unlike a 404/409/etc this is never the
- * caller's fault — the same request would succeed on a fully configured box —
- * which is why it is a 503 and not a 400.
+ * `POST /users/:handle/subscribe`), streaming (`POST /streams`,
+ * `POST /streams/:id/watch-token`), and — since the community-creation AI
+ * co-builder chat was rebuilt on today's schema — `deps.coBuilderChat`
+ * being `undefined` when `OPENROUTER_API_KEY` is unset
+ * (`POST /communities/co-builder/chat`, see `selectAiProvider` in
+ * `bootstrap.ts`). Unlike a 404/409/etc this is never the caller's fault —
+ * the same request would succeed on a fully configured box — which is why
+ * it is a 503 and not a 400.
  */
 export class ServiceUnavailableError extends AppError {
   constructor(message = "service unavailable") {

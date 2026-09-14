@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { COMMUNITY_CATEGORIES, MAX_COMMUNITY_SEARCH_LENGTH } from "@diudara/shared";
 import { browseCommunities, type CommunityListRow, type FollowListRow } from "./apiClient";
+import CoBuilderModal from "./CoBuilderModal";
 import CommunityCard from "./CommunityCard";
 import { communityColor } from "./communityColor";
 import FollowButton from "./FollowButton";
@@ -95,6 +96,7 @@ export default function DiscoverPage() {
   const [popularTags, setPopularTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showCoBuilder, setShowCoBuilder] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -228,13 +230,21 @@ export default function DiscoverPage() {
             <div className="card discover-cta-card">
               <p className="discover-cta-eyebrow">PUNYA KOMUNITAS SENDIRI?</p>
               <p>Setup komunitas berbayar kamu dalam 15 menit bareng Pulse-ID.</p>
-              <Link to="/komunitas/baru" className="btn btn-primary btn-sm">
+              {/*
+                A button that opens the AI co-builder modal, not a `<Link>`
+                to `/komunitas/baru` anymore — that manual form still exists
+                and is still linked from inside the modal (and reachable
+                directly by URL) as a fallback, see `CoBuilderModal`'s own
+                docstring.
+              */}
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => setShowCoBuilder(true)}>
                 Mulai sekarang <span aria-hidden="true">→</span>
-              </Link>
+              </button>
             </div>
           </aside>
         </div>
       </main>
+      {showCoBuilder ? <CoBuilderModal onClose={() => setShowCoBuilder(false)} /> : null}
     </>
   );
 }

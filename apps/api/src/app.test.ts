@@ -135,6 +135,7 @@ describe("the app's routing table", () => {
       "POST /communities/:slug/sections",
       "POST /communities/:slug/subscribe",
       "POST /communities/:slug/tiers",
+      "POST /communities/co-builder/chat",
       "POST /streams",
       "POST /streams/:id/watch-token",
       "POST /users/:handle/follow",

@@ -133,6 +133,11 @@
     var(--awan) 0 10px,
     var(--ink-100) 10px 20px
   );
+
+  /* The AI co-builder modal's backdrop — `--ink-900` at low opacity, not a
+     bare literal, so the no-hardcoded-colours guard (which exempts :root)
+     is what makes this themeable rather than a hole in it. */
+  --overlay: rgba(22, 40, 58, 0.45);
 }
 
 * {
@@ -3706,4 +3711,121 @@ button:disabled {
   .materi-back {
     display: block;
   }
+}
+
+/* ---------------------------------------------------------------
+   The AI co-builder modal (`shell/Modal.tsx`, `CoBuilderModal.tsx`) —
+   Discover's "Mulai sekarang" CTA. The first true overlay in this app;
+   everything before it (`.confirm-panel` and friends) sits in normal
+   document flow instead of a backdrop+portal. `.chat-*` below was carried
+   over unchanged from the deleted Phase 7 co-builder screen, re-tinted to
+   this sheet's tokens.
+   --------------------------------------------------------------- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  /* Deliberately ABOVE the navigation's z-index of 10 — a modal is meant to
+     cover chrome too, the one documented exception `AppShell.test.tsx`'s
+     `zIndexes()` helper carves out of its "nav outranks everything" rule. */
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: var(--overlay);
+}
+
+.modal-panel {
+  width: 100%;
+  max-width: 560px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  background: var(--surface);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-card);
+  padding: var(--panel-pad);
+}
+
+.modal-panel:focus {
+  outline: none;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 1.125rem;
+}
+
+.chat-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.chat-bubble {
+  max-width: 85%;
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+
+.chat-bubble p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.chat-bubble-user {
+  align-self: flex-end;
+  background: var(--success-bg);
+  color: var(--success-ink);
+}
+
+.chat-bubble-assistant {
+  align-self: flex-start;
+  background: var(--awan);
+  border: 1px solid var(--line);
+}
+
+.chat-composer {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  margin-bottom: 20px;
+}
+
+.chat-composer textarea {
+  flex: 1;
+  min-height: 44px;
+  font: inherit;
+  font-size: 0.9375rem;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--awan);
+  color: var(--ink-900);
+  resize: vertical;
+}
+
+.chat-composer textarea:focus {
+  outline: 2px solid var(--langit);
+  outline-offset: 1px;
+  border-color: var(--langit);
+}
+
+.cobuilder-draft {
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.cobuilder-draft h3 {
+  margin: 0 0 4px;
 }
