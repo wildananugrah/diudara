@@ -23,6 +23,13 @@ import { join } from "node:path";
  * making progress with no output, and it reads as a stuck runner rather than a broken
  * test — so it gets retried instead of fixed. The safe form is to assert on a COUNT
  * (`queryAllBy…().length`), which serialises as a number.
+ *
+ * The hazard is specifically an ELEMENT reaching the matcher. A query whose result is
+ * first unwrapped to a primitive — `.length`, `.getAttribute(…)`, `.textContent` — is
+ * safe for the same reason a count is: the received value is a string or a number, and
+ * it serialises in milliseconds. Reading `.length` alone as the safe form flagged
+ * `expect(getByTestId("…").getAttribute("role")).toBeNull()` in KegiatanTab.test.tsx,
+ * which never had an element to serialise; see PRIMITIVE_ACCESSOR below.
  */
 
 const TEST_ROOT = join(import.meta.dir, "..");
@@ -45,6 +52,14 @@ const ELEMENT_QUERY = /\b(?:query|get|find)(?:All)?By[A-Z]\w*\s*\(/;
  */
 const SERIALISING_MATCHER = /\.(?:toBeNull|toBeUndefined)\s*\(\s*\)|\.(?:toBe|toEqual|toStrictEqual)\s*\(\s*(?:null|undefined|\[\s*\])\s*\)/;
 
+/**
+ * Reads that turn a queried element into a string or a number. Once the statement
+ * contains one of these, whatever reaches the matcher is a primitive, so the
+ * serialisation blow-up this file exists to prevent cannot happen.
+ */
+const PRIMITIVE_ACCESSOR =
+  /\.(?:getAttribute|hasAttribute|getAttributeNames)\s*\(|\)\s*\.(?:length|textContent|innerHTML|innerText|value|className|id|tagName|nodeName)\b/;
+
 describe("web test hygiene", () => {
   it("never hands a DOM element straight to a matcher that serialises it", () => {
     const offenders: string[] = [];
@@ -59,8 +74,8 @@ describe("web test hygiene", () => {
         if (!statement.includes("expect(")) return;
         if (!ELEMENT_QUERY.test(statement)) return;
         if (!SERIALISING_MATCHER.test(statement)) return;
-        // `queryAllBy…().length` is the safe form: the received value is a number.
-        if (/\)\s*\.length\b/.test(statement)) return;
+        // Unwrapped to a primitive before the matcher — no element to serialise.
+        if (PRIMITIVE_ACCESSOR.test(statement)) return;
         offenders.push(`${file.slice(TEST_ROOT.length + 1)}: ${statement.trim().split("\n").pop()}`);
       });
     }
