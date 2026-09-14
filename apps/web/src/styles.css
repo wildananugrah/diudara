@@ -237,6 +237,7 @@ code {
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
+  padding: 5px;
 }
 
 /* ---------- Udara components ----------
