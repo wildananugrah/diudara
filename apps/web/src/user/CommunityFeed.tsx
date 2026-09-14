@@ -2,7 +2,8 @@ import { useCallback, useRef } from "react";
 import { COMMUNITY_POST_TYPES } from "@diudara/shared";
 import PostComposer from "./PostComposer";
 import PostFeed, { type PostFeedHandle } from "./PostFeed";
-import { createCommunityPost, listCommunityPosts, type EventDraft } from "./apiClient";
+import { DeleteConfirm, EditComposer, usePostOwnerActions } from "./postOwnerActions";
+import { createCommunityPost, getSessionUser, listCommunityPosts, type EventDraft } from "./apiClient";
 
 interface Props {
   slug: string;
@@ -30,9 +31,30 @@ interface Props {
  * A submitted post is put on top by `PostFeed`'s `prepend` — no refetch, the
  * pattern `BerandaPage` uses. `PostFeed` is reused with one additive prop,
  * `detailHrefFor`, that gives each card its discussion link (ruling R11).
+ *
+ * **Edit and delete on your own thread** go through the same
+ * `usePostOwnerActions` hook Beranda and a profile's posts tab use — see that
+ * hook's own docstring for why it exists in one place. `ownHandle` is read
+ * straight from `getSessionUser()`, the same source `BerandaPage` uses, so a
+ * card only shows owner controls for the signed-in viewer's own thread.
+ * `resetKey` is `slug`: switching communities must drop any open edit or
+ * pending delete rather than carry it into the next community's feed.
  */
 export default function CommunityFeed({ slug, viewerIsMember, viewerIsOwner }: Props) {
   const feed = useRef<PostFeedHandle>(null);
+  const ownHandle = getSessionUser()?.handle ?? null;
+  const {
+    editing,
+    pendingDelete,
+    deleting,
+    deleteError,
+    onEdit,
+    onDeleteRequested,
+    confirmDelete,
+    cancelDelete,
+    cancelEdit,
+    saveEdit,
+  } = usePostOwnerActions(feed, slug);
 
   // Memoised on `slug` so PostFeed refetches when the community changes and NOT
   // on every render — see PostFeed's own note on the effect loop.
@@ -64,22 +86,46 @@ export default function CommunityFeed({ slug, viewerIsMember, viewerIsOwner }: P
   return (
     <section className="community-feed">
       {viewerIsMember === true ? (
-        <PostComposer
-          key="komunitas-baru"
-          submitLabel="Kirim"
-          onSubmit={handleCreate}
-          postTypeChoices={viewerIsOwner ? COMMUNITY_POST_TYPES : []}
-        />
+        // Keyed, so switching between composing and editing — and between two
+        // different threads — resets the box rather than carrying the
+        // previous text over, the same reasoning `BerandaPage` documents.
+        editing !== null ? (
+          <EditComposer post={editing} onSubmit={saveEdit} onCancel={cancelEdit} />
+        ) : (
+          <PostComposer
+            key="komunitas-baru"
+            submitLabel="Kirim"
+            onSubmit={handleCreate}
+            postTypeChoices={viewerIsOwner ? COMMUNITY_POST_TYPES : []}
+          />
+        )
       ) : (
         <p className="community-feed-guestnote">
           {viewerIsMember === false ? "Gabung untuk ikut diskusi." : "Masuk untuk gabung."}
         </p>
       )}
 
+      {pendingDelete !== null ? (
+        <DeleteConfirm
+          postId={pendingDelete}
+          deleting={deleting}
+          onConfirm={() => void confirmDelete()}
+          onCancel={cancelDelete}
+        />
+      ) : null}
+
+      {deleteError !== null ? (
+        <p className="feed-error" role="alert">
+          {deleteError}
+        </p>
+      ) : null}
+
       <PostFeed
         ref={feed}
         load={load}
-        ownHandle={null}
+        ownHandle={ownHandle}
+        onEdit={onEdit}
+        onDeleteRequested={onDeleteRequested}
         emptyMessage="Belum ada diskusi di komunitas ini."
         detailHrefFor={(id) => `/komunitas/${slug}/diskusi/${id}`}
       />

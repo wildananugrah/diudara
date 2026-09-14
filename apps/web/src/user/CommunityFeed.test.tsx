@@ -60,6 +60,9 @@ function stubFetch(
     if (init?.method === "POST") {
       return jsonResponse(opts.created ?? makePost("new", "baru"), 201);
     }
+    if (init?.method === "DELETE") {
+      return new Response(null, { status: 204 });
+    }
     if (opts.feedStatus !== undefined && opts.feedStatus >= 400) {
       return jsonResponse({ error: "boom" }, opts.feedStatus);
     }
@@ -166,6 +169,45 @@ describe("CommunityFeed", () => {
     renderFeed({ viewerIsMember: null });
 
     expect(await screen.findByText("Belum ada diskusi di komunitas ini.")).toBeTruthy();
+  });
+
+  /**
+   * `CommunityFeed` used to hardcode `ownHandle={null}` on `PostFeed`, so no
+   * thread ever showed its own Edit/Hapus controls, even for its own author —
+   * the same owner-actions wiring `BerandaPage` and a profile's posts tab
+   * already have. This is that regression's guard, mirroring
+   * `BerandaPage.test.tsx`'s equivalent case.
+   */
+  it("gives the author of a thread its own Edit and Hapus controls", async () => {
+    setUserSession("t", USER);
+    stubFetch({ posts: [{ ...makePost("p1", "Kiriman saya"), author: { handle: "rina", displayName: "Rina" } }] });
+    renderFeed({ viewerIsMember: true });
+
+    await screen.findByText("Kiriman saya");
+    expect(screen.getByRole("button", { name: "Edit" }).textContent).toBe("Edit");
+    expect(screen.getByRole("button", { name: "Hapus" }).textContent).toBe("Hapus");
+  });
+
+  it("deletes the viewer's own thread after confirming, with no owner controls on someone else's", async () => {
+    setUserSession("t", USER);
+    const calls = stubFetch({
+      posts: [
+        { ...makePost("mine", "Kiriman saya"), author: { handle: "rina", displayName: "Rina" } },
+        makePost("other", "Kiriman orang lain"),
+      ],
+    });
+    renderFeed({ viewerIsMember: true });
+
+    await screen.findByText("Kiriman saya");
+    // Exactly one Hapus — the other author's thread gets none.
+    expect(screen.getAllByRole("button", { name: "Hapus" }).length).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hapus" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ya, hapus" }));
+
+    await screen.findByText("Kiriman orang lain");
+    expect(screen.queryAllByText("Kiriman saya").length).toBe(0);
+    expect(calls.some((call) => call === "DELETE /users/posts/mine")).toBe(true);
   });
 
   it("gives each feed card a comment-count link to that post's discussion (R11)", async () => {
