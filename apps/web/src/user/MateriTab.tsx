@@ -138,6 +138,37 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
     }
   }
 
+  /**
+   * The empty-syllabus path: `SectionAuthoring`'s dropzone lives inside a
+   * SECTION's card, so a community with none yet shows no way to attach
+   * anything — a section title, a lesson and its attachment are one screen
+   * here instead of "create a bare section, then find its form".
+   */
+  async function addFirstLesson(
+    sectionTitle: string,
+    title: string,
+    body: string,
+    documentId?: string
+  ): Promise<void> {
+    setBusy(true);
+    setActionError(null);
+    try {
+      const section = await createSection(slug, { title: sectionTitle, position: 1 });
+      await createLesson(slug, {
+        sectionId: section.id,
+        title,
+        body,
+        position: 1,
+        ...(documentId === undefined ? {} : { documentId }),
+      });
+      await refresh();
+    } catch (error: unknown) {
+      setActionError(`Materi gagal dibuat. ${describeRequestFailure(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function removeSection(section: SectionRow): Promise<void> {
     if (
       !window.confirm(
@@ -256,13 +287,17 @@ export default function MateriTab({ slug, viewerIsOwner }: Props) {
         )}
 
         {viewerIsOwner ? (
-          <form className="materi-form materi-form-section" onSubmit={addSection}>
-            <label htmlFor="section-title">Bagian baru</label>
-            <input id="section-title" name="section-title" maxLength={160} required />
-            <button type="submit" disabled={busy}>
-              Tambah bagian
-            </button>
-          </form>
+          sections.length === 0 ? (
+            <FirstSectionAuthoring slug={slug} busy={busy} onAdd={addFirstLesson} />
+          ) : (
+            <form className="materi-form materi-form-section" onSubmit={addSection}>
+              <label htmlFor="section-title">Bagian baru</label>
+              <input id="section-title" name="section-title" maxLength={160} required />
+              <button type="submit" disabled={busy}>
+                Tambah bagian
+              </button>
+            </form>
+          )
         ) : null}
       </div>
 
@@ -478,6 +513,146 @@ function SectionAuthoring({
           Hapus bagian
         </button>
       </div>
+    </form>
+  );
+}
+
+/**
+ * The empty-syllabus form — `SectionAuthoring`'s own dropzone, copied rather
+ * than shared for the same reason its docstring gives, plus one field: there
+ * is no section yet for a lesson to belong to, so this asks for its title
+ * too and `addFirstLesson` creates both in order.
+ *
+ * No "Hapus bagian" here — nothing exists yet to remove.
+ */
+function FirstSectionAuthoring({
+  slug,
+  busy,
+  onAdd,
+}: {
+  slug: string;
+  busy: boolean;
+  onAdd: (sectionTitle: string, title: string, body: string, documentId?: string) => void;
+}) {
+  const [attachment, setAttachment] = useState<{ id: string; name: string } | null>(null);
+  const [attachMembersOnly, setAttachMembersOnly] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const attachmentBusy = busy || attaching;
+
+  async function processFile(file: File): Promise<void> {
+    if (file.size > MAX_DOCUMENT_BYTES) {
+      setAttachError(`Berkas terlalu besar. Batasnya ${formatBytes(MAX_DOCUMENT_BYTES)}.`);
+      return;
+    }
+    if (!isAllowedDocumentType(file.type)) {
+      setAttachError("Format berkas tidak didukung.");
+      return;
+    }
+
+    setAttaching(true);
+    setAttachError(null);
+    try {
+      const created = await uploadCommunityDocument(slug, file, attachMembersOnly);
+      setAttachment({ id: created.id, name: created.name });
+    } catch (error: unknown) {
+      setAttachError(`Lampiran gagal diunggah. ${describeRequestFailure(error)}`);
+    } finally {
+      setAttaching(false);
+    }
+  }
+
+  function handleDragOver(event: React.DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    if (attachmentBusy) return;
+    setIsDragging(true);
+  }
+
+  function handleDragLeave(event: React.DragEvent<HTMLDivElement>): void {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setIsDragging(false);
+  }
+
+  async function handleDrop(event: React.DragEvent<HTMLDivElement>): Promise<void> {
+    event.preventDefault();
+    setIsDragging(false);
+    if (attachmentBusy) return;
+    const file = event.dataTransfer.files[0];
+    if (file === undefined) return;
+    await processFile(file);
+  }
+
+  async function handlePick(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file === undefined) return;
+    await processFile(file);
+  }
+
+  return (
+    <form
+      className="materi-form materi-form-section"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const form = event.target as HTMLFormElement;
+        const sectionTitle = (form.elements.namedItem("first-section-title") as HTMLInputElement)
+          .value;
+        const title = (form.elements.namedItem("first-lesson-title") as HTMLInputElement).value;
+        const body = (form.elements.namedItem("first-lesson-body") as HTMLTextAreaElement).value;
+        onAdd(sectionTitle, title, body, attachment?.id);
+        form.reset();
+        setAttachment(null);
+        setAttachMembersOnly(false);
+        setAttachError(null);
+      }}
+    >
+      <label htmlFor="first-section-title">Bagian baru</label>
+      <input id="first-section-title" name="first-section-title" maxLength={160} required />
+      <label htmlFor="first-lesson-title">Judul materi</label>
+      <input id="first-lesson-title" name="first-lesson-title" maxLength={160} required />
+      <label htmlFor="first-lesson-body">Isi materi</label>
+      <textarea id="first-lesson-body" name="first-lesson-body" rows={3} required />
+
+      <div
+        className={`dokumen-upload${isDragging ? " dokumen-upload-dragging" : ""}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={(event) => void handleDrop(event)}
+      >
+        <label htmlFor="first-lesson-attachment">Lampiran (opsional)</label>
+        <input
+          id="first-lesson-attachment"
+          type="file"
+          disabled={attachmentBusy}
+          accept={ALLOWED_DOCUMENT_TYPES.join(",")}
+          onChange={(event) => void handlePick(event)}
+        />
+        <label htmlFor="first-lesson-attachment-members-only">
+          <input
+            id="first-lesson-attachment-members-only"
+            type="checkbox"
+            checked={attachMembersOnly}
+            disabled={attachmentBusy}
+            onChange={(event) => setAttachMembersOnly(event.target.checked)}
+          />
+          Khusus anggota berbayar
+        </label>
+        <p className="muted">
+          {attachment !== null
+            ? `Terlampir: ${attachment.name}`
+            : `Maksimal ${formatBytes(MAX_DOCUMENT_BYTES)} per berkas, atau seret berkas ke sini.`}
+        </p>
+        {attachError !== null ? (
+          <p className="form-error" role="alert">
+            {attachError}
+          </p>
+        ) : null}
+      </div>
+
+      <button type="submit" disabled={busy}>
+        Tambah materi
+      </button>
     </form>
   );
 }

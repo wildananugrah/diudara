@@ -87,6 +87,65 @@ describe("MateriTab", () => {
     await screen.findByText(/Belum ada materi/);
   });
 
+  /**
+   * `SectionAuthoring`'s dropzone lives inside a section's own card, so a
+   * community with none yet had nowhere to show it — the owner saw only the
+   * bare "Bagian baru" form, no way to attach a document. This is the fix:
+   * an empty syllabus offers the dropzone directly.
+   */
+  it("offers the attachment dropzone even before any section exists, for the owner", async () => {
+    stubFetch({ sections: [] });
+    renderTab(true);
+
+    await screen.findByText(/Belum ada materi/);
+    expect(screen.getByLabelText("Lampiran (opsional)")).toBeTruthy();
+    // The old bare "add a section" button is gone — this form replaces it.
+    expect(screen.queryAllByRole("button", { name: "Tambah bagian" }).length).toBe(0);
+  });
+
+  it("hides the empty-syllabus dropzone from a non-owner", async () => {
+    stubFetch({ sections: [] });
+    renderTab(false);
+
+    await screen.findByText(/Belum ada materi/);
+    expect(screen.queryAllByLabelText("Lampiran (opsional)").length).toBe(0);
+  });
+
+  it("creating the first materi creates its section, then its lesson carrying the new section's id", async () => {
+    const calls: { url: string; method: string; body: unknown }[] = [];
+    global.fetch = mock(async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      let body: unknown;
+      if (typeof init?.body === "string") body = JSON.parse(init.body);
+      calls.push({ url, method, body });
+      if (url.includes("/sections") && method === "POST") {
+        return jsonResponse(
+          { id: "s-new", title: "Minggu 1", position: 1, lessonCount: 0, lessons: [] },
+          201
+        );
+      }
+      if (url.includes("/lessons") && method === "POST") {
+        return jsonResponse({ id: "l-new", title: "Baru", body: "isi", position: 1, attachment: null }, 201);
+      }
+      return jsonResponse({ sections: [] });
+    }) as unknown as typeof fetch;
+    renderTab(true);
+    await screen.findByText(/Belum ada materi/);
+
+    fireEvent.change(screen.getByLabelText("Bagian baru"), { target: { value: "Minggu 1" } });
+    fireEvent.change(screen.getByLabelText("Judul materi"), { target: { value: "Baru" } });
+    fireEvent.change(screen.getByLabelText("Isi materi"), { target: { value: "isi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Tambah materi" }));
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.url.includes("/lessons") && call.method === "POST")).toBe(true)
+    );
+    const sectionCall = calls.find((call) => call.url.includes("/sections") && call.method === "POST");
+    const lessonCall = calls.find((call) => call.url.includes("/lessons") && call.method === "POST");
+    expect((sectionCall?.body as { title?: string }).title).toBe("Minggu 1");
+    expect((lessonCall?.body as { sectionId?: string }).sectionId).toBe("s-new");
+  });
+
   it("choosing a lesson shows its body", async () => {
     stubFetch();
     renderTab();
