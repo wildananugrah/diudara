@@ -71,6 +71,10 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
   // with an error page — the library is still there and still readable.
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Purely a highlight while a file is dragged over the dropzone — the drop
+  // itself goes through the same `processFile` path as the file input, so
+  // this never gates an upload, only a CSS class.
+  const [isDragging, setIsDragging] = useState(false);
   const clock = now ?? new Date();
 
   useEffect(() => {
@@ -93,13 +97,9 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
     };
   }, [slug]);
 
-  async function handleUpload(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
-    const file = event.target.files?.[0];
-    // Clear the input immediately so choosing the SAME file twice after a
-    // failure still fires a change event.
-    event.target.value = "";
-    if (file === undefined) return;
-
+  // Shared by the file input and the dropzone — one validate-then-upload path
+  // so drag-and-drop can't drift from picking a file the normal way.
+  async function processFile(file: File): Promise<void> {
     // Checked here as well as on the server, and the limits come from
     // `@diudara/shared` so the two cannot drift — `document.schema.ts`'s own
     // docstring explains which direction of drift is dangerous. This is a
@@ -126,6 +126,38 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
     } finally {
       setBusy(false);
     }
+  }
+
+  async function handleUpload(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0];
+    // Clear the input immediately so choosing the SAME file twice after a
+    // failure still fires a change event.
+    event.target.value = "";
+    if (file === undefined) return;
+    await processFile(file);
+  }
+
+  function handleDragOver(event: React.DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    if (busy) return;
+    setIsDragging(true);
+  }
+
+  function handleDragLeave(event: React.DragEvent<HTMLDivElement>): void {
+    // Only the outer dropzone leaving counts — a child element (the label,
+    // the checkbox) firing its own dragleave must not cancel the highlight
+    // while the pointer is still over the dropzone.
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setIsDragging(false);
+  }
+
+  async function handleDrop(event: React.DragEvent<HTMLDivElement>): Promise<void> {
+    event.preventDefault();
+    setIsDragging(false);
+    if (busy) return;
+    const file = event.dataTransfer.files[0];
+    if (file === undefined) return;
+    await processFile(file);
   }
 
   async function handleDownload(document: CommunityDocumentRow): Promise<void> {
@@ -171,7 +203,12 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
   return (
     <section className="dokumen-tab">
       {viewerIsOwner ? (
-        <div className="dokumen-upload">
+        <div
+          className={`dokumen-upload${isDragging ? " dokumen-upload-dragging" : ""}`}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={(event) => void handleDrop(event)}
+        >
           <label htmlFor="dokumen-upload">Unggah dokumen</label>
           <input
             id="dokumen-upload"
@@ -193,7 +230,9 @@ export default function DokumenTab({ slug, viewerIsOwner, viewerIsMember, now }:
             />
             Khusus anggota berbayar
           </label>
-          <p className="muted">Maksimal {formatBytes(MAX_DOCUMENT_BYTES)} per berkas.</p>
+          <p className="muted">
+            Maksimal {formatBytes(MAX_DOCUMENT_BYTES)} per berkas, atau seret berkas ke sini.
+          </p>
         </div>
       ) : null}
 

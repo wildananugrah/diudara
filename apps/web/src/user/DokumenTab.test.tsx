@@ -208,6 +208,43 @@ describe("DokumenTab", () => {
     expect(calls.filter((call) => call.startsWith("POST")).length).toBe(1);
   });
 
+  /**
+   * Dropping a file on the dropzone must reach the SAME `processFile` path as
+   * picking one through the input — asserted by the identical POST + prepend,
+   * not by re-testing every validation rule the file-input tests already
+   * cover.
+   */
+  it("drags a file onto the dropzone and uploads it, same as picking it", async () => {
+    const calls = stubFetch({ viewerMayDownload: true });
+    const { container } = renderTab({ viewerIsOwner: true, viewerIsMember: true });
+    await screen.findByText("Rangkuman Trigonometri.pdf");
+
+    const dropzone = container.querySelector(".dokumen-upload") as HTMLElement;
+    const file = new File([new Uint8Array([1])], "Diseret.pdf", { type: "application/pdf" });
+    fireEvent.drop(dropzone, { dataTransfer: { files: [file] } });
+
+    // `stubFetch`'s POST handler always answers with the fixed "Baru.pdf" row
+    // (see `aDocument({ id: "doc-new", name: "Baru.pdf" })` above), matching
+    // the file-input upload test — the dropped file's own name never reaches
+    // the assertion because the mock doesn't echo the request body.
+    await screen.findByText("Baru.pdf");
+    expect(calls.filter((call) => call.startsWith("POST")).length).toBe(1);
+    expect(dropzone.className).not.toContain("dokumen-upload-dragging");
+  });
+
+  it("highlights the dropzone while dragging over it, and clears on drag leave", async () => {
+    stubFetch({ viewerMayDownload: true });
+    const { container } = renderTab({ viewerIsOwner: true, viewerIsMember: true });
+    await screen.findByText("Rangkuman Trigonometri.pdf");
+
+    const dropzone = container.querySelector(".dokumen-upload") as HTMLElement;
+    fireEvent.dragOver(dropzone);
+    expect(dropzone.className).toContain("dokumen-upload-dragging");
+
+    fireEvent.dragLeave(dropzone, { relatedTarget: document.body });
+    expect(dropzone.className).not.toContain("dokumen-upload-dragging");
+  });
+
   it("refuses a file over the cap in the browser, naming the limit", async () => {
     stubFetch({ viewerMayDownload: true });
     renderTab({ viewerIsOwner: true, viewerIsMember: true });
