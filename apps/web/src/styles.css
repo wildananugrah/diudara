@@ -1254,6 +1254,14 @@ button:disabled {
    settles on, so a form field here isn't stretched across a near-1180px row. */
 .settings-page {
   max-width: 36rem;
+  /* The account-form card and the three seller widgets below it
+     (MembershipSettings/MembershipRequests/SubscriberList) are direct
+     siblings here with no margin of their own (see `.card`) — without this
+     they sit flush against each other. Same `gap`-on-a-flex-column shape
+     `.stack` already uses inside each card, just one level up. */
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
 }
 
 .app-header {
