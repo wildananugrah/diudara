@@ -13,6 +13,7 @@ import {
   faUsers,
 } from "@fortawesome/free-solid-svg-icons";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
+import logo from "../../assets/logo.svg";
 import { Link, NavLink, useLocation } from "react-router-dom";
 
 /**
@@ -198,7 +199,7 @@ export default function Sidebar({
       aria-label="Navigasi utama"
     >
       <div className="side-rail-brand">
-        {!collapsed && <span className="side-rail-wordmark">DIUDARA</span>}
+        {!collapsed && <img className="side-rail-wordmark" src={logo} alt="DIUDARA" />}
         <button
           type="button"
           className="btn btn-ghost btn-icon side-rail-toggle"

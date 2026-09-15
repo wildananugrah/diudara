@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { requestPasswordReset } from "./apiClient";
+import logo from "../assets/logo.svg";
 
 /**
  * `POST /users/password-reset/request`'s copy — and this exact wording is
@@ -45,7 +46,7 @@ export default function ResetRequestPage() {
   return (
     <main className="auth-page">
       <div className="auth-card">
-        <p className="brand">DIUDARA</p>
+        <img className="brand" src={logo} alt="DIUDARA" />
         <h1>Lupa sandi</h1>
 
         {phase === "requested" ? (

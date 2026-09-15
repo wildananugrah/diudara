@@ -80,7 +80,9 @@ describe("routing — the personal-account routes", () => {
 
   it("the landing page still renders at /", async () => {
     renderAt("/");
-    expect(document.body.textContent).toContain("DIUDARA");
+    // The wordmark is the logo image, not a text node (see
+    // LandingPage.tsx) — its accessible name is the stable proof of life.
+    expect(await screen.findByRole("img", { name: "DIUDARA" })).toBeTruthy();
   });
 
   it("resolves /masuk to the login page, not swallowed by the profile route", () => {

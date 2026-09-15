@@ -416,14 +416,15 @@ code {
   padding: var(--space-6);
 }
 
-/* The wordmark is tracked wide enough to read as a lockup rather than a word. */
+/* The DIUDARA logotype (`src/assets/logo.svg`) — an <img> since the design
+   update, not styled text. Its paths are already filled `#2b4c6f`, exactly
+   `--langit`, so it drops onto this --surface card with no colour work
+   needed. `width: auto` keeps the source's ~4.3:1 aspect ratio at this
+   height. */
 .brand {
-  font-weight: 600;
-  letter-spacing: 0.22em;
-  font-size: 0.75rem;
-  color: var(--langit);
-  text-transform: uppercase;
-  text-decoration: none;
+  display: block;
+  height: 16px;
+  width: auto;
   margin: 0 0 8px;
 }
 
@@ -764,13 +765,13 @@ button:disabled {
   padding: 2rem 1.25rem 4rem;
 }
 
+/* The logotype above the hero heading — see `.brand`'s comment for why no
+   colour work is needed on top of the source SVG. */
 .landing-eyebrow {
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  font-size: 0.75rem;
+  display: block;
+  height: 16px;
+  width: auto;
   margin: 0 0 0.5rem;
-  color: var(--langit);
 }
 
 /* --- Display type. The display face is the redesign's whole voice: it
@@ -1969,10 +1970,12 @@ button:disabled {
     padding: 0 4px 28px;
   }
 
+  /* The logotype, sized up from `.brand`'s 16px for the rail's own scale —
+     see that rule's comment for why no colour work is needed here either. */
   .side-rail-wordmark {
-    font-family: var(--font-display);
-    font-weight: 800;
-    color: var(--langit);
+    display: block;
+    height: 22px;
+    width: auto;
   }
 
   .side-rail .sidebar-nav {

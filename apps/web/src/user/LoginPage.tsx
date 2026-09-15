@@ -8,6 +8,7 @@ import {
 } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
 import { SIGNED_IN_HOME } from "./RedirectIfSignedIn";
+import logo from "../assets/logo.svg";
 
 /**
  * THE GENERIC 401, and the reason it is a constant rather than the API's
@@ -98,7 +99,7 @@ export default function LoginPage() {
   return (
     <main className="auth-page">
       <div className="auth-card">
-        <p className="brand">DIUDARA</p>
+        <img className="brand" src={logo} alt="DIUDARA" />
         <h1>Masuk</h1>
 
         {noticeFromState !== null ? <p className="form-ok">{noticeFromState}</p> : null}

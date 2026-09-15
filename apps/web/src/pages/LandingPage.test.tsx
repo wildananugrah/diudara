@@ -190,12 +190,12 @@ describe("LandingPage", () => {
       </MemoryRouter>
     );
     const text = document.body.textContent ?? "";
+    // PROOF OF LIFE, kept independent of the denylist below. The eyebrow is
+    // now the logo image (see LandingPage.tsx), not a text node, so
+    // `textContent` alone can no longer see it — its accessible name is the
+    // stable thing to require instead.
+    expect(screen.getByRole("img", { name: "DIUDARA" })).toBeTruthy();
     cleanup();
-    // PROOF OF LIFE. A denylist over `textContent` passes vacuously if the page
-    // renders nothing, and five sibling tests reddening first is luck, not a
-    // guarantee. "DIUDARA" is the eyebrow above the H1 and the one word on this
-    // page that is not a product claim, so it is the stable thing to require.
-    expect(text).toContain("DIUDARA");
     const banned: Array<[string, RegExp]> = [
       ["telegram", /telegram/i],
       ["komunitas", /komunitas/i],

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 import { completePasswordReset, UserApiError } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
+import logo from "../assets/logo.svg";
 
 /**
  * `CompletePasswordReset`'s ONE message for a missing, expired, or
@@ -47,7 +48,7 @@ export default function ResetCompletePage() {
   return (
     <main className="auth-page">
       <div className="auth-card">
-        <p className="brand">DIUDARA</p>
+        <img className="brand" src={logo} alt="DIUDARA" />
         <h1>Atur ulang sandi</h1>
 
         {phase === "done" ? (

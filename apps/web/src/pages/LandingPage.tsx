@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import logo from "../assets/logo.svg";
 
 /**
  * The only page an unauthenticated visitor sees.
@@ -81,7 +82,7 @@ export default function LandingPage() {
   return (
     <main className="landing">
       <section className="landing-hero">
-        <p className="landing-eyebrow">DIUDARA</p>
+        <img className="landing-eyebrow" src={logo} alt="DIUDARA" />
         <h1>Jual keanggotaan langsung dari profil Anda</h1>
         <p className="landing-lede">
           Satu profil untuk tulisan, foto, dan siaran langsung Anda. Tulisannya terbuka

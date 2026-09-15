@@ -2,6 +2,7 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { signup, UserApiError } from "./apiClient";
 import { describeRequestFailure } from "./errorCopy";
+import logo from "../assets/logo.svg";
 
 /**
  * `POST /users/signup`'s 409 — a duplicate HANDLE, which is public by design
@@ -72,7 +73,7 @@ export default function SignupPage() {
   return (
     <main className="auth-page">
       <div className="auth-card">
-        <p className="brand">DIUDARA</p>
+        <img className="brand" src={logo} alt="DIUDARA" />
         <h1>Buat akun</h1>
 
         <form onSubmit={handleSubmit} className="stack" noValidate>
