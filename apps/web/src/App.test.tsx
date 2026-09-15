@@ -543,29 +543,29 @@ describe("routing — pages that turn a signed-in visitor away", () => {
     localStorage.setItem(USER_TOKEN_STORAGE_KEY, "jwt-existing");
   }
 
-  function mockFeed() {
+  function mockDiscover() {
     global.fetch = mock(async () =>
-      jsonResponse({ posts: [], nextCursor: null })
+      jsonResponse({ communities: [], popularTags: [] })
     ) as unknown as typeof fetch;
   }
 
-  it("sends a signed-in visitor from /signup to the feed", async () => {
+  it("sends a signed-in visitor from /signup to /discover", async () => {
     signIn();
-    mockFeed();
+    mockDiscover();
 
     renderAt("/signup");
 
-    expect(await screen.findByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Discover" })).toBeTruthy();
     expect(screen.queryAllByRole("heading", { name: "Buat akun" }).length).toBe(0);
   });
 
-  it("sends a signed-in visitor from /masuk to the feed", async () => {
+  it("sends a signed-in visitor from /masuk to /discover", async () => {
     signIn();
-    mockFeed();
+    mockDiscover();
 
     renderAt("/masuk");
 
-    expect(await screen.findByText("Belum ada kiriman untuk ditampilkan.")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Discover" })).toBeTruthy();
     expect(screen.queryAllByRole("heading", { name: "Masuk" }).length).toBe(0);
   });
 

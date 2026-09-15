@@ -3,15 +3,20 @@ import { Navigate } from "react-router-dom";
 import { isUserSignedIn } from "./apiClient";
 
 /**
- * Where a session belongs when nothing more specific was asked for: the feed.
+ * Where a session belongs when nothing more specific was asked for: Discover.
  *
  * Exported because `LoginPage` needs the same answer for its post-login
  * `destination` default, and these two drifting apart is exactly the bug this
  * file exists to end — `/masuk` used to send an already-signed-in visitor to
  * `/` (the marketing landing page) while a fresh login on the same page went
- * to `/@{handle}`. Two answers, one question, neither of them the feed.
+ * to `/@{handle}`. Two answers, one question, neither of them useful.
+ *
+ * `/discover`, not `/beranda`: `AppShell.tsx`'s `STATIC_DESTINATIONS` is the
+ * one place the app's real nav destinations are listed, and Discover is the
+ * only one currently uncommented there — landing a fresh session on a page
+ * with no nav entry pointing back to it would be its own small dead end.
  */
-export const SIGNED_IN_HOME = "/beranda";
+export const SIGNED_IN_HOME = "/discover";
 
 /**
  * Wraps a page meant for people who are NOT signed in, and turns away the

@@ -40,7 +40,7 @@ export default function LoginPage() {
    * Where a successful login lands. A guard that bounced the visitor here
    * (SettingsPage) names the page it took them from, and that always wins —
    * being returned to what you were doing beats any default. With no such
-   * state, the feed.
+   * state, Discover — see `SIGNED_IN_HOME`'s own docstring for why.
    *
    * The "already signed in, go away" check that used to live at the top of
    * this component is gone: it is now `RedirectIfSignedIn`, applied to this

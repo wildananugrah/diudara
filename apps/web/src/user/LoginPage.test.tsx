@@ -21,7 +21,7 @@ function renderLogin(initialEntry: string | { pathname: string; state?: unknown 
             sent, so it must remain reachable in this harness for the tests
             below to be able to prove they DON'T land on it. */}
         <Route path="/" element={<div>home reached</div>} />
-        <Route path="/beranda" element={<div>beranda reached</div>} />
+        <Route path="/discover" element={<div>discover reached</div>} />
         <Route path="/masuk" element={<LoginPage />} />
         <Route path="/pengaturan" element={<div>settings page reached</div>} />
         {/* `/@:handleParam` would NOT match `/@wildan` — React Router cannot mix a
@@ -60,19 +60,19 @@ describe("LoginPage", () => {
   });
 
   /**
-   * One rule for "signed in, no particular destination asked for": /beranda.
+   * One rule for "signed in, no particular destination asked for": /discover.
    * This used to land on the caller's own profile while the already-signed-in
    * guard below landed on "/" — two answers to the same question, and neither
-   * was the feed.
+   * was Discover.
    */
-  it("stores a session and redirects to /beranda", async () => {
+  it("stores a session and redirects to /discover", async () => {
     global.fetch = mock(async () => jsonResponse({ user: USER, token: "jwt-fresh" })) as unknown as typeof fetch;
 
     renderLogin();
     fillCredentials();
     fireEvent.click(screen.getByRole("button", { name: "Masuk" }));
 
-    expect(await screen.findByText("beranda reached")).toBeTruthy();
+    expect(await screen.findByText("discover reached")).toBeTruthy();
     expect(getUserToken()).toBe("jwt-fresh");
   });
 
@@ -89,7 +89,7 @@ describe("LoginPage", () => {
 
     // Waited on only as the "login finished" signal — this test is about the
     // request, not the destination, which has its own test above.
-    await screen.findByText("beranda reached");
+    await screen.findByText("discover reached");
     expect(calls[0]!.url).toBe("/users/login");
     expect(JSON.parse(calls[0]!.init.body as string)).toEqual({
       email: "wildan@example.com",
@@ -118,7 +118,7 @@ describe("LoginPage", () => {
 
     // Waited on only as the "login finished" signal — this test is about the
     // request, not the destination, which has its own test above.
-    await screen.findByText("beranda reached");
+    await screen.findByText("discover reached");
     expect(document.body.innerHTML).not.toContain("jwt-super-secret");
   });
 
@@ -129,7 +129,7 @@ describe("LoginPage", () => {
   });
 
   /*
-   * The "already signed in -> /beranda" test used to live here, rendering
+   * The "already signed in -> /discover" test used to live here, rendering
    * LoginPage directly. That check is no longer LoginPage's: it moved to
    * `RedirectIfSignedIn`, applied to this route in App.tsx, and its test
    * moved with it to App.test.tsx's "pages that turn a signed-in visitor
@@ -143,9 +143,9 @@ describe("LoginPage", () => {
    */
 
   /**
-   * `state.from` still outranks the /beranda default: a visitor bounced off a
-   * guarded page returns to THAT page, not the feed. This is the assertion
-   * that stops the change above from flattening every login into /beranda.
+   * `state.from` still outranks the /discover default: a visitor bounced off
+   * a guarded page returns to THAT page, not Discover. This is the assertion
+   * that stops the change above from flattening every login into /discover.
    */
   it("redirects to a guarded page's own path when arriving via state.from", async () => {
     global.fetch = mock(async () => jsonResponse({ user: USER, token: "jwt-fresh" })) as unknown as typeof fetch;
