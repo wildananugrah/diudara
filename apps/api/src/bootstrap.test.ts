@@ -3107,6 +3107,16 @@ describe("bootstrap() in the test suite reaches no real provider", () => {
       `email=${adapterName(deps.email)}`,
       `streaming=${adapterName(deps.streamingProvider)}`,
       `mediaStorage=${adapterName(deps.mediaStorage)}`,
+      // THE FIFTH LEAK, and the one that proved this test's own "needs no
+      // list" claim wrong: it has a list — of dependency fields rather than
+      // env var names — and `aiProvider` was never on it. A developer with a
+      // live OPENROUTER_API_KEY in `apps/api/.env` got a suite where
+      // `selectAiProvider`'s rule 1 ("set -> OpenRouterAiAdapter, in EVERY
+      // environment") handed every bare `bootstrap()` a real adapter, and
+      // `routes/communities.test.ts`'s co-builder tests made real, BILLED
+      // POSTs to openrouter.ai on every run — failing whenever the live model
+      // answered without a parseable draft block.
+      `aiProvider=${adapterName(deps.aiProvider)}`,
       ...Object.values(deps.messaging).map((m) => `messaging=${adapterName(m)}`),
     ];
 

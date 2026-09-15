@@ -190,6 +190,29 @@ for (const key of [
   // one would turn a leaked adapter into a suite that cannot boot at all.
   "RESEND_API_KEY",
   "EMAIL_FROM",
+  // The FIFTH time, and the most expensive: the AI co-builder going live put a
+  // real OPENROUTER_API_KEY in `apps/api/.env`, and `selectAiProvider`'s rule 1
+  // is "set -> OpenRouterAiAdapter, in EVERY environment" — it is not gated on
+  // NODE_ENV the way the email and messaging selectors are, so nothing else
+  // stood between a developer's key and the suite.
+  //
+  // Measured on 2026-09-15: `routes/communities.test.ts`'s co-builder block —
+  // whose own docstring states it drives the FakeAiAdapter and that "no real
+  // OpenRouter call happens in this suite" — was making real, billed POSTs to
+  // openrouter.ai on every run, at roughly 2-3 seconds each. One test failed
+  // outright ("answers a draft once the fake has enough turns to propose one")
+  // because a live gpt-4o-mini answered without a parseable JSON draft block,
+  // so `CoBuilderChat`'s double-malformed fallback returned `draft: null`. The
+  // other co-builder tests passed while still spending money, which is why
+  // this went unnoticed: only the assertion that pinned the fake's exact
+  // output could tell the difference.
+  //
+  // The KEY ONLY, unlike RESEND_API_KEY/EMAIL_FROM above: `selectAiProvider`'s
+  // docstring records that OPENROUTER_MODEL has a hard default
+  // (`DEFAULT_OPENROUTER_MODEL`), so there is no pair of vars that can
+  // half-configure and throw. With the key gone the model name is simply
+  // unread.
+  "OPENROUTER_API_KEY",
 ]) {
   delete process.env[key];
 }
