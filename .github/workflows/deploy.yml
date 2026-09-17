@@ -1,0 +1,80 @@
+name: Deploy to Production
+
+# THIS WORKFLOW RUNS ON A SELF-HOSTED RUNNER ON THE PRODUCTION VPS, so the
+# trigger list below is a security boundary, not a convenience.
+#
+# This repository is PUBLIC. A self-hosted runner executes whatever a workflow
+# tells it to, on the machine that serves real traffic. `push` to main and a
+# manual dispatch are both safe because a stranger can cause neither — a fork's
+# pull request cannot push to main.
+#
+# NEVER ADD A `pull_request` TRIGGER HERE. That would let anyone who opens a
+# pull request run arbitrary code on the production server. Tests on pull
+# requests belong in a separate workflow on a GitHub-HOSTED runner.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, and a queued one WAITS rather than replacing the one in
+# flight. `cancel-in-progress: false` is deliberate: cancelling midway could
+# leave pm2 reloaded against a half-copied web build, or the database migrated
+# for code that never finished deploying.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    timeout-minutes: 30
+
+    # The job reads nothing from the GitHub API. Declared anyway so the token's
+    # scope is explicit rather than inherited from a repository default.
+    permissions:
+      contents: read
+
+    env:
+      # The deployment IS this clone — not the runner's workspace. It holds
+      # backend/.env and infra/.env, which are gitignored and exist nowhere else,
+      # so a fresh `actions/checkout` would build fine and deploy nothing usable.
+      DEPLOY_TREE: /home/wildandev/repo/diudara2
+
+    steps:
+      # Deliberately NO actions/checkout: see DEPLOY_TREE above.
+      #
+      # The update lives here rather than in scripts/deploy.sh, which states in
+      # its own header that it deploys the tree you are looking at and never
+      # pulls. That contract is right for a human running it by hand; CI is the
+      # caller that has to decide what "current" means, so it does so out loud.
+      - name: Fast-forward the deployment clone to origin/main
+        run: |
+          set -Eeuo pipefail
+          cd "$DEPLOY_TREE"
+
+          # Uncommitted work in the deploy tree is a person mid-task, not a
+          # deploy input. Fail loudly instead of resetting over it.
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::$DEPLOY_TREE has uncommitted changes; refusing to deploy over them"
+            git status --short
+            exit 1
+          fi
+
+          git fetch origin main --prune
+          git checkout main
+          # --ff-only, never a merge: if the local main has diverged, production
+          # would otherwise start running a commit that exists on no remote.
+          git merge --ff-only origin/main
+
+          echo "deploying $(git rev-parse --short HEAD) — $(git log -1 --format=%s)"
+          {
+            echo "### Deployed commit"
+            echo ""
+            echo "\`$(git rev-parse --short HEAD)\` $(git log -1 --format=%s)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # deploy.sh verifies its own work — /health, then each hostname's `/`,
+      # `/api` returning JSON and `/hls` reaching MediaMTX — and exits non-zero if
+      # any check fails, which fails this job. No extra verification step needed.
+      - name: Run the deploy script
+        run: bash "$DEPLOY_TREE/scripts/deploy.sh"
