@@ -51,7 +51,7 @@ export default function Sidebar() {
       icon: faChartLine,
       children: (mine?.created ?? []).map((c) => ({ to: `/creator/dashboard/${c.id}`, label: c.name })),
     },
-    { key: "onboarding", to: "/onboarding", label: "Pulse-ID", icon: faFingerprint },
+    // { key: "onboarding", to: "/onboarding", label: "Pulse-ID", icon: faFingerprint },
   ];
 
   const toggleMenu = (key: string) => setOpenMenus((prev) => ({ ...prev, [key]: !prev[key] }));
