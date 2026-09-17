@@ -25,6 +25,29 @@ export function buildRoutes(c: Container) {
 
   api.get("/auth/me", requireAuth, async (ctx) => ctx.json(await c.auth.me(userId(ctx))));
 
+  /**
+   * The profile page. Each endpoint edits the account behind the TOKEN — there is
+   * no user id in any path or body, so one signed-in user cannot address another.
+   *
+   * Split three ways because they have different costs: name/handle/colour save
+   * on a session alone, while changing the email or the password re-checks the
+   * current password (see AuthService for why).
+   */
+  api.patch("/auth/me", requireAuth, async (ctx) => {
+    const body = await ctx.req.json<{ name?: string; handle?: string; avatarColor?: string }>();
+    return ctx.json(await c.auth.updateProfile(userId(ctx), body));
+  });
+
+  api.patch("/auth/me/email", requireAuth, async (ctx) => {
+    const body = await ctx.req.json<{ currentPassword: string; email: string }>();
+    return ctx.json(await c.auth.changeEmail(userId(ctx), body));
+  });
+
+  api.patch("/auth/me/password", requireAuth, async (ctx) => {
+    const body = await ctx.req.json<{ currentPassword: string; newPassword: string }>();
+    return ctx.json(await c.auth.changePassword(userId(ctx), body));
+  });
+
   // ------------------------------------------------------------- discovery
   api.get("/communities", async (ctx) => {
     const q = ctx.req.query();

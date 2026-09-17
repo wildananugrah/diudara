@@ -8,6 +8,11 @@ type AuthState = {
   login: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string) => Promise<void>;
   logout: () => void;
+  /**
+   * Replaces the cached user after a profile save, so the header's name, handle
+   * and avatar change with the form instead of waiting for the next page load.
+   */
+  applyUser: (user: ApiUser) => void;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -43,7 +48,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
-  const value = useMemo(() => ({ user, loading, login, register, logout }), [user, loading, login, register, logout]);
+  const applyUser = useCallback((u: ApiUser) => setUser(u), []);
+
+  const value = useMemo(
+    () => ({ user, loading, login, register, logout, applyUser }),
+    [user, loading, login, register, logout, applyUser],
+  );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

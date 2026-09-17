@@ -227,6 +227,18 @@ export const api = {
     login: (body: { email: string; password: string }) =>
       post<{ user: ApiUser; token: string }>("/auth/login", body),
     me: () => get<ApiUser>("/auth/me"),
+
+    /**
+     * Profile edits. Each acts on the account behind the token — no user id is
+     * ever sent — and each is partial, so a card saves without clearing the rest.
+     */
+    updateProfile: (body: { name?: string; handle?: string; avatarColor?: string }) =>
+      patch<ApiUser>("/auth/me", body),
+    /** Requires the current password: changing the recovery address is a takeover vector. */
+    changeEmail: (body: { currentPassword: string; email: string }) =>
+      patch<ApiUser>("/auth/me/email", body),
+    changePassword: (body: { currentPassword: string; newPassword: string }) =>
+      patch<{ ok: true }>("/auth/me/password", body),
   },
 
   communities: {
