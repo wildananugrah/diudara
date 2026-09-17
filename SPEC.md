@@ -186,8 +186,12 @@ These are things the mockup *depicts* that the backend cannot honestly deliver a
    **Still fabricated:** the deltas `"+12% bulan ini"`, `"-0,4% dari bulan lalu"` are string
    literals in the JSX, not data; they need period-over-period comparison to mean anything.
 
-4. **Chat is polled, not realtime.** Nothing in the current UI receives inbound messages, so
-   polling reaches feature parity. WebSockets would be a genuine upgrade, not a restoration.
+4. **Chat is polled, not realtime.** Two cadences, because they answer different
+   questions: the conversation LIST (previews, unread badges) every 15s, and each OPEN
+   conversation every 5s — a message you are waiting for should not take fifteen seconds
+   to appear. An arriving message scrolls the thread only for readers already at the
+   bottom; someone who scrolled up to read history is left where they put themselves.
+   WebSockets would be a genuine upgrade, not a restoration.
 
 5. **`trending` has no source.** Needs a rule; defaulting to "most new members in 7 days".
 

@@ -14,11 +14,18 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import Avatar from "../ui/Avatar";
 import { api, type ApiAttachment, type ApiConversation, type ApiMessage } from "../../lib/api";
+import { isNearBottom, threadChanged } from "../../lib/chatScroll";
 import { useAuth } from "../../lib/auth";
 import { clockTime, timeAgoShort } from "../../lib/format";
 
 const MAX_OPEN = 3;
+/** The conversation LIST: previews and unread badges. Cheap, and rarely urgent. */
 const POLL_MS = 15_000;
+/**
+ * An OPEN conversation, which is what someone is actually looking at. Matches the
+ * Live Room's chat cadence — 15s felt broken to the person waiting for a reply.
+ */
+const THREAD_POLL_MS = 5_000;
 
 const EMOJIS = [
   "😀", "😂", "😍", "👍", "🙏", "🎉", "😢", "😮",
@@ -52,7 +59,18 @@ export default function FloatingChat() {
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
 
-  const threadRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * One element per open window, keyed by conversation id. A single ref cannot
+   * work here: up to MAX_OPEN windows render, each would assign the same ref, and
+   * only the last to mount would ever scroll.
+   */
+  const threadRefs = useRef(new Map<string, HTMLDivElement | null>());
+  /**
+   * Per window: is the reader following the conversation, or reading history?
+   * Updated on scroll, so an arriving message never drags the view away from
+   * whatever someone scrolled up to read. Unknown means following.
+   */
+  const stickToBottom = useRef(new Map<string, boolean>());
 
   const refreshConversations = useCallback(async () => {
     try {
@@ -71,12 +89,19 @@ export default function FloatingChat() {
     return () => clearInterval(timer);
   }, [user, refreshConversations]);
 
-  const loadThread = useCallback(async (conversationId: string) => {
+  const loadThread = useCallback(async (conversationId: string, opts: { silent?: boolean } = {}) => {
     try {
       const thread = await api.chat.messages(conversationId);
-      setMessages((prev) => ({ ...prev, [conversationId]: thread }));
+      // Replace only when something actually changed: a poll that swaps in an
+      // equal array every 5s re-renders the window and re-fires the scroll effect
+      // for nothing.
+      setMessages((prev) => (threadChanged(prev[conversationId], thread)
+        ? { ...prev, [conversationId]: thread }
+        : prev));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal memuat pesan");
+      // A failed background poll is not worth interrupting anyone over; the next
+      // tick retries. A failed OPEN still reports, because nothing else will.
+      if (!opts.silent) setError(err instanceof Error ? err.message : "Gagal memuat pesan");
     }
   }, []);
 
@@ -119,10 +144,38 @@ export default function FloatingChat() {
     return () => window.removeEventListener(OPEN_CHAT_EVENT, handler);
   }, [openChat, refreshConversations]);
 
-  // Keep the newest message in view as threads load or grow.
+  /**
+   * Poll the conversations that are actually open.
+   *
+   * THIS IS THE FIX for "chat is not realtime": the 15s poll above refreshes the
+   * conversation LIST — previews and unread counts — and nothing refreshed the
+   * open thread. An inbound message showed up in the sidebar while the window
+   * you were staring at stayed frozen until it was closed and reopened.
+   *
+   * Minimized windows are skipped: nobody is reading them, and reopening reloads.
+   */
+  const openThreadIds = openChats.filter((c) => !c.minimized).map((c) => c.id).join(",");
   useEffect(() => {
-    const el = threadRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!user || !openThreadIds) return;
+    const ids = openThreadIds.split(",");
+    const tick = () => { for (const id of ids) void loadThread(id, { silent: true }); };
+    const timer = setInterval(tick, THREAD_POLL_MS);
+    return () => clearInterval(timer);
+  }, [user, openThreadIds, loadThread]);
+
+  /**
+   * Keep the newest message in view — for every open window, and only for readers
+   * who are already at the bottom. Scrolling unconditionally would drag someone
+   * out of the history they scrolled up to read every time a message lands.
+   */
+  useEffect(() => {
+    for (const { id, minimized } of openChats) {
+      if (minimized) continue;
+      const el = threadRefs.current.get(id);
+      if (!el) continue;
+      if (stickToBottom.current.get(id) === false) continue;
+      el.scrollTop = el.scrollHeight;
+    }
   }, [messages, openChats]);
 
   const closeChat = (id: string) => setOpenChats((prev) => prev.filter((c) => c.id !== id));
@@ -158,6 +211,9 @@ export default function FloatingChat() {
     setDrafts((prev) => ({ ...prev, [id]: "" }));
     setPendingAttachments((prev) => ({ ...prev, [id]: [] }));
     setEmojiPickerFor(null);
+    // Sending is an explicit "I am at the end of this conversation", even if you
+    // had scrolled up to quote something before typing.
+    stickToBottom.current.set(id, true);
 
     try {
       await api.chat.send(id, { text, attachmentIds: attachments.map((a) => a.id) });
@@ -238,7 +294,18 @@ export default function FloatingChat() {
             {!minimized && (
               <>
                 {/* Riwayat pesan */}
-                <div ref={threadRef} style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8, background: "var(--surface)" }}>
+                <div
+                  ref={(el) => {
+                    threadRefs.current.set(id, el);
+                    // A freshly opened window starts pinned to the newest message.
+                    if (el && !stickToBottom.current.has(id)) {
+                      stickToBottom.current.set(id, true);
+                      el.scrollTop = el.scrollHeight;
+                    }
+                  }}
+                  onScroll={(e) => stickToBottom.current.set(id, isNearBottom(e.currentTarget))}
+                  style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8, background: "var(--surface)" }}
+                >
                   {thread.length === 0 && (
                     <p style={{ fontSize: 12, color: "var(--ink-500)", textAlign: "center", marginTop: 12 }}>
                       Belum ada pesan. Mulai percakapan.
