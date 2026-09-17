@@ -1,6 +1,7 @@
 import {
   pgTable, text, integer, boolean, timestamp, jsonb, primaryKey, index, uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 const id = () => text("id").primaryKey().$defaultFn(() => crypto.randomUUID());
 const now = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
@@ -293,6 +294,37 @@ export const liveChatMessages = pgTable("live_chat_messages", {
   body: text("body").notNull(),
   createdAt: now(),
 }, (t) => ({ bySession: index("live_chat_session_idx").on(t.sessionId, t.createdAt) }));
+
+/**
+ * One row per thing a member should be told about, addressed to that member.
+ *
+ * Personal only (design spec 2026-09-17): a community announcement does NOT land
+ * here, because one announcement would mean one row per member. Everything in
+ * this table concerns the reader directly.
+ */
+export const notifications = pgTable("notifications", {
+  id: id(),
+  /** The RECIPIENT, not the person who caused it. */
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  type: text("type").notNull(),
+  /** Who caused it. Null for events nobody triggered, and when that account is gone. */
+  actorId: text("actor_id").references(() => users.id, { onDelete: "set null" }),
+  communityId: text("community_id").references(() => communities.id, { onDelete: "cascade" }),
+  /** The thing this is about — a post, a conversation, a payment. Untyped on purpose. */
+  entityId: text("entity_id"),
+  /**
+   * What the sentence needs, captured when the row is written: names, titles,
+   * amounts. NOT joined at read time — a notification should still read
+   * correctly after the post it mentions is renamed.
+   */
+  data: jsonb("data").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: now(),
+  readAt: timestamp("read_at", { withTimezone: true }),
+}, (t) => ({
+  byUser: index("notifications_user_idx").on(t.userId, t.createdAt),
+  // Partial index: the badge polls a COUNT of exactly these rows every 30s.
+  unread: index("notifications_unread_idx").on(t.userId).where(sql`read_at IS NULL`),
+}));
 
 export const trendingTags = pgTable("trending_tags", {
   tag: text("tag").primaryKey(),

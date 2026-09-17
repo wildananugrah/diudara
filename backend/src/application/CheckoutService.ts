@@ -1,6 +1,6 @@
 import type {
   MembershipRepository, PaymentGateway, PaymentRepository,
-  SubscriptionRepository, TierRepository,
+  SubscriptionRepository, TierRepository, EventBus,
 } from "../domain/ports.ts";
 import { NotFoundError, ValidationError } from "../domain/errors.ts";
 
@@ -18,6 +18,7 @@ export class CheckoutService {
     private readonly payments: PaymentRepository,
     private readonly memberships: MembershipRepository,
     private readonly gateway: PaymentGateway,
+    private readonly events: EventBus,
   ) {}
 
   listTiers(communityId: string) { return this.tiers.listForCommunity(communityId); }
@@ -83,6 +84,23 @@ export class CheckoutService {
     await this.payments.markStatus(payment.id, input.status);
     if (input.status === "paid") {
       await this.activate(payment.subscriptionId, input.communityId, input.userId, input.tierId);
+
+      // Two events for one fact, because they are addressed to opposite sides of
+      // it: the buyer learns their payment went through, the community's staff
+      // learn they have a new member.
+      await this.events.emit({
+        type: "payment.confirmed",
+        userId: input.userId,
+        communityId: input.communityId,
+        tierId: input.tierId,
+        paymentId: payment.id,
+      });
+      await this.events.emit({
+        type: "member.joined",
+        communityId: input.communityId,
+        memberId: input.userId,
+        tierId: input.tierId,
+      });
     }
     return { ok: true };
   }

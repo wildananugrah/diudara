@@ -1,7 +1,8 @@
 import type {
-  ConversationRepository, MessageRepository, UploadRepository, UserRepository,
+  ConversationRepository, MessageRepository, UploadRepository, UserRepository, EventBus,
 } from "../domain/ports.ts";
 import { ForbiddenError, NotFoundError, ValidationError } from "../domain/errors.ts";
+import { MESSAGE_PREVIEW_LENGTH } from "../domain/events.ts";
 import { assertUploadsExist } from "./PostService.ts";
 
 export class ChatService {
@@ -10,6 +11,7 @@ export class ChatService {
     private readonly messages: MessageRepository,
     private readonly users: UserRepository,
     private readonly uploads: UploadRepository,
+    private readonly events: EventBus,
   ) {}
 
   list(userId: string) { return this.conversations.listForUser(userId); }
@@ -19,6 +21,10 @@ export class ChatService {
     if (peerId === userId) throw new ValidationError("Tidak bisa memulai chat dengan diri sendiri");
     if (!(await this.users.findById(peerId))) throw new NotFoundError("Pengguna");
     return this.conversations.findOrCreateDirect(userId, peerId);
+  }
+
+  private otherParticipant(conversationId: string, userId: string) {
+    return this.conversations.otherParticipant(conversationId, userId);
   }
 
   private async assertParticipant(conversationId: string, userId: string) {
@@ -46,6 +52,20 @@ export class ChatService {
       conversationId, senderId: userId,
       body: input.text?.trim() ?? "", attachmentIds: input.attachmentIds,
     });
+
+    // The recipient is resolved here, where both participants are already known —
+    // the subscriber would have to look the conversation up again to find them.
+    const recipientId = await this.otherParticipant(conversationId, userId);
+    if (recipientId) {
+      await this.events.emit({
+        type: "message.sent",
+        conversationId,
+        senderId: userId,
+        recipientId,
+        preview: (input.text?.trim() ?? "").slice(0, MESSAGE_PREVIEW_LENGTH),
+      });
+    }
+
     return { ...msg, sender: "me" as const };
   }
 

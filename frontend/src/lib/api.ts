@@ -218,6 +218,21 @@ export type ApiWatchToken = {
   sessionId: string; token: string; expiresInSeconds: number; playbackUrl: string;
 };
 
+/**
+ * A thing that happened, addressed to the reader. The API deliberately returns
+ * no sentence: `type` + `data` are rendered by lib/notificationCopy.ts.
+ */
+export type ApiNotification = {
+  id: string;
+  type: string;
+  actorId: string | null;
+  communityId: string | null;
+  entityId: string | null;
+  data: Record<string, unknown>;
+  createdAt: string;
+  readAt: string | null;
+};
+
 // ---------------------------------------------------------------- endpoints
 
 export const api = {
@@ -369,6 +384,14 @@ export const api = {
       post<ApiStreamCredentials & { endedActiveSession: boolean }>(
         `/communities/${communityId}/live/stream-key/rotate`,
       ),
+  },
+
+  notifications: {
+    list: (params: { unreadOnly?: string } = {}) => get<ApiNotification[]>(`/notifications${qs(params)}`),
+    /** Polled for the bell badge — one indexed COUNT, not the list. */
+    unreadCount: () => get<{ count: number }>("/notifications/unread-count"),
+    markRead: (id: string) => patch<{ ok: true }>(`/notifications/${id}/read`, {}),
+    markAllRead: () => patch<{ updated: number }>("/notifications/read-all", {}),
   },
 
   uploads: {

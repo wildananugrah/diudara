@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faBell, faRightFromBracket, faUserPen } from "@fortawesome/free-solid-svg-icons";
+import { faRightFromBracket, faUserPen } from "@fortawesome/free-solid-svg-icons";
 import { useAuth } from "../../lib/auth";
 import Avatar from "../ui/Avatar";
+import NotificationBell from "./NotificationBell";
 
 type Crumb = { label: string; to?: string };
 
@@ -12,19 +13,13 @@ type Props = {
   subtitle?: string;
   /** Trail rendered below the title, e.g. Komunitas / Bimbel Matematika Pak Andi */
   breadcrumb?: Crumb[];
-  /**
-   * Unread notifications for the bell badge. Left unset by every page today:
-   * the API has no notifications endpoint, and a hardcoded number would claim
-   * unread items that do not exist. Pass a real count once that endpoint lands.
-   */
-  notificationCount?: number;
   /** Page-specific controls (search, filter, tabs, dsb.) rendered before notifikasi/avatar */
   actions?: ReactNode;
   /** false untuk halaman tanpa sidebar — divider jadi full-bleed sampai ujung */
   insetDivider?: boolean;
 };
 
-export default function Header({ title, subtitle, breadcrumb, notificationCount = 0, actions, insetDivider = true }: Props) {
+export default function Header({ title, subtitle, breadcrumb, actions, insetDivider = true }: Props) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -89,47 +84,7 @@ export default function Header({ title, subtitle, breadcrumb, notificationCount 
       <div style={{ display: "flex", alignItems: "center", gap: 16, flexShrink: 0 }}>
         {actions}
 
-        <button
-          aria-label="Notifikasi"
-          style={{
-            position: "relative",
-            width: 38,
-            height: 38,
-            borderRadius: "50%",
-            border: "1px solid var(--ink-150)",
-            background: "var(--awan)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 15,
-            color: "var(--ink-700)",
-            flexShrink: 0,
-          }}
-        >
-          <FontAwesomeIcon icon={faBell} />
-          {notificationCount > 0 && (
-            <span
-              style={{
-                position: "absolute",
-                top: -4,
-                right: -4,
-                minWidth: 17,
-                height: 17,
-                padding: "0 4px",
-                borderRadius: 999,
-                background: "var(--merah-senja)",
-                color: "#fff",
-                fontSize: 10,
-                fontWeight: 700,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              {notificationCount > 9 ? "9+" : notificationCount}
-            </span>
-          )}
-        </button>
+        <NotificationBell />
 
         <div ref={menuRef} style={{ position: "relative", flexShrink: 0 }}>
           <div
