@@ -107,6 +107,7 @@ array. That is not a security control. Server rules:
 | Edit/delete a post | community `admin`/`owner`, **or** the author of a `diskusi`/`anggota` post |
 | Read any community content | active member (or anyone, if the community is free) |
 | View creator dashboard | `owner`/`admin` only |
+| Edit an account | only its own, always the one behind the token — no user id is accepted from any path or body. Changing the email or the password additionally costs the current password |
 | Publish RTMP to `c/<streamKey>` | a publisher presenting that room's `publish_secret` (`?user=…&pass=…` on the RTMP url). The key alone is NOT enough — it travels in every viewer's playback url |
 | See or rotate a room's stream key and secret | `owner`/`admin` of that community |
 | Read HLS from `c/<streamKey>` | an unexpired `live_watch_tokens` row issued to an active member for that room. Rotating the key deletes the room's outstanding tokens |
@@ -115,7 +116,10 @@ Every rule is re-checked server-side regardless of what the UI renders.
 
 ## 5. Endpoints (all under `/api`)
 
-**Auth** `POST /auth/register` · `POST /auth/login` · `GET /auth/me`
+**Auth** `POST /auth/register` · `POST /auth/login` · `GET /auth/me` ·
+`PATCH /auth/me` (name, handle, avatar colour — initials are derived server-side) ·
+`PATCH /auth/me/email` · `PATCH /auth/me/password` (both re-check the current
+password; a wrong one is a 422, never a 401 — the client clears its token on 401)
 
 **Discovery** `GET /communities?q=&category=&isLive=` · `GET /communities/:id` ·
 `GET /categories` · `GET /trending-tags` · `GET /me/communities` (joined + created, one call)

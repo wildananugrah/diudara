@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faBell, faRightFromBracket } from "@fortawesome/free-solid-svg-icons";
+import { faBell, faRightFromBracket, faUserPen } from "@fortawesome/free-solid-svg-icons";
 import { useAuth } from "../../lib/auth";
 import Avatar from "../ui/Avatar";
 
@@ -151,6 +151,17 @@ export default function Header({ title, subtitle, breadcrumb, notificationCount 
                 padding: 6, boxShadow: "var(--shadow-card)", zIndex: 20,
               }}
             >
+              <button
+                onClick={() => { setMenuOpen(false); navigate("/profile"); }}
+                className="hover-bg"
+                style={{
+                  width: "100%", display: "flex", alignItems: "center", gap: 9,
+                  padding: "9px 12px", borderRadius: 10, border: "none", background: "transparent",
+                  color: "var(--ink-700)", fontSize: 13.5, fontWeight: 600, textAlign: "left",
+                }}
+              >
+                <FontAwesomeIcon icon={faUserPen} /> Profil saya
+              </button>
               <button
                 onClick={handleLogout}
                 className="hover-bg"

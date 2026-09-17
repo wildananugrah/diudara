@@ -27,10 +27,22 @@ export interface TokenIssuer {
 export interface UserRepository {
   findById(id: string): Promise<User | null>;
   findByEmail(email: string): Promise<(User & { passwordHash: string }) | null>;
+  /** Handles are stored with their leading `@`; pass it. */
+  findByHandle(handle: string): Promise<User | null>;
+  /** For re-authentication: the caller already knows WHO, and needs the hash. */
+  findByIdWithPassword(id: string): Promise<(User & { passwordHash: string }) | null>;
   create(input: {
     email: string; passwordHash: string; name: string;
     handle: string; avatarColor: string; initials: string;
   }): Promise<User>;
+  /**
+   * Partial by design: the profile page saves one card at a time, and a field
+   * that was not sent must keep its value rather than being overwritten.
+   */
+  update(id: string, patch: Partial<{
+    email: string; passwordHash: string; name: string;
+    handle: string; avatarColor: string; initials: string;
+  }>): Promise<User>;
 }
 
 // ------------------------------------------------------------- communities

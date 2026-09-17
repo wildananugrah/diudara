@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import AppShell from "./components/layout/AppShell";
 import Discover from "./pages/Discover";
+import Profile from "./pages/Profile";
 import CommunityHome from "./pages/CommunityHome";
 import DiscussionDetail from "./pages/DiscussionDetail";
 import EventDetail from "./pages/EventDetail";
@@ -35,6 +36,7 @@ export default function App() {
                 <AppShell>
                   <Routes>
                     <Route path="/discover" element={<Discover />} />
+                    <Route path="/profile" element={<Profile />} />
                     <Route path="/community/:id" element={<CommunityHome />} />
                     <Route path="/community/:id/discussion/:postId" element={<DiscussionDetail />} />
                     <Route path="/community/:id/event/:eventId" element={<EventDetail />} />
