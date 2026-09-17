@@ -1,5 +1,14 @@
-node_modules
-dist
+references/
+
+# Secrets — never commit. .env.example files are the committed templates.
+.env
+.env.*
+!.env.example
+
+node_modules/
+dist/
 .DS_Store
 *.local
-.vite
+
+# Uploaded files are user data, not source.
+backend/storage/

@@ -1,0 +1,1 @@
+ALTER TABLE "syllabus_items" ADD COLUMN "source_url" text;

@@ -1,0 +1,237 @@
+:root {
+  /* === Udara: Langit & Sinyal === */
+  --langit: #2b4c6f;
+  --langit-light: #3e6690;
+  --langit-dark: #1a3350;
+  --sinyal: #e8873e;
+  --sinyal-light: #f2a868;
+  --kabut: #93a8c2;
+  --awan: #f4f7fa;
+  --hijau-lepas: #4c8b6e;
+  --merah-senja: #c1543d;
+
+  --ink-900: #16283a;
+  --ink-700: #35526b;
+  --ink-500: #6c8298;
+  --ink-300: #a9b7c4;
+  --ink-150: #dce3e8;
+  --ink-100: #edf1f3;
+  --surface: #ffffff;
+
+  --border: var(--ink-150);
+
+  --success-bg: #e5f1ea;
+  --danger-bg: #f7e7e1;
+  --warning-bg: #fceedc;
+
+  --font-display: "Bricolage Grotesque", sans-serif;
+  --font-body: "Plus Jakarta Sans", sans-serif;
+
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+
+  --shadow-card: 0 1px 2px rgba(22, 40, 58, 0.05), 0 8px 24px rgba(22, 40, 58, 0.07);
+
+  /* === Global shell: sidebar & header === */
+  --sidebar-width: 248px;
+  --sidebar-bg: var(--awan);
+  --sidebar-text: var(--ink-500);
+  --sidebar-text-active: var(--awan);
+  --sidebar-icon-bg-active: var(--surface);
+  --sidebar-active-bg: var(--langit-dark);
+
+  --header-bg: var(--surface);
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+html {
+  scrollbar-gutter: stable;
+}
+body {
+  margin: 0;
+  background: var(--awan);
+  color: var(--ink-900);
+  font-family: var(--font-body);
+  font-feature-settings: "tnum" 1, "lnum" 1;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  margin: 0;
+  color: var(--ink-900);
+}
+p { margin: 0; }
+a { color: inherit; text-decoration: none; }
+button { font-family: var(--font-body); cursor: pointer; }
+input, select, textarea { font-family: var(--font-body); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--ink-150); border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- shared component classes ---- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+/* Only clickable cards get a lift, and only on hover */
+.card-clickable {
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.05s ease;
+}
+.card-clickable:hover {
+  box-shadow: var(--shadow-card);
+}
+
+/* List item hover — subtle background only, no shadow/lift */
+.hover-bg { transition: background 0.12s ease; }
+.hover-bg:hover { background: var(--awan); }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 14px;
+  border-radius: 999px;
+  border: none;
+  padding: 10px 18px;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.05s ease;
+  white-space: nowrap;
+}
+.btn:active { transform: scale(0.98); }
+
+/* Solid buttons: on hover, background fades to 80% opacity */
+.btn-primary { background: var(--sinyal); color: var(--awan); }
+.btn-primary:hover { background: color-mix(in srgb, var(--sinyal) 80%, transparent); }
+
+.btn-secondary { background: var(--kabut); color: var(--awan); }
+.btn-secondary:hover { background: var(--langit-dark); color: var(--awan); }
+
+.btn-danger { background: var(--danger-bg); color: var(--merah-senja); }
+.btn-danger:hover { background: color-mix(in srgb, var(--danger-bg) 80%, transparent); }
+
+.btn-petang { background: var(--langit-dark); color: var(--awan); }
+.btn-petang:hover { background: var(--kabut); color: var(--awan); }
+
+/* No-background buttons: hover fills with kabut instead of fading */
+.btn-ghost { background: transparent; color: var(--langit); border: 1px solid var(--ink-150); }
+.btn-ghost:hover { background: var(--kabut); color: var(--awan); }
+
+.btn-sm { padding: 7px 13px; font-size: 13px; }
+.btn-icon { width: 38px; height: 38px; padding: 0; flex-shrink: 0; }
+.btn-block { width: 100%; }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.badge .dot { width: 6px; height: 6px; border-radius: 50%; }
+.badge-active { background: var(--success-bg); color: #2e6248; }
+.badge-active .dot { background: var(--hijau-lepas); }
+.badge-pending { background: var(--warning-bg); color: #9a5b18; }
+.badge-pending .dot { background: var(--sinyal); }
+.badge-churn { background: var(--danger-bg); color: #93412c; }
+.badge-churn .dot { background: var(--merah-senja); }
+.badge-neutral { background: var(--ink-100); color: var(--ink-700); }
+
+.avatar {
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--kabut);
+  flex-shrink: 0;
+}
+
+.input {
+  width: 100%;
+  padding: 10px 13px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--awan);
+  color: var(--ink-900);
+  font-size: 14px;
+}
+.input:focus {
+  outline: 2px solid var(--sinyal);
+  outline-offset: 1px;
+  border-color: var(--sinyal);
+}
+
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--merah-senja);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  padding: 4px 9px;
+  border-radius: 999px;
+}
+.live-badge .dot {
+  width: 6px; height: 6px; border-radius: 50%; background: #fff;
+  animation: pulse 1.6s infinite;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255,255,255,0.55); }
+  70% { box-shadow: 0 0 0 7px rgba(255,255,255,0); }
+  100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
+}
+
+/**
+ * Hides the scrollbar on a strip that scrolls horizontally, without disabling
+ * the scrolling itself. All three declarations are needed: the WebKit rule
+ * alone leaves Firefox showing a bar, which is what it used to do here.
+ */
+.scrollbar-none {
+  scrollbar-width: none;      /* Firefox */
+  -ms-overflow-style: none;   /* legacy Edge/IE */
+}
+.scrollbar-none::-webkit-scrollbar { display: none; }  /* Chrome, Safari */
+
+.sidebar-nav {
+  color: var(--sidebar-text);
+  font-weight: 500;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.sidebar-nav:hover { background: var(--langit-dark); color: var(--awan); }
+.sidebar-nav-active {
+  color: var(--sidebar-text-active);
+  font-weight: 700;
+  background: var(--sidebar-active-bg);
+}
+/* Active nav item: hover leaves it exactly as-is, no color/opacity change */
+.sidebar-nav-active:hover { background: var(--sidebar-active-bg); color: var(--sidebar-text-active); }
+
+.sidebar-subnav {
+  color: var(--sidebar-text);
+  font-weight: 500;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.sidebar-subnav:hover { background: var(--langit-dark); color: var(--awan); }
+.sidebar-subnav-active {
+  color: var(--sidebar-text-active);
+  font-weight: 700;
+  background: var(--sidebar-active-bg);
+}
+.sidebar-subnav-active:hover { background: var(--sidebar-active-bg); color: var(--sidebar-text-active); }

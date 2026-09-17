@@ -1,58 +1,82 @@
-# DIUDARA — Hi-Fi Mockup
+# DIUDARA
 
-Mockup frontend statis (React + Vite), tanpa database, sebagai referensi UI/UX untuk tim development.
+Paid community gateway: creators sell access to a community, members get a feed,
+a library, direct messages, and live sessions they can actually watch.
 
-## Menjalankan secara lokal
+React SPA + Bun/Hono API + Postgres, with MediaMTX relaying RTMP in and HLS out.
+UI copy is Bahasa Indonesia; code, comments and commits are English.
+
+```
+frontend/   React 18 + Vite + TypeScript SPA
+backend/    Bun + Hono + Drizzle API (port 3004)
+infra/      docker-compose: Postgres (host port 5443), MediaMTX
+deploy/     nginx site configs for the two public hostnames + TLS notes
+scripts/    deploy.sh — one command, both hostnames, verifies it serves
+SPEC.md     what the backend does, and §6 what it deliberately does not
+```
+
+## Running locally
 
 ```bash
-npm install
-npm run dev
+cd infra    && docker compose up -d postgres
+cd backend  && bun install && bun run db:migrate && bun run db:seed && bun run dev
+cd frontend && bun install && bun run dev      # proxies /api -> :3004
 ```
 
-Buka `http://localhost:5173`.
+Seed logins: any `*@diudara.id` address with password `password123`.
+`rangga@diudara.id` owns `finansial-cerdas` and is admin of `bimbel-sbmptn`.
+`bun run db:seed` prints the seeded room's OBS server and stream key.
 
-## Halaman yang tersedia
+## Architecture
 
-| Route | Halaman |
-|---|---|
-| `/discover` | Jelajahi & cari komunitas |
-| `/community/:id` | Halaman komunitas — tab Feed, Content, Members |
-| `/live/:id` | Live Room (video call UI) |
-| `/checkout/:id` | Pilih tier & metode pembayaran |
-| `/creator/dashboard` | Dashboard analytics untuk creator |
-| `/onboarding` | Pulse-ID — AI co-builder setup komunitas |
-
-ID komunitas yang tersedia di data dummy: `bimbel-sbmptn`, `coaching-bisnis`, `kajian-online`,
-`finansial-cerdas`, `desain-ui`, `content-creator` (lihat `src/data/mock.ts`).
-
-## Deploy ke Vercel
-
-1. Push folder ini ke repository GitHub baru (terpisah dari monorepo `diudara`, atau sebagai branch/folder referensi).
-2. Import repo tersebut di [vercel.com/new](https://vercel.com/new).
-3. Vercel otomatis mendeteksi Vite — tidak perlu ubah build settings.
-4. `vercel.json` sudah disiapkan supaya client-side routing (React Router) tidak 404 saat refresh di route selain `/`.
-
-## Struktur
+The backend is layered and dependencies point inward:
 
 ```
-src/
-  components/
-    layout/AppShell.tsx   — sidebar navigasi utama
-    ui/Avatar.tsx
-  data/mock.ts             — semua data dummy Bahasa Indonesia
-  pages/                   — satu file per halaman
-  styles/tokens.css        — design tokens: palet Udara + tipografi
+domain/          entities + repository interfaces (no framework, no Drizzle)
+  ^
+application/     use-case services; all authorisation in AccessPolicy.ts
+  ^
+infrastructure/  Drizzle repositories, storage, JWT, payment gateway
+presentation/    Hono routers
 ```
 
-## Design tokens
+`container.ts` is the only module that names a concrete implementation, so
+swapping Postgres for something else, or `MockPaymentGateway` for a real one,
+is an edit to that file. Money is stored and transported as integer cents.
 
-Warna dan font didefinisikan sebagai CSS variables di `src/styles/tokens.css`
-(palet "Udara — Langit & Sinyal", font Bricolage Grotesque + Plus Jakarta Sans).
-Ubah di satu tempat ini untuk memengaruhi seluruh halaman.
+## Live streaming
 
-## Catatan
+A creator broadcasts from OBS over RTMP; members watch HLS in the Live Room.
 
-Ini murni mockup statis untuk referensi visual/interaksi — semua data dummy, tidak ada
-pemanggilan API sungguhan, tidak terhubung ke backend `apps/api` di repo utama. Komponen
-di sini ditulis dengan struktur yang gampang di-port ke `apps/web` (yang juga React + Vite)
-kalau tim mau reuse langsung.
+- **Publishing** needs the room's `publish_secret`, not just the stream key —
+  the key is a public path segment that appears in every viewer's playback URL,
+  so it cannot also be the credential. Both rotate together, and rotating is
+  the only revocation there is.
+- **Watching** needs a `live_watch_tokens` row, issued to active members and
+  checked by MediaMTX against `POST /api/webhooks/mediamtx/auth`.
+- **The viewer count** counts viewers: players check in every 20s and are
+  counted as present for 45s. There is no stored number.
+- **RTMP ingest uses its own hostname.** The web hostnames are behind a CDN
+  that forwards HTTP/HTTPS only, so `MEDIAMTX_RTMP_HOST` must name a DNS-only
+  record pointing at the origin.
+
+## What this does not do
+
+Stated properly in [SPEC.md §6](SPEC.md), briefly here: there is no
+browser-based publishing (a creator needs OBS or another RTMP encoder), the
+Live Room's participant tiles were removed rather than faked because MediaMTX
+is a broadcast relay and not an SFU, payments run through `MockPaymentGateway`
+which confirms instantly, and a few dashboard deltas are still literals in the
+JSX rather than period-over-period data.
+
+## Deploying
+
+`scripts/deploy.sh` brings up infra, migrates, restarts the API under pm2,
+publishes the bundle to both document roots, syncs both nginx sites behind a
+single `nginx -t`, and then verifies each hostname really serves: `/` is 200,
+`/api` returns JSON rather than the SPA's HTML, and `/hls` reaches MediaMTX.
+It never touches `.env` files or seeds the database.
+
+See [CLAUDE.md](CLAUDE.md) for the environment constraints that look arbitrary
+and are not — the ports, the database name, and which secrets must stay
+server-side.

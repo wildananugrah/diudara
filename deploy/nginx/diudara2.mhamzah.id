@@ -1,0 +1,171 @@
+server {
+  listen 443 ssl;
+  listen [::]:443 ssl;
+  ssl_certificate /etc/letsencrypt/live/diudara2.mhamzah.id/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/diudara2.mhamzah.id/privkey.pem;
+  client_max_body_size 64M;
+  server_name diudara2.mhamzah.id;
+
+  root /var/www/html/diudara2/dist;
+  index index.html;
+
+  # Security Headers
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+  add_header X-Frame-Options "SAMEORIGIN" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+  # Gzip Compression
+  gzip on;
+  gzip_vary on;
+  gzip_min_length 1024;
+  gzip_proxied any;
+  gzip_comp_level 6;
+  gzip_types text/plain text/css text/xml application/json application/javascript application/xml+rss application/atom+xml image/svg+xml;
+
+  # Cache static assets (JS, CSS, images) — Vite uses content hashes so safe to cache long
+  location /assets/ {
+      expires 1y;
+      add_header Cache-Control "public, immutable";
+  }
+
+  # Public checkout paths (/c/:slug, /c/:slug/checkout, /c/subscription/:id/status) are
+  location = /index.html {
+      add_header Vary Accept always;
+      root /var/www/html/diudara2/dist;
+  }
+
+  # THE API. Every backend route lives under /api (see SPEC.md §1), so this one
+  # block covers all of them. That is deliberate: the per-resource blocks below
+  # are what caused the "GET returned index.html instead of JSON" bug their own
+  # comments describe — any route without a block fell through to the SPA. A
+  # single prefix cannot develop that gap, and /api can never collide with a
+  # client-side route.
+  #
+  # `^~` so no regex location elsewhere can claim it first.
+  location ^~ /api/ {
+      proxy_pass http://127.0.0.1:3004;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      # File uploads stream through here; 64M matches UploadService's own limit.
+      client_max_body_size 64M;
+      proxy_request_buffering off;
+  }
+
+  # ---------------------------------------------------------------------------
+  # LEGACY blocks (below) — these proxy bare /users, /streams, /communities and
+  # /webhooks to :3004. They were written for an earlier backend whose source is
+  # no longer in backend/; the current API serves those paths under /api instead,
+  # so these now forward to a 404. Left in place rather than deleted because
+  # removing live production routing is not a side effect a code change should
+  # have. Delete them once you have confirmed nothing still calls the old paths.
+  # ---------------------------------------------------------------------------
+
+  location ^~ /users/ {
+    proxy_pass http://127.0.0.1:3004;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  }
+
+  # API routes with no SPA collision — dashboard-only, never a browser navigation target.
+  location /webhooks {
+      proxy_pass http://127.0.0.1:3004;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+  }
+  # /streams — the API routes the Siaran page actually calls:
+  #   GET  /streams                    who is live
+  #   POST /streams                    go live
+  #   POST /streams/:id/watch-token    mint a watch token
+  #   DELETE /streams/:id              end a stream
+  #
+  # WITHOUT THIS BLOCK these fell through to the SPA `location /` below, so
+  # GET returned index.html instead of JSON ("Tidak dapat menghubungi server")
+  # and POST got nginx's own 405 Not Allowed — nginx refuses non-GET methods
+  # on a static file. The `/streaming` block above is a different, older path
+  # and never matched: "/streaming"[7] is 'i', "/streams"[7] is 's', so no
+  # request for one is ever matched by the other.
+  #
+  # `^~` so no regex location elsewhere in this server can claim it first.
+  location ^~ /streams {
+      proxy_pass http://127.0.0.1:3004;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+  }
+  
+  # GET /communities, POST /communities, GET /communities/:slug,
+  # GET /communities/:slug/members, POST and DELETE /communities/:slug/join.
+  # `^~` for the same reason /streams uses it. NOTE the web app serves the page
+  # these back, /komunitas, from the SPA fallback — only the API prefix is here.
+  location ^~ /communities {
+      proxy_pass http://127.0.0.1:3004;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+  }
+
+  # HLS playback for the Live Room.
+  #
+  # MediaMTX binds :8888 to loopback (infra/mediamtx.yml), so this is the ONLY
+  # way a member reaches a segment — and that is deliberate: exposing 8888 would
+  # let anyone fetch segments directly, skipping the read authorisation that is
+  # the access control on a paid stream.
+  #
+  # Authorisation is NOT done here. MediaMTX asks the API itself, once per
+  # playback session (`POST /api/webhooks/mediamtx/auth`, action "read"), and the
+  # watch token rides in the url's query. The trailing slash on proxy_pass strips
+  # the /hls prefix, which MediaMTX knows nothing about.
+  #
+  # proxy_redirect is load-bearing, not boilerplate. MediaMTX answers the first
+  # request of a playback with `302 Location: /c/<key>/index.m3u8?cookieCheck=1…`
+  # — an absolute path WITHOUT our prefix (captured from a real playback). Left
+  # alone, the browser follows it to /c/… here, matches no location, and falls
+  # through to the SPA's index.html, so the player receives HTML where it
+  # expected a playlist. frontend/vite.config.ts performs the same rewrite in
+  # dev; the two must stay in step.
+  #
+  # `^~` so no regex location can claim it first, matching /streams above.
+  location ^~ /hls/ {
+      proxy_pass http://127.0.0.1:8888/;
+      proxy_redirect ~^/(.*)$ /hls/$1;
+      proxy_http_version 1.1;
+      # Live segments: hand them on as they arrive rather than accumulating a
+      # buffer's worth of latency in front of a stream whose point is being live.
+      proxy_buffering off;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+  }
+
+  # INHERITED FROM ANOTHER PRODUCT, AND DEAD HERE. This snippet serves the `u/`
+  # (user) namespace, a `user_stream` id and apps/api endpoints none of which
+  # exist in DIUDARA — see infra/mediamtx.yml's header for the same inheritance.
+  # It is left included rather than removed because it is a root-owned file this
+  # repo does not ship; nothing in DIUDARA routes through it.
+  include /etc/nginx/snippets/live-hls.conf;
+
+  # SPA fallback — serve index.html for all frontend routes
+  location / {
+     add_header Vary Accept always;
+     try_files $uri $uri/ /index.html;
+  }
+}
+
+server {
+    if ($host = diudara2.mhamzah.id) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+    listen 80 ;
+    listen [::]:80 ;
+    server_name diudara2.mhamzah.id;
+    return 404; # managed by Certbot
+}
