@@ -1,4 +1,4 @@
-import type { CommentRepository, PostRepository, UploadRepository } from "../domain/ports.ts";
+import type { CommentRepository, EventBus, PostRepository, UploadRepository } from "../domain/ports.ts";
 import type { PostType } from "../domain/types.ts";
 import { NotFoundError, ValidationError } from "../domain/errors.ts";
 import { safeHttpUrl } from "../domain/links.ts";
@@ -20,6 +20,7 @@ export class PostService {
     private readonly comments: CommentRepository,
     private readonly uploads: UploadRepository,
     private readonly access: AccessPolicy,
+    private readonly events: EventBus,
   ) {}
 
   async create(communityId: string, userId: string, input: CreatePostInput) {
@@ -89,7 +90,19 @@ export class PostService {
     const post = await this.posts.findById(postId);
     if (!post) throw new NotFoundError("Post");
     await this.access.requireMember(post.communityId, userId);
-    return this.comments.create({ postId, authorId: userId, body: body.trim() });
+    const comment = await this.comments.create({ postId, authorId: userId, body: body.trim() });
+
+    // Announced AFTER the comment exists, so nothing can be notified about a
+    // comment that failed to save. Who hears about it is the subscriber's call.
+    await this.events.emit({
+      type: "post.commented",
+      postId,
+      postAuthorId: post.authorId,
+      actorId: userId,
+      communityId: post.communityId,
+    });
+
+    return comment;
   }
 
   likeComment(commentId: string, userId: string) {

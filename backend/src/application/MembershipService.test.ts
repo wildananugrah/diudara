@@ -35,8 +35,15 @@ function makeService(seats: Record<string, Seat>, knownUsers = Object.keys(seats
     findById: async (id: string) => (knownUsers.includes(id) ? { id } : null),
   } as unknown as UserRepository;
 
+  // Records what was announced, so a test can assert the removed member is told.
+  const events = {
+    emit: async (event: { type: string; userId?: string }) => {
+      calls.push({ op: `emit:${event.type}`, userId: event.userId ?? "" });
+    },
+  };
+
   return {
-    service: new MembershipService(memberships, subscriptions, users, new AccessPolicy(memberships)),
+    service: new MembershipService(memberships, subscriptions, users, new AccessPolicy(memberships), events),
     calls,
   };
 }
@@ -72,14 +79,16 @@ describe("removeMember", () => {
     expect(calls).toEqual([]);
   });
 
-  test("removing marks churned AND cancels the subscription", async () => {
+  test("removing marks churned, cancels the subscription, THEN tells the member", async () => {
     // Access and billing have to move together, or a removed member still reads
-    // as a paying subscriber on the dashboard.
+    // as a paying subscriber on the dashboard. The announcement comes last: being
+    // told you lost access while still subscribed would be worse than late news.
     const { service, calls } = community();
     await service.removeMember(C, "owner", "member");
     expect(calls).toEqual([
       { op: "markChurned", userId: "member" },
       { op: "cancelForMember", userId: "member" },
+      { op: "emit:membership.ended", userId: "member" },
     ]);
   });
 

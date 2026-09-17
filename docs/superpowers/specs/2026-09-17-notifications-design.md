@@ -1,6 +1,6 @@
 # Notifications — design
 
-Status: approved for implementation · 2026-09-17
+Status: implemented · 2026-09-17
 
 ## Why
 
@@ -134,8 +134,10 @@ part of the request's latency — one indexed insert, measured in milliseconds.
 compile error. With a bus, a missing `bus.subscribe(...)` line compiles, runs,
 raises nothing, and silently produces zero notifications forever. Mitigation is
 mandatory, not optional: **a container test asserting that a freshly built
-container has a subscriber registered, and that emitting a known event through
-it produces a row.**
+container has a subscriber registered, and that an emitted event reaches a
+subscriber.** (Implemented as `container.test.ts`. It asserts delivery to a test
+subscriber rather than a written row: the suite has no database, and adding one
+for a single assertion would cost more than it proves.)
 
 ## API
 
@@ -157,8 +159,9 @@ rather than a list query with its payloads.
 
 ## Frontend
 
-- **Bell** (`Header.tsx`) becomes a real button. Today it is a `<div>` with no
-  handler and a badge that never renders. It gains: the unread count, a
+- **Bell** (`Header.tsx`) becomes a real button. Today it IS a `<button>`, but
+  one with no `onClick` and a badge that never renders (an earlier note in this
+  spec called it a `<div>`; corrected here). It gains: the unread count, a
   dropdown of the 10 most recent, and an empty state.
 - **`/notifications`** — the full page the unfilled `pending_works` doc was
   named after. Grouped by day, each row links to its subject and marks itself

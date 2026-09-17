@@ -87,6 +87,8 @@ message_attachments      message_id, upload_id
 live_sessions            id, community_id, title, status(idle|live|ended),
                          stream_key, publish_secret, started_at, ended_at
 live_watch_tokens        token, session_id, user_id, expires_at, created_at
+notifications            id, user_id(recipient), type, actor_id, community_id,
+                         entity_id, data(jsonb), created_at, read_at
 live_viewers             session_id, user_id, last_seen_at   -- presence; the viewer
                          count is COUNT(*) of these inside a 45s window, nothing else
 live_chat_messages       id, session_id, user_id, body, created_at
@@ -137,6 +139,10 @@ password; a wrong one is a 422, never a 401 — the client clears its token on 4
 **Chat** `GET /conversations` · `POST /conversations` (idempotent per user-pair) ·
 `GET|POST /conversations/:id/messages` · `POST /conversations/:id/read`
 
+**Notifications** `GET /notifications?unreadOnly=` · `GET /notifications/unread-count`
+(polled by the bell — one indexed COUNT) · `PATCH /notifications/read-all` ·
+`PATCH /notifications/:id/read` (404, never 403, for someone else's id)
+
 **Uploads** `POST /uploads` · `GET /uploads/:id` · `GET /documents/:id/download`
 
 **Live** `GET /communities/:id/live` · `GET|POST /communities/:id/live/chat` ·
@@ -186,6 +192,14 @@ These are things the mockup *depicts* that the backend cannot honestly deliver a
 5. **`trending` has no source.** Needs a rule; defaulting to "most new members in 7 days".
 
 6. **The WhatsApp invite** promised in the checkout success copy has no backing feature.
+
+7. **Notifications are personal only.** The bell carries replies to your posts, your
+   payments, members joining a community you run, memberships ending, and direct
+   messages. It does NOT carry community broadcasts — a new announcement or a session
+   going live notifies nobody — which is what the Basic tier's `"Notifikasi event"`
+   benefit actually promises. That benefit is still unbacked. Delivery is best-effort:
+   events are handled in-process with no retry (`InProcessEventBus`), so a notification
+   can be silently missing, and nothing is pruned, so the table grows without limit.
 
 ## 7. Seeding
 

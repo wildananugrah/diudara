@@ -302,6 +302,28 @@ export function buildRoutes(c: Container) {
   api.post("/communities/:id/live/watch-token", requireAuth, async (ctx) =>
     ctx.json(await c.live.watchToken(param(ctx, "id"), userId(ctx))));
 
+  // --------------------------------------------------------- notifications
+  /**
+   * Personal only: everything here is addressed to the token's user, and no
+   * endpoint accepts a user id. `unread-count` is separate from the list because
+   * the bell badge polls it every 30s and should cost one indexed COUNT.
+   */
+  api.get("/notifications", requireAuth, async (ctx) =>
+    ctx.json(await c.notifications.list(userId(ctx), {
+      unreadOnly: ctx.req.query("unreadOnly") === "true",
+    })));
+
+  api.get("/notifications/unread-count", requireAuth, async (ctx) =>
+    ctx.json(await c.notifications.unreadCount(userId(ctx))));
+
+  api.patch("/notifications/read-all", requireAuth, async (ctx) =>
+    ctx.json(await c.notifications.markAllRead(userId(ctx))));
+
+  // Declared AFTER /read-all: Hono matches in order, and ":id" would otherwise
+  // swallow "read-all" as an id.
+  api.patch("/notifications/:id/read", requireAuth, async (ctx) =>
+    ctx.json(await c.notifications.markRead(param(ctx, "id"), userId(ctx))));
+
   // -------------------------------------------------------------- webhooks
   api.post("/webhooks/payment", async (ctx) => {
     const body = await ctx.req.json<{

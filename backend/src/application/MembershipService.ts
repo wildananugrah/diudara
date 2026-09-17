@@ -1,4 +1,6 @@
-import type { MembershipRepository, SubscriptionRepository, UserRepository } from "../domain/ports.ts";
+import type {
+  EventBus, MembershipRepository, SubscriptionRepository, UserRepository,
+} from "../domain/ports.ts";
 import { ForbiddenError, NotFoundError, ValidationError } from "../domain/errors.ts";
 import type { AccessPolicy } from "./AccessPolicy.ts";
 
@@ -12,6 +14,7 @@ export class MembershipService {
     private readonly subscriptions: SubscriptionRepository,
     private readonly users: UserRepository,
     private readonly access: AccessPolicy,
+    private readonly events: EventBus,
   ) {}
 
   /**
@@ -48,6 +51,11 @@ export class MembershipService {
 
     await this.memberships.markChurned(communityId, targetUserId);
     await this.subscriptions.cancelForMember(communityId, targetUserId);
+
+    // Announced after both writes: being told you lost access to a community you
+    // are somehow still subscribed to would be worse than being told late.
+    await this.events.emit({ type: "membership.ended", userId: targetUserId, communityId });
+
     return { ok: true };
   }
 }

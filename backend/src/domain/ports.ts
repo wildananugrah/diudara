@@ -7,6 +7,7 @@
  * Repository<T>: a service that only reads posts should not be handed payment
  * methods it must ignore (ISP).
  */
+import type { DomainEvent, DomainEventType } from "./events.ts";
 import type {
   Community, Membership, MemberRole, MemberStatus, PaymentStatus,
   Post, PostType, QuizFormat, SubscriptionStatus, UploadKind, User,
@@ -288,6 +289,8 @@ export interface ConversationRepository {
   }>>;
   findOrCreateDirect(userA: string, userB: string): Promise<{ id: string }>;
   isParticipant(conversationId: string, userId: string): Promise<boolean>;
+  /** The OTHER person in a direct conversation — null if there isn't exactly one. */
+  otherParticipant(conversationId: string, userId: string): Promise<string | null>;
   markRead(conversationId: string, userId: string): Promise<void>;
 }
 
@@ -355,6 +358,44 @@ export interface LiveRepository {
    */
   startByStreamKey(streamKey: string): Promise<boolean>;
   endByStreamKey(streamKey: string): Promise<boolean>;
+}
+
+// ----------------------------------------------------------- notifications
+
+export type Notification = {
+  id: string;
+  type: DomainEventType;
+  actorId: string | null;
+  communityId: string | null;
+  entityId: string | null;
+  /** Rendered by the FRONTEND from `type` + this — UI copy is not the API's job. */
+  data: Record<string, unknown>;
+  createdAt: Date;
+  readAt: Date | null;
+};
+
+export interface NotificationRepository {
+  create(input: {
+    userId: string; type: DomainEventType; actorId?: string | null;
+    communityId?: string | null; entityId?: string | null; data: Record<string, unknown>;
+  }): Promise<Notification>;
+  listForUser(userId: string, filter: { unreadOnly?: boolean; limit: number }): Promise<Notification[]>;
+  countUnread(userId: string): Promise<number>;
+  /**
+   * Scoped to the owner in the WHERE clause, not checked afterwards: false means
+   * "no such notification of yours", which is all a caller should learn about
+   * someone else's row.
+   */
+  markRead(id: string, userId: string): Promise<boolean>;
+  markAllRead(userId: string): Promise<number>;
+}
+
+/**
+ * Announces domain facts to whoever subscribed. See domain/events.ts, and
+ * InProcessEventBus for the delivery guarantees (there is one: none).
+ */
+export interface EventBus {
+  emit(event: DomainEvent): Promise<void>;
 }
 
 // --------------------------------------------------------------- analytics

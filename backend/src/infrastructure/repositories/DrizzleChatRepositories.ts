@@ -92,6 +92,18 @@ export class DrizzleConversationRepository implements ConversationRepository {
     return { id: conv!.id };
   }
 
+  async otherParticipant(conversationId: string, userId: string): Promise<string | null> {
+    const rows = await this.db.select({ userId: conversationParticipants.userId })
+      .from(conversationParticipants)
+      .where(and(
+        eq(conversationParticipants.conversationId, conversationId),
+        ne(conversationParticipants.userId, userId),
+      ));
+    // Conversations are one-to-one today. A group chat would make "the other
+    // participant" meaningless, so this answers null rather than guessing.
+    return rows.length === 1 ? rows[0]!.userId : null;
+  }
+
   async isParticipant(conversationId: string, userId: string): Promise<boolean> {
     const [row] = await this.db.select({ n: sql<number>`1` }).from(conversationParticipants)
       .where(and(
